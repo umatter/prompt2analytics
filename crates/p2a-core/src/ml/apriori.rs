@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 use crate::errors::{EconError, EconResult};
+use crate::resource::{checkpoint, checkpoint_stride, try_vec, try_with_capacity};
 
 /// Configuration for Apriori algorithm.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -141,10 +142,318 @@ impl std::fmt::Display for AprioriResult {
     }
 }
 
+/// Check the configuration: `min_support` finite in (0, 1], `min_confidence` in [0, 1], `min_lift` finite and
+/// non-negative, `max_length` at least 1.
+fn check_config(config: &AprioriConfig) -> EconResult<()> {
+    let bad = |message: String| Err(EconError::InvalidSpecification { message });
+    if !(config.min_support.is_finite() && config.min_support > 0.0 && config.min_support <= 1.0) {
+        return bad(format!(
+            "min_support must be in (0, 1], got {}",
+            config.min_support
+        ));
+    }
+    if !(0.0..=1.0).contains(&config.min_confidence) {
+        return bad(format!(
+            "min_confidence must be in [0, 1], got {}",
+            config.min_confidence
+        ));
+    }
+    if !(config.min_lift.is_finite() && config.min_lift >= 0.0) {
+        return bad(format!(
+            "min_lift must be finite and at least 0, got {}",
+            config.min_lift
+        ));
+    }
+    if config.max_length < 1 {
+        return bad(format!(
+            "max_length must be at least 1, got {}",
+            config.max_length
+        ));
+    }
+    Ok(())
+}
+
+/// The smallest count `c` whose support `c / n` (as reported) is at least `min_support`: an itemset is frequent
+/// exactly when its reported support is `>= min_support`. `ceil(min_support * n)` in floating point asked one
+/// more for supports such as 0.07 over 100 transactions.
+fn min_count(min_support: f64, n: usize) -> usize {
+    let nf = n as f64;
+    let mut c = ((min_support * nf).ceil().max(0.0) as usize).min(n);
+    while c > 0 && (c - 1) as f64 / nf >= min_support {
+        c -= 1;
+    }
+    while c < n && (c as f64 / nf) < min_support {
+        c += 1;
+    }
+    c.max(1)
+}
+
+/// Transactions as sorted, deduplicated item ids; ids follow the items' sorted order, so itemsets of ids
+/// sort as itemsets of names.
+struct Encoded {
+    names: Vec<String>,
+    transactions: Vec<Vec<u32>>,
+}
+
+fn encode(transactions: &[Vec<String>]) -> EconResult<Encoded> {
+    if transactions.len() > u32::MAX as usize {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "apriori/eclat take at most {} transactions, got {}",
+                u32::MAX,
+                transactions.len()
+            ),
+        });
+    }
+    let mut names: Vec<String> = transactions.iter().flatten().cloned().collect();
+    names.sort_unstable();
+    names.dedup();
+    if names.len() > u32::MAX as usize {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "apriori/eclat take at most {} distinct items, got {}",
+                u32::MAX,
+                names.len()
+            ),
+        });
+    }
+    let index: HashMap<&str, u32> = names
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (s.as_str(), i as u32))
+        .collect();
+    let mut encoded = try_with_capacity(transactions.len(), "apriori transactions")?;
+    for t in transactions {
+        let mut ids: Vec<u32> = t.iter().map(|s| index[s.as_str()]).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        encoded.push(ids);
+    }
+    Ok(Encoded {
+        names,
+        transactions: encoded,
+    })
+}
+
+/// Frequent itemsets of ids with their counts, sorted by length, then items.
+type IdItemsets = Vec<(Vec<u32>, usize)>;
+
+fn to_itemsets(found: IdItemsets, names: &[String], n: usize) -> Vec<FrequentItemset> {
+    found
+        .into_iter()
+        .map(|(ids, count)| FrequentItemset {
+            items: ids.iter().map(|&i| names[i as usize].clone()).collect(),
+            support: count as f64 / n as f64,
+            count,
+        })
+        .collect()
+}
+
+fn sort_itemsets(found: &mut IdItemsets) {
+    found.sort_by(|a, b| a.0.len().cmp(&b.0.len()).then_with(|| a.0.cmp(&b.0)));
+}
+
+/// Apriori's level-wise search over encoded transactions.
+fn apriori_itemsets(enc: &Encoded, min_count: usize, max_length: usize) -> EconResult<IdItemsets> {
+    let n_items = enc.names.len();
+    let mut counts = try_vec(n_items, 0usize, "apriori item counts")?;
+    for t in &enc.transactions {
+        for &i in t {
+            counts[i as usize] += 1;
+        }
+    }
+    let mut found: IdItemsets = Vec::new();
+    let mut level: Vec<Vec<u32>> = Vec::new();
+    for (i, &c) in counts.iter().enumerate() {
+        if c >= min_count {
+            found.push((vec![i as u32], c));
+            level.push(vec![i as u32]);
+        }
+    }
+    let mut member = try_vec(n_items, false, "apriori transaction mask")?;
+    for _k in 2..=max_length {
+        checkpoint()?;
+        if level.is_empty() {
+            break;
+        }
+        let candidates = generate_candidates(&level)?;
+        if candidates.is_empty() {
+            break;
+        }
+        let mut cand_counts = try_vec(candidates.len(), 0usize, "apriori candidate counts")?;
+        let stride = checkpoint_stride(candidates.len());
+        for (row, t) in enc.transactions.iter().enumerate() {
+            if row % stride == 0 {
+                checkpoint()?;
+            }
+            if t.len() < candidates[0].len() {
+                continue;
+            }
+            for &i in t {
+                member[i as usize] = true;
+            }
+            for (c, cand) in cand_counts.iter_mut().zip(&candidates) {
+                if cand.iter().all(|&i| member[i as usize]) {
+                    *c += 1;
+                }
+            }
+            for &i in t {
+                member[i as usize] = false;
+            }
+        }
+        level = Vec::new();
+        for (cand, c) in candidates.into_iter().zip(cand_counts) {
+            if c >= min_count {
+                found.push((cand.clone(), c));
+                level.push(cand);
+            }
+        }
+    }
+    sort_itemsets(&mut found);
+    Ok(found)
+}
+
+/// Candidate k-itemsets from the sorted frequent (k-1)-itemsets: join two that share their first k-2 items,
+/// keep the join when every (k-1)-subset is frequent. Sorted output.
+fn generate_candidates(prev_level: &[Vec<u32>]) -> EconResult<Vec<Vec<u32>>> {
+    let frequent: HashSet<&[u32]> = prev_level.iter().map(|v| v.as_slice()).collect();
+    let mut candidates = Vec::new();
+    for (i, a) in prev_level.iter().enumerate() {
+        checkpoint()?;
+        let k = a.len();
+        for b in &prev_level[i + 1..] {
+            // prev_level is sorted, so the itemsets sharing a's prefix follow it
+            if a[..k - 1] != b[..k - 1] {
+                break;
+            }
+            let mut candidate = a.clone();
+            candidate.push(b[k - 1]);
+            let mut subset = Vec::with_capacity(k);
+            let valid = (0..candidate.len()).all(|skip| {
+                subset.clear();
+                subset.extend(
+                    candidate
+                        .iter()
+                        .enumerate()
+                        .filter(|&(idx, _)| idx != skip)
+                        .map(|(_, &item)| item),
+                );
+                frequent.contains(subset.as_slice())
+            });
+            if valid {
+                candidates.push(candidate);
+            }
+        }
+    }
+    Ok(candidates)
+}
+
+/// Eclat's depth-first search over sorted tid lists.
+fn eclat_itemsets(enc: &Encoded, min_count: usize, max_length: usize) -> EconResult<IdItemsets> {
+    let n_items = enc.names.len();
+    let mut tids: Vec<Vec<u32>> = vec![Vec::new(); n_items];
+    for (tid, t) in enc.transactions.iter().enumerate() {
+        for &i in t {
+            tids[i as usize].push(tid as u32);
+        }
+    }
+    let frequent_1: Vec<(u32, Vec<u32>)> = tids
+        .into_iter()
+        .enumerate()
+        .filter(|(_, t)| t.len() >= min_count)
+        .map(|(i, t)| (i as u32, t))
+        .collect();
+    let mut found: IdItemsets = Vec::new();
+    eclat_recursive(&[], &frequent_1, min_count, max_length, &mut found)?;
+    sort_itemsets(&mut found);
+    Ok(found)
+}
+
+fn intersect(a: &[u32], b: &[u32]) -> Vec<u32> {
+    let mut out = Vec::with_capacity(a.len().min(b.len()));
+    let (mut i, mut j) = (0, 0);
+    while i < a.len() && j < b.len() {
+        match a[i].cmp(&b[j]) {
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+            std::cmp::Ordering::Equal => {
+                out.push(a[i]);
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    out
+}
+
+/// Each prefix + item is reported once; the recursion extends it with the later items.
+fn eclat_recursive(
+    prefix: &[u32],
+    items_tids: &[(u32, Vec<u32>)],
+    min_count: usize,
+    max_length: usize,
+    result: &mut IdItemsets,
+) -> EconResult<()> {
+    for (i, (item_i, tids_i)) in items_tids.iter().enumerate() {
+        checkpoint()?;
+        let mut itemset = prefix.to_vec();
+        itemset.push(*item_i);
+        result.push((itemset.clone(), tids_i.len()));
+        if itemset.len() >= max_length {
+            continue;
+        }
+        let mut suffix: Vec<(u32, Vec<u32>)> = Vec::new();
+        for (item_j, tids_j) in &items_tids[i + 1..] {
+            let both = intersect(tids_i, tids_j);
+            if both.len() >= min_count {
+                suffix.push((*item_j, both));
+            }
+        }
+        if !suffix.is_empty() {
+            eclat_recursive(&itemset, &suffix, min_count, max_length, result)?;
+        }
+    }
+    Ok(())
+}
+
+/// Shared driver of [`apriori`] and [`eclat`].
+fn mine(
+    transactions: &[Vec<String>],
+    config: &AprioriConfig,
+    search: fn(&Encoded, usize, usize) -> EconResult<IdItemsets>,
+) -> EconResult<AprioriResult> {
+    check_config(config)?;
+    let n_transactions = transactions.len();
+    if n_transactions == 0 {
+        return Err(EconError::EmptyDataset);
+    }
+    let enc = encode(transactions)?;
+    let n_items = enc.names.len();
+    let found = if n_items == 0 {
+        Vec::new()
+    } else {
+        search(
+            &enc,
+            min_count(config.min_support, n_transactions),
+            config.max_length,
+        )?
+    };
+    let itemsets = to_itemsets(found, &enc.names, n_transactions);
+    let rules = generate_rules(&itemsets, config)?;
+    Ok(AprioriResult {
+        itemsets,
+        rules,
+        n_transactions,
+        n_items,
+        config: config.clone(),
+    })
+}
+
 /// Apriori algorithm for association rule mining.
 ///
 /// Finds frequent itemsets using a level-wise approach, then generates
-/// association rules from those itemsets.
+/// association rules from those itemsets. An itemset is frequent when its support (count / n) is at least
+/// `min_support`. Itemsets are listed by length, then items.
 ///
 /// # Arguments
 ///
@@ -154,6 +463,12 @@ impl std::fmt::Display for AprioriResult {
 /// # Returns
 ///
 /// AprioriResult with frequent itemsets and association rules.
+///
+/// # Errors
+///
+/// `InvalidSpecification` for a setting out of range (see [`AprioriConfig`]), `EmptyDataset` for no
+/// transactions, `ResourceLimit` when a buffer exceeds the allocation ceiling, `Cancelled` when the call's
+/// budget is cancelled or its deadline passes.
 ///
 /// # Example
 ///
@@ -182,198 +497,53 @@ impl std::fmt::Display for AprioriResult {
 /// Agrawal, R., & Srikant, R. (1994). "Fast Algorithms for Mining Association Rules."
 /// *Proc. 20th Int. Conf. Very Large Data Bases*, 487-499.
 pub fn apriori(transactions: &[Vec<String>], config: &AprioriConfig) -> EconResult<AprioriResult> {
-    let n_transactions = transactions.len();
+    mine(transactions, config, apriori_itemsets)
+}
 
-    if n_transactions == 0 {
-        return Err(EconError::EmptyDataset);
-    }
-
-    // Get all unique items
-    let mut all_items: HashSet<String> = HashSet::new();
-    for transaction in transactions {
-        for item in transaction {
-            all_items.insert(item.clone());
-        }
-    }
-
-    let n_items = all_items.len();
-
-    if n_items == 0 {
-        return Ok(AprioriResult {
-            itemsets: Vec::new(),
-            rules: Vec::new(),
-            n_transactions,
-            n_items,
-            config: config.clone(),
-        });
-    }
-
-    // Convert transactions to sets for efficient lookup
-    let transaction_sets: Vec<HashSet<String>> = transactions
+/// Association rules from frequent itemsets (all of them, so that every subset's support is known).
+fn generate_rules(
+    frequent_itemsets: &[FrequentItemset],
+    config: &AprioriConfig,
+) -> EconResult<Vec<AssociationRule>> {
+    let itemset_support: HashMap<&[String], f64> = frequent_itemsets
         .iter()
-        .map(|t| t.iter().cloned().collect())
+        .map(|is| (is.items.as_slice(), is.support))
         .collect();
-
-    let min_count = (config.min_support * n_transactions as f64).ceil() as usize;
-
-    // Find frequent 1-itemsets
-    let mut item_counts: HashMap<String, usize> = HashMap::new();
-    for trans in &transaction_sets {
-        for item in trans {
-            *item_counts.entry(item.clone()).or_insert(0) += 1;
-        }
-    }
-
-    let mut frequent_itemsets: Vec<FrequentItemset> = Vec::new();
-    let mut current_level: Vec<Vec<String>> = Vec::new();
-
-    for (item, &count) in &item_counts {
-        if count >= min_count {
-            let support = count as f64 / n_transactions as f64;
-            frequent_itemsets.push(FrequentItemset {
-                items: vec![item.clone()],
-                support,
-                count,
-            });
-            current_level.push(vec![item.clone()]);
-        }
-    }
-
-    // Sort for consistent candidate generation
-    current_level.sort();
-
-    // Level-wise search for larger itemsets
-    for k in 2..=config.max_length {
-        if current_level.is_empty() {
-            break;
-        }
-
-        // Generate candidate k-itemsets
-        let candidates = generate_candidates(&current_level);
-
-        if candidates.is_empty() {
-            break;
-        }
-
-        // Count support for candidates
-        let mut candidate_counts: HashMap<Vec<String>, usize> = HashMap::new();
-
-        for trans in &transaction_sets {
-            for candidate in &candidates {
-                if candidate.iter().all(|item| trans.contains(item)) {
-                    *candidate_counts.entry(candidate.clone()).or_insert(0) += 1;
-                }
-            }
-        }
-
-        // Filter by minimum support
-        let mut next_level: Vec<Vec<String>> = Vec::new();
-
-        for (itemset, count) in candidate_counts {
-            if count >= min_count {
-                let support = count as f64 / n_transactions as f64;
-                frequent_itemsets.push(FrequentItemset {
-                    items: itemset.clone(),
-                    support,
-                    count,
-                });
-                next_level.push(itemset);
-            }
-        }
-
-        next_level.sort();
-        current_level = next_level;
-    }
-
-    // Precompute support for all itemsets
-    let itemset_support: HashMap<Vec<String>, f64> = frequent_itemsets
-        .iter()
-        .map(|is| {
-            let mut sorted_items = is.items.clone();
-            sorted_items.sort();
-            (sorted_items, is.support)
-        })
-        .collect();
-
-    // Generate association rules
     let mut rules: Vec<AssociationRule> = Vec::new();
-
-    for itemset in &frequent_itemsets {
+    for itemset in frequent_itemsets {
         if itemset.items.len() < 2 {
             continue;
         }
-
-        // Generate all non-empty proper subsets as potential LHS
-        let subsets = generate_subsets(&itemset.items);
-
-        for lhs in subsets {
+        checkpoint()?;
+        for lhs in generate_subsets(&itemset.items) {
             if lhs.is_empty() || lhs.len() == itemset.items.len() {
                 continue;
             }
-
-            // RHS = itemset - LHS
             let rhs: Vec<String> = itemset
                 .items
                 .iter()
                 .filter(|item| !lhs.contains(item))
                 .cloned()
                 .collect();
-
-            if rhs.is_empty() {
+            let Some(&support_lhs) = itemset_support.get(lhs.as_slice()) else {
                 continue;
-            }
-
-            // Get support of LHS
-            let mut lhs_sorted = lhs.clone();
-            lhs_sorted.sort();
-            let support_lhs = match itemset_support.get(&lhs_sorted) {
-                Some(&s) => s,
-                None => continue,
             };
-
-            // Get support of RHS
-            let mut rhs_sorted = rhs.clone();
-            rhs_sorted.sort();
-            let support_rhs = match itemset_support.get(&rhs_sorted) {
-                Some(&s) => s,
-                None => continue,
+            let Some(&support_rhs) = itemset_support.get(rhs.as_slice()) else {
+                continue;
             };
-
-            // Confidence = support(itemset) / support(LHS)
-            let confidence = if support_lhs > 0.0 {
-                itemset.support / support_lhs
-            } else {
-                0.0
-            };
-
+            let confidence = itemset.support / support_lhs;
             if confidence < config.min_confidence {
                 continue;
             }
-
-            // Lift = confidence / support(RHS)
-            let lift = if support_rhs > 0.0 {
-                confidence / support_rhs
-            } else {
-                0.0
-            };
-
+            let lift = confidence / support_rhs;
             if lift < config.min_lift {
                 continue;
             }
-
-            // Coverage = support(LHS)
-            let coverage = support_lhs;
-
-            // Leverage = support(itemset) - support(LHS) * support(RHS)
-            let leverage = itemset.support - support_lhs * support_rhs;
-
-            // Conviction = (1 - support(RHS)) / (1 - confidence)
             let conviction = if (1.0 - confidence).abs() > 1e-10 {
                 (1.0 - support_rhs) / (1.0 - confidence)
             } else {
                 f64::INFINITY
             };
-
             rules.push(AssociationRule {
                 lhs,
                 rhs,
@@ -381,67 +551,19 @@ pub fn apriori(transactions: &[Vec<String>], config: &AprioriConfig) -> EconResu
                 confidence,
                 lift,
                 count: itemset.count,
-                coverage,
-                leverage,
+                coverage: support_lhs,
+                leverage: itemset.support - support_lhs * support_rhs,
                 conviction,
             });
         }
     }
-
-    // Sort rules by lift (descending)
-    rules.sort_by(|a, b| b.lift.total_cmp(&a.lift));
-
-    Ok(AprioriResult {
-        itemsets: frequent_itemsets,
-        rules,
-        n_transactions,
-        n_items,
-        config: config.clone(),
-    })
-}
-
-/// Generate candidate (k)-itemsets from frequent (k-1)-itemsets.
-fn generate_candidates(prev_level: &[Vec<String>]) -> Vec<Vec<String>> {
-    let mut candidates: HashSet<Vec<String>> = HashSet::new();
-
-    for i in 0..prev_level.len() {
-        for j in (i + 1)..prev_level.len() {
-            let a = &prev_level[i];
-            let b = &prev_level[j];
-
-            // Join condition: first k-2 items are the same
-            if a.len() != b.len() {
-                continue;
-            }
-
-            let k = a.len();
-            if k > 1 && a[..k - 1] != b[..k - 1] {
-                continue;
-            }
-
-            // Create candidate by merging
-            let mut candidate: Vec<String> = a.clone();
-            candidate.push(b[k - 1].clone());
-            candidate.sort();
-
-            // Prune: check all (k-1)-subsets are frequent
-            let is_valid = (0..candidate.len()).all(|skip| {
-                let subset: Vec<String> = candidate
-                    .iter()
-                    .enumerate()
-                    .filter(|(idx, _)| *idx != skip)
-                    .map(|(_, item)| item.clone())
-                    .collect();
-                prev_level.contains(&subset)
-            });
-
-            if is_valid {
-                candidates.insert(candidate);
-            }
-        }
-    }
-
-    candidates.into_iter().collect()
+    rules.sort_by(|a, b| {
+        b.lift
+            .total_cmp(&a.lift)
+            .then_with(|| a.lhs.cmp(&b.lhs))
+            .then_with(|| a.rhs.cmp(&b.rhs))
+    });
+    Ok(rules)
 }
 
 /// Generate all non-empty subsets of an itemset.
@@ -500,7 +622,7 @@ pub fn matrix_to_transactions(
 /// Run Eclat algorithm (alternative to Apriori using vertical data format).
 ///
 /// Eclat (Equivalence Class Clustering and bottom-up Lattice Traversal) is
-/// often faster than Apriori for dense datasets.
+/// often faster than Apriori for dense datasets. Same itemsets, rules, order and errors as [`apriori`].
 ///
 /// # Arguments
 ///
@@ -512,207 +634,7 @@ pub fn matrix_to_transactions(
 /// Zaki, M. J. (2000). "Scalable Algorithms for Association Mining."
 /// *IEEE Transactions on Knowledge and Data Engineering*, 12(3), 372-390.
 pub fn eclat(transactions: &[Vec<String>], config: &AprioriConfig) -> EconResult<AprioriResult> {
-    let n_transactions = transactions.len();
-
-    if n_transactions == 0 {
-        return Err(EconError::EmptyDataset);
-    }
-
-    // Build vertical representation: item -> set of transaction IDs
-    let mut vertical: HashMap<String, HashSet<usize>> = HashMap::new();
-
-    for (tid, transaction) in transactions.iter().enumerate() {
-        for item in transaction {
-            vertical.entry(item.clone()).or_default().insert(tid);
-        }
-    }
-
-    let n_items = vertical.len();
-    let min_count = (config.min_support * n_transactions as f64).ceil() as usize;
-
-    // Filter to frequent 1-itemsets
-    let frequent_1: Vec<(Vec<String>, HashSet<usize>)> = vertical
-        .into_iter()
-        .filter(|(_, tids)| tids.len() >= min_count)
-        .map(|(item, tids)| (vec![item], tids))
-        .collect();
-
-    let mut frequent_itemsets: Vec<FrequentItemset> = frequent_1
-        .iter()
-        .map(|(items, tids)| FrequentItemset {
-            items: items.clone(),
-            support: tids.len() as f64 / n_transactions as f64,
-            count: tids.len(),
-        })
-        .collect();
-
-    // Recursive depth-first search
-    fn eclat_recursive(
-        prefix: &[String],
-        items_tids: &[(Vec<String>, HashSet<usize>)],
-        min_count: usize,
-        max_length: usize,
-        n_transactions: usize,
-        result: &mut Vec<FrequentItemset>,
-    ) {
-        for i in 0..items_tids.len() {
-            let (item_i, tids_i) = &items_tids[i];
-
-            // Create new itemset
-            let mut new_itemset: Vec<String> = prefix.to_vec();
-            new_itemset.extend(item_i.clone());
-
-            if new_itemset.len() > max_length {
-                continue;
-            }
-
-            result.push(FrequentItemset {
-                items: new_itemset.clone(),
-                support: tids_i.len() as f64 / n_transactions as f64,
-                count: tids_i.len(),
-            });
-
-            // Generate suffix items
-            let mut suffix: Vec<(Vec<String>, HashSet<usize>)> = Vec::new();
-
-            for j in (i + 1)..items_tids.len() {
-                let (item_j, tids_j) = &items_tids[j];
-
-                // Intersection of transaction sets
-                let intersection: HashSet<usize> = tids_i.intersection(tids_j).cloned().collect();
-
-                if intersection.len() >= min_count {
-                    suffix.push((item_j.clone(), intersection));
-                }
-            }
-
-            if !suffix.is_empty() {
-                eclat_recursive(
-                    &new_itemset,
-                    &suffix,
-                    min_count,
-                    max_length,
-                    n_transactions,
-                    result,
-                );
-            }
-        }
-    }
-
-    // Sort for consistent ordering
-    let mut sorted_frequent_1 = frequent_1;
-    sorted_frequent_1.sort_by(|a, b| a.0.cmp(&b.0));
-
-    eclat_recursive(
-        &[],
-        &sorted_frequent_1,
-        min_count,
-        config.max_length,
-        n_transactions,
-        &mut frequent_itemsets,
-    );
-
-    // Compute support map
-    let itemset_support: HashMap<Vec<String>, f64> = frequent_itemsets
-        .iter()
-        .map(|is| {
-            let mut sorted_items = is.items.clone();
-            sorted_items.sort();
-            (sorted_items, is.support)
-        })
-        .collect();
-
-    // Generate rules (same as in apriori)
-    let mut rules: Vec<AssociationRule> = Vec::new();
-
-    for itemset in &frequent_itemsets {
-        if itemset.items.len() < 2 {
-            continue;
-        }
-
-        let subsets = generate_subsets(&itemset.items);
-
-        for lhs in subsets {
-            if lhs.is_empty() || lhs.len() == itemset.items.len() {
-                continue;
-            }
-
-            let rhs: Vec<String> = itemset
-                .items
-                .iter()
-                .filter(|item| !lhs.contains(item))
-                .cloned()
-                .collect();
-
-            if rhs.is_empty() {
-                continue;
-            }
-
-            let mut lhs_sorted = lhs.clone();
-            lhs_sorted.sort();
-            let support_lhs = match itemset_support.get(&lhs_sorted) {
-                Some(&s) => s,
-                None => continue,
-            };
-
-            let mut rhs_sorted = rhs.clone();
-            rhs_sorted.sort();
-            let support_rhs = match itemset_support.get(&rhs_sorted) {
-                Some(&s) => s,
-                None => continue,
-            };
-
-            let confidence = if support_lhs > 0.0 {
-                itemset.support / support_lhs
-            } else {
-                0.0
-            };
-
-            if confidence < config.min_confidence {
-                continue;
-            }
-
-            let lift = if support_rhs > 0.0 {
-                confidence / support_rhs
-            } else {
-                0.0
-            };
-
-            if lift < config.min_lift {
-                continue;
-            }
-
-            let coverage = support_lhs;
-            let leverage = itemset.support - support_lhs * support_rhs;
-            let conviction = if (1.0 - confidence).abs() > 1e-10 {
-                (1.0 - support_rhs) / (1.0 - confidence)
-            } else {
-                f64::INFINITY
-            };
-
-            rules.push(AssociationRule {
-                lhs,
-                rhs,
-                support: itemset.support,
-                confidence,
-                lift,
-                count: itemset.count,
-                coverage,
-                leverage,
-                conviction,
-            });
-        }
-    }
-
-    rules.sort_by(|a, b| b.lift.total_cmp(&a.lift));
-
-    Ok(AprioriResult {
-        itemsets: frequent_itemsets,
-        rules,
-        n_transactions,
-        n_items,
-        config: config.clone(),
-    })
+    mine(transactions, config, eclat_itemsets)
 }
 
 #[cfg(test)]
@@ -838,13 +760,10 @@ mod tests {
         // Results should be similar to apriori
         let apriori_result = apriori(&transactions, &config).unwrap();
 
-        // Eclat should find at least the same frequent itemsets as Apriori
-        // (The recursive implementation may include more due to different counting)
-        assert!(
-            result.itemsets.len() >= apriori_result.itemsets.len(),
-            "Eclat found {} itemsets, Apriori found {}",
-            result.itemsets.len(),
-            apriori_result.itemsets.len()
+        // Eclat finds exactly Apriori's itemsets (it reported every single item twice before)
+        assert_eq!(
+            itemset_keys(&result.itemsets),
+            itemset_keys(&apriori_result.itemsets)
         );
     }
 
@@ -944,6 +863,221 @@ mod tests {
         let out = r.to_string();
         assert!(out.contains("{Vollkornbrot geschnitten ü... "), "{out}");
         assert!(out.contains("{Milch} => {Vollkornbrot ge... "), "{out}"); // ASCII cut, as before
+    }
+
+    fn tx(rows: &[&[&str]]) -> Vec<Vec<String>> {
+        rows.iter()
+            .map(|r| r.iter().map(|s| s.to_string()).collect())
+            .collect()
+    }
+
+    fn itemset_keys(sets: &[FrequentItemset]) -> Vec<(Vec<String>, usize, f64)> {
+        sets.iter()
+            .map(|s| (s.items.clone(), s.count, s.support))
+            .collect()
+    }
+
+    fn config(min_support: f64) -> AprioriConfig {
+        AprioriConfig {
+            min_support,
+            ..Default::default()
+        }
+    }
+
+    /// Seeded baskets over items a-h with item-specific densities.
+    pub(super) fn seeded_baskets(seed: u64, n: usize) -> Vec<Vec<String>> {
+        use rand::{Rng, SeedableRng, rngs::StdRng};
+        let mut rng = StdRng::seed_from_u64(seed);
+        let p = [0.55, 0.6, 0.5, 0.35, 0.25, 0.3, 0.12, 0.07];
+        (0..n)
+            .map(|_| {
+                let mut t: Vec<String> = Vec::new();
+                for (j, &pj) in p.iter().enumerate() {
+                    // correlate b with a and d with c
+                    let pj = match j {
+                        1 if t.iter().any(|x| x == "a") => 0.8,
+                        3 if t.iter().any(|x| x == "c") => 0.55,
+                        _ => pj,
+                    };
+                    if rng.gen_bool(pj) {
+                        t.push(((b'a' + j as u8) as char).to_string());
+                    }
+                }
+                t
+            })
+            .collect()
+    }
+
+    /// Every itemset over a-h (255) counted directly.
+    pub(super) fn brute_force_itemsets(
+        baskets: &[Vec<String>],
+        min_support: f64,
+    ) -> Vec<(Vec<String>, usize, f64)> {
+        let n = baskets.len();
+        let mut out = Vec::new();
+        for mask in 1u32..256 {
+            let items: Vec<String> = (0..8)
+                .filter(|j| mask & (1 << j) != 0)
+                .map(|j| ((b'a' + j as u8) as char).to_string())
+                .collect();
+            let count = baskets
+                .iter()
+                .filter(|t| items.iter().all(|i| t.contains(i)))
+                .count();
+            let support = count as f64 / n as f64;
+            if support >= min_support {
+                out.push((items, count, support));
+            }
+        }
+        out.sort_by(|a, b| a.0.len().cmp(&b.0.len()).then_with(|| a.0.cmp(&b.0)));
+        out
+    }
+
+    /// ML-117: an itemset whose support equals min_support is kept. Before, ceil(min_support * n) in floating
+    /// point dropped A (7 of 100) at 0.07, and every k in {7, 14, 28, 55, 56} (n = 100), {7, 14, 28} (n = 50).
+    #[test]
+    fn apriori_keeps_itemsets_exactly_at_min_support() {
+        let mut baskets = vec![vec!["A".to_string()]; 7];
+        baskets.extend(vec![vec!["B".to_string()]; 93]);
+        for f in [apriori, eclat] {
+            let r = f(&baskets, &config(0.07)).unwrap();
+            assert_eq!(
+                itemset_keys(&r.itemsets),
+                vec![
+                    (vec!["A".to_string()], 7, 0.07),
+                    (vec!["B".to_string()], 93, 0.93)
+                ]
+            );
+        }
+        let mut dropped = Vec::new();
+        for n in [100usize, 50] {
+            for k in 1..n {
+                let mut baskets = vec![vec!["A".to_string()]; k];
+                baskets.extend(vec![vec!["B".to_string()]; n - k]);
+                let s = k as f64 / n as f64;
+                for f in [apriori, eclat] {
+                    let r = f(&baskets, &config(s)).unwrap();
+                    if !r.itemsets.iter().any(|i| i.items == ["A"]) {
+                        dropped.push((n, k));
+                    }
+                }
+            }
+        }
+        assert!(dropped.is_empty(), "dropped at the boundary: {dropped:?}");
+    }
+
+    /// ML-119: eclat reported every frequent single item twice (7 itemsets here, 4 now), and it finds exactly
+    /// the itemsets of apriori and of a brute-force count.
+    #[test]
+    fn eclat_reports_each_itemset_once() {
+        let mut baskets = vec![vec!["A".to_string(), "B".to_string()]; 3];
+        baskets.extend(vec![vec!["C".to_string()]; 7]);
+        let r = eclat(&baskets, &config(0.2)).unwrap();
+        let items: Vec<Vec<String>> = r.itemsets.iter().map(|i| i.items.clone()).collect();
+        assert_eq!(items, vec![vec!["A"], vec!["B"], vec!["C"], vec!["A", "B"]]);
+        let baskets = seeded_baskets(20261115, 200);
+        for s in [0.02, 0.07, 0.15] {
+            let truth = brute_force_itemsets(&baskets, s);
+            let a = apriori(&baskets, &config(s)).unwrap();
+            let e = eclat(&baskets, &config(s)).unwrap();
+            assert_eq!(itemset_keys(&a.itemsets), truth, "apriori at {s}");
+            assert_eq!(itemset_keys(&e.itemsets), truth, "eclat at {s}");
+        }
+    }
+
+    /// Settings out of range are refused, naming the field and the bound.
+    #[test]
+    fn apriori_refuses_invalid_settings() {
+        let baskets = tx(&[&["a", "b"], &["a"]]);
+        let cases: Vec<(AprioriConfig, &str)> = vec![
+            (config(f64::NAN), "min_support"),
+            (config(0.0), "min_support"),
+            (config(-0.1), "min_support"),
+            (config(1.5), "min_support"),
+            (
+                AprioriConfig {
+                    min_confidence: f64::NAN,
+                    ..Default::default()
+                },
+                "min_confidence",
+            ),
+            (
+                AprioriConfig {
+                    min_confidence: -0.1,
+                    ..Default::default()
+                },
+                "min_confidence",
+            ),
+            (
+                AprioriConfig {
+                    min_confidence: 1.1,
+                    ..Default::default()
+                },
+                "min_confidence",
+            ),
+            (
+                AprioriConfig {
+                    min_lift: f64::NAN,
+                    ..Default::default()
+                },
+                "min_lift",
+            ),
+            (
+                AprioriConfig {
+                    min_lift: -1.0,
+                    ..Default::default()
+                },
+                "min_lift",
+            ),
+            (
+                AprioriConfig {
+                    max_length: 0,
+                    ..Default::default()
+                },
+                "max_length",
+            ),
+        ];
+        for (c, field) in cases {
+            for f in [apriori, eclat] {
+                match f(&baskets, &c) {
+                    Err(EconError::InvalidSpecification { message }) => {
+                        assert!(message.contains(field), "{message}");
+                        assert!(message.contains("got"), "{message}");
+                    }
+                    other => panic!("{field}: {other:?}"),
+                }
+            }
+        }
+    }
+
+    /// Itemsets and rules come out in a fixed order (by length, then items), whatever the basket order.
+    #[test]
+    fn apriori_lists_itemsets_in_a_fixed_order() {
+        let baskets = seeded_baskets(5, 150);
+        let mut reversed = baskets.clone();
+        reversed.reverse();
+        for item_order in [false, true] {
+            let b2: Vec<Vec<String>> = if item_order {
+                reversed
+                    .iter()
+                    .map(|t| t.iter().rev().cloned().collect())
+                    .collect()
+            } else {
+                reversed.clone()
+            };
+            for f in [apriori, eclat] {
+                let a = f(&baskets, &config(0.05)).unwrap();
+                let b = f(&baskets, &config(0.05)).unwrap();
+                let c = f(&b2, &config(0.05)).unwrap();
+                assert_eq!(itemset_keys(&a.itemsets), itemset_keys(&b.itemsets));
+                assert_eq!(itemset_keys(&a.itemsets), itemset_keys(&c.itemsets));
+                assert!(
+                    a.itemsets
+                        .windows(2)
+                        .all(|w| (w[0].items.len(), &w[0].items) < (w[1].items.len(), &w[1].items))
+                );
+            }
+        }
     }
 
     /// R5: rules are listed by non-increasing lift; lift is finite by construction (confidence / support_rhs,
