@@ -56,6 +56,10 @@ Registered as `ml_mboost` (`ml/mboost.rs`): `test_validate_mboost_package_paths`
 `test_validate_mboost_converged_limits`, `test_validate_mboost_tree_depth`.
 
 Fast mboost's early stopping, seed and training means have property tests in `ml/mboost_fast.rs`.
+Fast mboost's Huber family takes mboost's adaptive threshold `d = median(|y - f|)` of the fit, every iteration, as
+`Huber()` does with `d = NULL`, but from the current fit (mboost's is one iteration behind); the fit is
+scale-equivariant (`test_fast_mboost_huber_is_scale_equivariant`). Not R-pinned. Before T4 it used a fixed `d =
+1.345` in the units of `y` (WT-1).
 `crates/p2a-core/tests/validation_boosting_methods.rs` holds DGP-recovery checks, not R comparisons.
 
 ## Tolerances
