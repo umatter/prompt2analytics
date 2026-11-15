@@ -26,6 +26,11 @@ use rayon::prelude::*;
 use crate::errors::EconResult;
 use crate::resource::{self, Budget};
 
+/// The deepest node any tree of the boosting and forest builders grows (as `quantile_rf`, `c50`
+/// and `cubist`): a larger `max_depth` stops here, so neither a recursive builder's stack nor a
+/// chain of single-row splits grows with the rows.
+pub(crate) const MAX_TREE_DEPTH: usize = 512;
+
 /// A node in a decision tree.
 #[derive(Debug, Clone)]
 pub enum TreeNode {
@@ -115,7 +120,10 @@ impl DecisionTree {
         let n_samples = indices.len();
 
         // Check stopping conditions
-        if depth >= self.max_depth || n_samples < self.min_samples_split || n_samples <= 1 {
+        if depth >= self.max_depth.min(MAX_TREE_DEPTH)
+            || n_samples < self.min_samples_split
+            || n_samples <= 1
+        {
             return self.create_leaf(y, indices);
         }
 
@@ -365,11 +373,34 @@ struct SplitResult {
     right_indices: Vec<usize>,
 }
 
+/// Per-tree scratch of the split search: the bootstrap multiplicity of each row in the current
+/// node (zero outside it), the node's distinct rows, and a buffer for their order on a feature.
+/// Allocated once per tree; each node sets and resets only its own rows.
+struct NodeScratch {
+    counts: Vec<u32>,
+    distinct: Vec<usize>,
+    order: Vec<usize>,
+}
+
+impl NodeScratch {
+    fn new(n_rows: usize) -> EconResult<Self> {
+        Ok(NodeScratch {
+            counts: resource::try_vec(n_rows, 0u32, "random forest node scratch")?,
+            distinct: Vec::new(),
+            order: Vec::new(),
+        })
+    }
+}
+
+/// A node scans its own rows, sorted per feature, instead of the presorted list of all rows when
+/// `m ceil(log2 m) * NODE_SCAN_FACTOR < N` (m distinct rows in the node, N rows in the data).
+const NODE_SCAN_FACTOR: u128 = 4;
+
 /// Build a tree on the original data using bootstrap sample indices.
 ///
 /// The tree is built recursively. At each node, `node_indices` are the
-/// bootstrap sample rows that reach this node. Pre-sorted feature indices
-/// are used with a membership mask for efficient split finding.
+/// bootstrap sample rows that reach this node. The split search reads only the node's rows: a
+/// small node sorts its own rows per feature, a large one walks the presorted list of the data.
 fn build_tree_optimized(
     data: &ArrayView2<f64>,
     target: &ArrayView1<f64>,
@@ -383,6 +414,7 @@ fn build_tree_optimized(
     rng_state: &mut u64,
     budget: Option<&Budget>,
     gain: &mut [f64],
+    scratch: &mut NodeScratch,
 ) -> EconResult<TreeNode> {
     // Checked per node, so even one deep tree stops at the deadline.
     if let Some(b) = budget {
@@ -407,25 +439,16 @@ fn build_tree_optimized(
     // Select features to consider
     let features_to_try = select_features_fast(n_features, max_features, rng_state);
 
-    // Build a membership set for the current node's samples.
-    // For large n, a boolean mask is faster than a HashSet.
-    let total_rows = data.nrows();
-    let mut in_node = vec![0u32; total_rows];
-    // Count occurrences (bootstrap can have duplicates)
-    for &idx in node_indices {
-        in_node[idx] += 1;
-    }
-
     // Compute total sum and count for the node (accounting for duplicates)
     let total_sum: f64 = node_indices.iter().map(|&i| target[i]).sum();
     let total_count = n_samples;
 
-    // Find best split using pre-sorted indices and running statistics
-    if let Some(split) = find_best_split_optimized(
+    // Find best split over the node's rows
+    if let Some(split) = find_best_split_node(
         data,
         target,
         node_indices,
-        &in_node,
+        scratch,
         total_sum,
         total_count,
         &features_to_try,
@@ -455,6 +478,7 @@ fn build_tree_optimized(
             rng_state,
             budget,
             gain,
+            scratch,
         )?;
         let right = build_tree_optimized(
             data,
@@ -469,6 +493,7 @@ fn build_tree_optimized(
             rng_state,
             budget,
             gain,
+            scratch,
         )?;
 
         Ok(TreeNode::Split {
@@ -508,35 +533,85 @@ fn select_features_fast(n_features: usize, max_features: usize, rng_state: &mut 
     selected
 }
 
-/// Find the best split using pre-sorted indices and running statistics.
-///
-/// For each candidate feature, we iterate through the pre-sorted index array.
-/// We skip rows not in the current node (using `in_node` mask). As we scan,
-/// we maintain running sum_left/count_left and derive sum_right/count_right
-/// from the totals. This gives O(N) split evaluation per feature (where N
-/// is the total dataset size, but with early-out opportunities).
+/// The running state of the split search over one node.
+struct BestSplit {
+    reduction: f64,
+    feature: usize,
+    threshold: f64,
+}
+
+/// Scan one feature's rows in ascending order of the feature (ties in row order), each distinct
+/// row once with its multiplicity `counts[row]` (rows with count 0 are skipped). A split between
+/// two values is scored before the larger one is added.
 ///
 /// The weighted MSE criterion is:
 ///   MSE = (n_left * var_left + n_right * var_right) / n_total
-/// where var = E[y^2] - (E[y])^2 = (sum_sq / n) - (sum / n)^2
+/// which is minimised by maximising sum_left^2/n_left + sum_right^2/n_right.
+#[inline]
+fn scan_feature(
+    data: &ArrayView2<f64>,
+    target: &ArrayView1<f64>,
+    counts: &[u32],
+    rows: &[usize],
+    feature: usize,
+    total_sum: f64,
+    total_count: usize,
+    best: &mut BestSplit,
+) {
+    let mut sum_left = 0.0;
+    let mut count_left: usize = 0;
+    let mut prev_val = f64::NEG_INFINITY;
+
+    for &row_idx in rows {
+        let cnt = counts[row_idx];
+        if cnt == 0 {
+            continue;
+        }
+
+        let x_val = data[[row_idx, feature]];
+        let y_val = target[row_idx];
+
+        // Before adding this point, evaluate split if feature value changed
+        // (split between prev_val and x_val)
+        if count_left > 0 && x_val > prev_val + 1e-12 {
+            let count_right = total_count - count_left;
+            if count_right > 0 {
+                let sum_right = total_sum - sum_left;
+                let reduction = sum_left * sum_left / count_left as f64
+                    + sum_right * sum_right / count_right as f64;
+
+                if reduction > best.reduction {
+                    best.reduction = reduction;
+                    best.feature = feature;
+                    best.threshold = (prev_val + x_val) / 2.0;
+                }
+            }
+        }
+
+        // Add this point to the left side (handle bootstrap duplicates)
+        sum_left += y_val * cnt as f64;
+        count_left += cnt as usize;
+        prev_val = x_val;
+    }
+}
+
+/// Find the best split of a node, reading only its rows.
 ///
-/// We can equivalently minimize:
-///   sum_sq_left - sum_left^2/n_left + sum_sq_right - sum_right^2/n_right
-/// which avoids computing mean/variance explicitly.
-fn find_best_split_optimized(
+/// The node's distinct rows and their bootstrap multiplicities are put in `scratch` (and taken
+/// out again before returning). Per feature, a small node sorts its distinct rows by `(value,
+/// row)`, which is the order of the presorted list restricted to the node, and a large node
+/// walks the presorted list skipping rows outside it; both add the same values in the same order,
+/// so the chosen split is the same either way.
+fn find_best_split_node(
     data: &ArrayView2<f64>,
     target: &ArrayView1<f64>,
     node_indices: &[usize],
-    in_node: &[u32],
+    scratch: &mut NodeScratch,
     total_sum: f64,
     total_count: usize,
     features: &[usize],
     sorted_feature_indices: &SortedFeatureIndices,
 ) -> Option<SplitResult> {
-    let mut best_reduction = f64::NEG_INFINITY;
-    let mut best_feature = 0;
-    let mut best_threshold = 0.0;
-
     // Total sum of squares for the node
     let total_sum_sq: f64 = node_indices.iter().map(|&i| target[i] * target[i]).sum();
     // Baseline impurity (proportional to total_sum_sq - total_sum^2 / total_count)
@@ -547,55 +622,68 @@ fn find_best_split_optimized(
         return None;
     }
 
-    for &feature in features {
-        let sorted = &sorted_feature_indices.sorted_indices[feature];
-
-        // Running statistics for the left side
-        let mut sum_left = 0.0;
-        let mut sum_sq_left = 0.0;
-        let mut count_left: usize = 0;
-        let mut prev_val = f64::NEG_INFINITY;
-
-        for &row_idx in sorted {
-            let cnt = in_node[row_idx];
-            if cnt == 0 {
-                continue;
-            }
-
-            let x_val = data[[row_idx, feature]];
-            let y_val = target[row_idx];
-
-            // Before adding this point, evaluate split if feature value changed
-            // (split between prev_val and x_val)
-            if count_left > 0 && x_val > prev_val + 1e-12 {
-                let count_right = total_count - count_left;
-                if count_right > 0 {
-                    // Reduction = sum_left^2/n_left + sum_right^2/n_right - total_sum^2/total_count
-                    let sum_right = total_sum - sum_left;
-                    let reduction = sum_left * sum_left / count_left as f64
-                        + sum_right * sum_right / count_right as f64;
-
-                    if reduction > best_reduction {
-                        best_reduction = reduction;
-                        best_feature = feature;
-                        best_threshold = (prev_val + x_val) / 2.0;
-                    }
-                }
-            }
-
-            // Add this point to the left side (handle bootstrap duplicates)
-            let cnt_f = cnt as f64;
-            sum_left += y_val * cnt_f;
-            sum_sq_left += y_val * y_val * cnt_f;
-            count_left += cnt as usize;
-            prev_val = x_val;
+    let NodeScratch {
+        counts,
+        distinct,
+        order,
+    } = scratch;
+    distinct.clear();
+    for &idx in node_indices {
+        if counts[idx] == 0 {
+            distinct.push(idx);
         }
+        counts[idx] += 1;
+    }
+    let m = distinct.len() as u128;
+    let log2_m = u128::from(usize::BITS - distinct.len().saturating_sub(1).leading_zeros());
+    let node_local = m * log2_m * NODE_SCAN_FACTOR < data.nrows() as u128;
+
+    let mut best = BestSplit {
+        reduction: f64::NEG_INFINITY,
+        feature: 0,
+        threshold: 0.0,
+    };
+    for &feature in features {
+        if node_local {
+            order.clear();
+            order.extend_from_slice(distinct);
+            order.sort_unstable_by(|&a, &b| {
+                data[[a, feature]]
+                    .total_cmp(&data[[b, feature]])
+                    .then(a.cmp(&b))
+            });
+            scan_feature(
+                data,
+                target,
+                counts,
+                order,
+                feature,
+                total_sum,
+                total_count,
+                &mut best,
+            );
+        } else {
+            scan_feature(
+                data,
+                target,
+                counts,
+                &sorted_feature_indices.sorted_indices[feature],
+                feature,
+                total_sum,
+                total_count,
+                &mut best,
+            );
+        }
+    }
+    for &idx in distinct.iter() {
+        counts[idx] = 0;
     }
 
     // Check that we found a valid split
-    if best_reduction <= f64::NEG_INFINITY {
+    if best.reduction <= f64::NEG_INFINITY {
         return None;
     }
+    let (best_feature, best_threshold) = (best.feature, best.threshold);
 
     // Partition node_indices by the best split
     let mut left_indices = Vec::with_capacity(node_indices.len() / 2);
@@ -716,9 +804,10 @@ impl std::fmt::Display for RandomForestResult {
 /// * `data` - Input feature matrix (n_samples x n_features)
 /// * `target` - Target values
 /// * `n_trees` - Number of trees (default: 100)
-/// * `max_depth` - Maximum tree depth (default: 10)
+/// * `max_depth` - Maximum tree depth (default: 10; at most 512)
 /// * `min_samples_split` - Minimum samples to split (default: 2)
-/// * `max_features` - Max features per split ("sqrt", "log2", "all", or number)
+/// * `max_features` - Max features per split: "sqrt" (default), "log2", "all", or a whole number
+///   of at least 1 (more than the features means all); anything else is an error
 /// * `seed` - Random seed
 /// * `feature_names` - Optional feature names
 ///
@@ -732,7 +821,8 @@ impl std::fmt::Display for RandomForestResult {
 ///
 /// # Errors
 ///
-/// `n_trees` must be at least 1 and every feature and target value finite.
+/// `n_trees` must be at least 1, `max_features` one of the forms above, and every feature and
+/// target value finite.
 /// Returns the "Computation stopped" message once the installed computation
 /// budget expires (checked per tree and per node).
 pub fn random_forest(
@@ -757,11 +847,11 @@ pub fn random_forest(
 
     let num_trees = n_trees.unwrap_or(100);
     validate_forest_inputs(&data, &target, num_trees, feature_names.as_deref())?;
-    let tree_max_depth = max_depth.unwrap_or(10);
+    let tree_max_depth = max_depth.unwrap_or(10).min(MAX_TREE_DEPTH);
     let tree_min_split = min_samples_split.unwrap_or(2);
 
     // Parse max_features
-    let max_feat = parse_max_features(max_features, n_features);
+    let max_feat = parse_max_features(max_features, n_features)?;
 
     let spec = ForestSpec {
         n_trees: num_trees,
@@ -770,6 +860,8 @@ pub fn random_forest(
         max_features: max_feat,
         n_features,
         seed: seed.unwrap_or(42),
+        #[cfg(test)]
+        full_scan: full_scan_reference::ON.with(std::cell::Cell::get),
     };
 
     // Pre-sort feature indices once (shared read-only across all trees)
@@ -916,9 +1008,10 @@ impl std::fmt::Display for RandomForestModel {
 /// * `data` - Input feature matrix (n_samples x n_features)
 /// * `target` - Target values
 /// * `n_trees` - Number of trees (default: 100)
-/// * `max_depth` - Maximum tree depth (default: 10)
+/// * `max_depth` - Maximum tree depth (default: 10; at most 512)
 /// * `min_samples_split` - Minimum samples to split (default: 2)
-/// * `max_features` - Max features per split ("sqrt", "log2", "all", or number)
+/// * `max_features` - Max features per split: "sqrt" (default), "log2", "all", or a whole number
+///   of at least 1 (more than the features means all); anything else is an error
 /// * `seed` - Random seed
 /// * `feature_names` - Optional feature names
 ///
@@ -957,10 +1050,10 @@ pub fn random_forest_with_trees(
 
     let num_trees = n_trees.unwrap_or(100);
     validate_forest_inputs(&data, &target, num_trees, feature_names.as_deref())?;
-    let tree_max_depth = max_depth.unwrap_or(10);
+    let tree_max_depth = max_depth.unwrap_or(10).min(MAX_TREE_DEPTH);
     let tree_min_split = min_samples_split.unwrap_or(2);
 
-    let max_feat = parse_max_features(max_features, n_features);
+    let max_feat = parse_max_features(max_features, n_features)?;
 
     let spec = ForestSpec {
         n_trees: num_trees,
@@ -969,6 +1062,8 @@ pub fn random_forest_with_trees(
         max_features: max_feat,
         n_features,
         seed: seed.unwrap_or(42),
+        #[cfg(test)]
+        full_scan: full_scan_reference::ON.with(std::cell::Cell::get),
     };
 
     // The model keeps every tree, so its vector is sized up front, fallibly.
@@ -1065,6 +1160,38 @@ struct ForestSpec {
     max_features: usize,
     n_features: usize,
     seed: u64,
+    /// Grow with the v0.5.1 full-scan builder (the equivalence tests' reference)
+    #[cfg(test)]
+    full_scan: bool,
+}
+
+/// One tree of the forest on its bootstrap rows, with its own split-search scratch.
+fn grow_root(
+    data: &ArrayView2<f64>,
+    target: &ArrayView1<f64>,
+    sorted: &SortedFeatureIndices,
+    spec: &ForestSpec,
+    bootstrap_indices: &[usize],
+    tree_rng: &mut u64,
+    budget: Option<&Budget>,
+    gain: &mut [f64],
+) -> EconResult<TreeNode> {
+    let mut scratch = NodeScratch::new(data.nrows())?;
+    build_tree_optimized(
+        data,
+        target,
+        bootstrap_indices,
+        0,
+        spec.max_depth,
+        spec.min_split,
+        spec.max_features,
+        spec.n_features,
+        sorted,
+        tree_rng,
+        budget,
+        gain,
+        &mut scratch,
+    )
 }
 
 /// Grow `spec.n_trees` trees and hand each one, with its out-of-bag
@@ -1102,16 +1229,41 @@ fn grow_forest(
 
         // Build tree on original data using bootstrap indices (no copy)
         let mut gain = vec![0.0; spec.n_features];
-        let root = build_tree_optimized(
+        #[cfg(test)]
+        let root = if spec.full_scan {
+            full_scan_reference::build_tree_optimized(
+                data,
+                target,
+                &bootstrap_indices,
+                0,
+                spec.max_depth,
+                spec.min_split,
+                spec.max_features,
+                spec.n_features,
+                sorted,
+                &mut tree_rng,
+                budget.as_ref(),
+                &mut gain,
+            )?
+        } else {
+            grow_root(
+                data,
+                target,
+                sorted,
+                spec,
+                &bootstrap_indices,
+                &mut tree_rng,
+                budget.as_ref(),
+                &mut gain,
+            )?
+        };
+        #[cfg(not(test))]
+        let root = grow_root(
             data,
             target,
-            &bootstrap_indices,
-            0,
-            spec.max_depth,
-            spec.min_split,
-            spec.max_features,
-            spec.n_features,
             sorted,
+            spec,
+            &bootstrap_indices,
             &mut tree_rng,
             budget.as_ref(),
             &mut gain,
@@ -1195,16 +1347,22 @@ pub(crate) fn check_target_scale(y: &ArrayView1<f64>, method: &str) -> Result<()
     Ok(())
 }
 
-/// Parse max_features parameter.
-fn parse_max_features(max_features: Option<&str>, n_features: usize) -> usize {
+/// The number of features tried at each split: `"sqrt"` (the default) and `"log2"` round up and
+/// try at least one, `"all"`, or a whole number of at least 1 (more than the features means all).
+/// Anything else is refused.
+fn parse_max_features(max_features: Option<&str>, n_features: usize) -> Result<usize, String> {
+    let at_least_one = |v: f64| (v.ceil() as usize).max(1);
     match max_features {
-        Some("sqrt") => (n_features as f64).sqrt().ceil() as usize,
-        Some("log2") => (n_features as f64).log2().ceil() as usize,
-        Some("all") => n_features,
-        Some(s) => s
-            .parse()
-            .unwrap_or((n_features as f64).sqrt().ceil() as usize),
-        None => (n_features as f64).sqrt().ceil() as usize, // Default: sqrt
+        None | Some("sqrt") => Ok(at_least_one((n_features as f64).sqrt())),
+        Some("log2") => Ok(at_least_one((n_features as f64).log2())),
+        Some("all") => Ok(n_features),
+        Some(s) => match s.parse::<usize>() {
+            Ok(k) if k >= 1 => Ok(k),
+            _ => Err(format!(
+                "max_features must be 'sqrt', 'log2', 'all' or a whole number of features of at \
+                 least 1 (got '{s}')"
+            )),
+        },
     }
 }
 
@@ -1332,6 +1490,248 @@ fn compute_oob_score(
         Some(1.0 - ss_res / ss_tot)
     } else {
         None
+    }
+}
+
+/// The full-scan split search of v0.5.1, kept as the reference the node-local search must
+/// reproduce exactly (`test_node_local_split_search_matches_full_scan`).
+#[cfg(test)]
+mod full_scan_reference {
+    use super::*;
+
+    thread_local! {
+        /// Set by a test to grow its forests with the reference builder (read on the calling
+        /// thread when the forest's settings are fixed).
+        pub(super) static ON: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    /// Build a tree on the original data using bootstrap sample indices.
+    ///
+    /// The tree is built recursively. At each node, `node_indices` are the
+    /// bootstrap sample rows that reach this node. Pre-sorted feature indices
+    /// are used with a membership mask for efficient split finding.
+    pub(super) fn build_tree_optimized(
+        data: &ArrayView2<f64>,
+        target: &ArrayView1<f64>,
+        node_indices: &[usize],
+        depth: usize,
+        max_depth: usize,
+        min_samples_split: usize,
+        max_features: usize,
+        n_features: usize,
+        sorted_feature_indices: &SortedFeatureIndices,
+        rng_state: &mut u64,
+        budget: Option<&Budget>,
+        gain: &mut [f64],
+    ) -> EconResult<TreeNode> {
+        // Checked per node, so even one deep tree stops at the deadline.
+        if let Some(b) = budget {
+            b.check()?;
+        }
+        let n_samples = node_indices.len();
+
+        // Stopping conditions
+        if depth >= max_depth || n_samples < min_samples_split || n_samples <= 1 {
+            return Ok(make_leaf(target, node_indices));
+        }
+
+        // Check if all targets are the same
+        let first_val = target[node_indices[0]];
+        if node_indices
+            .iter()
+            .all(|&i| (target[i] - first_val).abs() < 1e-10)
+        {
+            return Ok(make_leaf(target, node_indices));
+        }
+
+        // Select features to consider
+        let features_to_try = select_features_fast(n_features, max_features, rng_state);
+
+        // Build a membership set for the current node's samples.
+        // For large n, a boolean mask is faster than a HashSet.
+        let total_rows = data.nrows();
+        let mut in_node = vec![0u32; total_rows];
+        // Count occurrences (bootstrap can have duplicates)
+        for &idx in node_indices {
+            in_node[idx] += 1;
+        }
+
+        // Compute total sum and count for the node (accounting for duplicates)
+        let total_sum: f64 = node_indices.iter().map(|&i| target[i]).sum();
+        let total_count = n_samples;
+
+        // Find best split using pre-sorted indices and running statistics
+        if let Some(split) = find_best_split_optimized(
+            data,
+            target,
+            node_indices,
+            &in_node,
+            total_sum,
+            total_count,
+            &features_to_try,
+            sorted_feature_indices,
+        ) {
+            if split.left_indices.is_empty() || split.right_indices.is_empty() {
+                return Ok(make_leaf(target, node_indices));
+            }
+            add_split_gain(
+                gain,
+                split.feature,
+                target,
+                &split.left_indices,
+                &split.right_indices,
+            );
+
+            let left = build_tree_optimized(
+                data,
+                target,
+                &split.left_indices,
+                depth + 1,
+                max_depth,
+                min_samples_split,
+                max_features,
+                n_features,
+                sorted_feature_indices,
+                rng_state,
+                budget,
+                gain,
+            )?;
+            let right = build_tree_optimized(
+                data,
+                target,
+                &split.right_indices,
+                depth + 1,
+                max_depth,
+                min_samples_split,
+                max_features,
+                n_features,
+                sorted_feature_indices,
+                rng_state,
+                budget,
+                gain,
+            )?;
+
+            Ok(TreeNode::Split {
+                feature_index: split.feature,
+                threshold: split.threshold,
+                left: Box::new(left),
+                right: Box::new(right),
+            })
+        } else {
+            Ok(make_leaf(target, node_indices))
+        }
+    }
+
+    /// Find the best split using pre-sorted indices and running statistics.
+    ///
+    /// For each candidate feature, we iterate through the pre-sorted index array.
+    /// We skip rows not in the current node (using `in_node` mask). As we scan,
+    /// we maintain running sum_left/count_left and derive sum_right/count_right
+    /// from the totals. This gives O(N) split evaluation per feature (where N
+    /// is the total dataset size, but with early-out opportunities).
+    ///
+    /// The weighted MSE criterion is:
+    ///   MSE = (n_left * var_left + n_right * var_right) / n_total
+    /// where var = E[y^2] - (E[y])^2 = (sum_sq / n) - (sum / n)^2
+    ///
+    /// We can equivalently minimize:
+    ///   sum_sq_left - sum_left^2/n_left + sum_sq_right - sum_right^2/n_right
+    /// which avoids computing mean/variance explicitly.
+    pub(super) fn find_best_split_optimized(
+        data: &ArrayView2<f64>,
+        target: &ArrayView1<f64>,
+        node_indices: &[usize],
+        in_node: &[u32],
+        total_sum: f64,
+        total_count: usize,
+        features: &[usize],
+        sorted_feature_indices: &SortedFeatureIndices,
+    ) -> Option<SplitResult> {
+        let mut best_reduction = f64::NEG_INFINITY;
+        let mut best_feature = 0;
+        let mut best_threshold = 0.0;
+
+        // Total sum of squares for the node
+        let total_sum_sq: f64 = node_indices.iter().map(|&i| target[i] * target[i]).sum();
+        // Baseline impurity (proportional to total_sum_sq - total_sum^2 / total_count)
+        let baseline = total_sum_sq - total_sum * total_sum / total_count as f64;
+
+        if baseline <= 0.0 {
+            // Pure node, no split can improve
+            return None;
+        }
+
+        for &feature in features {
+            let sorted = &sorted_feature_indices.sorted_indices[feature];
+
+            // Running statistics for the left side
+            let mut sum_left = 0.0;
+            let mut sum_sq_left = 0.0;
+            let mut count_left: usize = 0;
+            let mut prev_val = f64::NEG_INFINITY;
+
+            for &row_idx in sorted {
+                let cnt = in_node[row_idx];
+                if cnt == 0 {
+                    continue;
+                }
+
+                let x_val = data[[row_idx, feature]];
+                let y_val = target[row_idx];
+
+                // Before adding this point, evaluate split if feature value changed
+                // (split between prev_val and x_val)
+                if count_left > 0 && x_val > prev_val + 1e-12 {
+                    let count_right = total_count - count_left;
+                    if count_right > 0 {
+                        // Reduction = sum_left^2/n_left + sum_right^2/n_right - total_sum^2/total_count
+                        let sum_right = total_sum - sum_left;
+                        let reduction = sum_left * sum_left / count_left as f64
+                            + sum_right * sum_right / count_right as f64;
+
+                        if reduction > best_reduction {
+                            best_reduction = reduction;
+                            best_feature = feature;
+                            best_threshold = (prev_val + x_val) / 2.0;
+                        }
+                    }
+                }
+
+                // Add this point to the left side (handle bootstrap duplicates)
+                let cnt_f = cnt as f64;
+                sum_left += y_val * cnt_f;
+                sum_sq_left += y_val * y_val * cnt_f;
+                count_left += cnt as usize;
+                prev_val = x_val;
+            }
+        }
+
+        // Check that we found a valid split
+        if best_reduction <= f64::NEG_INFINITY {
+            return None;
+        }
+
+        // Partition node_indices by the best split
+        let mut left_indices = Vec::with_capacity(node_indices.len() / 2);
+        let mut right_indices = Vec::with_capacity(node_indices.len() / 2);
+        for &idx in node_indices {
+            if data[[idx, best_feature]] <= best_threshold {
+                left_indices.push(idx);
+            } else {
+                right_indices.push(idx);
+            }
+        }
+
+        if left_indices.is_empty() || right_indices.is_empty() {
+            return None;
+        }
+
+        Some(SplitResult {
+            feature: best_feature,
+            threshold: best_threshold,
+            left_indices,
+            right_indices,
+        })
     }
 }
 
@@ -2027,6 +2427,7 @@ mod tests {
             &mut rng,
             None,
             &mut gain,
+            &mut NodeScratch::new(x.nrows()).unwrap(),
         )
         .unwrap();
         let mut sizes = node_sizes(&root).1;
@@ -2143,5 +2544,276 @@ mod tests {
             })
             .collect();
         assert_eq!(per_tree, m.inc_node_purity);
+    }
+
+    #[test]
+    fn test_random_forest_max_features_forms() {
+        // ML-104. "log2" with one feature selected 0 features (a forest of stumps), "0" too, and
+        // any other unparseable string silently meant "sqrt". Now: at least one feature, and
+        // anything not a keyword or a whole number of at least 1 is refused.
+        let n = 120;
+        let (x1, _) = noisy_regression(n, 1, 5);
+        let y1 = Array1::from_shape_fn(n, |i| 3.0 * x1[[i, 0]] + ((i * 37) % 11) as f64 / 10.0);
+        let r2 = |pred: &[f64]| {
+            let m = y1.mean().unwrap();
+            let ss: f64 = y1.iter().map(|v| (v - m).powi(2)).sum();
+            let rs: f64 = y1.iter().zip(pred).map(|(a, b)| (a - b).powi(2)).sum();
+            1.0 - rs / ss
+        };
+        let rf = random_forest(
+            x1.view(),
+            y1.view(),
+            Some(20),
+            None,
+            None,
+            Some("log2"),
+            Some(1),
+            None,
+        )
+        .unwrap();
+        assert!(
+            r2(&rf.predictions) > 0.9,
+            "log2 with one feature: R^2 {}",
+            r2(&rf.predictions)
+        );
+
+        let (x, y) = noisy_regression(80, 3, 9);
+        for bad in ["0", "0.33", "abc", "", "-1"] {
+            let e = random_forest(
+                x.view(),
+                y.view(),
+                Some(5),
+                None,
+                None,
+                Some(bad),
+                Some(1),
+                None,
+            )
+            .unwrap_err();
+            assert!(
+                e.contains("max_features must be 'sqrt', 'log2', 'all' or a whole number")
+                    && e.contains(&format!("'{bad}'")),
+                "{bad}: {e}"
+            );
+            let e = random_forest_with_trees(
+                x.view(),
+                y.view(),
+                Some(5),
+                None,
+                None,
+                Some(bad),
+                Some(1),
+                None,
+            )
+            .unwrap_err();
+            assert!(e.contains("max_features"), "{bad}: {e}");
+        }
+        let fit = |mf: Option<&str>| {
+            random_forest(x.view(), y.view(), Some(10), None, None, mf, Some(4), None)
+                .unwrap()
+                .predictions
+        };
+        assert_eq!(fit(Some("5")), fit(Some("all")));
+        assert_eq!(fit(Some("3")), fit(Some("all")));
+        assert_eq!(fit(None), fit(Some("sqrt")));
+        assert_ne!(fit(Some("1")), fit(Some("all")));
+    }
+
+    /// `n` rows, `p` features; with `decimals` the features are rounded (ties).
+    fn tie_design(
+        n: usize,
+        p: usize,
+        seed: u64,
+        decimals: Option<i32>,
+    ) -> (Array2<f64>, Array1<f64>) {
+        let (mut x, y) = noisy_regression(n, p, seed);
+        if let Some(d) = decimals {
+            let f = 10f64.powi(d);
+            x.mapv_inplace(|v| (v * f).round() / f);
+        }
+        (x, y)
+    }
+
+    #[test]
+    fn test_node_local_split_search_matches_full_scan() {
+        // ML-142: the node-local search returns the full scan's split exactly (feature,
+        // threshold bits, both partitions in order) on nodes of every size, with ties and
+        // bootstrap duplicates.
+        let mut s = 99u64;
+        for &n in &[50usize, 300, 2_000] {
+            for &p in &[1usize, 3, 8] {
+                for decimals in [None, Some(1), Some(2)] {
+                    let (x, y) = tie_design(n, p, n as u64 + p as u64, decimals);
+                    let sorted = SortedFeatureIndices::new(&x.view());
+                    let mut scratch = NodeScratch::new(n).unwrap();
+                    for size in [2usize, 5, n / 10, n / 2, n, 2 * n] {
+                        let size = size.max(2);
+                        let node: Vec<usize> = (0..size).map(|_| lcg_random(&mut s) % n).collect();
+                        let total_sum: f64 = node.iter().map(|&i| y[i]).sum();
+                        for mtry in 1..=p {
+                            let features = select_features_fast(p, mtry, &mut s);
+                            let mut in_node = vec![0u32; n];
+                            for &i in &node {
+                                in_node[i] += 1;
+                            }
+                            let want = full_scan_reference::find_best_split_optimized(
+                                &x.view(),
+                                &y.view(),
+                                &node,
+                                &in_node,
+                                total_sum,
+                                size,
+                                &features,
+                                &sorted,
+                            );
+                            let got = find_best_split_node(
+                                &x.view(),
+                                &y.view(),
+                                &node,
+                                &mut scratch,
+                                total_sum,
+                                size,
+                                &features,
+                                &sorted,
+                            );
+                            assert!(scratch.counts.iter().all(|&c| c == 0));
+                            match (want, got) {
+                                (None, None) => {}
+                                (Some(a), Some(b)) => {
+                                    assert_eq!(a.feature, b.feature, "n {n} p {p} size {size}");
+                                    assert_eq!(a.threshold.to_bits(), b.threshold.to_bits());
+                                    assert_eq!(a.left_indices, b.left_indices);
+                                    assert_eq!(a.right_indices, b.right_indices);
+                                }
+                                (a, b) => panic!(
+                                    "n {n} p {p} size {size}: {:?} vs {:?}",
+                                    a.map(|r| r.feature),
+                                    b.map(|r| r.feature)
+                                ),
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn with_reference<T>(on: bool, f: impl FnOnce() -> T) -> T {
+        full_scan_reference::ON.with(|c| c.set(on));
+        let out = f();
+        full_scan_reference::ON.with(|c| c.set(false));
+        out
+    }
+
+    #[test]
+    fn test_random_forest_identical_to_full_scan_reference() {
+        // ML-142 (W3.3): the node-local builder grows the same forests as the full scan.
+        let (x, y) = tie_design(300, 4, 11, Some(1));
+        for seed in 1..=5u64 {
+            for depth in [3usize, 10, 40] {
+                for min_split in [2usize, 5] {
+                    for mf in ["sqrt", "all"] {
+                        let run = |on: bool| {
+                            with_reference(on, || {
+                                random_forest(
+                                    x.view(),
+                                    y.view(),
+                                    Some(25),
+                                    Some(depth),
+                                    Some(min_split),
+                                    Some(mf),
+                                    Some(seed),
+                                    None,
+                                )
+                                .unwrap()
+                            })
+                        };
+                        let (a, b) = (run(true), run(false));
+                        let bits = |v: &[f64]| v.iter().map(|z| z.to_bits()).collect::<Vec<_>>();
+                        assert_eq!(bits(&a.predictions), bits(&b.predictions));
+                        assert_eq!(bits(&a.inc_node_purity), bits(&b.inc_node_purity));
+                        assert_eq!(a.oob_score.map(f64::to_bits), b.oob_score.map(f64::to_bits));
+                    }
+                }
+            }
+            let trees = |on: bool| {
+                with_reference(on, || {
+                    random_forest_with_trees(
+                        x.view(),
+                        y.view(),
+                        Some(10),
+                        Some(40),
+                        Some(2),
+                        Some("sqrt"),
+                        Some(seed),
+                        None,
+                    )
+                    .unwrap()
+                })
+            };
+            let (a, b) = (trees(true), trees(false));
+            for (ta, tb) in a.trees.iter().zip(&b.trees) {
+                assert_eq!(format!("{:?}", ta.root()), format!("{:?}", tb.root()));
+            }
+            assert_eq!(a.predictions, b.predictions);
+        }
+    }
+
+    fn chain_data(n: usize) -> (Array2<f64>, Array1<f64>) {
+        (
+            Array2::from_shape_fn((n, 1), |(i, _)| i as f64),
+            Array1::from_shape_fn(n, |i| (i % 2) as f64),
+        )
+    }
+
+    fn on_small_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+        std::thread::Builder::new()
+            .stack_size(2 << 20)
+            .spawn(f)
+            .unwrap()
+            .join()
+            .unwrap()
+    }
+
+    fn tree_depth(root: &TreeNode) -> usize {
+        let (mut max, mut stack) = (0, vec![(root, 0usize)]);
+        while let Some((node, d)) = stack.pop() {
+            max = max.max(d);
+            if let TreeNode::Split { left, right, .. } = node {
+                stack.push((left, d + 1));
+                stack.push((right, d + 1));
+            }
+        }
+        max
+    }
+
+    #[test]
+    fn test_forest_and_decision_tree_depth_is_capped() {
+        // Trees stop at depth 512 whatever max_depth says.
+        let (forest, single) = on_small_stack(|| {
+            let (x, y) = chain_data(2_000);
+            let m = random_forest_with_trees(
+                x.view(),
+                y.view(),
+                Some(1),
+                Some(10_000),
+                Some(2),
+                Some("all"),
+                Some(3),
+                None,
+            )
+            .unwrap();
+            // The exhaustive single-tree search is quadratic per node: 600 rows suffice.
+            let (xs, ys) = chain_data(600);
+            let mut t = DecisionTree::new(10_000, 2, None);
+            let mut rng = 1u64;
+            t.fit(xs.view(), ys.view(), None, &mut rng);
+            (
+                tree_depth(m.trees[0].root().unwrap()),
+                tree_depth(t.root().unwrap()),
+            )
+        });
+        assert!(forest <= MAX_TREE_DEPTH, "forest depth {forest}");
+        assert_eq!(single, MAX_TREE_DEPTH);
     }
 }
