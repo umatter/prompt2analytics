@@ -206,7 +206,9 @@ pub fn mini_batch_kmeans(
         }
     }
 
-    best_result.ok_or_else(|| "Mini-batch K-means failed".to_string())
+    best_result.ok_or_else(|| {
+        "mini_batch_kmeans: squared distances overflow in every run; rescale the data".to_string()
+    })
 }
 
 /// K-means++ initialization for mini-batch k-means.
@@ -538,7 +540,9 @@ pub fn trimmed_kmeans(
         }
     }
 
-    best_result.ok_or_else(|| "Trimmed K-means failed".to_string())
+    best_result.ok_or_else(|| {
+        "trimmed_kmeans: squared distances overflow in every run; rescale the data".to_string()
+    })
 }
 
 /// Convenience wrapper for trimmed_kmeans.
@@ -800,7 +804,9 @@ pub fn skmeans(
         }
     }
 
-    best_result.ok_or_else(|| "Spherical K-means failed".to_string())
+    best_result.ok_or_else(|| {
+        "skmeans: no run gave a finite objective (overflowing values); rescale the data".to_string()
+    })
 }
 
 /// Convenience wrapper for skmeans.
@@ -1074,5 +1080,22 @@ mod tests {
                 norm
             );
         }
+    }
+
+    #[test]
+    fn test_kmeans_variants_name_overflowing_distances() {
+        let x = ndarray::Array2::from_shape_fn((30, 2), |(i, j)| {
+            (1.0 + (i % 3) as f64 + 0.01 * i as f64 + 0.3 * j as f64) * 1e200
+        });
+        let e = mini_batch_kmeans(x.view(), 3, Some(10), Some(20), Some(2), Some(1)).unwrap_err();
+        assert!(
+            e.contains("mini_batch_kmeans: squared distances overflow in every run"),
+            "{e}"
+        );
+        let e = trimmed_kmeans(x.view(), 3, None, Some(20), Some(2), Some(1)).unwrap_err();
+        assert!(
+            e.contains("trimmed_kmeans: squared distances overflow in every run"),
+            "{e}"
+        );
     }
 }

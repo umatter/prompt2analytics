@@ -1787,6 +1787,9 @@ mod tests {
                 "{} vs {sd}",
                 r.sigma[j]
             );
+            // Not a rounding bound: EM stops on the log-likelihood change, so the mean is the
+            // group mean only to the convergence error (about 3e-11 sd here), a property bound
+            // relative to the sd, not an R tolerance.
             assert!((r.mu[j] - m).abs() <= 1e-9 * sd, "{} vs {m}", r.mu[j]);
         }
     }
@@ -2194,5 +2197,30 @@ mod tests {
         assert_eq!(result.labels[0], result.labels[1]);
         assert_eq!(result.labels[3], result.labels[4]);
         assert_ne!(result.labels[0], result.labels[3]);
+    }
+
+    #[test]
+    fn test_mixtures_are_cancellable() {
+        use crate::ml::advanced_clustering_mod::common::test_data::cancelled;
+        use crate::resource::with_budget;
+        let x = ndarray::Array2::from_shape_fn((60, 2), |(i, j)| {
+            (i % 3) as f64 * 4.0 + 0.3 * ((i * 7 + j * 3) as f64).sin() + 0.1 * j as f64
+        });
+        let col: Vec<f64> = x.column(0).to_vec();
+        let e =
+            with_budget(cancelled(), || normal_mix_em(&col, 2, None, None, Some(1))).unwrap_err();
+        assert!(e.contains("cancelled"), "{e}");
+        let e = with_budget(cancelled(), || {
+            mvnorm_mix_em(x.view(), 2, None, None, Some(1))
+        })
+        .unwrap_err();
+        assert!(e.contains("cancelled"), "{e}");
+        let y = x.column(1).to_owned().insert_axis(ndarray::Axis(1));
+        let xs = x.column(0).to_owned().insert_axis(ndarray::Axis(1));
+        let e = with_budget(cancelled(), || {
+            flexmix(y.view(), xs.view(), 2, None, None, Some(1))
+        })
+        .unwrap_err();
+        assert!(e.contains("cancelled"), "{e}");
     }
 }

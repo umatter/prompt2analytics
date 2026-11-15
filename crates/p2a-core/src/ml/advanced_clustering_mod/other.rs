@@ -342,7 +342,9 @@ pub fn kprototypes(
         }
     }
 
-    best_result.ok_or_else(|| "K-prototypes failed".to_string())
+    best_result.ok_or_else(|| {
+        "kprototypes: squared distances overflow in every run; rescale the data".to_string()
+    })
 }
 
 /// Convenience wrapper for kprototypes.
@@ -522,5 +524,32 @@ mod tests {
         // Both should produce valid results
         assert_eq!(result_low.n_clusters, 2);
         assert_eq!(result_high.n_clusters, 2);
+    }
+
+    #[test]
+    fn test_kprototypes_is_cancellable() {
+        use crate::ml::advanced_clustering_mod::common::test_data::cancelled;
+        let x = ndarray::Array2::from_shape_fn((60, 2), |(i, j)| {
+            (i % 3) as f64 * 4.0 + 0.3 * ((i * 7 + j * 3) as f64).sin() + 0.1 * j as f64
+        });
+        let cat: Vec<Vec<usize>> = (0..60).map(|i| vec![i % 3]).collect();
+        let e = crate::resource::with_budget(cancelled(), || {
+            kprototypes(x.view(), &cat, 3, None, None, None, Some(1))
+        })
+        .unwrap_err();
+        assert!(e.contains("cancelled"), "{e}");
+    }
+
+    #[test]
+    fn test_kprototypes_overflow_is_named() {
+        let x = ndarray::Array2::from_shape_fn((12, 2), |(i, j)| {
+            (1.0 + i as f64 + 0.3 * j as f64) * 1e200
+        });
+        let cat: Vec<Vec<usize>> = (0..12).map(|i| vec![i % 2]).collect();
+        let e = kprototypes(x.view(), &cat, 2, None, None, None, Some(1)).unwrap_err();
+        assert!(
+            e.contains("squared distances overflow in every run; rescale the data"),
+            "{e}"
+        );
     }
 }
