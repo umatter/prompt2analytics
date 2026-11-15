@@ -66,7 +66,12 @@ decomp <- mstl(y_ts, s.window = "periodic")
 
 ## Numerical Precision
 
-Trend and seasonal components should match R within 1e-4.
+`augurs-mstl` computes in f32. `run_mstl` centres the series by its mean and scales it by its standard deviation
+before the fit, restores the components afterwards (T = s T' + c, S_i = s S_i') and computes the residuals in f64 as
+x - T - sum S, so the components carry about 1e-7 of the series' spread per operation whatever its level.
+`test_mstl_level_invariance` holds that y and y + 1e8 decompose alike to 1e-5 of the spread and that the components
+add back to the series. The components are not pinned against `forecast::mstl` (not R-pinned; the MCP registry entry
+`mcp_t3_remaining_handlers` records it as deviation TS-26).
 
 ## Running the Tests
 

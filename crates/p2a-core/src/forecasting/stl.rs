@@ -11,6 +11,14 @@
 //! - R Core Team. `stats::stl()` function.
 //!   <https://stat.ethz.ch/R-manual/R-devel/library/stats/html/stl.html>
 //! - Implementation uses the `stlrs` crate (Rust port of original Fortran code).
+//!
+//! # Precision
+//!
+//! `stlrs` computes in f32. The series is centred by its mean and scaled by its standard
+//! deviation before the call, and the components are restored afterwards (LOESS commutes with
+//! an affine map of the series, and the robustness weights do not change under it), so the
+//! seasonal and trend components carry about 1e-7 of the series' spread per operation whatever
+//! its level. The remainder is computed in f64 as x - S - T, as R's `stl` computes it.
 
 use crate::data::Dataset;
 use crate::data::columns::{NaPolicy, numeric_column};
@@ -22,8 +30,9 @@ use serde::{Deserialize, Serialize};
 pub struct StlConfig {
     /// Seasonal period (must be >= 2).
     pub period: usize,
-    /// Length of the seasonal smoother. Must be odd and >= 7.
-    /// Default: nextodd(ceiling((1.5*period)/(1-(1.5/s.window)))+1)
+    /// Length of the seasonal smoother (R's `s.window`). Odd and >= 3.
+    /// Default: nextodd(period) (stlrs). R's `stl` has no default `s.window`; use
+    /// [`StlConfig::periodic`] for `s.window = "periodic"`.
     pub seasonal_length: Option<usize>,
     /// Degree of locally-fitted polynomial in seasonal smoothing (0 or 1).
     pub seasonal_degree: Option<usize>,
@@ -44,6 +53,10 @@ pub struct StlConfig {
     pub outer_loops: Option<usize>,
     /// Whether to use robust fitting (iteratively downweights outliers).
     pub robust: bool,
+    /// R's `s.window = "periodic"`: seasonal window 10 n + 1, seasonal degree 0, and the
+    /// seasonal component replaced by its cycle means afterwards. Not combined with
+    /// `seasonal_length` or `seasonal_degree`.
+    pub periodic: bool,
 }
 
 impl Default for StlConfig {
@@ -59,6 +72,7 @@ impl Default for StlConfig {
             inner_loops: None,
             outer_loops: None,
             robust: false,
+            periodic: false,
         }
     }
 }
@@ -81,6 +95,12 @@ impl StlConfig {
     /// Set the trend smoother length.
     pub fn trend_length(mut self, length: usize) -> Self {
         self.trend_length = Some(length);
+        self
+    }
+
+    /// R's `s.window = "periodic"`: a seasonal component that repeats exactly every period.
+    pub fn periodic(mut self) -> Self {
+        self.periodic = true;
         self
     }
 
@@ -207,12 +227,39 @@ pub fn stl(x: &[f64], config: StlConfig) -> EconResult<StlResult> {
         });
     }
 
-    // Convert to f32 for stlrs (it uses f32 internally)
-    let x_f32: Vec<f32> = x.iter().map(|&v| v as f32).collect();
+    if config.periodic && (config.seasonal_length.is_some() || config.seasonal_degree.is_some()) {
+        return Err(EconError::InvalidSpecification {
+            message: "a periodic seasonal window sets the seasonal length and degree; \
+                      give either periodic or seasonal_length/seasonal_degree"
+                .to_string(),
+        });
+    }
+
+    // stlrs computes in f32: centre and scale first, so the precision follows the series'
+    // spread and not its level. A constant series is only centred.
+    let center = x.iter().sum::<f64>() / n as f64;
+    let spread = (x.iter().map(|v| (v - center).powi(2)).sum::<f64>() / (n - 1) as f64).sqrt();
+    let scale = if spread > 0.0 && spread.is_finite() {
+        spread
+    } else {
+        1.0
+    };
+    let x_f32: Vec<f32> = x.iter().map(|&v| ((v - center) / scale) as f32).collect();
 
     // Build stlrs parameters using method chaining
     let mut params = stlrs::Stl::params();
 
+    if config.periodic {
+        // R: s.window <- 10 * n + 1; s.degree <- 0
+        let window = n
+            .checked_mul(10)
+            .and_then(|w| w.checked_add(1))
+            .ok_or_else(|| EconError::InvalidSpecification {
+                message: format!("series of {n} values is too long for a periodic window"),
+            })?;
+        params.seasonal_length(window);
+        params.seasonal_degree(0);
+    }
     if let Some(sl) = config.seasonal_length {
         params.seasonal_length(sl);
     }
@@ -246,10 +293,36 @@ pub fn stl(x: &[f64], config: StlConfig) -> EconResult<StlResult> {
         .fit(&x_f32, period)
         .map_err(|e| EconError::Computation(format!("STL decomposition failed: {}", e)))?;
 
-    // Extract components and convert back to f64
-    let trend: Vec<f64> = result.trend().iter().map(|&v| v as f64).collect();
-    let seasonal: Vec<f64> = result.seasonal().iter().map(|&v| v as f64).collect();
-    let remainder: Vec<f64> = result.remainder().iter().map(|&v| v as f64).collect();
+    // Restore the components: T = s T' + c, S = s S'.
+    let trend: Vec<f64> = result
+        .trend()
+        .iter()
+        .map(|&v| scale * v as f64 + center)
+        .collect();
+    let mut seasonal: Vec<f64> = result
+        .seasonal()
+        .iter()
+        .map(|&v| scale * v as f64)
+        .collect();
+    if config.periodic {
+        // R: seasonal <- tapply(seasonal, cycle(x), mean)[cycle(x)]
+        let mut sums = vec![0.0; period];
+        let mut counts = vec![0usize; period];
+        for (i, &v) in seasonal.iter().enumerate() {
+            sums[i % period] += v;
+            counts[i % period] += 1;
+        }
+        for (i, v) in seasonal.iter_mut().enumerate() {
+            *v = sums[i % period] / counts[i % period] as f64;
+        }
+    }
+    // R: remainder <- x - seasonal - trend, in f64.
+    let remainder: Vec<f64> = x
+        .iter()
+        .zip(&seasonal)
+        .zip(&trend)
+        .map(|((&xv, &sv), &tv)| xv - sv - tv)
+        .collect();
     let weights: Option<Vec<f64>> = if config.robust {
         Some(result.weights().iter().map(|&v| v as f64).collect())
     } else {
@@ -353,6 +426,98 @@ pub fn run_stl_with_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use p2a_validation::{Check, Tol};
+
+    /// Case ts_utils_t4: the monthly series y (n = 144, level about 1,000 to 1,290) and y + 1e8.
+    fn stl_case() -> (p2a_validation::Case, Vec<f64>, Tol) {
+        let (case, ds) = crate::test_support::load_case("ts_utils_t4");
+        let (y, _) = numeric_column(ds.df(), "y", NaPolicy::Fail).unwrap();
+        // stlrs computes in f32, so after centring and scaling the components carry about 1e-7 of
+        // the series' spread per operation: absolute 1e-5 * sd(y).
+        let tol = Tol::new(0.0, 1e-5 * case.scalar("stl_sd"));
+        (case, y, tol)
+    }
+
+    fn check_stl(check: &mut Check, prefix: &str, r: &StlResult, tol: Tol) {
+        check
+            .vector(&format!("{prefix}_seasonal"), &r.seasonal, tol)
+            .vector(&format!("{prefix}_trend"), &r.trend, tol)
+            .vector(&format!("{prefix}_remainder"), &r.remainder, tol);
+    }
+
+    /// stl(ts(y, frequency = 12), s.window = "periodic").
+    #[test]
+    fn test_validate_stl_periodic_ts_utils_t4() {
+        let (case, y, tol) = stl_case();
+        let r = stl(&y, StlConfig::new(12).periodic()).unwrap();
+        let mut check = Check::new(&case);
+        check_stl(&mut check, "stl_periodic", &r, tol);
+        check.finish();
+    }
+
+    /// stl(ts(y, frequency = 12), s.window = 13) (13 = stlrs' default nextodd(period)).
+    #[test]
+    fn test_validate_stl_swin13_ts_utils_t4() {
+        let (case, y, tol) = stl_case();
+        let r = stl(&y, StlConfig::new(12).seasonal_length(13)).unwrap();
+        let mut check = Check::new(&case);
+        check_stl(&mut check, "stl_swin13", &r, tol);
+        check.finish();
+    }
+
+    /// The same two calls on y + 1e8: the precision follows the spread, not the level.
+    #[test]
+    fn test_validate_stl_level_1e8_ts_utils_t4() {
+        let (case, y, tol) = stl_case();
+        let big: Vec<f64> = y.iter().map(|v| v + 1e8).collect();
+        let mut check = Check::new(&case);
+        let p = stl(&big, StlConfig::new(12).periodic()).unwrap();
+        check_stl(&mut check, "stl_periodic_big", &p, tol);
+        let w = stl(&big, StlConfig::new(12)).unwrap();
+        check_stl(&mut check, "stl_swin13_big", &w, tol);
+        check.finish();
+    }
+
+    #[test]
+    fn test_stl_reconstructs_exactly() {
+        let (_, y, _) = stl_case();
+        let big: Vec<f64> = y.iter().map(|v| v + 1e8).collect();
+        for config in [StlConfig::new(12), StlConfig::new(12).periodic()] {
+            let r = stl(&big, config).unwrap();
+            for i in 0..big.len() {
+                let back = r.trend[i] + r.seasonal[i] + r.remainder[i];
+                assert!(
+                    (big[i] - back).abs() <= 1e-9 * 1e8,
+                    "{i}: {} vs {back}",
+                    big[i]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_stl_periodic_with_seasonal_length_is_refused() {
+        let (_, y, _) = stl_case();
+        let err = stl(&y, StlConfig::new(12).periodic().seasonal_length(13)).unwrap_err();
+        assert!(
+            matches!(&err, EconError::InvalidSpecification { message } if message.contains("periodic")),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_stl_constant_series() {
+        let x = vec![1e8 + 3.0; 48];
+        for config in [StlConfig::new(12), StlConfig::new(12).periodic()] {
+            let r = stl(&x, config).unwrap();
+            for i in 0..x.len() {
+                assert!((r.trend[i] - x[i]).abs() <= 1e-6, "{}", r.trend[i]);
+                assert!(r.seasonal[i].abs() <= 1e-6, "{}", r.seasonal[i]);
+                assert!(r.remainder[i].abs() <= 1e-6, "{}", r.remainder[i]);
+            }
+        }
+    }
 
     /// X-2: an Int64 column decomposes as its Float64 copy; missing values, text and
     /// absent columns are refused by name.
@@ -508,17 +673,10 @@ mod tests {
         assert_eq!(result.n_obs, 120);
     }
 
-    /// Validation test against R's stl() function
+    /// Recovers a deterministic trend-plus-sine DGP (property; R's stl is pinned in the
+    /// test_validate_stl_* tests).
     #[test]
     fn test_stl_recovers_dgp() {
-        // R code:
-        // set.seed(42)
-        // x <- ts(100 + 0.5*(1:120) + 10*sin(2*pi*(1:120)/12), frequency=12)
-        // result <- stl(x, s.window="periodic")
-        //
-        // Expected: seasonal component should show ~10*sin pattern
-        // Trend should be ~100 + 0.5*t
-
         // Generate deterministic data (no noise)
         let x: Vec<f64> = (1..=120)
             .map(|t| {

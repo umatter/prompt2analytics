@@ -1,4 +1,9 @@
 //! MSTL (Multiple Seasonal-Trend decomposition using LOESS).
+//!
+//! The decomposition runs in `augurs-mstl`, which computes in f32. The series is centred by its
+//! mean and scaled by its standard deviation before the fit and the components are restored
+//! afterwards, so their precision follows the series' spread and not its level; the residuals
+//! are computed in f64 as x - T - sum S.
 
 use anyhow::{Result, anyhow};
 use augurs_core::Fit;
@@ -61,34 +66,47 @@ pub fn run_mstl(dataset: &Dataset, column: &str, periods: &[usize]) -> Result<Ms
     let periods_vec: Vec<usize> = periods.to_vec();
     let mstl = MSTLModel::new(periods_vec, NaiveTrend::new());
 
+    // augurs computes in f32: centre and scale first (a constant series is only centred).
+    let n = values.len();
+    let center = values.iter().sum::<f64>() / n as f64;
+    let spread = if n > 1 {
+        (values.iter().map(|v| (v - center).powi(2)).sum::<f64>() / (n - 1) as f64).sqrt()
+    } else {
+        0.0
+    };
+    let scale = if spread > 0.0 && spread.is_finite() {
+        spread
+    } else {
+        1.0
+    };
+    let standardised: Vec<f64> = values.iter().map(|v| (v - center) / scale).collect();
+
     // Fit the decomposition using the Fit trait
     let fitted = mstl
-        .fit(&values)
+        .fit(&standardised)
         .map_err(|e| anyhow!("MSTL fitting failed: {}", e))?;
 
     // Extract the MSTL result containing the decomposition
     let decomposition = fitted.fit();
-    let n = values.len();
 
-    // Get trend component (augurs uses f32 internally, convert to f64)
-    // Pre-allocate for efficiency
+    // Restore the components (augurs returns f32): T = s T' + c, S_i = s S_i'.
     let trend_f32 = decomposition.trend();
     let mut trend = Vec::with_capacity(n);
-    trend.extend(trend_f32.iter().map(|&x| x as f64));
+    trend.extend(trend_f32.iter().map(|&x| scale * x as f64 + center));
 
-    // Get seasonal components - pre-allocate outer vec
     let seasonal_f32 = decomposition.seasonal();
     let mut seasonal = Vec::with_capacity(seasonal_f32.len());
     for s in seasonal_f32 {
         let mut season = Vec::with_capacity(n);
-        season.extend(s.iter().map(|&x| x as f64));
+        season.extend(s.iter().map(|&x| scale * x as f64));
         seasonal.push(season);
     }
 
-    // Get residuals
-    let remainder_f32 = decomposition.remainder();
+    // Residuals in f64: x - T - sum S.
     let mut residuals = Vec::with_capacity(n);
-    residuals.extend(remainder_f32.iter().map(|&x| x as f64));
+    for (i, (&x, &t)) in values.iter().zip(&trend).enumerate() {
+        residuals.push(x - t - seasonal.iter().map(|s| s[i]).sum::<f64>());
+    }
 
     Ok(MstlResult {
         column: column.to_string(),
@@ -119,6 +137,41 @@ mod tests {
         assert_null_values(econ(&run("ai_na").unwrap_err()), "ai_na", 2);
         assert_non_numeric(econ(&run("lab").unwrap_err()), "lab");
         assert_not_found(econ(&run("nope").unwrap_err()), "nope");
+    }
+
+    /// The decomposition does not depend on the series' level: y and y + 1e8 give the same
+    /// seasonal components and residuals, and trends 1e8 apart, to 1e-5 of the spread.
+    #[test]
+    fn test_mstl_level_invariance() {
+        let y: Vec<f64> = (0..144)
+            .map(|t| {
+                let t = t as f64;
+                1000.0
+                    + 2.0 * t
+                    + 50.0 * (2.0 * std::f64::consts::PI * t / 12.0).sin()
+                    + 8.0 * ((t * 7.3).sin() * 43.1).sin()
+            })
+            .collect();
+        let big: Vec<f64> = y.iter().map(|v| v + 1e8).collect();
+        let m = y.iter().sum::<f64>() / y.len() as f64;
+        let sd = (y.iter().map(|v| (v - m).powi(2)).sum::<f64>() / (y.len() - 1) as f64).sqrt();
+        let ds = |v: &[f64]| Dataset::new(df! { "y" => v }.unwrap());
+        let a = run_mstl(&ds(&y), "y", &[12]).unwrap();
+        let b = run_mstl(&ds(&big), "y", &[12]).unwrap();
+        let tol = 1e-5 * sd;
+        for i in 0..y.len() {
+            assert!((b.trend[i] - 1e8 - a.trend[i]).abs() <= tol, "trend {i}");
+            assert!(
+                (b.seasonal[0][i] - a.seasonal[0][i]).abs() <= tol,
+                "seasonal {i}"
+            );
+            assert!(
+                (b.residuals[i] - a.residuals[i]).abs() <= tol,
+                "residual {i}"
+            );
+            let back = b.trend[i] + b.seasonal[0][i] + b.residuals[i];
+            assert!((big[i] - back).abs() <= 1e-9 * 1e8, "reconstruction {i}");
+        }
     }
 
     #[test]
