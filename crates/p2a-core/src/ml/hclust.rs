@@ -427,8 +427,16 @@ impl HclustTree {
         n: usize,
         linkage: &[(usize, usize, f64, usize)],
     ) -> EconResult<Self> {
-        let bound = (2 * n).saturating_sub(1);
+        let bound = n
+            .checked_mul(2)
+            .map(|b| b.saturating_sub(1))
+            .ok_or_else(|| invalid(format!("linkage of {n} observations: 2n - 1 overflows")))?;
         let map = |id: usize| -> EconResult<i64> {
+            if id >= bound {
+                return Err(invalid(format!(
+                    "linkage id {id} is out of range (ids must be < 2n - 1 = {bound})"
+                )));
+            }
             // id < n: observation -(id + 1); otherwise the 1-based merge step id - n + 1.
             let v = if id < n {
                 i64::try_from(id)
@@ -1224,9 +1232,17 @@ mod tests {
             e.contains("out of range") && e.contains("< 2n - 1 = 5"),
             "{e}"
         );
-        let e = HclustTree::from_scipy_linkage(3, &[(0, 1, 1.0, 2), (2, usize::MAX - 1, 2.0, 3)])
+        // id 5 = 2n - 1 is the first id out of range
+        let e = HclustTree::from_scipy_linkage(3, &[(0, 1, 1.0, 2), (2, 5, 2.0, 3)])
             .unwrap_err()
             .to_string();
-        assert!(e.contains("out of range"), "{e}");
+        assert!(
+            e.contains("out of range") && e.contains("< 2n - 1 = 5"),
+            "{e}"
+        );
+        let e = HclustTree::from_scipy_linkage(usize::MAX / 2 + 1, &[])
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains(&(usize::MAX / 2 + 1).to_string()), "{e}");
     }
 }
