@@ -244,18 +244,18 @@ const ARIMA_FIT_WORK_HOSTED: u64 = 7_500_000;
 
 /// Hosted [`Limits::scpi_work`]. Measured on release builds, one call at a time on one core of
 /// a shared machine, over 2 to 160 donors, 20 to 1,000 pre-treatment and 1 to 20 post-treatment
-/// periods and the simplex, lasso and ridge constraints, with calls at this value for 2 to 10
+/// periods and the simplex, lasso and ridge constraints, with calls at 800,000 for 2 to 10
 /// donors: a unit ([`scpi_work`], donors below [`SCPI_MIN_DONORS`] counted as that many, lasso
 /// units weighted by [`SCPI_LASSO_WEIGHT`]) cost at most about 36 us, the ridge constraint with 8
-/// to 12 donors being the slowest per unit, so the slowest call the value allows takes about
-/// 18 s, under a third of the hosted 60 s deadline (simplex calls at most about 10 s, lasso
+/// to 12 donors being the slowest per unit, so the slowest call this value allows takes about
+/// 18-19 s, under a third of the hosted 60 s deadline (simplex calls at most about 10 s, lasso
 /// calls about 5 s). It admits the default 200 simulations over five post-treatment periods
-/// with up to 22 donors; the lasso counts at least 512,000 there, so it needs at most 195
-/// simulations over five periods (or four periods, with up to 8 donors). The core checks the call's budget at every centring of its
-/// programs, so a call that runs past the deadline is cancelled at its next check. With a lower
-/// `P2A_TOOL_TIMEOUT_SECS`, or on a slower or throttled CPU, lower `scpi_work` in proportion
-/// with `P2A_LIMIT_OVERRIDES`.
-const SCPI_WORK_HOSTED: u64 = 500_000;
+/// with up to 22 donors for the simplex and ridge constraints and up to 8 with the lasso (the
+/// lasso at the defaults counts at least 512,000, the floor's work). The core checks the call's
+/// budget at every centring of its programs, so a call that runs past the deadline is cancelled
+/// at its next check. With a lower `P2A_TOOL_TIMEOUT_SECS`, or on a slower or throttled CPU,
+/// lower `scpi_work` in proportion with `P2A_LIMIT_OVERRIDES`.
+const SCPI_WORK_HOSTED: u64 = 512_000;
 
 /// Hosted [`Limits::ensemble_bytes`]: 256 MiB, the hosted per-allocation ceiling
 /// (`P2A_MAX_ALLOC_MB`), so that one tree-ensemble fit grows the process by about as much as one

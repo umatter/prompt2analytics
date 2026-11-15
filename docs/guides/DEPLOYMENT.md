@@ -622,7 +622,7 @@ Named budgets:
 | `session_disk_bytes` | bytes in one session's data directory | 64 MiB | none |
 | `spatial_links` | total links of a `spatial_neighbors` structure | 2,000,000 | none |
 | `arima_fit_work` | work of an ARIMA fit, observations × ((p + q + 3)² + d), checked before the fit starts; while set, a series holding a nonzero value below 1e-100 is refused as well | 7,500,000 | none |
-| `scpi_work` | work of an `scpi` call, simulations × post-treatment periods × max(donors, 8)² (× 8 with the lasso constraint), checked before the simulations start | 500,000 | none |
+| `scpi_work` | work of an `scpi` call, simulations × post-treatment periods × max(donors, 8)² (× 8 with the lasso constraint), checked before the simulations start | 512,000 | none |
 | `ensemble_bytes` | memory a `ml_causal_forest` or `ml_bart_causal` fit may hold at once (its trees, bootstrap draws and working copies of the data), as the core's bound predicts it from the rows and the settings, checked before the fit starts | 256 MiB | none |
 | `db_result_rows` | rows a SQL tool keeps | 100,000 | none |
 | `db_result_bytes` | estimated bytes a SQL tool keeps | 64 MiB | none |
@@ -657,15 +657,14 @@ throttled shared CPU, lower `arima_fit_work` in proportion with
 every 4,096 rows of a pass, so a fit that runs past the deadline is cancelled
 at its next check.
 
-The hosted `scpi_work` of 500,000 admits the default 200 simulations over five
-post-treatment periods with up to 22 donors. The lasso constraint counts at least
-512,000 there, so it needs at most 195 simulations over five periods (or four
-periods with up to 8 donors).
+The hosted `scpi_work` of 512,000 admits the default 200 simulations over five
+post-treatment periods with up to 22 donors for the simplex and ridge
+constraints, and up to 8 donors with the lasso constraint.
 A panel with fewer than 8 donors is counted as if it had 8, because each
 program's fixed cost does not shrink with the donors. On a release build, one
 call at a time on one core, a counted unit cost at most about 36 µs (the ridge
 constraint with 8 to 12 donors), so the slowest call the value admits takes
-about 18 s, under a third of the default deadline; simplex calls take at most
+about 18-19 s, under a third of the default deadline; simplex calls take at most
 about 10 s and lasso calls about 5 s. The pre-treatment length is not counted: it
 changed the time of some panels several-fold, but not the time per unit beyond
 that maximum. With a lower `P2A_TOOL_TIMEOUT_SECS`, or on a slower or throttled

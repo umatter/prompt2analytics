@@ -143,10 +143,10 @@ The time grows linearly with `sims`; the hosted limits cap `sims` and the call's
 shrink with the donors, so a panel with fewer than 8 counts as 8). On release builds, one call per
 process on one core, at the then hosted value of 800,000 for J = 2-10 and over J = 10-160,
 T0 = 20-1,000, T1 = 1-20 and every constraint (2026-11-15), a counted unit cost at most about 36 us,
-the ridge constraint at J = 8-12 being the slowest. At the hosted value of 500,000 the slowest
-admitted call takes about 18 s (simplex at most about 10 s, lasso about 5 s); the defaults (200
-simulations, T1 = 5) pass up to J = 22, and the lasso, which counts at least 512,000 there, needs at
-most 195 simulations. T0 is not counted. It changes the time of some panels several-fold
+the ridge constraint at J = 8-12 being the slowest. At the hosted value of 512,000 the slowest
+admitted call takes about 18-19 s (simplex at most about 10 s, lasso about 5 s); the defaults (200
+simulations, T1 = 5) pass with the simplex or ridge constraint up to J = 22 and with the lasso up
+to J = 8. T0 is not counted. It changes the time of some panels several-fold
 (the lasso at J = 40 and T1 = 5 took 3.9 s at T0 = 20 and 17.9 s at T0 = 50 for 20 simulations), but in
 no measured call did it push the time per unit above that maximum. The simulated intervals' cost against v0.5.0's
 closed form was signed off on 2026-11-14 (rule 5).
