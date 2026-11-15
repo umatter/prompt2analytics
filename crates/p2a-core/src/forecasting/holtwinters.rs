@@ -54,12 +54,16 @@ crate::option_enum!(
 /// Configuration for Holt-Winters fitting.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HoltWintersConfig {
-    /// Level smoothing parameter (0 < α <= 1). None = optimize automatically.
+    /// Level smoothing parameter (0 < α <= 1, as R's `HoltWinters` requires of a given alpha).
+    /// None = optimised on [0, 1] (R's L-BFGS-B box; R's `optimize()` for exponential
+    /// smoothing); an optimised alpha may reach 0, as R's may.
     pub alpha: Option<f64>,
-    /// Trend smoothing parameter (0 <= β <= 1), used with `use_trend`. None = optimize.
+    /// Trend smoothing parameter (0 <= β <= 1), used with `use_trend`. None = optimised on
+    /// [0, 1].
     /// Some(0.0) keeps a trend that is not updated (R's beta = 0); `use_trend = false` has none.
     pub beta: Option<f64>,
-    /// Seasonal smoothing parameter (0 <= γ <= 1), used with `use_seasonal`. None = optimize.
+    /// Seasonal smoothing parameter (0 <= γ <= 1), used with `use_seasonal`. None = optimised
+    /// on [0, 1].
     /// Some(0.0) keeps a seasonal component that is not updated (R's gamma = 0);
     /// `use_seasonal = false` has none.
     pub gamma: Option<f64>,
@@ -993,11 +997,7 @@ fn optimize_parameters(
 ) -> EconResult<(f64, f64, f64)> {
     // Only what is optimised stays in the optimiser's box: a fixed value is used as given.
     let start = |init: f64, optimize: bool| {
-        if optimize {
-            init.clamp(0.01, 0.99)
-        } else {
-            init
-        }
+        if optimize { init.clamp(0.0, 1.0) } else { init }
     };
     let alpha = start(init_alpha, optimize_alpha);
     let beta = start(init_beta, optimize_beta);
@@ -1039,17 +1039,17 @@ fn optimize_parameters(
 
     if optimize_alpha {
         initial.push(alpha);
-        bounds.push((0.01, 0.99));
+        bounds.push((0.0, 1.0));
         param_mask[0] = true;
     }
     if optimize_beta && use_trend {
         initial.push(beta);
-        bounds.push((0.01, 0.99));
+        bounds.push((0.0, 1.0));
         param_mask[1] = true;
     }
     if optimize_gamma && use_seasonal {
         initial.push(gamma);
-        bounds.push((0.01, 0.99));
+        bounds.push((0.0, 1.0));
         param_mask[2] = true;
     }
 
@@ -1059,7 +1059,7 @@ fn optimize_parameters(
         let mut idx = 0;
         for (i, &optimizing) in param_mask.iter().enumerate() {
             if optimizing {
-                full[i] = reduced_params[idx].clamp(0.01, 0.99);
+                full[i] = reduced_params[idx].clamp(0.0, 1.0);
                 idx += 1;
             }
         }
@@ -1075,7 +1075,7 @@ fn optimize_parameters(
     let mut idx = 0;
     for (i, &optimizing) in param_mask.iter().enumerate() {
         if optimizing {
-            result[i] = optimized[idx].clamp(0.01, 0.99);
+            result[i] = optimized[idx].clamp(0.0, 1.0);
             idx += 1;
         }
     }
@@ -1640,8 +1640,8 @@ mod tests {
     /// The filter at R's optimum (alpha, beta, gamma read from the case; they reproduce the
     /// legacy validation/expected/holtwinters_*.csv to their 15 digits): AirPassengers
     /// multiplicative, additive (gamma = 1), the legacy quarterly series (period 4, gamma = 0)
-    /// and the legacy non-seasonal Holt series. The optimiser itself is not pinned (deviation
-    /// TS-24).
+    /// and the legacy non-seasonal Holt series. The optimiser itself is not pinned (Nelder-Mead,
+    /// not R's L-BFGS-B; test_holtwinters_optimum_reaches_rs_box holds its SSE to R's).
     #[test]
     fn test_validate_holtwinters_at_r_optimum() {
         let (case, ds) = crate::test_support::load_case("ts_holtwinters_forecast");
@@ -1700,6 +1700,50 @@ mod tests {
                 );
             }
             check.finish();
+        }
+    }
+
+    /// The default optimisation reaches R's optimum on the four `ts_holtwinters_forecast` series:
+    /// its SSE is at most R's (R's L-BFGS-B box is [0, 1]), and the boundary optima R finds
+    /// (AirPassengers additive gamma 1, the quarterly series gamma 0) are reached. A property: the
+    /// optimiser is Nelder-Mead, not R's L-BFGS-B, so the parameters are not pinned.
+    #[test]
+    fn test_holtwinters_optimum_reaches_rs_box() {
+        let (case, ds) = crate::test_support::load_case("ts_holtwinters_forecast");
+        let runs = [
+            (
+                "opt_mult",
+                "airpass",
+                12,
+                SeasonalType::Multiplicative,
+                true,
+            ),
+            ("opt_add", "airpass", 12, SeasonalType::Additive, true),
+            ("opt_quarterly", "q", 4, SeasonalType::Multiplicative, true),
+            ("opt_nonseasonal", "ns", 1, SeasonalType::Additive, false),
+        ];
+        for (tag, column, period, kind, season) in runs {
+            let y = col(&ds, column);
+            let mut c = HoltWintersConfig::default();
+            c.period = period;
+            c.seasonal = kind;
+            c.use_trend = true;
+            c.use_seasonal = season;
+            let r = holt_winters(&y, c).unwrap();
+            let r_sse = case.scalar(&format!("{tag}_sse"));
+            assert!(
+                r.sse <= r_sse * (1.0 + 1e-6),
+                "{tag}: SSE {} above R's {r_sse} (alpha {}, beta {:?}, gamma {:?})",
+                r.sse,
+                r.alpha,
+                r.beta,
+                r.gamma
+            );
+            match tag {
+                "opt_add" => assert!((r.gamma.unwrap() - 1.0).abs() <= 1e-6, "{:?}", r.gamma),
+                "opt_quarterly" => assert!(r.gamma.unwrap().abs() <= 1e-6, "{:?}", r.gamma),
+                _ => {}
+            }
         }
     }
 
@@ -1908,10 +1952,11 @@ mod tests {
 
         let result = holt_winters(&y, config).unwrap();
 
-        // Parameters should be reasonable
-        assert!(result.alpha > 0.0 && result.alpha < 1.0);
-        assert!(result.beta.unwrap() > 0.0 && result.beta.unwrap() < 1.0);
-        assert!(result.gamma.unwrap() > 0.0 && result.gamma.unwrap() < 1.0);
+        // The optimised parameters lie in R's box [0, 1]
+        let unit = |v: f64| (0.0..=1.0).contains(&v);
+        assert!(unit(result.alpha), "{}", result.alpha);
+        assert!(unit(result.beta.unwrap()), "{:?}", result.beta);
+        assert!(unit(result.gamma.unwrap()), "{:?}", result.gamma);
     }
 
     #[test]
