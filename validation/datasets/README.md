@@ -344,6 +344,7 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/ltmle_saturation.csv` | 2,500 × 25 (L1a, L1b, A1, ..., L8a, L8b, A8, Y) | `ltmle_saturation` | `r/cases/causal_ltmle.R` | seed 3 (`.lt_sat_data`, an R port of the `sparse_followers` fixture of ltmle.rs's tests); eight nodes; the never regime has 9 followers at the last node |
 | `generated/roc_small.csv` | 24 × 4 (id, set, pred, label) | `ml_roc_small` | `r/cases/ml_evaluation_t4.R` | the findings' four score vectors (no randomness), set 1-4; ties at the top score and within a tie group holding both classes |
 | `generated/roc_ties.csv` | 240 × 4 (id, cls, s_prob, s_lin) | `ml_roc_ties` | `r/cases/ml_evaluation_t4.R` | seed 20261115; classes coded 3 and 7; scores tied (probabilities on a 0.1 grid capped at 1, and integers) |
+| `generated/apriori_baskets.csv` | 100 × 9 (id, a-h) | `ml_apriori_baskets` | `r/cases/ml_apriori_t4.R` | seed 20261115; 0/1 baskets, b and c follow a; h in exactly 7 baskets (support 0.07, on the boundary) |
 
 ## Adding a dataset
 

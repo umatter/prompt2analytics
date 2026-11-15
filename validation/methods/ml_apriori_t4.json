@@ -1,0 +1,27 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "ml_apriori",
+      "name": "Frequent itemsets (apriori, eclat) and association rules",
+      "category": "ml",
+      "reference": "arules::apriori and arules::eclat 1.7-10, arules::interestMeasure (leverage, conviction)",
+      "doc": "validation/ml/apriori.md",
+      "cases": [
+        "ml_apriori_baskets"
+      ],
+      "tests": [
+        "p2a-core::ml::apriori::tests::test_validate_apriori_baskets",
+        "p2a-core::ml::apriori::tests::test_validate_eclat_baskets"
+      ],
+      "quantities": [
+        "frequent itemsets with support and count (apriori), support (eclat), their number",
+        "rules: support, confidence, lift, coverage, count, leverage, conviction where finite",
+        "number of rules and of rules with an empty left-hand side"
+      ],
+      "tolerance": "validation/README.md coefficient row, n = 100: 1e-8 relative; counts exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}

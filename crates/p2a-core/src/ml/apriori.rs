@@ -1302,6 +1302,112 @@ mod tests {
         }
     }
 
+    /// The `ml_apriori_baskets` dataset (0/1 columns a-h) as transactions.
+    fn case_baskets(ds: &crate::data::Dataset) -> Vec<Vec<String>> {
+        use crate::data::columns::{ColumnRequest, NaPolicy};
+        let names = ["a", "b", "c", "d", "e", "f", "g", "h"];
+        let c = ColumnRequest::new(ds.df())
+            .numerics(&names)
+            .na(NaPolicy::Fail)
+            .extract()
+            .unwrap();
+        let n = c.numeric("a").len();
+        let data: Vec<Vec<u8>> = (0..n)
+            .map(|i| names.iter().map(|k| c.numeric(k)[i] as u8).collect())
+            .collect();
+        let items: Vec<String> = names.iter().map(|s| s.to_string()).collect();
+        matrix_to_transactions(&data, &items).unwrap()
+    }
+
+    fn case_config() -> AprioriConfig {
+        let mut c = AprioriConfig::default();
+        c.min_support = 0.07;
+        c.min_confidence = 0.5;
+        c.min_length = 1;
+        c.max_length = 10;
+        c.min_lift = 0.0;
+        c
+    }
+
+    fn set_key(items: &[String]) -> String {
+        format!("{{{}}}", items.join(","))
+    }
+
+    fn check_itemsets(
+        c: &mut p2a_validation::Check<'_>,
+        key: &str,
+        r: &AprioriResult,
+        counts: bool,
+    ) {
+        use p2a_validation::Tol;
+        let names: Vec<String> = r.itemsets.iter().map(|i| set_key(&i.items)).collect();
+        let support: Vec<f64> = r.itemsets.iter().map(|i| i.support).collect();
+        c.named(key, &names, &support, Tol::coef(100));
+        if counts {
+            let count: Vec<f64> = r.itemsets.iter().map(|i| i.count as f64).collect();
+            c.named("itemset_count", &names, &count, Tol::exact())
+                .scalar("n_itemsets", r.itemsets.len() as f64, Tol::exact());
+        }
+    }
+
+    /// ML-117, ML-118: arules' frequent itemsets (h, {f,g} and {b,g} exactly on support 0.07) and rules (one
+    /// item on the right, three with an empty left-hand side). Before: the boundary itemsets were dropped and
+    /// rules had multi-item right-hand sides.
+    #[test]
+    fn test_validate_apriori_baskets() {
+        use p2a_validation::Tol;
+        let (case, ds) = crate::test_support::load_case("ml_apriori_baskets");
+        let r = apriori(&case_baskets(&ds), &case_config()).unwrap();
+        let mut c = p2a_validation::Check::new(&case);
+        check_itemsets(&mut c, "itemset_support", &r, true);
+        let keys: Vec<String> = r
+            .rules
+            .iter()
+            .map(|x| format!("{} => {}", set_key(&x.lhs), set_key(&x.rhs)))
+            .collect();
+        let col = |f: fn(&AssociationRule) -> f64| -> Vec<f64> { r.rules.iter().map(f).collect() };
+        let tol = Tol::coef(100);
+        c.named("rule_support", &keys, &col(|x| x.support), tol)
+            .named("rule_confidence", &keys, &col(|x| x.confidence), tol)
+            .named("rule_lift", &keys, &col(|x| x.lift), tol)
+            .named("rule_coverage", &keys, &col(|x| x.coverage), tol)
+            .named("rule_count", &keys, &col(|x| x.count as f64), Tol::exact())
+            .named("rule_leverage", &keys, &col(|x| x.leverage), tol)
+            .scalar("n_rules", r.rules.len() as f64, Tol::exact())
+            .scalar(
+                "n_rules_empty_lhs",
+                r.rules.iter().filter(|x| x.lhs.is_empty()).count() as f64,
+                Tol::exact(),
+            );
+        // conviction: R pins the finite values; a rule with confidence 1 has conviction inf
+        let finite: Vec<usize> = (0..keys.len())
+            .filter(|&i| r.rules[i].conviction.is_finite())
+            .collect();
+        let fk: Vec<String> = finite.iter().map(|&i| keys[i].clone()).collect();
+        let fv: Vec<f64> = finite.iter().map(|&i| r.rules[i].conviction).collect();
+        c.named("rule_conviction_finite", &fk, &fv, tol).finish();
+        for x in &r.rules {
+            assert_eq!(x.conviction.is_infinite(), x.confidence == 1.0);
+        }
+    }
+
+    /// ML-119: eclat's itemsets are arules::eclat's, each once.
+    #[test]
+    fn test_validate_eclat_baskets() {
+        let (case, ds) = crate::test_support::load_case("ml_apriori_baskets");
+        let r = eclat(&case_baskets(&ds), &case_config()).unwrap();
+        let mut c = p2a_validation::Check::new(&case);
+        check_itemsets(&mut c, "eclat_support", &r, false);
+        c.scalar(
+            "n_itemsets",
+            r.itemsets.len() as f64,
+            p2a_validation::Tol::exact(),
+        )
+        .finish();
+        let a = apriori(&case_baskets(&ds), &case_config()).unwrap();
+        assert_eq!(itemset_keys(&r.itemsets), itemset_keys(&a.itemsets));
+    }
+
     /// R5: rules are listed by non-increasing lift; lift is finite by construction (confidence / support_rhs,
     /// support_rhs >= 1/n, else 0.0), so total_cmp orders exactly as the old NaN-tolerant comparison did.
     #[test]
