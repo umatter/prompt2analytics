@@ -139,8 +139,14 @@ numbers, and each program holds matrices of the donor count squared.
 
 For scale, R's `scpi()` 3.0.1 on the case's panel (J = 8, T0 = 14, T1 = 6) takes about 5 seconds.
 The time grows linearly with `sims`; the hosted limits cap `sims` and the call's work
-(`scpi_work`). At a fixed `scpi_work` the time does not grow with T0 (2026-11-15, one call per
-process, J = 10-28, T0 = 20-1,000, every constraint). The simulated intervals' cost against v0.5.0's
+(`scpi_work`: sims x T1 x max(J, 8)^2, the lasso weighted 8; a program's fixed cost does not
+shrink with the donors, so a panel with fewer than 8 counts as 8). On release builds, one call per
+process on one core, at the hosted value of 800,000 for J = 2-10 and over J = 10-160, T0 = 20-1,000,
+T1 = 1-20 and every constraint (2026-11-15), a counted unit cost at most about 36 us, the ridge
+constraint at J = 8-12 being the slowest: the slowest admitted call took about 29 s (simplex at most
+about 16 s, lasso about 8 s). T0 is not counted. It changes the time of some panels several-fold
+(the lasso at J = 40 and T1 = 5 took 3.9 s at T0 = 20 and 17.9 s at T0 = 50 for 20 simulations), but in
+no measured call did it push the time per unit above that maximum. The simulated intervals' cost against v0.5.0's
 closed form was signed off on 2026-11-14 (rule 5).
 
 ## Deviations

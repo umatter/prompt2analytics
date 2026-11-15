@@ -115,8 +115,8 @@ use serde_json::Value;
 mod distinct;
 mod rules;
 pub use rules::{
-    ARIMA_MIN_MAGNITUDE, PARAM_RULES, PIVOT_RULES, ROW_RULES, SCPI_LASSO_WEIGHT, arima_fit_work,
-    scpi_work,
+    ARIMA_MIN_MAGNITUDE, PARAM_RULES, PIVOT_RULES, ROW_RULES, SCPI_LASSO_WEIGHT, SCPI_MIN_DONORS,
+    arima_fit_work, scpi_work,
 };
 
 /// Generates [`Family`], [`Family::ALL`], [`Family::key`] and `Family::hosted_cap` from one list
@@ -242,15 +242,18 @@ families! {
 /// higher value allows and that runs past the deadline is cancelled at its next check.
 const ARIMA_FIT_WORK_HOSTED: u64 = 7_500_000;
 
-/// Hosted [`Limits::scpi_work`]: the slowest call it allows is meant to take about a quarter of
-/// the hosted 60 s deadline. Measured on release builds, one call at a time on one core of a
-/// shared machine, over 10 to 160 donors, 20 to 200 pre-treatment and 5 to 20 post-treatment
-/// periods and the simplex, lasso and ridge constraints: a unit ([`scpi_work`], lasso units
-/// weighted by [`SCPI_LASSO_WEIGHT`]) cost at most about 19 us, so the slowest call the value
-/// allows takes about 15 s. It admits the default 200 simulations over five post-treatment
-/// periods with up to 28 donors (10 with the lasso). The core checks the call's budget at every
-/// centring of its programs, so a call that a higher value allows and that runs past the
-/// deadline is cancelled at its next check.
+/// Hosted [`Limits::scpi_work`]. Measured on release builds, one call at a time on one core of
+/// a shared machine, over 2 to 160 donors, 20 to 1,000 pre-treatment and 1 to 20 post-treatment
+/// periods and the simplex, lasso and ridge constraints, with calls at this value for 2 to 10
+/// donors: a unit ([`scpi_work`], donors below [`SCPI_MIN_DONORS`] counted as that many, lasso
+/// units weighted by [`SCPI_LASSO_WEIGHT`]) cost at most about 36 us, the ridge constraint with 8
+/// to 12 donors being the slowest per unit, so the slowest call the value allows takes about
+/// 29 s, about half the hosted 60 s deadline (simplex calls at most about 16 s, lasso calls
+/// about 8 s). It admits the default 200 simulations over five post-treatment periods with up
+/// to 28 donors (10 with the lasso). The core checks the call's budget at every centring of its
+/// programs, so a call that runs past the deadline is cancelled at its next check. With a lower
+/// `P2A_TOOL_TIMEOUT_SECS`, or on a slower or throttled CPU, lower `scpi_work` in proportion
+/// with `P2A_LIMIT_OVERRIDES`.
 const SCPI_WORK_HOSTED: u64 = 800_000;
 
 /// Hosted [`Limits::ensemble_bytes`]: 256 MiB, the hosted per-allocation ceiling
@@ -551,7 +554,7 @@ pub struct Limits {
     /// series below [`ARIMA_MIN_MAGNITUDE`].
     pub arima_fit_work: Option<u64>,
     /// Work of an `scpi` call, as [`scpi_work`] counts it (simulations x post-treatment periods
-    /// x donors^2, lasso weighted); checked by the handler with [`Limits::check_scpi`] before
+    /// x max(donors, [`SCPI_MIN_DONORS`])^2, lasso weighted); checked by the handler with [`Limits::check_scpi`] before
     /// the simulations start.
     pub scpi_work: Option<u64>,
     /// Bytes a tree-ensemble fit may hold at once (`ml_causal_forest`, `ml_bart_causal`): its
@@ -1452,16 +1455,20 @@ impl Limits {
         if work <= limit {
             return Ok(());
         }
-        // `work > limit`, so `post` and `donors` are at least 1
+        // `work > limit`, so `post` is at least 1 and so is `per_sim` (the donors count at
+        // least `SCPI_MIN_DONORS`)
         let per_sim = scpi_work(1, post, donors, lasso);
         let max_sims = limit / per_sim;
-        let per_donor2 = scpi_work(200, post, 1, lasso);
-        let max_donors = (limit / per_donor2).isqrt();
+        // the donor count the default 200 simulations allow; fewer than the floor's donors
+        // count as the floor, so naming a smaller count would not help
+        let per_donor2 = scpi_work(200, post, SCPI_MIN_DONORS, lasso)
+            / (SCPI_MIN_DONORS * SCPI_MIN_DONORS) as u64;
+        let max_donors = (limit / per_donor2.max(1)).isqrt();
         let mut advice = Vec::new();
         if max_sims >= 10 {
             advice.push(format!("set sims to at most {max_sims}"));
         }
-        if max_donors >= 1 {
+        if max_donors >= SCPI_MIN_DONORS as u64 {
             advice.push(format!(
                 "keep at most {max_donors} donors at the default 200 simulations"
             ));
@@ -1479,10 +1486,13 @@ impl Limits {
         };
         Err(LimitViolation {
             message: format!(
-                "`{tool}` with sims = {sims}, {post} post-treatment periods and {donors} donors                  needs {work} ({KNOB}: sims x post-treatment periods x donors^2{weight}), which                  exceeds this server's limit of {limit} for one call, checked before the                  simulations start. To run it, {advice}."
+                "`{tool}` with sims = {sims}, {post} post-treatment periods and {donors} donors \
+                 needs {work} ({KNOB}: sims x post-treatment periods x max(donors, \
+                 {SCPI_MIN_DONORS})^2{weight}), which exceeds this server's limit of {limit} for \
+                 one call, checked before the simulations start. To run it, {advice}."
             ),
             tool: tool.to_string(),
-            parameter: "sims".to_string(),
+            parameter: KNOB.to_string(),
             requested: work.to_string(),
             limit: limit.to_string(),
             override_key: KNOB,

@@ -1084,19 +1084,27 @@ pub fn arima_fit_work(n_obs: usize, p: usize, d: usize, q: usize) -> u64 {
 /// measured units cost up to about eight times theirs.
 pub const SCPI_LASSO_WEIGHT: u64 = 8;
 
+/// The donor count below which [`scpi_work`] counts a call as if it had this many donors: a
+/// program's fixed cost (its setup and the barrier method's iterations) does not shrink with
+/// the donors, so below about this count the time per counted unit grew as the donors fell.
+pub const SCPI_MIN_DONORS: usize = 8;
+
 /// Work of an `scpi` call as the `scpi_work` budget counts it:
-/// `sims * post * donors^2`, times [`SCPI_LASSO_WEIGHT`] for the `lasso` constraint,
-/// saturating at `u64::MAX`.
+/// `sims * post * max(donors, SCPI_MIN_DONORS)^2`, times [`SCPI_LASSO_WEIGHT`] for the `lasso`
+/// constraint, saturating at `u64::MAX`.
 ///
 /// Each simulation solves, for every post-treatment period, a lower and an upper bound by a
 /// barrier method on a program in the donor weights (`p2a_core::econometrics::scpi`), whose
-/// Newton systems grow with the number of donors. The core checks the call's budget once per
-/// centring, so the deadline stops a call; this count bounds its cost before it starts. The
-/// pre-treatment length enters the programs only through donor-by-donor cross products and
-/// barely changed the measured times, so it is not counted. The hosted value was measured on
-/// release builds (`SCPI_WORK_HOSTED`).
+/// Newton systems grow with the number of donors; [`SCPI_MIN_DONORS`] stands for the part of
+/// a program's cost that does not. The core checks the call's budget once per centring, so
+/// the deadline stops a call; this count bounds its cost before it starts. The pre-treatment
+/// length is not counted: it enters the programs through donor-by-donor cross products and
+/// the number of barrier iterations, and changed the time of some panels several-fold (the
+/// lasso over 40 donors took more than four times as long with 50 pre-treatment periods as with
+/// 20), but over the measured panels the time per counted unit stayed within the maximum the
+/// hosted value is set for (`SCPI_WORK_HOSTED`, measured on release builds).
 pub fn scpi_work(sims: usize, post: usize, donors: usize, lasso: bool) -> u64 {
-    let d = donors as u128;
+    let d = donors.max(SCPI_MIN_DONORS) as u128;
     let w = (sims as u128)
         .saturating_mul(post as u128)
         .saturating_mul(d.saturating_mul(d))
@@ -2151,10 +2159,17 @@ mod tests {
 
     #[test]
     fn scpi_work_is_sims_times_post_times_squared_donors() {
-        use super::{SCPI_LASSO_WEIGHT, scpi_work};
+        use super::{SCPI_LASSO_WEIGHT, SCPI_MIN_DONORS, scpi_work};
         assert_eq!(scpi_work(200, 5, 10, false), 100_000);
         assert_eq!(scpi_work(200, 5, 10, true), 100_000 * SCPI_LASSO_WEIGHT);
         assert_eq!(scpi_work(0, 5, 10, false), 0);
+        // below the donor floor a call counts as if it had the floor's donors
+        let floor = scpi_work(200, 5, SCPI_MIN_DONORS, false);
+        assert_eq!(floor, 200 * 5 * 64);
+        for donors in 0..SCPI_MIN_DONORS {
+            assert_eq!(scpi_work(200, 5, donors, false), floor);
+        }
+        assert_eq!(scpi_work(200, 5, SCPI_MIN_DONORS + 1, false), 200 * 5 * 81);
         assert_eq!(
             scpi_work(usize::MAX, usize::MAX, usize::MAX, true),
             u64::MAX
@@ -2165,9 +2180,50 @@ mod tests {
         assert!(scpi_work(200, 5, 20, false) <= cap);
         assert!(scpi_work(200, 5, 10, true) <= cap);
         assert!(h.check_scpi("scpi", 200, 5, 20, false).is_ok());
+        // the defaults pass up to 28 donors (simplex, ridge) and 10 with the lasso, and on
+        // every smaller panel
+        for donors in 1..=28 {
+            assert!(
+                h.check_scpi("scpi", 200, 5, donors, false).is_ok(),
+                "{donors}"
+            );
+        }
+        for donors in 1..=10 {
+            assert!(
+                h.check_scpi("scpi", 200, 5, donors, true).is_ok(),
+                "{donors}"
+            );
+        }
+        assert!(h.check_scpi("scpi", 200, 5, 29, false).is_err());
+        // a small panel cannot buy many more simulations than the floor allows
+        assert!(h.check_scpi("scpi", 1_250, 10, 3, false).is_ok());
+        assert!(h.check_scpi("scpi", 1_251, 10, 3, false).is_err());
         let e = h.check_scpi("scpi", 200, 10, 80, false).unwrap_err();
         assert_eq!(e.override_key, "scpi_work");
+        assert_eq!(e.parameter, "scpi_work");
         assert!(e.message.contains("sims"), "{}", e.message);
+        assert!(!e.message.contains("  "), "{}", e.message);
+        assert!(e.message.contains("max(donors, 8)^2"), "{}", e.message);
+        // a panel below the floor is told how many simulations it may run
+        let e = h.check_scpi("scpi", 3_000, 5, 6, false).unwrap_err();
+        assert!(
+            e.message.contains("set sims to at most 2500"),
+            "{}",
+            e.message
+        );
+        // no advice on the donors where the default simulations exceed the floor's work
+        let e = h.check_scpi("scpi", 200, 20, 6, true).unwrap_err();
+        assert!(
+            !e.message.contains("donors at the default"),
+            "{}",
+            e.message
+        );
+        let e = h.check_scpi("scpi", 1_000, 5, 20, false).unwrap_err();
+        assert!(
+            e.message.contains("keep at most 28 donors"),
+            "{}",
+            e.message
+        );
         assert!(
             super::super::Limits::off()
                 .check_scpi("scpi", usize::MAX, usize::MAX, usize::MAX, true)
