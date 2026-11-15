@@ -898,8 +898,9 @@ fn adaboost_r2(
 
     // Store predictions from each estimator
     let mut all_predictions: Vec<Array1<f64>> = Vec::new();
+    let mut warnings = Vec::new();
 
-    for _ in 0..config.n_estimators {
+    for round in 0..config.n_estimators {
         checkpoint()?;
 
         // Fit weak learner
@@ -914,11 +915,23 @@ fn adaboost_r2(
         }
 
         if max_error < 1e-10 {
-            // Perfect fit, stop
+            // A learner that fits the training data exactly is the model: the limit beta -> 0 of
+            // Drucker's weights, ln(1/beta), gives it the whole weighted median. Weight 1.
+            warnings.push(format!(
+                "AdaBoost.R2: weak learner {} fits the training data exactly; the model is that \
+                 learner",
+                round + 1
+            ));
+            importance.fill(0.0);
+            add_importance(&mut importance, &tree, 1.0);
+            all_predictions.clear();
             all_predictions.push(predictions);
-            betas.push(1.0);
-            learner_errors.push(0.0);
+            betas.clear();
+            betas.push((-1.0f64).exp());
+            learners.clear();
             learners.push(tree);
+            learner_errors.push(0.0);
+            train_error.push(0.0);
             break;
         }
 
@@ -936,12 +949,29 @@ fn adaboost_r2(
         // Weighted average loss
         let avg_loss: f64 = weights.iter().zip(losses.iter()).map(|(w, l)| w * l).sum();
 
-        // For R2, we're more lenient with the loss threshold since it's regression
-        // The original R2 paper allows avg_loss up to 1, but we clip beta
-        let avg_loss_clamped = avg_loss.clamp(1e-10, 0.999);
+        // Drucker (1997): stop when the average loss reaches 0.5 (beta >= 1); the learner is not
+        // kept. A first learner that bad leaves nothing to boost.
+        if avg_loss >= 0.5 {
+            if learners.is_empty() {
+                return Err(EconError::InvalidSpecification {
+                    message: format!(
+                        "AdaBoost.R2: the first weak learner has weighted average loss \
+                         {avg_loss:.4} >= 0.5000, no better than predicting nothing; nothing to \
+                         boost"
+                    ),
+                });
+            }
+            warnings.push(format!(
+                "AdaBoost.R2 stopped after {round} of {} rounds: weak learner {} has weighted \
+                 average loss {avg_loss:.4} >= 0.5000",
+                config.n_estimators,
+                round + 1
+            ));
+            break;
+        }
 
-        // Compute beta
-        let beta = avg_loss_clamped / (1.0 - avg_loss_clamped);
+        // Compute beta (a zero loss on positive weights is a numerically perfect learner)
+        let beta = avg_loss.max(1e-10) / (1.0 - avg_loss);
 
         // Update weights
         for i in 0..n_samples {
@@ -990,7 +1020,7 @@ fn adaboost_r2(
         feature_names: None,
         learner_errors,
         classes: None,
-        warnings: Vec::new(),
+        warnings,
         learners,
         n_features: x.ncols(),
     })
@@ -1654,7 +1684,9 @@ mod tests {
             [9.0],
             [10.0]
         ];
-        let y = array![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
+        // A step with one outlier: the first stump's average linear loss is about 0.2. (On y = x
+        // a stump's is 0.6, and Drucker's R2 has nothing to boost.)
+        let y = array![1.0, 1.1, 0.9, 1.0, 1.0, 5.0, 5.1, 4.9, 5.0, 8.0];
 
         let config = AdaBoostConfig {
             n_estimators: 20,
@@ -1799,5 +1831,105 @@ mod tests {
         assert_eq!(pred[1], -1.0);
         assert_eq!(pred[2], 1.0);
         assert_eq!(pred[3], 1.0);
+    }
+
+    fn r2_config(n_estimators: usize, max_depth: usize) -> AdaBoostConfig {
+        let mut c = AdaBoostConfig::default();
+        c.boost_type = AdaBoostType::R2;
+        c.n_estimators = n_estimators;
+        c.max_depth = max_depth;
+        c
+    }
+
+    #[test]
+    fn test_adaboost_r2_stops_at_average_loss_half() {
+        // ML-110. Drucker (1997) stops when a learner's weighted average loss reaches 0.5. Before:
+        // the loss was clamped to 0.999 and such learners were kept with negative weights.
+        let n = 120;
+        let mut s = 20_261_115u64;
+        let mut u = || (crate::ml::lcg_random(&mut s) % 1_000_000) as f64 / 1_000_000.0;
+        let x = Array2::from_shape_fn((n, 2), |_| u());
+        let y = Array1::from_shape_fn(n, |_| u() * 2.0 - 1.0);
+        let rounds = 200;
+        let r = adaboost(x.view(), y.view(), &r2_config(rounds, 1)).unwrap();
+        assert!(
+            r.learner_errors.iter().all(|&l| l < 0.5),
+            "{:?}",
+            r.learner_errors
+        );
+        assert!(r.estimator_weights.iter().all(|&w| w > 0.0));
+        assert!(r.feature_importances.iter().all(|&v| v >= 0.0));
+        let k = r.n_estimators;
+        assert!(k < rounds, "no stop in {rounds} rounds");
+        let note = r.warnings.join("\n");
+        assert!(
+            note.contains(&format!(
+                "AdaBoost.R2 stopped after {k} of {rounds} rounds: weak learner {}",
+                k + 1
+            )) && note.contains(">= 0.5"),
+            "{note}"
+        );
+    }
+
+    #[test]
+    fn test_adaboost_r2_refuses_a_first_learner_at_half() {
+        // ML-110. A constant feature leaves the weak learner at the weighted mean, 0 for a target
+        // alternating -1, +1: every loss is 1. Before: the fit went on with beta 999.
+        let n = 20;
+        let x = Array2::from_elem((n, 1), 3.0);
+        let y = Array1::from_shape_fn(n, |i| if i % 2 == 0 { -1.0 } else { 1.0 });
+        let e = adaboost(x.view(), y.view(), &r2_config(10, 1)).unwrap_err();
+        assert!(
+            matches!(&e, EconError::InvalidSpecification { message }
+                if message.contains("the first weak learner has weighted average loss 1.0000 >= 0.5000")),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn test_adaboost_r2_perfect_fit_is_the_model() {
+        // ML-110. A learner that fits the training data exactly is the model (the limit beta -> 0
+        // of Drucker's weights). Before: it got beta = 1, weight 0 in the median.
+        let n = 12;
+        let mut found = false;
+        for seed in 1..400u64 {
+            let mut s = seed;
+            let mut draw = |k: u64| crate::ml::lcg_random(&mut s) as u64 % k;
+            let x = Array2::from_shape_fn((n, 2), |_| draw(9) as f64 + 0.5);
+            let (t0, t1, t2) = (
+                draw(8) as f64 + 1.0,
+                draw(8) as f64 + 1.0,
+                draw(8) as f64 + 1.0,
+            );
+            let levels: Vec<f64> = (0..4).map(|_| draw(3) as f64).collect();
+            let y = Array1::from_shape_fn(n, |i| {
+                let (a, b) = (x[[i, 0]], x[[i, 1]]);
+                if a <= t0 {
+                    if b <= t1 { levels[0] } else { levels[1] }
+                } else if b <= t2 {
+                    levels[2]
+                } else {
+                    levels[3]
+                }
+            });
+            let Ok(r) = adaboost(x.view(), y.view(), &r2_config(20, 2)) else {
+                continue;
+            };
+            let Some(m) = r.learner_errors.iter().position(|&l| l == 0.0) else {
+                continue;
+            };
+            if m == 0 {
+                continue;
+            }
+            found = true;
+            assert_eq!(r.n_estimators, 1, "seed {seed}");
+            assert_eq!(r.learner_errors.len(), m + 1, "seed {seed}");
+            assert_eq!(r.predictions, y.to_vec(), "seed {seed}");
+            let x_new = Array2::from_shape_fn((15, 2), |(i, j)| ((i * 3 + j * 5) % 10) as f64);
+            let want = r.learners[0].predict(&x_new.view()).to_vec();
+            assert_eq!(adaboost_predict(&r, x_new.view()).unwrap(), want);
+            break;
+        }
+        assert!(found, "no design with a perfect learner after round 1");
     }
 }

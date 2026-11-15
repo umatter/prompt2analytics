@@ -86,4 +86,9 @@ The like-for-like rows are faster than the base.
 
 ## Not pinned
 
-The R2 loop beyond its first learner: Drucker's loop deviations are the open finding ML-110.
+The R2 loop beyond its first learner. Its rules follow Drucker (1997): a learner whose weighted average loss
+reaches 0.5 stops the loop and is not kept (a warning names it; a first learner that bad is an error), and a learner
+that fits the training data exactly becomes the whole model (beta -> 0 gives it the whole weighted median), with a
+note. Before T4 the loss was clamped at 0.999, so learners worse than chance were kept with negative weight, and a
+perfect learner was added with beta 1 to the others (ML-110). `test_adaboost_r2_stops_at_average_loss_half`,
+`test_adaboost_r2_refuses_a_first_learner_at_half`, `test_adaboost_r2_perfect_fit_is_the_model`.
