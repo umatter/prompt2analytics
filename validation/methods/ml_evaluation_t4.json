@@ -13,7 +13,9 @@
       ],
       "tests": [
         "p2a-core::ml::evaluation::tests::test_validate_roc_auc_small",
-        "p2a-core::ml::evaluation::tests::test_validate_roc_auc_ties"
+        "p2a-core::ml::evaluation::tests::test_validate_roc_auc_ties",
+        "p2a-core::ml::evaluation_fast::tests::test_validate_fast_roc_auc_small",
+        "p2a-core::ml::evaluation_fast::tests::test_validate_fast_roc_auc_ties"
       ],
       "quantities": [
         "AUC",

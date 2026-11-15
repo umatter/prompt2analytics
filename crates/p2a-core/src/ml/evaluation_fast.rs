@@ -1,22 +1,24 @@
 //! Fast model evaluation metrics using optimized algorithms.
 //!
-//! ROC/AUC: O(n log n) using Mann-Whitney U statistic instead of O(n × thresholds)
+//! ROC/AUC in one sort (O(n log n)), on the tie-aware sweep of [`crate::ml::roc_auc`].
 
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use super::evaluation::{auc_sorted_desc, roc_classes, roc_inputs, roc_sweep};
+
 /// Fast ROC/AUC result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FastRocAucResult {
-    /// Area under the ROC curve (computed via Mann-Whitney U)
+    /// Area under the ROC curve (Mann-Whitney, ties counted half)
     pub auc: f64,
-    /// True positive rates at each threshold
+    /// True positive rates of the rule `score >= threshold` at each threshold
     pub tpr: Vec<f64>,
     /// False positive rates at each threshold
     pub fpr: Vec<f64>,
-    /// Thresholds (sorted prediction values)
+    /// Thresholds in decreasing order: `+inf` (the point (0, 0)), then the distinct scores
     pub thresholds: Vec<f64>,
-    /// Optimal threshold (Youden's J)
+    /// Optimal threshold (Youden's J; the lowest of tied optima): the observed score starting the rule
     pub optimal_threshold: f64,
     /// Sensitivity at optimal threshold
     pub optimal_sensitivity: f64,
@@ -28,212 +30,50 @@ pub struct FastRocAucResult {
     pub n_negative: usize,
 }
 
-/// Refuse NaN predictions or labels: they have no place in a ranking.
-fn refuse_nan(predictions: &[f64], actual: &[f64]) -> Result<(), String> {
-    for (name, values) in [("predictions", predictions), ("actual", actual)] {
-        let k = values.iter().filter(|v| v.is_nan()).count();
-        if k > 0 {
-            return Err(format!("{name} contain {k} missing value(s) (NaN)"));
-        }
-    }
-    Ok(())
-}
-
-/// Compute ROC/AUC using the fast Mann-Whitney U statistic method.
+/// Compute the ROC curve, the AUC and Youden's optimum in one sort.
 ///
-/// Complexity: O(n log n) for sorting + O(n) for AUC calculation
-/// This is much faster than the threshold-based O(n × t) approach.
+/// Same results as [`crate::ml::roc_auc`] with `n_thresholds = None` (pROC's convention): the rule
+/// `score >= threshold`, a first point at `+inf`, one point per distinct score in decreasing order, each after
+/// its whole tie group is counted (ties are exact equality), the AUC as the Mann-Whitney statistic with half
+/// credit for ties, and the lowest threshold among tied Youden optima. O(n log n).
 ///
-/// # Algorithm
-/// 1. Sort predictions with their labels
-/// 2. Compute AUC = (sum of positive ranks - n_pos*(n_pos+1)/2) / (n_pos * n_neg)
-/// 3. Generate ROC curve in a single pass through sorted data
+/// # Errors
+/// As `roc_auc`: unequal lengths, an empty input, NaN or infinite scores, NaN or infinite labels, anything but
+/// two label values.
 pub fn fast_roc_auc(predictions: &[f64], actual: &[f64]) -> Result<FastRocAucResult, String> {
-    let n = predictions.len();
-    if n != actual.len() {
-        return Err("Predictions and actual must have same length".to_string());
-    }
-    if n == 0 {
-        return Err("Need at least one sample".to_string());
-    }
-    refuse_nan(predictions, actual)?;
-
-    // Determine positive/negative class
-    let mut unique: Vec<f64> = actual.to_vec();
-    unique.sort_by(|a, b| a.total_cmp(b));
-    unique.dedup();
-
-    if unique.len() != 2 {
-        return Err(format!("Need exactly 2 classes, found {}", unique.len()));
-    }
-
-    let pos_class = unique[1];
-
-    // Create (prediction, is_positive) pairs and sort by prediction descending
-    let mut pairs: Vec<(f64, bool, usize)> = predictions
-        .iter()
-        .zip(actual.iter())
-        .enumerate()
-        .map(|(i, (&pred, &act))| (pred, (act - pos_class).abs() < 1e-10, i))
-        .collect();
-
-    // Sort by prediction descending (for ROC curve generation)
-    pairs.sort_by(|a, b| b.0.total_cmp(&a.0));
-
-    let n_pos = pairs.iter().filter(|(_, is_pos, _)| *is_pos).count();
-    let n_neg = n - n_pos;
-
-    if n_pos == 0 || n_neg == 0 {
-        return Err("Need at least one positive and one negative sample".to_string());
-    }
-
-    // === Fast AUC via Mann-Whitney U statistic ===
-    // Sort by prediction ascending for rank calculation
-    let mut ranked: Vec<(f64, bool)> = pairs.iter().map(|(p, is_pos, _)| (*p, *is_pos)).collect();
-    ranked.sort_by(|a, b| a.0.total_cmp(&b.0));
-
-    // Assign ranks (handle ties by averaging)
-    let mut ranks = vec![0.0; n];
-    let mut i = 0;
-    while i < n {
-        let mut j = i;
-        // Find all elements with same prediction value
-        while j < n && (ranked[j].0 - ranked[i].0).abs() < 1e-15 {
-            j += 1;
-        }
-        // Average rank for tied values
-        let avg_rank = (i + j + 1) as f64 / 2.0 + (j - i - 1) as f64 / 2.0;
-        let avg_rank = (i + 1 + j) as f64 / 2.0;
-        for k in i..j {
-            ranks[k] = avg_rank;
-        }
-        i = j;
-    }
-
-    // Sum ranks of positive samples
-    let rank_sum_pos: f64 = ranked
-        .iter()
-        .zip(ranks.iter())
-        .filter(|((_, is_pos), _)| *is_pos)
-        .map(|(_, rank)| *rank)
-        .sum();
-
-    // Mann-Whitney U statistic
-    // U = rank_sum_pos - n_pos * (n_pos + 1) / 2
-    // AUC = U / (n_pos * n_neg)
-    let u = rank_sum_pos - (n_pos * (n_pos + 1)) as f64 / 2.0;
-    let auc = u / (n_pos as f64 * n_neg as f64);
-
-    // === Generate ROC curve in single pass ===
-    // pairs is already sorted by prediction descending
-    let mut tpr = Vec::with_capacity(n + 1);
-    let mut fpr = Vec::with_capacity(n + 1);
-    let mut thresholds = Vec::with_capacity(n + 1);
-
-    // Start at (0, 0) - threshold above all predictions
-    tpr.push(0.0);
-    fpr.push(0.0);
-    thresholds.push(f64::INFINITY);
-
-    let mut tp = 0;
-    let mut fp = 0;
-    let mut best_j = f64::NEG_INFINITY;
-    let mut best_threshold = 0.5;
-    let mut best_sens = 0.0;
-    let mut best_spec = 0.0;
-
-    let mut prev_pred = f64::INFINITY;
-
-    for (pred, is_pos, _) in &pairs {
-        // Only add point when prediction changes (avoid duplicate points)
-        if (*pred - prev_pred).abs() > 1e-15 {
-            let current_tpr = tp as f64 / n_pos as f64;
-            let current_fpr = fp as f64 / n_neg as f64;
-
-            tpr.push(current_tpr);
-            fpr.push(current_fpr);
-            thresholds.push(*pred);
-
-            // Check Youden's J
-            let spec = 1.0 - current_fpr;
-            let j = current_tpr + spec - 1.0;
-            if j > best_j {
-                best_j = j;
-                best_threshold = *pred;
-                best_sens = current_tpr;
-                best_spec = spec;
-            }
-
-            prev_pred = *pred;
-        }
-
-        if *is_pos {
-            tp += 1;
-        } else {
-            fp += 1;
-        }
-    }
-
-    // End at (1, 1) - threshold below all predictions
-    tpr.push(1.0);
-    fpr.push(1.0);
-    thresholds.push(f64::NEG_INFINITY);
-
+    let (pairs, n_pos, n_neg) = roc_inputs(predictions, actual)?;
+    let sweep = roc_sweep(&pairs, n_pos, n_neg);
+    let tpr: Vec<f64> = sweep.tp.iter().map(|&t| t as f64 / n_pos as f64).collect();
+    let fpr: Vec<f64> = sweep.fp.iter().map(|&f| f as f64 / n_neg as f64).collect();
     Ok(FastRocAucResult {
-        auc,
+        auc: sweep.auc,
+        optimal_threshold: sweep.thresholds[sweep.best],
+        optimal_sensitivity: tpr[sweep.best],
+        optimal_specificity: (n_neg - sweep.fp[sweep.best]) as f64 / n_neg as f64,
         tpr,
         fpr,
-        thresholds,
-        optimal_threshold: best_threshold,
-        optimal_sensitivity: best_sens,
-        optimal_specificity: best_spec,
+        thresholds: sweep.thresholds,
         n_positive: n_pos,
         n_negative: n_neg,
     })
 }
 
-/// Parallel AUC computation for very large datasets.
-/// Uses parallel sorting and parallel rank summation.
+/// The AUC alone, with a parallel sort, for very large datasets.
+///
+/// Equal to the AUC of [`fast_roc_auc`] and [`crate::ml::roc_auc`]: tied scores get half credit, so the
+/// result does not depend on the input order. Use it when only the AUC is needed.
+///
+/// # Errors
+/// As [`fast_roc_auc`].
 pub fn fast_roc_auc_parallel(predictions: &[f64], actual: &[f64]) -> Result<f64, String> {
-    let n = predictions.len();
-    if n != actual.len() {
-        return Err("Predictions and actual must have same length".to_string());
-    }
-
-    refuse_nan(predictions, actual)?;
-
-    // Determine positive class
-    let pos_class = actual.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-
-    // Create pairs
+    let (pos_class, n_pos, n_neg) = roc_classes(predictions, actual)?;
     let mut pairs: Vec<(f64, bool)> = predictions
         .par_iter()
         .zip(actual.par_iter())
-        .map(|(&pred, &act)| (pred, (act - pos_class).abs() < 1e-10))
+        .map(|(&pred, &act)| (pred, act == pos_class))
         .collect();
-
-    // Parallel sort
-    pairs.par_sort_by(|a, b| a.0.total_cmp(&b.0));
-
-    let n_pos: usize = pairs.par_iter().filter(|(_, is_pos)| *is_pos).count();
-    let n_neg = n - n_pos;
-
-    if n_pos == 0 || n_neg == 0 {
-        return Err("Need at least one positive and one negative".to_string());
-    }
-
-    // Compute rank sum of positives (simplified - ignoring ties for speed)
-    let rank_sum_pos: f64 = pairs
-        .par_iter()
-        .enumerate()
-        .filter(|(_, (_, is_pos))| *is_pos)
-        .map(|(i, _)| (i + 1) as f64)
-        .sum();
-
-    let u = rank_sum_pos - (n_pos * (n_pos + 1)) as f64 / 2.0;
-    let auc = u / (n_pos as f64 * n_neg as f64);
-
-    Ok(auc)
+    pairs.par_sort_by(|a, b| b.0.total_cmp(&a.0));
+    Ok(auc_sorted_desc(&pairs, n_pos, n_neg))
 }
 
 #[cfg(test)]
@@ -252,6 +92,120 @@ mod tests {
         let labels = [0.0, f64::NAN, 1.0, 0.0, 1.0, 0.0];
         let e = fast_roc_auc(&[0.1, 0.2, 0.8, 0.4, 0.65, 0.3], &labels).unwrap_err();
         assert!(e.contains("missing"), "{e}");
+        // infinite scores are refused as in roc_auc (pROC)
+        let inf = [0.1, f64::INFINITY, 0.8, 0.4, 0.65, 0.3];
+        let e = fast_roc_auc(&inf, &actual).unwrap_err();
+        assert!(e.contains("finite"), "{e}");
+        let e = fast_roc_auc_parallel(&inf, &actual).unwrap_err();
+        assert!(e.contains("finite"), "{e}");
+    }
+
+    use crate::ml::evaluation::tests::{roc_small_sets, roc_ties_columns, tied_draws};
+
+    fn check_fast(
+        c: &mut p2a_validation::Check<'_>,
+        key: &str,
+        r: &FastRocAucResult,
+        par: f64,
+        n: usize,
+    ) {
+        use p2a_validation::Tol;
+        c.scalar(&format!("{key}_auc"), r.auc, Tol::coef(n))
+            .scalar(&format!("{key}_auc"), par, Tol::coef(n))
+            .vector(&format!("{key}_tpr"), &r.tpr, Tol::coef(n))
+            .vector(&format!("{key}_fpr"), &r.fpr, Tol::coef(n))
+            .scalar(
+                &format!("{key}_best_sensitivity"),
+                r.optimal_sensitivity,
+                Tol::coef(n),
+            )
+            .scalar(
+                &format!("{key}_best_specificity"),
+                r.optimal_specificity,
+                Tol::coef(n),
+            )
+            .scalar(
+                &format!("{key}_best_threshold"),
+                r.optimal_threshold,
+                Tol::exact(),
+            );
+    }
+
+    /// ML-92, ML-93. Before: ml92 optimum 0.3 (with the rates of score > 0.3); ml93 parallel AUC 0.5556.
+    #[test]
+    fn test_validate_fast_roc_auc_small() {
+        let (case, ds) = crate::test_support::load_case("ml_roc_small");
+        let mut c = p2a_validation::Check::new(&case);
+        for (key, pred, label) in roc_small_sets(&ds) {
+            let r = fast_roc_auc(&pred, &label).unwrap();
+            let par = fast_roc_auc_parallel(&pred, &label).unwrap();
+            check_fast(&mut c, key, &r, par, pred.len());
+        }
+        c.finish();
+    }
+
+    /// ML-92, ML-93 on 240 tied rows, classes 3/7.
+    #[test]
+    fn test_validate_fast_roc_auc_ties() {
+        let (case, ds) = crate::test_support::load_case("ml_roc_ties");
+        let (cls, s_prob, s_lin) = roc_ties_columns(&ds);
+        let mut c = p2a_validation::Check::new(&case);
+        for (key, s) in [("prob", &s_prob), ("lin", &s_lin)] {
+            let r = fast_roc_auc(s, &cls).unwrap();
+            let par = fast_roc_auc_parallel(s, &cls).unwrap();
+            check_fast(&mut c, key, &r, par, 240);
+        }
+        c.finish();
+    }
+
+    /// ML-93: the parallel AUC averaged no ranks over ties, so reordering tied rows changed it (0.5556 and
+    /// 1.0 here, 0.7778 both ways now).
+    #[test]
+    fn fast_roc_auc_parallel_does_not_depend_on_the_order_of_ties() {
+        let pred = [0.5, 0.5, 0.5, 0.5, 0.2, 0.9];
+        for label in [
+            [1.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            [0.0, 0.0, 1.0, 1.0, 0.0, 1.0],
+        ] {
+            let a = fast_roc_auc_parallel(&pred, &label).unwrap();
+            assert!((a - 7.0 / 9.0).abs() < 1e-15, "{a}");
+        }
+        let (_, ds) = crate::test_support::load_case("ml_roc_ties");
+        let (cls, s_prob, _) = roc_ties_columns(&ds);
+        let reference = fast_roc_auc_parallel(&s_prob, &cls).unwrap();
+        use rand::{SeedableRng, rngs::StdRng, seq::SliceRandom};
+        let mut rng = StdRng::seed_from_u64(7);
+        let mut idx: Vec<usize> = (0..cls.len()).collect();
+        for _ in 0..20 {
+            idx.shuffle(&mut rng);
+            let p: Vec<f64> = idx.iter().map(|&i| s_prob[i]).collect();
+            let y: Vec<f64> = idx.iter().map(|&i| cls[i]).collect();
+            assert_eq!(fast_roc_auc_parallel(&p, &y).unwrap(), reference);
+        }
+    }
+
+    /// ML-93: three label values were taken as max-vs-rest (`Ok(0.75)`).
+    #[test]
+    fn fast_roc_auc_parallel_refuses_three_classes() {
+        let e = fast_roc_auc_parallel(&[0.1, 0.4, 0.6, 0.9], &[0.0, 1.0, 2.0, 2.0]).unwrap_err();
+        assert!(e.contains("exactly 2 classes"), "{e}");
+    }
+
+    /// The three functions share one convention: field by field equal on tied draws.
+    #[test]
+    fn fast_and_exact_agree_on_tied_scores() {
+        for (pred, label) in tied_draws() {
+            let e = crate::ml::roc_auc(&pred, &label, None).unwrap();
+            let f = fast_roc_auc(&pred, &label).unwrap();
+            let p = fast_roc_auc_parallel(&pred, &label).unwrap();
+            assert_eq!((f.auc, p), (e.auc, e.auc));
+            assert_eq!(f.tpr, e.tpr);
+            assert_eq!(f.fpr, e.fpr);
+            assert_eq!(f.thresholds, e.thresholds);
+            assert_eq!(f.optimal_threshold, e.optimal_threshold);
+            assert_eq!(f.optimal_sensitivity, e.optimal_metrics.sensitivity);
+            assert_eq!(f.optimal_specificity, e.optimal_metrics.specificity);
+        }
     }
 
     #[test]
