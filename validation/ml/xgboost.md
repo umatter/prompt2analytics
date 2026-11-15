@@ -97,6 +97,19 @@ earlier base build. The Huber row is not like-for-like: the base's loss oscillat
 
 ## Not pinned
 
-The histogram trees against the package (the bins differ); `colsample_*` draws (p2a's own generator). Fast
-XGBoost's seeding (ML-42) and exact XGBoost's early stopping on the training loss (ML-143) are open findings.
-For gbm, see `tree_importance.md`.
+The histogram trees against the package (the bins differ); `colsample_*` draws (p2a's own generator). For gbm, see
+`gbm.md`.
+
+**Early stopping** (exact XGBoost, `early_stopping_rounds = k > 0`): `ceil(n validation_fraction)` rows (default
+0.1, in (0, 1), at least 2 rows left to train on) are held out by a seeded draw, the trees are grown on the rest, and
+boosting stops after `k` rounds without an improvement of the held-out loss; the model keeps the trees up to the
+best round (`best_iteration`, 1-based as R xgboost's), and the result lists the held-out rows and their loss per
+round. A fit with early stopping equals the plain fit on the training rows cut at the best round
+(`test_xgboost_early_stopping_watches_held_out_rows`). Before T4 it watched the training loss, which almost never
+stops, and kept every tree (ML-143). R xgboost needs a user-supplied watchlist instead; nothing is R-pinned here.
+
+**Seeded fast XGBoost** draws its rows and columns from one generator per fit, so each round draws anew (before T4
+every round reseeded and drew the same rows and columns, ML-42): `test_fast_xgboost_seeded_subsample_reaches_every_row`,
+`test_fast_xgboost_seeded_colsample_uses_every_feature`.
+
+Trees of both stop at depth 512 whatever `max_depth` says (`max_depth = 0`, "no limit", included).
