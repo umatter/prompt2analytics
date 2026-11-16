@@ -58,6 +58,17 @@ negates the decision values), `test_kernel_cache_evicts_least_recently_used`,
 `linear_svm` hard-codes the bound 1.0 in `select_second_alpha` (finding ML-40), so it is not optimal at
 `C != 1`; `kernel_svm` skips alpha steps below 1e-5 and is accurate only to its KKT tolerance.
 
+## Class labels
+
+`linear_svm` and `kernel_svm` keep the two class labels as `i32`: the target must hold two whole numbers in the
+`i32` range ("SVM: class labels must be whole numbers ... (found 0.2 and 0.7); recode the target, for example
+as 0/1"). Before ML-102 two fractional labels were truncated (0.2 and 0.7 both became 0), and `kernel_svm`'s
+training accuracy compared the truncated predictions with the original values; it is now computed on the
+internal -1/+1 labels. The class-distribution line of `linear_svm`'s summary counts the predictions of each
+label ("45 predicted 0 (negative), 55 predicted 1 (positive)"); it counted predictions below zero as negative
+before (ML-101). Tests: `test_svm_refuses_fractional_labels`, `test_svm_display_counts_predicted_labels`,
+`test_kernel_svm_accuracy_uses_internal_labels`.
+
 ## Missing values
 
 `fast_svm` and `linear_svm` refuse non-finite input. The MCP tool `ml_svm` drops rows with a missing

@@ -82,13 +82,13 @@ impl std::fmt::Display for SvmResult {
         writeln!(f)?;
         writeln!(f, "Predictions: {} samples", self.predictions.len())?;
 
-        // Count predictions per class
-        let neg_count = self.predictions.iter().filter(|&&p| p < 0).count();
-        let pos_count = self.predictions.len() - neg_count;
+        // Count predictions per class label
+        let (neg, pos) = self.class_labels.unwrap_or((-1, 1));
+        let neg_count = self.predictions.iter().filter(|&&p| p == neg).count();
+        let pos_count = self.predictions.iter().filter(|&&p| p == pos).count();
         writeln!(
             f,
-            "  Class distribution: {} negative, {} positive",
-            neg_count, pos_count
+            "  Class distribution: {neg_count} predicted {neg} (negative), {pos_count} predicted {pos} (positive)"
         )?;
 
         Ok(())
@@ -252,9 +252,20 @@ pub(crate) fn binary_classes(target: &ArrayView1<f64>) -> Result<BinaryClasses, 
     })
 }
 
-/// Convert target values to binary -1/+1.
+/// Convert target values to binary -1/+1; the two labels must be whole numbers
+/// in the `i32` range (the result types keep them as `i32`).
 fn convert_to_binary(target: &ArrayView1<f64>) -> Result<(Array1<f64>, (i32, i32)), String> {
     let b = binary_classes(target)?;
+    let whole = |v: f64| v.fract() == 0.0 && v >= f64::from(i32::MIN) && v <= f64::from(i32::MAX);
+    if !(whole(b.negative) && whole(b.positive)) {
+        return Err(format!(
+            "SVM: class labels must be whole numbers between {} and {} (found {} and {}); recode the target, for example as 0/1",
+            i32::MIN,
+            i32::MAX,
+            b.negative,
+            b.positive
+        ));
+    }
     Ok((b.y, (b.negative as i32, b.positive as i32)))
 }
 
@@ -939,11 +950,11 @@ pub fn kernel_svm(
         })
         .collect();
 
-    // Compute training accuracy
+    // Training accuracy on the internal -1/+1 labels
     let correct = predictions
         .iter()
-        .zip(target.iter())
-        .filter(|(pred, actual)| **pred as f64 == **actual)
+        .zip(y.iter())
+        .filter(|&(&pred, &yi)| (pred == class_labels.1) == (yi > 0.0))
         .count();
     let train_accuracy = correct as f64 / n_samples as f64;
 
@@ -1607,6 +1618,66 @@ mod tests {
             "Train accuracy should be at least 50%, got {:.1}%",
             result.train_accuracy * 100.0
         );
+    }
+
+    /// `overlapping_classes` with its 0/1 labels recoded as `neg`/`pos`.
+    fn coded(n: usize, seed: u64, neg: f64, pos: f64) -> (Array2<f64>, Array1<f64>) {
+        let (x, y) = overlapping_classes(n, seed);
+        (x, y.mapv(|v| if v == 0.0 { neg } else { pos }))
+    }
+
+    /// ML-102: two fractional labels were truncated to integers (0.2 and 0.7 both became 0).
+    #[test]
+    fn test_svm_refuses_fractional_labels() {
+        let cfg = KernelSvmConfig::default();
+        for (neg, pos) in [(0.2, 0.7), (0.5, 1.5), (-0.5, 0.5), (0.0, 3e9)] {
+            let (x, y) = coded(40, 3, neg, pos);
+            let e = linear_svm(x.view(), y.view(), None, None, None, None).unwrap_err();
+            assert!(
+                e.contains("class labels must be whole numbers"),
+                "{neg}/{pos}: {e}"
+            );
+            let e = kernel_svm(x.view(), y.view(), &cfg, None).unwrap_err();
+            assert!(
+                e.contains("class labels must be whole numbers"),
+                "{neg}/{pos}: {e}"
+            );
+        }
+        for (neg, pos) in [(0.0, 1.0), (1.0, 2.0), (-1.0, 1.0), (-3.0, 7.0)] {
+            let (x, y) = coded(40, 3, neg, pos);
+            let r = linear_svm(x.view(), y.view(), None, None, None, None).unwrap();
+            assert_eq!(r.class_labels, Some((neg as i32, pos as i32)));
+            let k = kernel_svm(x.view(), y.view(), &cfg, None).unwrap();
+            assert_eq!(k.class_labels, (neg as i32, pos as i32));
+        }
+    }
+
+    /// ML-101: the class distribution counts the predicted labels (it counted predictions below
+    /// zero as negative, which a 0/1 coding never has).
+    #[test]
+    fn test_svm_display_counts_predicted_labels() {
+        let (x, y) = coded(100, 6, 0.0, 1.0);
+        let mut r = linear_svm(x.view(), y.view(), None, None, None, None).unwrap();
+        r.predictions = (0..100).map(|i| i32::from(i >= 45)).collect();
+        let text = r.to_string();
+        assert!(
+            text.contains(
+                "Class distribution: 45 predicted 0 (negative), 55 predicted 1 (positive)"
+            ),
+            "{text}"
+        );
+    }
+
+    /// The training accuracy does not depend on how the two classes are coded.
+    #[test]
+    fn test_kernel_svm_accuracy_uses_internal_labels() {
+        let cfg = KernelSvmConfig::default();
+        let (x, a) = coded(60, 8, 0.0, 1.0);
+        let (_, b) = coded(60, 8, 1.0, 2.0);
+        let ra = kernel_svm(x.view(), a.view(), &cfg, None).unwrap();
+        let rb = kernel_svm(x.view(), b.view(), &cfg, None).unwrap();
+        assert!(ra.train_accuracy > 0.5, "{}", ra.train_accuracy);
+        assert_eq!(ra.train_accuracy, rb.train_accuracy);
     }
 
     #[test]
