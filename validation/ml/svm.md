@@ -82,7 +82,15 @@ MCP: `test_validate_mcp_svm_linear_matches_e1071` (`crates/p2a-mcp/tests/tier3/w
 ## `kernel_svm`: not R-pinned
 
 `kernel_svm` (library only; no MCP tool or CLI command) keeps a simplified SMO: it skips alpha steps below 1e-5
-and is accurate only to its KKT tolerance.
+and is accurate only to its KKT tolerance. It checks its inputs as `linear_svm` does (C and the tolerance finite
+and positive, `max_iter >= 1`, finite features) plus the kernel's (`gamma`, when given, finite and positive;
+`degree >= 1` for the polynomial kernel; finite `coef0`); before ML-140 C = 0 returned an untrained model
+labelled converged. The n x n kernel matrix is allocated fallibly, and the budget is checked per row of it and
+per SMO sweep. The result keeps the resolved `gamma` and the training width (`n_features`):
+`kernel_svm_predict` refuses data of another width and uses that `gamma` (before ML-141 it truncated wider or
+narrower data silently and recomputed a defaulted `gamma` from them). Tests:
+`test_kernel_svm_rejects_bad_arguments`, `test_kernel_svm_honours_cancellation_and_ceiling`,
+`test_kernel_svm_predict_checks_width_and_keeps_gamma`.
 
 ## Class labels
 

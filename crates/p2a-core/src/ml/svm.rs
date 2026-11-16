@@ -175,19 +175,7 @@ pub fn linear_svm(
             "tolerance must be a finite number greater than 0, got {tol}"
         ));
     }
-    for (j, column) in data.axis_iter(Axis(1)).enumerate() {
-        let k = column.iter().filter(|v| !v.is_finite()).count();
-        if k > 0 {
-            let name = feature_names
-                .as_ref()
-                .and_then(|names| names.get(j))
-                .map(|name| format!("feature '{name}'"))
-                .unwrap_or_else(|| format!("column {j} (0-based)"));
-            return Err(format!(
-                "SVM: {name} has {k} missing or non-finite values; remove or impute them first"
-            ));
-        }
-    }
+    check_finite_features(&data, feature_names.as_deref())?;
     let k = target.iter().filter(|v| !v.is_finite()).count();
     if k > 0 {
         return Err(format!(
@@ -242,6 +230,66 @@ pub fn linear_svm(
         convergence: fast.convergence,
         warnings: fast.warnings,
     })
+}
+
+/// Refuses a feature column with a missing or non-finite value, naming it.
+fn check_finite_features(
+    data: &ArrayView2<f64>,
+    feature_names: Option<&[String]>,
+) -> Result<(), String> {
+    for (j, column) in data.axis_iter(Axis(1)).enumerate() {
+        let k = column.iter().filter(|v| !v.is_finite()).count();
+        if k > 0 {
+            let name = feature_names
+                .and_then(|names| names.get(j))
+                .map(|name| format!("feature '{name}'"))
+                .unwrap_or_else(|| format!("column {j} (0-based)"));
+            return Err(format!(
+                "SVM: {name} has {k} missing or non-finite values; remove or impute them first"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The parameter checks of [`kernel_svm`], as [`linear_svm`]'s plus the kernel's.
+fn check_kernel_config(config: &KernelSvmConfig) -> Result<(), String> {
+    if !(config.c.is_finite() && config.c > 0.0) {
+        return Err(format!(
+            "c must be a finite number greater than 0, got {}",
+            config.c
+        ));
+    }
+    if !(config.tolerance.is_finite() && config.tolerance > 0.0) {
+        return Err(format!(
+            "tolerance must be a finite number greater than 0, got {}",
+            config.tolerance
+        ));
+    }
+    if config.max_iter == 0 {
+        return Err("max_iter must be at least 1".to_string());
+    }
+    if let Some(g) = config.gamma {
+        if !(g.is_finite() && g > 0.0) {
+            return Err(format!(
+                "gamma must be a finite number greater than 0, got {g}"
+            ));
+        }
+    }
+    if config.kernel == SvmKernel::Polynomial && config.degree == 0 {
+        return Err("degree must be at least 1 for the polynomial kernel".to_string());
+    }
+    if config.degree > i32::MAX as usize {
+        return Err(format!(
+            "degree must be at most {}, got {}",
+            i32::MAX,
+            config.degree
+        ));
+    }
+    if !config.coef0.is_finite() {
+        return Err(format!("coef0 must be finite, got {}", config.coef0));
+    }
+    Ok(())
 }
 
 /// Two classes in a response: the smaller value is -1, the larger +1.
@@ -417,6 +465,12 @@ pub struct KernelSvmResult {
     pub train_accuracy: f64,
     /// Feature names (if provided)
     pub feature_names: Option<Vec<String>>,
+    /// The kernel coefficient used (`config.gamma`, else `1 / n_features`)
+    #[serde(default)]
+    pub gamma: f64,
+    /// Number of features of the training data
+    #[serde(default)]
+    pub n_features: usize,
     /// Support vectors (stored for prediction)
     #[serde(skip)]
     support_vectors: Option<ndarray::Array2<f64>>,
@@ -432,7 +486,7 @@ impl std::fmt::Display for KernelSvmResult {
         writeln!(f, "Kernel: {:?}", self.config.kernel)?;
         writeln!(f, "C: {}", self.config.c)?;
         if self.config.kernel != SvmKernel::Linear {
-            writeln!(f, "Gamma: {:?}", self.config.gamma)?;
+            writeln!(f, "Gamma: {}", self.gamma)?;
         }
         if self.config.kernel == SvmKernel::Polynomial {
             writeln!(f, "Degree: {}", self.config.degree)?;
@@ -522,10 +576,19 @@ fn compute_decision_kernel(
 /// Run Kernel SVM using SMO.
 ///
 /// # Arguments
-/// * `data` - Input feature matrix (n_samples x n_features)
-/// * `target` - Binary target values
+/// * `data` - Input feature matrix (n_samples x n_features); values must be finite
+/// * `target` - Two class labels, whole numbers in the `i32` range
 /// * `config` - SVM configuration
 /// * `feature_names` - Optional feature names
+///
+/// # Errors
+///
+/// - `c` and `tolerance` not finite and positive, `max_iter = 0`, a `gamma`
+///   that is not finite and positive, `degree = 0` for the polynomial kernel,
+///   a non-finite `coef0`, a non-finite feature value, fractional labels.
+/// - `"Resource limit: ..."` when the `n x n` kernel matrix exceeds the
+///   allocation ceiling; `"Computation stopped: ..."` when the budget is
+///   cancelled or expires (checked per row of the kernel matrix and per sweep).
 pub fn kernel_svm(
     data: ArrayView2<f64>,
     target: ArrayView1<f64>,
@@ -541,6 +604,11 @@ pub fn kernel_svm(
     if n_samples != target.len() {
         return Err("Data and target must have same number of samples".to_string());
     }
+    if n_features == 0 {
+        return Err("SVM: need at least one feature".to_string());
+    }
+    check_kernel_config(config)?;
+    check_finite_features(&data, feature_names.as_deref())?;
 
     // Convert target to -1/+1
     let (y, class_labels) = convert_to_binary(&target)?;
@@ -553,8 +621,11 @@ pub fn kernel_svm(
     let mut b = 0.0;
 
     // Precompute kernel matrix for efficiency
-    let mut kernel_matrix = ndarray::Array2::zeros((n_samples, n_samples));
+    let to_string = |e: crate::errors::EconError| e.to_string();
+    let mut kernel_matrix =
+        resource::try_zeros2(n_samples, n_samples, "kernel SVM matrix").map_err(to_string)?;
     for i in 0..n_samples {
+        resource::checkpoint().map_err(to_string)?;
         for j in i..n_samples {
             let k_ij = compute_kernel(
                 &data.row(i),
@@ -574,6 +645,7 @@ pub fn kernel_svm(
 
     // SMO main loop
     for iter in 0..config.max_iter {
+        resource::checkpoint().map_err(to_string)?;
         let mut num_changed = 0;
 
         for i in 0..n_samples {
@@ -757,12 +829,15 @@ pub fn kernel_svm(
         config: config.clone(),
         train_accuracy,
         feature_names,
+        gamma,
+        n_features,
         support_vectors: Some(sv_data),
         support_vector_labels: Some(sv_labels),
     })
 }
 
-/// Predict class labels for new data using a trained kernel SVM.
+/// Predict class labels for new data using a trained kernel SVM, with the
+/// model's `gamma`; data of another width than the training data are refused.
 pub fn kernel_svm_predict(
     data: ArrayView2<f64>,
     result: &KernelSvmResult,
@@ -776,7 +851,14 @@ pub fn kernel_svm_predict(
         .as_ref()
         .ok_or("Support vector labels not stored - cannot predict")?;
 
-    let gamma = result.config.gamma.unwrap_or(1.0 / data.ncols() as f64);
+    if data.ncols() != result.n_features {
+        return Err(format!(
+            "Data has {} features, but the model was fit with {}",
+            data.ncols(),
+            result.n_features
+        ));
+    }
+    let gamma = result.gamma;
 
     let predictions: Vec<i32> = data
         .outer_iter()
@@ -1284,6 +1366,112 @@ mod tests {
         let rb = kernel_svm(x.view(), b.view(), &cfg, None).unwrap();
         assert!(ra.train_accuracy > 0.5, "{}", ra.train_accuracy);
         assert_eq!(ra.train_accuracy, rb.train_accuracy);
+    }
+
+    /// ML-140: kernel_svm's parameters and data went into SMO unchecked (C = 0 returned an
+    /// untrained model labelled converged).
+    #[test]
+    fn test_kernel_svm_rejects_bad_arguments() {
+        let (x, y) = overlapping_classes(30, 4);
+        let base = KernelSvmConfig::default();
+        let bad = |cfg: KernelSvmConfig, x: &Array2<f64>| {
+            kernel_svm(x.view(), y.view(), &cfg, None).unwrap_err()
+        };
+        for c in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let e = bad(KernelSvmConfig { c, ..base.clone() }, &x);
+            assert!(e.contains("c must be"), "{c}: {e}");
+        }
+        for tolerance in [0.0, f64::NAN] {
+            let e = bad(
+                KernelSvmConfig {
+                    tolerance,
+                    ..base.clone()
+                },
+                &x,
+            );
+            assert!(e.contains("tolerance must be"), "{tolerance}: {e}");
+        }
+        let e = bad(
+            KernelSvmConfig {
+                max_iter: 0,
+                ..base.clone()
+            },
+            &x,
+        );
+        assert!(e.contains("max_iter must be"), "{e}");
+        for g in [0.0, -1.0, f64::NAN] {
+            let e = bad(
+                KernelSvmConfig {
+                    gamma: Some(g),
+                    ..base.clone()
+                },
+                &x,
+            );
+            assert!(e.contains("gamma must be"), "{g}: {e}");
+        }
+        let poly = KernelSvmConfig {
+            kernel: SvmKernel::Polynomial,
+            degree: 0,
+            ..base.clone()
+        };
+        assert!(bad(poly, &x).contains("degree must be"));
+        let e = bad(
+            KernelSvmConfig {
+                coef0: f64::NAN,
+                ..base.clone()
+            },
+            &x,
+        );
+        assert!(e.contains("coef0 must be"), "{e}");
+        for v in [f64::NAN, f64::INFINITY] {
+            let mut xb = x.clone();
+            xb[[2, 1]] = v;
+            assert!(bad(base.clone(), &xb).contains("non-finite"), "{v}");
+        }
+    }
+
+    /// ML-140: the n x n kernel matrix is allocated fallibly, and the SMO sweeps check the budget.
+    #[test]
+    fn test_kernel_svm_honours_cancellation_and_ceiling() {
+        let (x, y) = overlapping_classes(40, 5);
+        let cfg = KernelSvmConfig::default();
+        let e = with_budget(cancelled_budget(), || {
+            kernel_svm(x.view(), y.view(), &cfg, None)
+        })
+        .unwrap_err();
+        assert!(e.contains("cancelled"), "{e}");
+        let e = crate::resource::with_alloc_ceiling(Some(40 * 40 * 8 - 8), || {
+            kernel_svm(x.view(), y.view(), &cfg, None)
+        })
+        .unwrap_err();
+        assert!(e.contains("Resource limit"), "{e}");
+    }
+
+    /// ML-141: prediction data of another width were silently truncated, and a defaulted gamma was
+    /// recomputed from them.
+    #[test]
+    fn test_kernel_svm_predict_checks_width_and_keeps_gamma() {
+        let x = array![
+            [0.0, 0.1],
+            [0.3, 0.2],
+            [0.1, 0.4],
+            [2.0, 2.1],
+            [2.2, 1.9],
+            [1.8, 2.3]
+        ];
+        let y = array![0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+        let r = kernel_svm(x.view(), y.view(), &KernelSvmConfig::default(), None).unwrap();
+        assert_eq!((r.gamma, r.n_features), (0.5, 2));
+        assert!(r.to_string().contains("Gamma: 0.5"), "{r}");
+        let e = kernel_svm_predict(array![[0.0], [1.0], [2.0]].view(), &r).unwrap_err();
+        assert!(
+            e.contains("has 1 features, but the model was fit with 2"),
+            "{e}"
+        );
+        assert_eq!(kernel_svm_predict(x.view(), &r).unwrap(), r.predictions);
+        let back: KernelSvmResult =
+            serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
+        assert_eq!((back.gamma, back.n_features), (0.5, 2));
     }
 
     #[test]
