@@ -230,7 +230,7 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/etwfe_panel.csv` | 960 × 6 (id, year, first_treat, xc, y, treat) | `etwfe_staggered`, `etwfe_within_r2` | `r/cases/causal_etwfe.R` | seed 20261103, 120 units x 8 periods, cohorts 4/6/8/never (0), time-invariant control xc, treat the absorbing treatment indicator |
 | `generated/etwfe_panel_all_treated.csv` | 960 × 6 (id, year, first_treat, xc, y, treat) | `etwfe_unbalanced` | `r/cases/causal_etwfe.R` | seed 20261103, 120 units x 8 periods, cohorts 4/6/8, no never-treated unit |
 | `generated/etwfe_panel_unbalanced.csv` | 923 × 6 (id, year, first_treat, xc, y, treat) | `etwfe_unbalanced`, `etwfe_within_r2` | `r/cases/causal_etwfe.R` | seed 20261103, `etwfe_panel` without year 3 of every 7th unit and years 1-2 of every 11th |
-| `generated/eurodist_matrix.csv` | 21 × 21 (Athens ... Vienna) | `kmeans_lloyd_pca_mds` | `r/cases/ml_hierarchical.R` | `datasets::eurodist` as a 21 × 21 distance matrix (city names as columns) |
+| `generated/eurodist_matrix.csv` | 21 × 21 (Athens ... Vienna) | `kmeans_lloyd_pca_mds`, `cmdscale_gof_add` | `r/cases/ml_hierarchical.R` | `datasets::eurodist` as a 21 × 21 distance matrix (city names as columns) |
 | `generated/evalue_hr_inputs.csv` | 3 × 4 (id, est, lo, hi) | `evalue_hr_common` | `r/cases/regression_sensitivity_t4.R` | literal values: three hazard ratios with limits, one without a lower limit (empty cell) |
 | `generated/evalue_inputs.csv` | 8 × 7 (id, type, est, lo, hi, rare, se) | `evalue_formulas` | `r/cases/regression_smoothers_t3.R` | literal values: eight RR, OR, HR and MD estimates with limits, rare-outcome flags and one SE |
 | `generated/factanal_promax.csv` | 500 × 12 (v1-v12) | `stat_factanal_promax`, `stat_factanal_t4` | `r/cases/stats_power_loglin.R` | seed 20261118 |
@@ -260,6 +260,7 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/matching_sim.csv` | 240 × 6 (id, treat, x1, x2, x3, y) | `matchit_nearest`; read by `matchit_full_cem`, `matchit_subclass` | `r/cases/causal_matching.R` | seed 20261128 |
 | `generated/mauchly_sigma.csv` | 15 × 4 (V1, V2, V3, V4) | `stat_mauchly_sigma` | `r/cases/stats_power_loglin.R` | seed 20261117 |
 | `generated/mcf_networks.csv` | 580 × 6 (network, kind, a, b, cap, cost) | `mcf_networks` | `r/cases/causal_matching.R` | seed 20261023 |
+| `generated/mds_points8.csv` | 8 × 3 (a, b, c) | `cmdscale_gof_add` | `r/cases/ml_reduction_t4.R` | fixed points |
 | `generated/me_mem_contrast.csv` | 400 × 3 (y, x1, x2) | `me_mem_contrast` | `r/cases/regression_sensitivity_t4.R` | seed 20261111; binary y from a logit DGP in x1 ~ N(1, 1) and x2 ~ U(0, 4) |
 | `generated/medflex_sim.csv` | 500 × 12 (a, m, c1, c2, yc, yb, yp, yi, yo, m_lin, y_lin, c1dup; a, c2, yb and yp Int64) | `medflex_scales` | `r/cases/causal_medflex.R` | read by `mediation_ipw_t3` too (its case lists no dataset); seed 20261130; binary a, gaussian m, yc (gaussian), yb (binary), yp (Poisson), yi (A:M interaction), yo (NDE and NIE of opposite sign), m_lin = 0.1 + 0.3 c1 exactly, c1dup a copy of c1 |
 | `generated/mediation_huber_sim.csv` | 800 × 5 (y, d, m, x1, x2; d Int64) | `mediation_huber_sim` | `r/cases/causal_effects_t4.R` | seed 20261111; d ~ logit(0.2 + 0.7 x1 - 0.5 x2); m = 0.3 + 0.8 d + 0.5 x1 + 0.3 x2 + N(0, 1); y = 1 + 0.5 d + 0.6 m + 0.7 d m + 0.4 x1 - 0.3 x2 + N(0, 1) |
@@ -274,6 +275,8 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/p_adjust_vectors.csv` | 47 × 2 (vector, p) | `stat_p_adjust` | `r/cases/stats_power_loglin.R` | literal values: named p-value vectors (legacy, Hommel, ties, NA, single) |
 | `generated/pairwise_legacy.csv` | 36 × 3 (set, x, g) | `stat_pairwise_legacy` | `r/cases/stats_power_loglin.R` | literal values: the three sets of `pairwise.rs`'s legacy tests |
 | `generated/panel_absorbed.csv` | 180 × 8 (id, t, x1, x2, z, w, x3, y) | `panel_absorbed_regressors` | `r/cases/econ_panel_t3.R` | seed 20261104 |
+| `generated/pca_svd_20x8.csv` | 20 × 8 (v1..v8) | `pca_svd_path` | `r/cases/ml_reduction_t4.R` | seed 20261115 |
+| `generated/pca_wide_6x10.csv` | 6 × 10 (w1..w10) | `pca_svd_path` | `r/cases/ml_reduction_t4.R` | seed 20261116 |
 | `generated/pggls_panel.csv` | 200 × 5 (id, t, x1, x2, y) | `pggls_sim` | `r/cases/econ_panel_t3.R` | seed 20261101 |
 | `generated/pggls_unbalanced.csv` | 212 × 5 (id, t, x1, x2, y) | `pggls_unbalanced` | `r/cases/econ_panel_t4.R` | seed 20261111 |
 | `generated/ppr_sim.csv` | 200 × 5 (y, x1, x2, x3, w) | `ppr_methods` | `r/cases/ml_ppr_svm.R` | seed 20261125 |
@@ -309,6 +312,8 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/svm_sim.csv` | 160 × 4 (cls, cls_lin, x1, x2) | `svm_libsvm` | `r/cases/ml_ppr_svm.R` | seed 20261126; labels coded 1 and 2 |
 | `generated/synth_qp_panel.csv` | 180 × 9 (unit, time, y, x1, x2, x3, x1_big, x2_big, x3_big) | `synth_weights_qp`; read by `scpi_quantities` | `r/cases/causal_synth_scpi.R` | seed 3101; 8 donors and the treated unit TR × 20 periods (treatment at 15); `*_big` = predictors × 1e4 |
 | `generated/sysgmm_empluk.csv` | 1031 × 5 (firm, year, lemp, lwage, lcap) | `dpd_sys_empluk` | `r/cases/econ_sysgmm.R` | `plm::EmplUK`, logs of emp, wage and capital |
+| `generated/tsne_blobs.csv` | 60 × 7 (x1..x5, y0_1, y0_2) | `tsne_rtsne_exact` | `r/cases/ml_reduction_t4.R` | seed 20261117 |
+| `generated/tsne_unit.csv` | 300 × 22 (u1..u20, y0_1, y0_2) | `tsne_rtsne_exact` | `r/cases/ml_reduction_t4.R` | seed 20261118 |
 | `generated/ts_utils.csv` | 210 × 6 (t, x, s, lev, wn, ar1; x, s, wn and ar1 end in missing cells) | `ts_filter_ar_cpt` | `r/cases/ts_utils.R` | seed 20261123 |
 | `generated/var_canada.csv` | 84 × 4 (e, prod, rw, U) | `var_canada` | `r/cases/ts_var.R` | `vars::Canada` |
 | `generated/varma_sim.csv` | 400 × 2 (y1, y2) | `varma_hr` | `r/cases/ts_varma.R` | seed 20261114 |
