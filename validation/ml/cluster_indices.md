@@ -16,7 +16,8 @@
   scikit-learn: both partitions a single cluster give 1, a mutual information of 0 gives 0.
 - **Gap statistic**: Tibshirani et al. (2001) as `cluster::clusGap(x, kmeans, K.max = k_max, B = n_boot,
   d.power = 2, spaceH0 = "original")` with `maxSE(method = "Tibs2001SEmax")`: uniform references over the
-  bounding box, the inner k-means run to convergence, `SE = sd * sqrt(1 + 1/B)` with the sample standard deviation
+  bounding box, the inner k-means stopping on the relative 1e-4 rule (to convergence cost 1.45x at n = 10,000),
+  `SE = sd * sqrt(1 + 1/B)` with the sample standard deviation
   (divisor B - 1), `n_boot >= 2`. `log_w` is the log of the within-cluster sum of squares; clusGap's `logW` is
   `log_w - log 2` (it sums each pair once), so gap and SE are equal. clusGap's own defaults differ (`d.power = 1`,
   `spaceH0 = "scaledPCA"`, `B = 100`, `firstSEmax`). The reference draws are p2a's own, so the gap values are not

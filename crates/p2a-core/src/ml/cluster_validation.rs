@@ -1428,7 +1428,9 @@ impl std::fmt::Display for GapStatisticResult {
 /// of the paper's W_k (the within-cluster sum of squares); clusGap's `logW` is `log_w - log 2`
 /// (its W_k sums each pair once), so gap and SE are equal. clusGap's own defaults differ:
 /// `d.power = 1`, `spaceH0 = "scaledPCA"`, `B = 100`, `method = "firstSEmax"`; B defaults to 50
-/// here. The k-means fits (3 starts) run Lloyd to convergence.
+/// here. The k-means fits (3 starts) stop on scikit-learn's relative tolerance 1e-4 (R's `kmeans`
+/// runs Hartigan-Wong to convergence); running Lloyd to convergence costs up to about 1.5x on
+/// the uniform references.
 ///
 /// # Arguments
 /// * `data` - Input data matrix (n_samples x n_features)
@@ -1565,13 +1567,13 @@ fn sample_sd(x: &[f64]) -> f64 {
     (x.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (m - 1.0)).sqrt()
 }
 
-/// Within-cluster sum of squares of the best of 3 k-means fits (Lloyd to convergence).
+/// Within-cluster sum of squares of the best of 3 k-means fits (relative tolerance 1e-4).
 fn compute_pooled_within_cluster_dispersion(
     data: &ArrayView2<f64>,
     k: usize,
     seed: Option<u64>,
 ) -> Result<f64, String> {
-    let result = super::super::ml::kmeans(data.view(), k, Some(100), None, Some(3), seed)?;
+    let result = super::super::ml::kmeans(data.view(), k, Some(100), Some(1e-4), Some(3), seed)?;
 
     // Inertia is the within-cluster sum of squares
     Ok(result.inertia)
