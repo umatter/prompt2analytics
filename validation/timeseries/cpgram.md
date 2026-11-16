@@ -6,6 +6,10 @@ R reference case: `ts_filter_ar_cpt` (`validation/r/cases/ts_utils.R`), series `
 
 `stats::cpgram` plots and returns `NULL`, so the case writes out its body. p2a computes the same steps:
 
+0. **Scale.** The series is divided by the power of two at or below max |x|, which is exact and changes no result, so that
+   no square of the periodogram underflows or overflows at any finite magnitude
+   (`cpgram_is_invariant_to_a_power_of_two_scale`: bit-identical at scales 2^-700, 2^-600, 2^600, to 1e-12 at decimal
+   scales from 1e-200 to 1e308). A constant series is refused as having no variation before any arithmetic.
 1. **Centre, then taper.** `spec.taper(scale(x, TRUE, FALSE), p = taper)`: with m = floor(n p), the first and last m values
    are multiplied by 0.5 (1 - cos(pi (2i - 1) / (2m))), i = 1..m. Tapering before centring would turn the mean into a
    low-frequency component and declare every series with a non-zero mean non-white.
