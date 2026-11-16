@@ -131,7 +131,7 @@ impl std::str::FromStr for AffinityType {
 /// 2. M = D^(-1/2) A D^(-1/2), with D the degrees; a point of degree 0 has D^(-1/2) = 0 (R
 ///    would give NaN)
 /// 3. The k largest eigenvalues of M and their eigenvectors, exactly to solver tolerance: the
-///    graph's connected components are solved separately (dense for up to 64 points, otherwise
+///    graph's connected components are solved separately (dense for up to 128 points, otherwise
 ///    Krylov-Schur on (I + M) / 2, whose eigenvalues lie in [0, 1], with a dense fallback);
 ///    each component contributes its eigenvalue 1 first, then the largest remaining eigenvalues
 ///    over all components
@@ -295,7 +295,7 @@ fn build_knn_affinity(data: &ArrayView2<f64>, k: usize) -> Result<Array2<f64>, S
 }
 
 /// Components up to this size are solved densely.
-const DENSE_COMPONENT: usize = 64;
+const DENSE_COMPONENT: usize = 128;
 
 /// The k largest eigenvalues of M = D^-1/2 A D^-1/2 (overwriting `affinity`) and their
 /// eigenvectors (n x k, zero outside their component). Returns L_sym's eigenvalues 1 - mu,

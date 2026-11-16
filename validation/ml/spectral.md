@@ -9,7 +9,7 @@
    symmetric, otherwise refused); zero diagonal for RBF and k-NN.
 2. M = D^(-1/2) A D^(-1/2) with D the degrees; a point of degree 0 has D^(-1/2) = 0.
 3. The k largest eigenvalues of M and their eigenvectors, exactly to solver tolerance. The graph's connected
-   components are solved separately: dense (faer's self-adjoint eigendecomposition) for up to 64 points, otherwise
+   components are solved separately: dense (faer's self-adjoint eigendecomposition) for up to 128 points, otherwise
    Krylov-Schur (faer's partial eigensolver) on (I + M) / 2, whose spectrum lies in [0, 1], at tolerance
    128 eps with a seeded start, falling back to the dense solver when it returns fewer pairs. Each component
    contributes its eigenvalue 1 first; the rest are the largest remaining eigenvalues over all components.
