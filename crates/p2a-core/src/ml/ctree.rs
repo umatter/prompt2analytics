@@ -49,6 +49,9 @@
 //!   <https://cran.r-project.org/package=partykit>
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis, s};
+use rand::SeedableRng;
+use rand::seq::SliceRandom;
+use rand_chacha::ChaCha8Rng;
 use serde::{Deserialize, Serialize};
 
 use super::extract::class_labels_line;
@@ -69,9 +72,12 @@ use crate::traits::estimator::{chi_squared_p_value, normal_p_value_two_sided};
 ///   because node ids are `2^depth`); 0 means that limit. Default is 0.
 /// - `teststat`: Type of test statistic: "quadratic" (chi-squared; also "quad") or "maximum"
 ///   (also "max"; regression trees only). Default is "quadratic".
-/// - `testtype`: P-value computation method: "bonferroni", or "univariate" (also "none").
-///   Default is "bonferroni".
-/// - `seed`: Random seed for reproducibility (used in permutation tests if enabled).
+/// - `testtype`: P-value computation method: "bonferroni" (partykit's adjustment,
+///   `1 - (1 - p)^m`), "univariate" (also "none"), or "montecarlo" (permutation p-values from
+///   `nresample` permutations, unadjusted). Default is "bonferroni".
+/// - `seed`: Random seed of the Monte Carlo permutations (42 when `None`).
+/// - `classification`: whether the target's distinct values are classes (default: regression).
+/// - `nresample`: permutations per Monte Carlo test. Default is 9999 (partykit's).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CtreeConfig {
     /// 1 - alpha threshold for splitting (e.g., 0.95 means p < 0.05)
@@ -84,7 +90,7 @@ pub struct CtreeConfig {
     pub maxdepth: usize,
     /// Test statistic type: "quadratic" (also "quad") or "maximum" (also "max"; regression trees only)
     pub teststat: String,
-    /// P-value adjustment: "bonferroni", or "univariate" (also "none")
+    /// P-values: "bonferroni", "univariate" (also "none") or "montecarlo"
     pub testtype: String,
     /// Random seed for reproducibility
     pub seed: Option<u64>,
@@ -93,6 +99,14 @@ pub struct CtreeConfig {
     /// text, categorical or boolean target.
     #[serde(default)]
     pub classification: Option<bool>,
+    /// Permutations per test for `testtype = "montecarlo"` (partykit's `nresample`). Default 9999.
+    #[serde(default = "default_nresample")]
+    pub nresample: usize,
+}
+
+/// partykit's default `nresample`.
+fn default_nresample() -> usize {
+    9999
 }
 
 impl Default for CtreeConfig {
@@ -106,6 +120,7 @@ impl Default for CtreeConfig {
             testtype: "bonferroni".to_string(),
             seed: None,
             classification: None,
+            nresample: default_nresample(),
         }
     }
 }
@@ -134,11 +149,14 @@ crate::option_enum!(
 /// The p-value adjustment of the variable selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum CtreeTestType {
-    /// Multiply each p-value by the number of variables.
+    /// partykit's Bonferroni adjustment, `1 - (1 - p)^m` over the m tested inputs.
     #[default]
     Bonferroni,
     /// No adjustment.
     Univariate,
+    /// Monte Carlo permutation p-values (`nresample` permutations), unadjusted as partykit
+    /// leaves them for this test type.
+    MonteCarlo,
 }
 
 crate::option_enum!(
@@ -148,6 +166,7 @@ crate::option_enum!(
         values: &[
             (&["bonferroni"], CtreeTestType::Bonferroni),
             (&["univariate", "none"], CtreeTestType::Univariate),
+            (&["montecarlo"], CtreeTestType::MonteCarlo),
         ],
     }
 );
@@ -157,6 +176,10 @@ crate::option_enum!(
 struct CtreeOptions {
     teststat: CtreeTestStat,
     testtype: CtreeTestType,
+    /// Permutations per Monte Carlo test.
+    nresample: usize,
+    /// The seed of the Monte Carlo permutations (42 when the config has none).
+    seed: u64,
 }
 
 /// A split in the conditional inference tree.
@@ -514,38 +537,79 @@ impl NodeTests {
     }
 }
 
-/// The variable-selection tests of the node over `indices`, for every input.
+/// The variable-selection tests of the node `node_id` over `indices`, for every input.
 ///
 /// "Bonferroni" is partykit's: `1 - (1 - p)^m` computed as `-expm1(m log1p(-p))`, with m the number
-/// of tested inputs. "Univariate" leaves the p-values as they are.
+/// of tested inputs. "Univariate" leaves the p-values as they are. "MonteCarlo" draws `nresample`
+/// permutations of the node's responses, one per resample shared by every input, and reports
+/// `#{b : c*_b >= c} / B`, unadjusted; resample b's permutation is seeded from (seed, node, b).
 fn node_tests(
     x: &ArrayView2<f64>,
     response: &Response<'_>,
     indices: &[usize],
     options: CtreeOptions,
+    node_id: usize,
 ) -> EconResult<NodeTests> {
     let p_inputs = x.ncols();
     let test = LinearTest::new(response, indices, options.teststat);
     let mut statistic = vec![f64::NAN; p_inputs];
     let mut p = vec![f64::NAN; p_inputs];
+    let monte_carlo = options.testtype == CtreeTestType::MonteCarlo;
+    let mut tested: Vec<(usize, CentredInput)> = Vec::new();
     for j in 0..p_inputs {
         let input = CentredInput::new(indices.iter().map(|&i| x[[i, j]]));
         if test.testable(&input) {
             let s = test.statistic(&input, None);
             statistic[j] = s;
             p[j] = test.p_value(s);
+            if monte_carlo {
+                tested.push((j, input));
+            }
+        }
+    }
+    if monte_carlo && !tested.is_empty() {
+        let n = indices.len();
+        let mut perm = crate::resource::try_vec(n, 0usize, "ctree Monte Carlo permutation")?;
+        let mut exceed = vec![0usize; p_inputs];
+        let budget = options.nresample;
+        for b in 0..budget {
+            crate::resource::checkpoint()?;
+            for (i, v) in perm.iter_mut().enumerate() {
+                *v = i;
+            }
+            let mut rng = ChaCha8Rng::seed_from_u64(resample_seed(options.seed, node_id, b));
+            perm.shuffle(&mut rng);
+            for (j, input) in &tested {
+                if test.statistic(input, Some(&perm)) >= statistic[*j] {
+                    exceed[*j] += 1;
+                }
+            }
+        }
+        for (j, _) in &tested {
+            p[*j] = exceed[*j] as f64 / budget as f64;
         }
     }
     let m = p.iter().filter(|v| !v.is_nan()).count() as f64;
     let p_adjusted = match options.testtype {
         CtreeTestType::Bonferroni => p.iter().map(|&v| -(m * (-v).ln_1p()).exp_m1()).collect(),
-        CtreeTestType::Univariate => p.clone(),
+        CtreeTestType::Univariate | CtreeTestType::MonteCarlo => p.clone(),
     };
     Ok(NodeTests {
         statistic,
         p,
         p_adjusted,
     })
+}
+
+/// The seed of Monte Carlo resample `b` at node `node`: SplitMix64 finalisers over the three.
+fn resample_seed(seed: u64, node: usize, b: usize) -> u64 {
+    fn mix(mut z: u64) -> u64 {
+        z = z.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    }
+    mix(mix(mix(seed) ^ node as u64) ^ b as u64)
 }
 
 /// partykit's default `minprob`: each child of a split holds at least `ceil(n * minprob)` of
@@ -736,7 +800,7 @@ fn build_ctree(
     }
 
     // Variable selection: the conditional linear statistic of every input.
-    let tests = node_tests(x, response, indices, options)?;
+    let tests = node_tests(x, response, indices, options, node_id)?;
     if depth == 0 {
         *root_tests = Some(tests.clone());
     }
@@ -857,7 +921,8 @@ fn predict_one(node: &CtreeNode, x: &ArrayView1<f64>) -> f64 {
 /// `Computation` for fewer than 2 rows, when `x` and `y` differ in length, or
 /// when `mincriterion` is not strictly inside (0, 1), NaN included;
 /// `InvalidSpecification` for an unknown `teststat` or `testtype`, for partykit's
-/// `MonteCarlo` or `Teststatistic` test types (not implemented), for `minsplit` below
+/// `Teststatistic` test type (not implemented), for `testtype = montecarlo` with `nresample` 0,
+/// for `minsplit` below
 /// `2 * minbucket` (no node of that size can be split into two children of `minbucket` rows), for
 /// `teststat = maximum` with a classification target, for more classes than
 /// `max(2, min(1000, n / 2))`, when `x` or `y` holds a non-finite value or
@@ -909,16 +974,28 @@ pub fn ctree(
     }
     let teststat: CtreeTestStat = config.teststat.parse()?;
     let normalized_testtype = crate::options::normalize(&config.testtype);
-    if normalized_testtype == "montecarlo" || normalized_testtype == "teststatistic" {
+    if normalized_testtype == "teststatistic" {
         return Err(EconError::InvalidSpecification {
             message: format!(
-                "ctree: testtype '{}' (partykit) is not implemented; use bonferroni or univariate",
+                "ctree: testtype '{}' (partykit) is not implemented; use bonferroni, univariate \
+                 or montecarlo",
                 config.testtype
             ),
         });
     }
     let testtype: CtreeTestType = config.testtype.parse()?;
-    let options = CtreeOptions { teststat, testtype };
+    if testtype == CtreeTestType::MonteCarlo && config.nresample == 0 {
+        return Err(EconError::InvalidSpecification {
+            message: "ctree: testtype = montecarlo needs nresample of at least 1 permutation"
+                .to_string(),
+        });
+    }
+    let options = CtreeOptions {
+        teststat,
+        testtype,
+        nresample: config.nresample,
+        seed: config.seed.unwrap_or(42),
+    };
     if config
         .minbucket
         .checked_mul(2)
@@ -1623,6 +1700,66 @@ mod tests {
         assert!(e.contains("at most 15 classes"), "{e}");
     }
 
+    /// The Monte Carlo configuration of the `ctree_montecarlo_t4` case (`stump = TRUE`: the root only).
+    fn monte_carlo_config(seed: u64) -> CtreeConfig {
+        CtreeConfig {
+            testtype: "MonteCarlo".into(),
+            maxdepth: 1,
+            seed: Some(seed),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_validate_ctree_montecarlo_t4() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("ctree_montecarlo_t4");
+        let (x, y) = case_xy(&ds, &["x1", "x2"], "y");
+        let r = ctree(x.view(), y.view(), &monte_carlo_config(1)).unwrap();
+        Check::new(&case)
+            .vector("root_statistic", &r.root_statistics, Tol::stat(120))
+            .finish();
+        // p2a's and R's Monte Carlo p-values are two independent permutation estimates: each lies
+        // within 4 standard errors of their difference (plus 2 / B) of R's value.
+        let b = case.scalar("nresample");
+        for (j, &pr) in case.vector("root_p_mc").iter().enumerate() {
+            let allowed = 4.0 * (2.0 * pr * (1.0 - pr) / b).sqrt() + 2.0 / b;
+            let p = r.root_p_values[j];
+            assert!(
+                (p - pr).abs() <= allowed,
+                "x{}: p {p} vs R {pr} (allowed {allowed})",
+                j + 1
+            );
+            // MonteCarlo p-values are not adjusted (partykit).
+            assert_eq!(r.root_p_values_adjusted[j].to_bits(), p.to_bits());
+            // A count of permutations out of B.
+            assert_eq!((p * b).round() / b, p);
+        }
+    }
+
+    #[test]
+    fn test_ctree_montecarlo_is_reproducible_and_seeded() {
+        let (_, ds) = crate::test_support::load_case("ctree_montecarlo_t4");
+        let (x, y) = case_xy(&ds, &["x1", "x2"], "y");
+        let p = |seed: u64| {
+            ctree(x.view(), y.view(), &monte_carlo_config(seed))
+                .unwrap()
+                .root_p_values
+        };
+        assert_eq!(p(7), p(7));
+        assert_ne!(p(7), p(8));
+    }
+
+    #[test]
+    fn test_ctree_montecarlo_honours_cancellation() {
+        let (x, y, _) = rpart_reference_data();
+        let err = with_budget(cancelled_budget(), || {
+            ctree(x.view(), y.view(), &monte_carlo_config(1))
+        })
+        .unwrap_err();
+        assert!(matches!(err, EconError::Cancelled(_)), "{err}");
+    }
+
     /// The default configuration for a classification of numeric class codes.
     fn classification_config() -> CtreeConfig {
         CtreeConfig {
@@ -2024,6 +2161,7 @@ mod tests {
         assert_eq!(config.teststat, "quadratic");
         assert_eq!(config.testtype, "bonferroni");
         assert_eq!(config.classification, None);
+        assert_eq!(config.nresample, 9999);
     }
 
     /// partykit's two-sample statistic of every admissible cut computed from scratch, the
@@ -2214,10 +2352,26 @@ mod tests {
                 .contains("quadratic")
         );
         assert!(
-            run("quadratic", "MonteCarlo", &y, false)
+            run("quadratic", "Teststatistic", &y, false)
                 .unwrap_err()
                 .to_string()
                 .contains("not implemented")
+        );
+        assert!(run("quadratic", "MonteCarlo", &y, false).is_ok());
+        assert_eq!(
+            "MonteCarlo".parse::<CtreeTestType>().unwrap(),
+            CtreeTestType::MonteCarlo
+        );
+        let none = CtreeConfig {
+            testtype: "montecarlo".into(),
+            nresample: 0,
+            ..Default::default()
+        };
+        let e = ctree(x.view(), y.view(), &none).unwrap_err();
+        assert!(
+            matches!(e, EconError::InvalidSpecification { .. })
+                && e.to_string().contains("nresample"),
+            "{e}"
         );
         assert!(
             run("maximum", "bonferroni", &y_cls, true)
