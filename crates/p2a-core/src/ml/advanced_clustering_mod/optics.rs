@@ -402,6 +402,9 @@ pub fn optics_with(data: ArrayView2<f64>, config: &OpticsConfig) -> EconResult<O
 /// with a finite `max_eps`, `extractDBSCAN(eps_cl = max_eps)`; otherwise none (every label -1 and a
 /// warning; call [`OpticsResult::extract_dbscan`] or [`OpticsResult::extract_xi`] on the result), as
 /// R's `optics()` alone.
+///
+/// With the default `max_eps` (infinity) every neighbourhood is all n points: O(n^2) time; a
+/// finite `max_eps` lets the k-d tree prune.
 pub fn optics(
     data: ArrayView2<f64>,
     min_samples: usize,

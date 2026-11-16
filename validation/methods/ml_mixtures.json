@@ -136,9 +136,9 @@
     },
     {
       "id": "ml_fuzzy_partitioning",
-      "name": "Fuzzy c-means (hard partition) and FANNY (recorded)",
+      "name": "Fuzzy c-means (hard partition)",
       "category": "ml",
-      "reference": "e1071::cmeans, cluster::fanny",
+      "reference": "e1071::cmeans",
       "doc": "validation/ml/partitioning.md",
       "cases": [
         "fuzzy_reference_blobs"
@@ -147,21 +147,10 @@
         "p2a-core::ml::advanced_clustering_mod::fuzzy::tests::test_validate_fcm_cmeans_blobs_labels"
       ],
       "quantities": [
-        "c-means hard partition"
+        "c-means hard partition (full values: ml_fcm_t4, FANNY: ml_fanny_t4)"
       ],
       "tolerance": "exact",
-      "deviations": [
-        {
-          "finding": "ML-9",
-          "quantity": "c-means centres, memberships, withinerror",
-          "note": "2/(m-1) applied to squared distances; recorded in the case for the fix"
-        },
-        {
-          "finding": "ML-11",
-          "quantity": "FANNY memberships, coefficients, objective, clustering",
-          "note": "not the Kaufman-Rousseeuw iteration; recorded in the case for the fix"
-        }
-      ],
+      "deviations": [],
       "supersedes_legacy": []
     }
   ]

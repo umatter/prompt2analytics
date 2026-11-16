@@ -558,13 +558,14 @@ pub fn run_agnes(
 ///   Source: <https://www.rdocumentation.org/packages/pvclust/versions/2.2-0/topics/pvclust>
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PvClustResult {
-    /// AU (Approximately Unbiased) p-values for each cluster (edge)
+    /// AU (Approximately Unbiased) p-values for each edge (row of `merge`)
     pub au_pvalues: Vec<f64>,
-    /// BP (Bootstrap Probability) p-values for each cluster
+    /// BP (Bootstrap Probability) for each edge: the multiscale fit at r = 1 (pvclust's `bp`)
     pub bp_pvalues: Vec<f64>,
-    /// Cluster labels for each observation at given threshold
+    /// Labels of the objects (rows): pvpick's largest clusters with AU >= threshold (root
+    /// excluded) as 0.., in edge order; every other object a singleton label after them
     pub labels: Vec<usize>,
-    /// Number of clusters at AU >= threshold
+    /// Number of clusters pvpick reports (the singletons not counted)
     pub n_clusters: usize,
     /// Merge matrix from hierarchical clustering (pairs of merged clusters)
     pub merge: Vec<(i32, i32)>,
@@ -574,7 +575,7 @@ pub struct PvClustResult {
     pub n_boot: usize,
     /// AU threshold used for cluster selection
     pub au_threshold: f64,
-    /// Number of observations
+    /// Number of objects clustered (rows of the data)
     pub n: usize,
     /// Linkage method used
     pub method: String,
@@ -622,33 +623,49 @@ impl std::fmt::Display for PvClustResult {
 /// computing approximately unbiased (AU) p-values through multiscale
 /// bootstrap resampling.
 ///
+/// The rows of `data` are the objects that are clustered and the columns are resampled, so this
+/// is R's `pvclust(t(data), method.hclust = method, method.dist = "euclidean", r = r)` (pvclust
+/// clusters the columns of its argument). With few columns the scales are coarse: at p = 2 the
+/// default ratios give 1, 1, 1, 2, 2, 2, 2, 2, 3, 3 columns, as in R.
+///
 /// # Arguments
-/// * `data` - Data matrix (n_samples x n_features)
+/// * `data` - Data matrix (n_objects x n_features)
 /// * `method` - Linkage method, any `stats::hclust` method name or alias of
 ///   [`Linkage`] (default "average"; "ward" is ward.D2); an unknown name is an error
-/// * `n_boot` - Number of bootstrap replicates (default: 1000)
-/// * `r` - Bootstrap sample sizes as ratios (default: [0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4]);
-///   at least one, each finite and positive
-/// * `au_threshold` - Threshold for significant clusters (default: 0.95)
+/// * `n_boot` - Number of bootstrap replicates per scale (default: 1000)
+/// * `r` - Relative sample sizes (default: R's `seq(0.5, 1.4, by = 0.1)`); at least one, each
+///   finite and positive, and `round(p * r)` (half to even, as R) must be at least 1
+/// * `au_threshold` - AU level of the reported clusters (default: 0.95)
 /// * `seed` - Random seed
 ///
 /// # Returns
-/// * `PvClustResult` with AU and BP p-values for each cluster
+/// * `PvClustResult` with AU and BP p-values for each edge (row of `merge`) and the clusters of
+///   `pvpick(alpha = au_threshold, pv = "au", max.only = TRUE)` as labels
 ///
-/// # Algorithm
+/// # Algorithm (pvclust 2.2-0)
 ///
-/// 1. Perform initial hierarchical clustering
-/// 2. For each bootstrap sample size ratio:
-///    a. Resample observations with replacement
-///    b. Perform hierarchical clustering
-///    c. Check which original clusters appear in bootstrap tree
-/// 3. Fit curve to compute AU p-values using multiscale extrapolation
-/// 4. BP p-values are computed from r=1.0 bootstrap frequency
+/// 1. The tree is `hclust(dist(data), method)` on the rows.
+/// 2. For each ratio, the scale draws `size = round(p * r)` column indices with replacement
+///    `n_boot` times (the realised ratio is `size / p`); each replicate clusters the rows on those
+///    columns and counts every original edge whose object set is a cluster of the replicate tree.
+/// 3. Per edge, `pvclust:::msfit` on the scales with `0.001 < bp < 0.999`: weighted least squares
+///    of `-qnorm(bp)` on `(sqrt(r), 1/sqrt(r))` with weights `dnorm(z)^2 n_boot / (bp (1 - bp))`;
+///    `AU = pnorm(-(v - c))`, `BP = pnorm(-(v + c))` (the fitted BP at r = 1, pvclust's `bp`).
+///    Fewer than three such scales (or a singular fit): AU = BP = 0 if the mean bp is below 0.5,
+///    else 1.
+/// 4. Labels: the edges with AU at or above the threshold that lie below no other such edge, the
+///    root excluded (pvpick, `max.only = TRUE`), numbered in edge order; every other object is a
+///    singleton after them. `n_clusters` is the number of picked clusters.
+///
+/// Edge matching compares two 64-bit random keys summed over each cluster's members (with its
+/// size), not the member lists: a false match needs two different sets with equal 128-bit sums.
 ///
 /// # References
 ///
 /// - Shimodaira, H. (2004). "Approximately unbiased tests of regions using
 ///   multistep-multiscale bootstrap resampling". Annals of Statistics.
+/// - Suzuki, R. and Shimodaira, H. (2006). "Pvclust: an R package for assessing the uncertainty
+///   in hierarchical clustering". Bioinformatics, 22(12).
 pub fn pvclust(
     data: ArrayView2<f64>,
     method: Option<&str>,
@@ -658,15 +675,19 @@ pub fn pvclust(
     seed: Option<u64>,
 ) -> Result<PvClustResult, String> {
     let n = data.nrows();
-    let d = data.ncols();
+    let p = data.ncols();
 
     if n < 2 {
         return Err("Need at least 2 observations".to_string());
     }
+    if p == 0 {
+        return Err("pvclust needs at least one column to resample".to_string());
+    }
 
     let linkage = crate::options::parse_or(method, Linkage::Average).map_err(|e| e.to_string())?;
     let nboot = n_boot.unwrap_or(1000);
-    let ratios = r.unwrap_or_else(|| vec![0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4]);
+    // R's seq(0.5, 1.4, by = 0.1) is from + (0:9) * by.
+    let ratios = r.unwrap_or_else(|| (0..10).map(|i| 0.5 + f64::from(i) * 0.1).collect());
     let threshold = au_threshold.unwrap_or(0.95);
 
     if nboot == 0 {
@@ -680,118 +701,66 @@ pub fn pvclust(
             "r must contain only finite positive ratios (got {bad})"
         ));
     }
+    let sizes = scale_sizes(p, &ratios)?;
     let to_string = |e: EconError| e.to_string();
 
-    // Initialize RNG
     let mut rng = match seed {
         Some(s) => StdRng::seed_from_u64(s),
         None => StdRng::from_entropy(),
     };
 
-    // Perform initial clustering
+    // Initial tree on all columns
     let (merge, heights) = hierarchical_clustering_merge(&data, linkage)?;
-
     let n_edges = merge.len();
 
-    // Extract cluster memberships from the merge matrix
-    let original_clusters = extract_clusters_from_merge(&merge, n);
+    // Two random keys per object; a cluster's key is the wrapping sum over its members.
+    let what = "pvclust keys";
+    let mut keys = try_with_capacity::<(u64, u64)>(n, what).map_err(to_string)?;
+    keys.extend((0..n).map(|_| (rng.next_u64(), rng.next_u64())));
+    let original = cluster_keys(&merge, &keys)?;
 
-    // Bootstrap counts for each edge at each scale
     let mut counts: Vec<Vec<usize>> = vec![vec![0; ratios.len()]; n_edges];
+    let mut boot_keys: std::collections::HashSet<(usize, u64, u64)> =
+        std::collections::HashSet::new();
 
-    // First position of each observation in the current bootstrap sample
-    let mut first_pos = vec![usize::MAX; n];
-
-    // Perform multiscale bootstrap
-    for (scale_idx, &ratio) in ratios.iter().enumerate() {
-        let sample_size = ((n as f64) * ratio).round() as usize;
-        let sample_size = sample_size.max(2);
-
-        // Bootstrap buffers, sized once per scale and refilled per replicate
+    for (scale_idx, &size) in sizes.iter().enumerate() {
         let what = "pvclust bootstrap sample";
-        let mut indices = try_with_capacity::<usize>(sample_size, what).map_err(to_string)?;
         let boot_values = try_vec(
-            checked_len(&[sample_size, d], what).map_err(to_string)?,
+            checked_len(&[n, size], what).map_err(to_string)?,
             0.0f64,
             what,
         )
         .map_err(to_string)?;
-        let mut boot_data = Array2::from_shape_vec((sample_size, d), boot_values)
-            .map_err(|e| format!("{what}: {e}"))?;
+        let mut boot_data =
+            Array2::from_shape_vec((n, size), boot_values).map_err(|e| format!("{what}: {e}"))?;
 
         for _ in 0..nboot {
             checkpoint().map_err(to_string)?;
-
-            // Bootstrap sample indices
-            indices.clear();
-            indices.extend((0..sample_size).map(|_| rng.gen_range(0..n)));
-
-            // Create bootstrap data
-            for (i, &idx) in indices.iter().enumerate() {
-                boot_data.row_mut(i).assign(&data.row(idx));
+            for c in 0..size {
+                let col = rng.gen_range(0..p);
+                boot_data.column_mut(c).assign(&data.column(col));
             }
-
-            // Perform clustering on bootstrap sample
             let (boot_merge, _) = hierarchical_clustering_merge(&boot_data.view(), linkage)?;
-            let boot_clusters = extract_clusters_from_merge(&boot_merge, sample_size);
-
-            // Map each original observation to its first position in the sample
-            first_pos.fill(usize::MAX);
-            for (pos, &obs) in indices.iter().enumerate() {
-                if first_pos[obs] == usize::MAX {
-                    first_pos[obs] = pos;
-                }
-            }
-
-            // Bootstrap clusters as sorted position lists (positions within a
-            // cluster are distinct, so sorted equality is set equality)
-            let boot_sets: std::collections::HashSet<Vec<usize>> = boot_clusters
-                .into_iter()
-                .map(|mut cluster| {
-                    cluster.sort_unstable();
-                    cluster
-                })
-                .collect();
-
-            // Check which original clusters appear
-            for (edge_idx, orig_cluster) in original_clusters.iter().enumerate() {
-                // Map original cluster members to bootstrap sample
-                let mut mapped: Vec<usize> = orig_cluster
-                    .iter()
-                    .map(|&obs| first_pos[obs])
-                    .filter(|&pos| pos != usize::MAX)
-                    .collect();
-
-                if mapped.len() >= 2 {
-                    mapped.sort_unstable();
-                    // Check if this cluster appears in bootstrap
-                    if boot_sets.contains(&mapped) {
-                        counts[edge_idx][scale_idx] += 1;
-                    }
+            boot_keys.clear();
+            boot_keys.extend(cluster_keys(&boot_merge, &keys)?);
+            for (edge_idx, key) in original.iter().enumerate() {
+                if boot_keys.contains(key) {
+                    counts[edge_idx][scale_idx] += 1;
                 }
             }
         }
     }
 
-    // Compute AU and BP p-values
+    let realised: Vec<f64> = sizes.iter().map(|&s| s as f64 / p as f64).collect();
     let mut au_pvalues = vec![0.0; n_edges];
     let mut bp_pvalues = vec![0.0; n_edges];
-
     for edge_idx in 0..n_edges {
-        // BP is simply the frequency at r=1.0
-        let r1_idx = ratios.iter().position(|&r| (r - 1.0).abs() < 0.01);
-        if let Some(idx) = r1_idx {
-            bp_pvalues[edge_idx] = counts[edge_idx][idx] as f64 / nboot as f64;
-        }
-
-        // AU p-value from multiscale extrapolation
-        // Use weighted least squares on log(-log(p)) vs log(r)
-        au_pvalues[edge_idx] = compute_au_pvalue(&counts[edge_idx], &ratios, nboot)?;
+        let fit = msfit(&counts[edge_idx], &realised, nboot)?;
+        au_pvalues[edge_idx] = fit.au;
+        bp_pvalues[edge_idx] = fit.bp;
     }
 
-    // Assign cluster labels based on significant edges
-    let labels = assign_pvclust_labels(&merge, &au_pvalues, threshold, n);
-    let n_clusters = labels.iter().max().map(|&m| m + 1).unwrap_or(1);
+    let (labels, n_clusters) = pvpick_labels(&merge, &au_pvalues, threshold, n);
 
     Ok(PvClustResult {
         au_pvalues,
@@ -805,6 +774,184 @@ pub fn pvclust(
         n,
         method: linkage.r_name().to_string(),
     })
+}
+
+/// `round(p * r)` with R's half-to-even rounding (`pvclust:::boot.hclust`); 0 is an error.
+fn scale_sizes(p: usize, ratios: &[f64]) -> Result<Vec<usize>, String> {
+    ratios
+        .iter()
+        .map(|&r| {
+            let size = (p as f64 * r).round_ties_even();
+            if size < 1.0 {
+                Err(format!(
+                    "r = {r} gives no columns to resample at {p} columns (round(p * r) = 0)"
+                ))
+            } else if size > (usize::MAX / 2) as f64 {
+                Err(format!("r = {r} gives too many columns at {p} columns"))
+            } else {
+                Ok(size as usize)
+            }
+        })
+        .collect()
+}
+
+/// `(size, key1, key2)` of every merge, in merge order (O(n)).
+fn cluster_keys(
+    merge: &[(i32, i32)],
+    keys: &[(u64, u64)],
+) -> Result<Vec<(usize, u64, u64)>, String> {
+    let mut out: Vec<(usize, u64, u64)> = Vec::with_capacity(merge.len());
+    let node = |id: i32, out: &[(usize, u64, u64)]| -> Result<(usize, u64, u64), String> {
+        if id < 0 {
+            let (a, b) = keys[(-id - 1) as usize];
+            Ok((1, a, b))
+        } else {
+            out.get((id - 1) as usize)
+                .copied()
+                .ok_or_else(|| "pvclust: malformed merge matrix".to_string())
+        }
+    };
+    for &(a, b) in merge {
+        let (sa, a1, a2) = node(a, &out)?;
+        let (sb, b1, b2) = node(b, &out)?;
+        out.push((sa + sb, a1.wrapping_add(b1), a2.wrapping_add(b2)));
+    }
+    Ok(out)
+}
+
+/// `pvclust:::msfit` for one edge.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct MsFit {
+    au: f64,
+    bp: f64,
+    se_au: f64,
+    v: f64,
+    c: f64,
+}
+
+fn std_normal_pdf(z: f64) -> f64 {
+    (-0.5 * z * z).exp() / (2.0 * std::f64::consts::PI).sqrt()
+}
+
+/// Upper normal tail `pnorm(-z)` computed directly.
+fn normal_upper(z: f64) -> f64 {
+    0.5 * erfc(z / std::f64::consts::SQRT_2)
+}
+
+/// Shimodaira's multiscale fit (`pvclust:::msfit(bp, r, nboot)`, pvclust 2.2-0).
+fn msfit(counts: &[usize], r: &[f64], nboot: usize) -> Result<MsFit, String> {
+    let bps: Vec<f64> = counts.iter().map(|&c| c as f64 / nboot as f64).collect();
+    let degenerate = |bps: &[f64]| {
+        let mean = bps.iter().sum::<f64>() / bps.len() as f64;
+        let p = if mean < 0.5 { 0.0 } else { 1.0 };
+        MsFit {
+            au: p,
+            bp: p,
+            se_au: 0.0,
+            v: 0.0,
+            c: 0.0,
+        }
+    };
+    const EPS: f64 = 0.001;
+    let used: Vec<usize> = (0..bps.len())
+        .filter(|&i| bps[i] > EPS && bps[i] < 1.0 - EPS)
+        .collect();
+    if used.len() < 3 {
+        return Ok(degenerate(&bps));
+    }
+    // Normal equations of the weighted fit (weights 1 / vv) on columns sqrt(r), 1/sqrt(r).
+    let (mut s11, mut s12, mut s22, mut t1, mut t2) = (0.0, 0.0, 0.0, 0.0, 0.0);
+    for &i in &used {
+        let bp = bps[i];
+        let zz = -normal_quantile(bp).map_err(|e| e.to_string())?;
+        let dens = std_normal_pdf(zz);
+        let wt = dens * dens * nboot as f64 / ((1.0 - bp) * bp);
+        let x1 = r[i].sqrt();
+        let x2 = 1.0 / x1;
+        s11 += wt * x1 * x1;
+        s12 += wt * x1 * x2;
+        s22 += wt * x2 * x2;
+        t1 += wt * x1 * zz;
+        t2 += wt * x2 * zz;
+    }
+    let det = s11 * s22 - s12 * s12;
+    // All usable scales at one ratio: the design is collinear and R's solve() fails.
+    if !(det.is_finite() && det > 1e-12 * s11 * s22) {
+        return Ok(degenerate(&bps));
+    }
+    let v = (s22 * t1 - s12 * t2) / det;
+    let c = (s11 * t2 - s12 * t1) / det;
+    let z_au = v - c;
+    let z_bp = v + c;
+    // h V h' with V = (X'WX)^-1 and h = (1, -1).
+    let var_au = (s22 + s11 + 2.0 * s12) / det;
+    Ok(MsFit {
+        au: normal_upper(z_au),
+        bp: normal_upper(z_bp),
+        se_au: std_normal_pdf(z_au) * var_au.sqrt(),
+        v,
+        c,
+    })
+}
+
+/// `pvpick(alpha = threshold, pv = "au", max.only = TRUE)` as labels: the significant edges below
+/// no other significant edge (the root excluded) get labels 0.. in edge order, every other object
+/// a singleton label after them. Returns the labels and the number of picked clusters.
+fn pvpick_labels(
+    merge: &[(i32, i32)],
+    au_pvalues: &[f64],
+    threshold: f64,
+    n: usize,
+) -> (Vec<usize>, usize) {
+    let n_edges = merge.len();
+    // covered[e]: some edge above e (root excluded) is significant.
+    let mut covered = vec![false; n_edges];
+    let mut picked = vec![false; n_edges];
+    for e in (0..n_edges.saturating_sub(1)).rev() {
+        let significant = au_pvalues[e] >= threshold;
+        if significant && !covered[e] {
+            picked[e] = true;
+        }
+        let down = covered[e] || significant;
+        for child in [merge[e].0, merge[e].1] {
+            if child > 0 {
+                covered[(child - 1) as usize] = down;
+            }
+        }
+    }
+    let mut label_of_edge = vec![usize::MAX; n_edges];
+    let mut next = 0usize;
+    for e in 0..n_edges {
+        if picked[e] {
+            label_of_edge[e] = next;
+            next += 1;
+        }
+    }
+    let n_clusters = next;
+    // Propagate picked labels down the tree (parents have larger indices).
+    let mut labels = vec![usize::MAX; n];
+    let mut inherited = vec![usize::MAX; n_edges];
+    for e in (0..n_edges).rev() {
+        let lab = if picked[e] {
+            label_of_edge[e]
+        } else {
+            inherited[e]
+        };
+        for child in [merge[e].0, merge[e].1] {
+            if child > 0 {
+                inherited[(child - 1) as usize] = lab;
+            } else {
+                labels[(-child - 1) as usize] = lab;
+            }
+        }
+    }
+    for l in labels.iter_mut() {
+        if *l == usize::MAX {
+            *l = next;
+            next += 1;
+        }
+    }
+    (labels, n_clusters)
 }
 
 /// The `hclust(dist(data), linkage)` tree as R's merge matrix and heights.
@@ -822,136 +969,6 @@ fn hierarchical_clustering_merge(
         .map(|&(a, b)| Ok((to_i32(a)?, to_i32(b)?)))
         .collect::<Result<Vec<_>, String>>()?;
     Ok((merge, tree.height().to_vec()))
-}
-
-/// Extract clusters from merge matrix.
-fn extract_clusters_from_merge(merge: &[(i32, i32)], n: usize) -> Vec<Vec<usize>> {
-    let mut clusters = Vec::new();
-
-    // Build cluster contents from merge history
-    let mut cluster_contents: HashMap<i32, Vec<usize>> = HashMap::new();
-
-    // Initialize leaves
-    for i in 0..n {
-        cluster_contents.insert(-((i as i32) + 1), vec![i]);
-    }
-
-    // Process merges
-    for (merge_idx, &(m1, m2)) in merge.iter().enumerate() {
-        let members1 = cluster_contents.get(&m1).cloned().unwrap_or_default();
-        let members2 = cluster_contents.get(&m2).cloned().unwrap_or_default();
-
-        let mut new_members = members1;
-        new_members.extend(members2);
-
-        // Record this cluster
-        clusters.push(new_members.clone());
-
-        // Store for future reference
-        cluster_contents.insert((merge_idx + 1) as i32, new_members);
-    }
-
-    clusters
-}
-
-/// Compute the AU p-value from the multiscale bootstrap: `z = qnorm(p)` regressed on
-/// `sqrt(r)` by least squares, `AU = pnorm(-a)` of the intercept `a`.
-fn compute_au_pvalue(counts: &[usize], ratios: &[f64], nboot: usize) -> Result<f64, String> {
-    // Compute frequencies
-    let freqs: Vec<f64> = counts
-        .iter()
-        .map(|&c| (c as f64 / nboot as f64).clamp(0.001, 0.999))
-        .collect();
-
-    let mut sum_x = 0.0;
-    let mut sum_z = 0.0;
-    let mut sum_xz = 0.0;
-    let mut sum_xx = 0.0;
-    let n = ratios.len() as f64;
-
-    for (&r, &p) in ratios.iter().zip(&freqs) {
-        let x = r.sqrt();
-        let z = normal_quantile(p).map_err(|e| e.to_string())?;
-        sum_x += x;
-        sum_z += z;
-        sum_xz += x * z;
-        sum_xx += x * x;
-    }
-
-    // Simple linear regression
-    let denom = n * sum_xx - sum_x * sum_x;
-    if denom.abs() < 1e-10 {
-        return Ok(freqs.iter().sum::<f64>() / freqs.len() as f64);
-    }
-
-    let b = (n * sum_xz - sum_x * sum_z) / denom;
-    let a = (sum_z - b * sum_x) / n;
-
-    // AU = Phi(-a)
-    Ok(0.5 * erfc(a / std::f64::consts::SQRT_2))
-}
-
-/// Assign cluster labels based on significant AU p-values.
-fn assign_pvclust_labels(
-    merge: &[(i32, i32)],
-    au_pvalues: &[f64],
-    threshold: f64,
-    n: usize,
-) -> Vec<usize> {
-    let mut labels = vec![0; n];
-
-    // Find significant clusters (starting from highest AU)
-    let mut significant_edges: Vec<(usize, f64)> = au_pvalues
-        .iter()
-        .enumerate()
-        .filter(|&(_, au)| *au >= threshold)
-        .map(|(i, au)| (i, *au))
-        .collect();
-    significant_edges.sort_by(|a, b| b.1.total_cmp(&a.1));
-
-    // Build cluster contents
-    let mut cluster_contents: HashMap<i32, Vec<usize>> = HashMap::new();
-    for i in 0..n {
-        cluster_contents.insert(-((i as i32) + 1), vec![i]);
-    }
-    for (merge_idx, &(m1, m2)) in merge.iter().enumerate() {
-        let members1 = cluster_contents.get(&m1).cloned().unwrap_or_default();
-        let members2 = cluster_contents.get(&m2).cloned().unwrap_or_default();
-        let mut new_members = members1;
-        new_members.extend(members2);
-        cluster_contents.insert((merge_idx + 1) as i32, new_members);
-    }
-
-    // Assign labels based on significant edges
-    let mut assigned = vec![false; n];
-    let mut next_label = 0usize;
-
-    for (edge_idx, _) in significant_edges {
-        let cluster_id = (edge_idx + 1) as i32;
-        if let Some(members) = cluster_contents.get(&cluster_id) {
-            // Only assign if members haven't been assigned yet
-            let unassigned: Vec<usize> =
-                members.iter().filter(|&&m| !assigned[m]).copied().collect();
-
-            if !unassigned.is_empty() {
-                for &m in &unassigned {
-                    labels[m] = next_label;
-                    assigned[m] = true;
-                }
-                next_label += 1;
-            }
-        }
-    }
-
-    // Assign remaining to their own clusters
-    for i in 0..n {
-        if !assigned[i] {
-            labels[i] = next_label;
-            next_label += 1;
-        }
-    }
-
-    labels
 }
 
 /// Convenience wrapper for pvclust.
@@ -1126,17 +1143,12 @@ pub fn run_fastcluster(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ml::advanced_clustering_mod::common::test_data::cancelled;
     use crate::ml::hclust::Dissimilarity;
     use crate::ml::hclust::test_util::*;
-    use crate::resource::{Budget, CancelToken, with_alloc_ceiling, with_budget};
+    use crate::resource::{with_alloc_ceiling, with_budget};
     use ndarray::array;
     use p2a_validation::{Check, Tol};
-
-    fn cancelled() -> Budget {
-        let t = CancelToken::new();
-        t.cancel();
-        Budget::new(None, t)
-    }
 
     /// R 4.3.3 (cluster 2.x): x <- matrix(c(0.12,1.05, 0.48,0.31, 2.91,3.17, 3.36,2.62, 1.07,0.74,
     ///   5.21,0.43, 4.83,1.12, 0.71,2.38, 2.24,2.85, 5.66,0.97, 1.53,1.36, 3.95,3.48), ncol=2, byrow=TRUE)
@@ -1895,13 +1907,125 @@ mod tests {
     }
 
     #[test]
-    fn test_au_pvalue_uses_exact_normal_functions() {
-        // X-14. R: p <- pmin(pmax(counts / 1000, 0.001), 0.999); a <- coef(lm(qnorm(p) ~ sqrt(r)))[1];
-        // pnorm(-a) = 0.77754497438747294 (a = -0.76392816645692252). The A-S copies gave
-        // 0.77751341704481625.
-        let ratios = [0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4];
-        let counts = [512, 547, 571, 603, 622, 650, 668, 684, 701, 715];
-        let au = compute_au_pvalue(&counts, &ratios, 1000).unwrap();
-        assert!((au - 0.7775449743874729).abs() <= 1e-10 * 0.7775, "{au}");
+    fn test_validate_pvclust_msfit() {
+        // pvclust 2.2-0: pvclust:::msfit(counts / 1000, seq(0.5, 1.4, by = 0.1), 1000).
+        let (case, _) = crate::test_support::load_case("pvclust_msfit");
+        let r = case.vector("r");
+        let mut check = Check::new(&case);
+        for i in 1..=4 {
+            let counts: Vec<usize> = case
+                .vector(&format!("fit{i}_counts"))
+                .iter()
+                .map(|&c| c as usize)
+                .collect();
+            let f = msfit(&counts, &r, 1000).unwrap();
+            check
+                .scalar(&format!("fit{i}_au"), f.au, Tol::coef(10))
+                .scalar(&format!("fit{i}_bp"), f.bp, Tol::coef(10))
+                .scalar(&format!("fit{i}_se_au"), f.se_au, Tol::coef(10))
+                .scalar(&format!("fit{i}_v"), f.v, Tol::coef(10))
+                .scalar(&format!("fit{i}_c"), f.c, Tol::coef(10));
+        }
+        for j in 1..=3 {
+            let counts: Vec<usize> = case
+                .vector(&format!("degenerate{j}_counts"))
+                .iter()
+                .map(|&c| c as usize)
+                .collect();
+            let f = msfit(&counts, &r, 1000).unwrap();
+            check
+                .scalar(&format!("degenerate{j}_au"), f.au, Tol::exact())
+                .scalar(&format!("degenerate{j}_bp"), f.bp, Tol::exact());
+        }
+        // Default ratios and R's half-to-even rounding of p * r.
+        let default: Vec<f64> = (0..10).map(|i| 0.5 + f64::from(i) * 0.1).collect();
+        for p in [2usize, 5, 20] {
+            let sizes: Vec<f64> = scale_sizes(p, &default)
+                .unwrap()
+                .iter()
+                .map(|&s| s as f64)
+                .collect();
+            check.vector(&format!("sizes_p{p}"), &sizes, Tol::exact());
+        }
+        check.vector("r", &default, Tol::exact());
+        check.finish();
+    }
+
+    #[test]
+    fn test_pvclust_refuses_scales_without_columns() {
+        let x = array![[0.0], [0.4], [3.0], [3.3]];
+        // p = 1, r = 0.5: round(0.5) = 0 (R stops: "invalid scale parameter(r)")
+        let e = pvclust(x.view(), None, Some(5), None, None, Some(1)).unwrap_err();
+        assert!(e.contains("round(p * r) = 0"), "{e}");
+        assert!(pvclust(x.view(), None, Some(5), Some(vec![1.0, 1.4]), None, Some(1)).is_ok());
+    }
+
+    #[test]
+    fn test_pvclust_separated_groups_are_supported() {
+        // 20 objects x 40 features in two groups 5 sd apart in every feature.
+        let mut rng = StdRng::seed_from_u64(11);
+        let x = Array2::from_shape_fn((20, 40), |(i, _)| {
+            let shift = if i < 10 { 0.0 } else { 5.0 };
+            shift + rng.sample::<f64, _>(rand_distr::StandardNormal)
+        });
+        let r = pvclust(x.view(), None, Some(200), None, Some(0.95), Some(1)).unwrap();
+        let n_edges = r.merge.len();
+        // The root and the two group edges (the two merges just below the root).
+        let root = r.merge[n_edges - 1];
+        assert_eq!(r.au_pvalues[n_edges - 1], 1.0);
+        assert_eq!(r.bp_pvalues[n_edges - 1], 1.0);
+        for child in [root.0, root.1] {
+            assert!(child > 0, "a group is a single object");
+            let e = (child - 1) as usize;
+            assert!(r.au_pvalues[e] >= 0.99, "AU {}", r.au_pvalues[e]);
+            assert!(r.bp_pvalues[e] >= 0.99, "BP {}", r.bp_pvalues[e]);
+        }
+        assert_eq!(r.n_clusters, 2);
+        assert!(r.labels[..10].iter().all(|&l| l == r.labels[0]));
+        assert!(r.labels[10..].iter().all(|&l| l == r.labels[10]));
+        assert_ne!(r.labels[0], r.labels[10]);
+    }
+
+    #[test]
+    fn test_pvclust_degenerate_scales() {
+        let r: Vec<f64> = (0..10).map(|i| 0.5 + f64::from(i) * 0.1).collect();
+        // Every scale at 0 or 1, and two interior scales only: msfit's mean(bp) rule.
+        assert_eq!(msfit(&[0; 10], &r, 100).unwrap().au, 0.0);
+        assert_eq!(msfit(&[100; 10], &r, 100).unwrap().au, 1.0);
+        let two = [0, 0, 0, 0, 0, 0, 0, 0, 10, 20];
+        let f = msfit(&two, &r, 100).unwrap();
+        assert_eq!((f.au, f.bp), (0.0, 0.0));
+        // Three interior scales at one ratio: collinear design, the same rule.
+        let same = [1.0, 1.0, 1.0];
+        let f = msfit(&[60, 70, 80], &same, 100).unwrap();
+        assert_eq!((f.au, f.bp), (1.0, 1.0));
+    }
+
+    #[test]
+    fn test_pvclust_labels_are_pvpick_max_only() {
+        // Tree on 6 objects: e1 = (1,2), e2 = (3,4), e3 = (e1, 5), e4 = (e2, 6), e5 = root.
+        let merge = vec![(-1, -2), (-3, -4), (1, -5), (2, -6), (3, 4)];
+        // Root and e3 significant: e3 is picked, e1 lies below it; e2 is picked, e4 is not
+        // significant.
+        let au = [0.99, 0.97, 0.96, 0.5, 1.0];
+        let (labels, k) = pvpick_labels(&merge, &au, 0.95, 6);
+        assert_eq!(k, 2);
+        // Edge order: e2 (label 0) then e3 (label 1); object 6 is a singleton after them.
+        assert_eq!(labels, vec![1, 1, 0, 0, 1, 2]);
+        // Nothing significant below the root: every object a singleton, no cluster.
+        let (labels, k) = pvpick_labels(&merge, &[0.1, 0.1, 0.1, 0.1, 1.0], 0.95, 6);
+        assert_eq!(k, 0);
+        assert_eq!(labels, vec![0, 1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn test_pvclust_keys_match_equal_sets_only() {
+        let keys: Vec<(u64, u64)> = (0..4u64).map(|i| (i * 977 + 13, i * 7919 + 5)).collect();
+        let a = cluster_keys(&[(-1, -2), (-3, -4), (1, 2)], &keys).unwrap();
+        let b = cluster_keys(&[(-4, -3), (-2, -1), (2, 1)], &keys).unwrap();
+        let c = cluster_keys(&[(-1, -3), (-2, -4), (1, 2)], &keys).unwrap();
+        assert!(b.contains(&a[0]) && b.contains(&a[1]) && b.contains(&a[2]));
+        assert!(!c.contains(&a[0]) && !c.contains(&a[1]));
+        assert!(c.contains(&a[2]));
     }
 }

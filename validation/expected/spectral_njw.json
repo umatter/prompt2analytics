@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "id": "spectral_njw",
+  "area": "ml/clustering",
+  "method": "Exact NJW spectral clustering: ap_blobs (default gamma) and spectral_pair (gamma = 0.5)",
+  "reference": "eigen(D^-1/2 A D^-1/2, symmetric = TRUE) with A = exp(-gamma |x - y|^2), diag 0; kmeans(rows / norms, k, nstart = 50) (kernlab::specc's embedding)",
+  "call": "NJW(ap_blobs, gamma = 1/(p var), k = 3); NJW(spectral_pair, gamma = 0.5, k = 2, 3)",
+  "dataset": "validation/datasets/generated/spectral_pair.csv",
+  "datasets": ["validation/datasets/generated/ap_blobs.csv", "validation/datasets/generated/spectral_pair.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "blobs_gamma": 0.26571542277202109,
+    "blobs_mu": [0.99999999999999878, 0.71438096628872161, 0.67867257806358594],
+    "blobs_lsym": [1.2212453270876722e-15, 0.28561903371127839, 0.32132742193641406],
+    "blobs_cluster": [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 1, 2, 3, 1, 2, 2, 2, 3, 2],
+    "pair_k2_mu": [1.0000000000000002, 0.99999999999999889],
+    "pair_k2_cluster": [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2],
+    "pair_min_mu": -0.99999999999999911,
+    "pair_k3_mu": [1.0000000000000002, 0.99999999999999889, 0.99695355405267461],
+    "pair_k3_cluster": [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 3, 3]
+  }
+}

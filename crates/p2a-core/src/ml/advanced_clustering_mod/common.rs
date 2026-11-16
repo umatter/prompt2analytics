@@ -25,6 +25,14 @@ pub enum ClusteringAlgorithm {
     BruteForceParallel,
 }
 
+impl ClusteringAlgorithm {
+    /// The neighbour search `hdbscan` and `optics` use for `n` rows of `d` columns.
+    /// Informational: no function takes it.
+    pub fn for_data(n: usize, d: usize) -> ClusteringAlgorithm {
+        select_algorithm(n, d)
+    }
+}
+
 /// Select the neighbour search from the data size.
 pub(crate) fn select_algorithm(n: usize, d: usize) -> ClusteringAlgorithm {
     match (n, d) {
@@ -86,7 +94,8 @@ impl Points {
 // Helper functions
 // =============================================================================
 
-/// Compute pairwise Euclidean distances.
+/// Compute pairwise Euclidean distances (tests; product code uses [`try_distance_matrix`]).
+#[cfg(test)]
 pub(crate) fn compute_distance_matrix(data: &ArrayView2<f64>) -> Array2<f64> {
     let n = data.nrows();
     let mut distances = Array2::zeros((n, n));
@@ -107,7 +116,7 @@ pub(crate) fn compute_distance_matrix(data: &ArrayView2<f64>) -> Array2<f64> {
     distances
 }
 
-/// Pairwise Euclidean distances (as [`compute_distance_matrix`]), with the
+/// Pairwise Euclidean distances, with the
 /// `n x n` matrix allocated through the resource guards and a cancellation
 /// checkpoint per row.
 pub(crate) fn try_distance_matrix(
@@ -217,13 +226,15 @@ pub(crate) fn check_points(data: &ArrayView2<f64>, method: &str) -> EconResult<(
 ///   Source: <https://www.rdocumentation.org/packages/fpc/versions/2.2-10/topics/cluster.stats>
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClusterStatsResult {
-    /// Number of clusters
+    /// Number of clusters: the distinct labels
     pub n_clusters: usize,
-    /// Cluster sizes
+    /// Cluster sizes, one per distinct label in increasing order of the label (as
+    /// `cluster_silhouette` and `cluster_diameters`)
     pub cluster_sizes: Vec<usize>,
-    /// Average within-cluster distance
+    /// Average within-cluster distance: the size-weighted mean of each cluster's mean pairwise
+    /// distance, singletons left out (fpc's `average.within`)
     pub average_within: f64,
-    /// Average between-cluster distance
+    /// Average between-cluster distance (mean over pairs in different clusters)
     pub average_between: f64,
     /// Within-cluster sum of squares
     pub within_ss: f64,
@@ -241,7 +252,8 @@ pub struct ClusterStatsResult {
     pub dunn_index: f64,
     /// Calinski-Harabasz index
     pub calinski_harabasz: f64,
-    /// Davies-Bouldin index
+    /// Davies-Bouldin index ([`crate::ml::cluster_validation::davies_bouldin`]; 0 for one
+    /// cluster)
     pub davies_bouldin: f64,
     /// Separation: minimum distance between clusters
     pub separation: f64,
@@ -294,7 +306,9 @@ impl std::fmt::Display for ClusterStatsResult {
 /// Compute comprehensive cluster statistics.
 ///
 /// This function computes a variety of internal validation measures for
-/// evaluating the quality of a clustering solution.
+/// evaluating the quality of a clustering solution, as `fpc::cluster.stats(dist(data), labels)`
+/// and `clusterCrit::intCriteria` do. Clusters are the distinct labels, whatever their values;
+/// per-cluster vectors are in increasing order of the label.
 ///
 /// # Arguments
 /// * `data` - Data matrix (n_samples x n_features)
@@ -304,11 +318,11 @@ impl std::fmt::Display for ClusterStatsResult {
 /// * `ClusterStatsResult` with multiple cluster quality metrics
 ///
 /// # Metrics computed
-/// - Silhouette width
-/// - Dunn index
+/// - Silhouette width (`cluster::silhouette`; fpc's `avg.silwidth`, `clus.avg.silwidths`)
+/// - Dunn index (minimum separation / maximum diameter)
 /// - Calinski-Harabasz index
-/// - Davies-Bouldin index
-/// - Within/between cluster distances
+/// - Davies-Bouldin index (mean distance to the centroid as scatter)
+/// - Within/between cluster distances (fpc's `average.within`, `average.between`)
 /// - Sum of squares decomposition
 /// - Cluster separation and diameters
 ///
@@ -329,14 +343,15 @@ pub fn cluster_stats(
             labels.len()
         ));
     }
-
-    let k = *labels.iter().max().unwrap_or(&0) + 1;
-    if k == 0 {
+    if n == 0 {
         return Err("No clusters found".to_string());
     }
 
-    // Compute distance matrix
-    let distances = compute_distance_matrix(&data);
+    let compact = crate::ml::cluster_validation::compact_labels(labels, "cluster_stats labels")?;
+    let labels = compact.ids.as_slice();
+    let k = compact.k;
+
+    let distances = try_distance_matrix(&data, "cluster_stats distance matrix")?;
 
     // Cluster sizes
     let mut cluster_sizes = vec![0usize; k];
@@ -355,10 +370,8 @@ pub fn cluster_stats(
         }
     }
     for l in 0..k {
-        if cluster_sizes[l] > 0 {
-            for j in 0..p {
-                cluster_centroids[l][j] /= cluster_sizes[l] as f64;
-            }
+        for j in 0..p {
+            cluster_centroids[l][j] /= cluster_sizes[l] as f64;
         }
     }
 
@@ -389,30 +402,40 @@ pub fn cluster_stats(
         0.0
     };
 
-    // Average within and between cluster distances
-    let mut within_dist_sum = 0.0;
-    let mut within_dist_count = 0;
+    // One pass over the pairs: per-cluster distance sums and diameters, the between-cluster
+    // sum and the separation.
+    let mut within_sum = vec![0.0f64; k];
+    let mut cluster_diameters: Vec<f64> = vec![0.0; k];
     let mut between_dist_sum = 0.0;
-    let mut between_dist_count = 0;
-
+    let mut between_dist_count = 0usize;
+    let mut separation = f64::INFINITY;
     for i in 0..n {
+        checkpoint().map_err(|e| e.to_string())?;
+        let li = labels[i];
         for j in (i + 1)..n {
             let d = distances[[i, j]];
-            if labels[i] == labels[j] {
-                within_dist_sum += d;
-                within_dist_count += 1;
+            if li == labels[j] {
+                within_sum[li] += d;
+                cluster_diameters[li] = cluster_diameters[li].max(d);
             } else {
                 between_dist_sum += d;
                 between_dist_count += 1;
+                separation = separation.min(d);
             }
         }
     }
 
-    let average_within = if within_dist_count > 0 {
-        within_dist_sum / within_dist_count as f64
-    } else {
-        0.0
-    };
+    // fpc: weighted.mean(average.distance, cluster.size, na.rm = TRUE)
+    let (mut weighted, mut weight) = (0.0, 0.0);
+    for l in 0..k {
+        let m = cluster_sizes[l];
+        if m >= 2 {
+            let pairs = (m * (m - 1) / 2) as f64;
+            weighted += m as f64 * (within_sum[l] / pairs);
+            weight += m as f64;
+        }
+    }
+    let average_within = if weight > 0.0 { weighted / weight } else { 0.0 };
 
     let average_between = if between_dist_count > 0 {
         between_dist_sum / between_dist_count as f64
@@ -420,43 +443,7 @@ pub fn cluster_stats(
         0.0
     };
 
-    // Cluster diameters and minimum separation
-    let mut cluster_diameters: Vec<f64> = vec![0.0; k];
-    for l in 0..k {
-        let members: Vec<usize> = labels
-            .iter()
-            .enumerate()
-            .filter(|&(_, lab)| *lab == l)
-            .map(|(i, _)| i)
-            .collect();
-
-        for i in 0..members.len() {
-            for j in (i + 1)..members.len() {
-                let d = distances[[members[i], members[j]]];
-                cluster_diameters[l] = cluster_diameters[l].max(d);
-            }
-        }
-    }
-
     let max_diameter = cluster_diameters.iter().cloned().fold(0.0, f64::max);
-
-    // Separation: minimum distance between different clusters
-    let mut separation = f64::INFINITY;
-    for l1 in 0..k {
-        for l2 in (l1 + 1)..k {
-            for i in 0..n {
-                if labels[i] != l1 {
-                    continue;
-                }
-                for j in 0..n {
-                    if labels[j] != l2 {
-                        continue;
-                    }
-                    separation = separation.min(distances[[i, j]]);
-                }
-            }
-        }
-    }
     if separation.is_infinite() {
         separation = 0.0;
     }
@@ -479,8 +466,14 @@ pub fn cluster_stats(
         0.0
     };
 
-    // Davies-Bouldin index
-    let davies_bouldin = compute_davies_bouldin(labels, &distances, &cluster_centroids, k);
+    // Davies-Bouldin index: the one definition in cluster_validation
+    let davies_bouldin = if k >= 2 {
+        crate::ml::cluster_validation::davies_bouldin(data, labels)
+            .map_err(|e| e.to_string())?
+            .db_index
+    } else {
+        0.0
+    };
 
     Ok(ClusterStatsResult {
         n_clusters: k,
@@ -533,83 +526,6 @@ fn compute_silhouette_details(
     (avg, per)
 }
 
-/// Compute Davies-Bouldin index.
-fn compute_davies_bouldin(
-    labels: &[usize],
-    distances: &Array2<f64>,
-    centroids: &[Vec<f64>],
-    k: usize,
-) -> f64 {
-    if k < 2 {
-        return 0.0;
-    }
-
-    let _n = labels.len();
-    let p = centroids[0].len();
-
-    // Compute scatter for each cluster (average distance to centroid)
-    let mut scatter = vec![0.0; k];
-    let mut counts = vec![0; k];
-
-    for &l in labels.iter() {
-        counts[l] += 1;
-    }
-
-    // Compute average within-cluster distance to centroid for each cluster
-    for l in 0..k {
-        if counts[l] == 0 {
-            continue;
-        }
-        let mut total_dist = 0.0;
-        for (i, &lab) in labels.iter().enumerate() {
-            if lab == l {
-                // Use distances to all same-cluster points as proxy for scatter
-                let mut dist_to_others = 0.0;
-                let mut count = 0;
-                for (j, &lab_j) in labels.iter().enumerate() {
-                    if i != j && lab_j == l {
-                        dist_to_others += distances[[i, j]];
-                        count += 1;
-                    }
-                }
-                if count > 0 {
-                    total_dist += dist_to_others / count as f64;
-                }
-            }
-        }
-        scatter[l] = total_dist / counts[l] as f64;
-    }
-
-    // Compute centroid distances
-    let mut centroid_dist = Array2::zeros((k, k));
-    for l1 in 0..k {
-        for l2 in 0..k {
-            if l1 != l2 {
-                let mut d = 0.0;
-                for j in 0..p {
-                    d += (centroids[l1][j] - centroids[l2][j]).powi(2);
-                }
-                centroid_dist[[l1, l2]] = d.sqrt();
-            }
-        }
-    }
-
-    // Davies-Bouldin index
-    let mut db_sum = 0.0;
-    for l1 in 0..k {
-        let mut max_ratio: f64 = 0.0;
-        for l2 in 0..k {
-            if l1 != l2 && centroid_dist[[l1, l2]] > 0.0 {
-                let ratio = (scatter[l1] + scatter[l2]) / centroid_dist[[l1, l2]];
-                max_ratio = max_ratio.max(ratio);
-            }
-        }
-        db_sum += max_ratio;
-    }
-
-    db_sum / k as f64
-}
-
 /// Convenience wrapper for cluster_stats.
 pub fn run_cluster_stats(
     data: ArrayView2<f64>,
@@ -642,6 +558,13 @@ pub(crate) mod test_data {
         v.iter()
             .map(|&x| if x.is_finite() { x } else { f64::NAN })
             .collect()
+    }
+
+    /// A budget whose token is already cancelled (cancellation tests).
+    pub(crate) fn cancelled() -> crate::resource::Budget {
+        let t = crate::resource::CancelToken::new();
+        t.cancel();
+        crate::resource::Budget::new(None, t)
     }
 
     /// Seeded uniform points with noise in every coordinate (large-n and degenerate-input tests).
@@ -760,5 +683,68 @@ mod tests {
         assert_eq!(result.cluster_sizes, vec![3]);
         // With single cluster, between_ss = 0 and silhouette = 0
         assert!(result.between_ss < 1e-10);
+    }
+
+    #[test]
+    fn test_validate_cluster_stats_blobs() {
+        // fpc::cluster.stats(dist(ap_blobs), pam(ap_blobs, 3)$clustering) and clusterCrit.
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("cluster_stats_blobs");
+        let x = test_data::blobs(&ds);
+        let labels: Vec<usize> = case
+            .vector("labels")
+            .iter()
+            .map(|&v| v as usize - 1)
+            .collect();
+        let r = cluster_stats(x.view(), &labels).unwrap();
+        Check::new(&case)
+            .scalar("db", r.davies_bouldin, Tol::stat(115))
+            .scalar("ch", r.calinski_harabasz, Tol::stat(115))
+            .scalar("dunn", r.dunn_index, Tol::stat(115))
+            .scalar("within_ss", r.within_ss, Tol::stat(115))
+            .scalar("avg_silwidth", r.average_silhouette, Tol::stat(115))
+            .vector(
+                "fpc_cluster_avg_silwidths",
+                &r.cluster_silhouette,
+                Tol::stat(115),
+            )
+            .scalar("fpc_average_within", r.average_within, Tol::stat(115))
+            .scalar("fpc_average_between", r.average_between, Tol::stat(115))
+            .scalar("fpc_separation", r.separation, Tol::stat(115))
+            .scalar("fpc_max_diameter", r.max_diameter, Tol::stat(115))
+            .finish();
+        let db = crate::ml::cluster_validation::davies_bouldin(x.view(), &labels).unwrap();
+        assert_eq!(r.davies_bouldin.to_bits(), db.db_index.to_bits());
+    }
+
+    #[test]
+    fn test_for_data_is_select_algorithm() {
+        for n in [0, 1, 499, 500, 9_999, 10_000, 50_000] {
+            for d in [1, 2, 15, 16, 40] {
+                assert_eq!(ClusteringAlgorithm::for_data(n, d), select_algorithm(n, d));
+            }
+        }
+    }
+
+    #[test]
+    fn test_cluster_stats_gapped_labels() {
+        let data = array![
+            [0.0, 0.0],
+            [0.1, 0.3],
+            [0.2, 0.1],
+            [10.0, 10.0],
+            [10.4, 10.1],
+            [5.2, 0.0],
+            [5.0, 0.3],
+        ];
+        let a = cluster_stats(data.view(), &[0, 0, 0, 1, 1, 2, 2]).unwrap();
+        let b = cluster_stats(data.view(), &[0, 0, 0, 2, 2, 3, 3]).unwrap();
+        assert_eq!(b.n_clusters, 3);
+        assert_eq!(a.cluster_sizes, b.cluster_sizes);
+        assert_eq!(a.davies_bouldin.to_bits(), b.davies_bouldin.to_bits());
+        assert_eq!(a.calinski_harabasz.to_bits(), b.calinski_harabasz.to_bits());
+        assert_eq!(a.average_within.to_bits(), b.average_within.to_bits());
+        assert_eq!(a.cluster_silhouette, b.cluster_silhouette);
+        assert_eq!(a.cluster_diameters, b.cluster_diameters);
     }
 }

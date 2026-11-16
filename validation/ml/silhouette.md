@@ -8,6 +8,9 @@ One core (`silhouette_core` in `crates/p2a-core/src/ml/cluster_validation.rs`) s
 means of distances summed in index order; b(i) takes the first minimising cluster; s(i) = (b - a) / max(a, b),
 and s(i) = 0 for a singleton (Rousseeuw 1987) and when a(i) = b(i). Per-cluster averages run over all members.
 Labellings without 2 to n - 1 non-empty clusters (R returns `NA`) and non-finite data or dissimilarities are refused.
+`silhouette`'s `n_clusters` counts the distinct labels, whatever their values. `silhouette_optimized` allocates its
+distance matrix through the resource guards and checks the cancellation budget per row
+(`silhouette_optimized_distance_matrix_is_fallible_and_cancellable`).
 
 ## Reference
 

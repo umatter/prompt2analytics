@@ -67,8 +67,16 @@ Hand cases (review findings): `{0, 1, 3, 7, 15}` average heights 1, 2.5, 5.66666
 - **DIANA** (`diana`): cluster's `splyt` with running sums; the full divisive tree is always built, so `dc`
   (0.8885450615416582), the banner, `order` and `merge` equal `cluster::diana`; labels are
   `cutree(as.hclust(diana(x)), k) - 1`.
-- **pvclust** (`pvclust`): the original tree is `hclust(dist(x), "average")` (merge and heights pinned); the
-  bootstrap p-values are not R-pinned (ML-10, Tier 4). An unknown method name is an error.
+- **pvclust** (`pvclust`): rows are the clustered objects, as `pvclust(t(x), method.dist = "euclidean")`. The
+  original tree is `hclust(dist(x), method)` (merge and heights pinned, `test_validate_pvclust_tree`). Each
+  bootstrap resamples the columns with replacement at sizes `round(p r)` (ties to even, R's `round`; a size of 0 is
+  an error), and a cluster is matched by its set of objects. AU and BP come from Shimodaira's multiscale fit
+  (`pvclust:::msfit`): weighted least squares of `qnorm(1 - bp)` on `(sqrt(r), 1/sqrt(r))` with weights
+  `1 / ((1 - bp) bp / (dnorm(z)^2 nboot))`, using scales with `0.001 < bp < 0.999` and needing three of them
+  (else AU = BP = 0 when `mean(bp) < 0.5`, else 1); `AU = pnorm(-(v - c))`, the reported BP the fitted
+  `pnorm(-(v + c))`, `se.au = dnorm(z_au) sqrt(h V h')`. The fit is pinned on fixed bootstrap counts
+  (`test_validate_pvclust_msfit`, case `pvclust_msfit`, registry `ml_pvclust_t4`); the bootstrap draws are p2a's
+  own. Labels and `n_clusters` are `pvpick(max.only = TRUE)`'s. An unknown method name is an error.
 - **fastcluster** (`fastcluster`): the core with `fastcluster::hclust` / `hclust.vector` conventions (`Weighted`
   is mcquitty, `Ward` is ward.D2, centroid and median heights square-rooted).
 
@@ -93,12 +101,32 @@ points; p2a's label + 1 equals R's cluster (noise -1 -> 0). Test `test_validate_
 | `test_validate_agnes_diana_coefficients`, `test_validate_agnes_tree` | `agnes_<method>_ac`, `_height`, `_order`, `_cutree3`; `diana_dc` | ac, dc `Tol::stat(60)`; heights `Tol::coef(60)`; order, labels exact |
 | `test_validate_diana_banner` | `diana_banner`, `_order`, `_merge`, `_cutree3` | banner `Tol::coef(60)`; the rest exact |
 | `test_validate_pvclust_tree` | `average_merge`, `average_height` | merge exact; heights `Tol::coef(60)` |
+| `test_validate_pvclust_msfit` (case `pvclust_msfit`) | `fit<i>_au`, `_bp`, `_se_au`, `_v`, `_c`; `degenerate<j>_au`, `_bp`; `sizes_p<p>` | fits `Tol::coef(10)`; degenerate fits and sizes exact |
 | `test_validate_dbscan_hclust60` (`ml/clustering.rs`) | `dbscan_eps1_minpts5_cluster` | exact |
 
 ```bash
 cargo test -p p2a-core --lib --no-default-features --features ci -- ml::hclust ml::clustering \
     ml::advanced_clustering_mod::hierarchical
 ```
+
+## Timing
+
+Release builds of v0.5.0 (`f80b0131`) and this change, `p2a-core` with `spectral-analysis` only, one thread (`RAYON_NUM_THREADS=1`, pinned to one core); noisy three-blob data (2 columns unless stated); 3 interleaved processes per side, each the median of up to 2,001 calls after up to 10 warm-ups; median of the medians. The machine was shared (load 23-53), so ratios within about 10% are noise. The Boruvka tree is now minimal (v0.5.0's tree weighed up to 13x the minimum on these data); at small n in 5 dimensions it costs more than the non-minimal tree (signed off up to 3x).
+
+| Call | n | v0.5.0 | this change | ratio |
+|---|---|---|---|---|
+| pvclust average, 20 columns | 100 | 378.96 ms | 264.14 ms | 0.70 |
+| pvclust average, 20 columns | 1,000 | 2.67 s | 2.57 s | 0.96 |
+| pvclust average, 20 columns | 10,000 | 8.28 s | 8.06 s | 0.97 |
+| dual_tree_boruvka_mst, d 2, min_samples 5 | 100 | 355.8 µs | 366.3 µs | 1.03 |
+| dual_tree_boruvka_mst, d 2, min_samples 5 | 1,000 | 23.93 ms | 11.60 ms | 0.48 |
+| dual_tree_boruvka_mst, d 2, min_samples 5 | 10,000 | 3.92 s | 358.36 ms | 0.09 |
+| dual_tree_boruvka_mst, d 5 | 100 | 469.0 µs | 834.3 µs | 1.78 |
+| dual_tree_boruvka_mst, d 5 | 1,000 | 45.80 ms | 54.88 ms | 1.20 |
+| dual_tree_boruvka_mst, d 5 | 10,000 | 6.00 s | 1.68 s | 0.28 |
+| kdtree_prim_mst, d 5 (reference) | 100 | 95.6 µs | 89.0 µs | 0.93 |
+| kdtree_prim_mst, d 5 (reference) | 1,000 | 10.83 ms | 9.85 ms | 0.91 |
+| kdtree_prim_mst, d 5 (reference) | 10,000 | 1.22 s | 1.12 s | 0.92 |
 
 ## MCP tools
 

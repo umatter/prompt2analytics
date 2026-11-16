@@ -449,8 +449,8 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Method | File | Status |
 |--------|------|--------|
 | K-means | [kmeans.md](ml/kmeans.md) | R-pinned |
-| DBSCAN (dbscan::dbscan; recorded with the hclust data; the deviations listed are hclust's, ml_dbscan has none) | [hclust.md](ml/hclust.md) | R-pinned, known deviations (ML-10, ML-55) |
-| Hierarchical (stats::hclust core; hierarchical, fastcluster, AGNES, DIANA, pvclust) | [hclust.md](ml/hclust.md) | R-pinned, known deviations (ML-10, ML-55) |
+| DBSCAN (dbscan::dbscan; recorded with the hclust data; the deviations listed are hclust's, ml_dbscan has none) | [hclust.md](ml/hclust.md) | R-pinned, known deviations (ML-55) |
+| Hierarchical (stats::hclust core; hierarchical, fastcluster, AGNES, DIANA, pvclust with pvclust:::msfit) | [hclust.md](ml/hclust.md) | R-pinned, known deviations (ML-55) |
 | Cutree | [cutree.md](ml/cutree.md) | R-pinned |
 | Dynamic tree cut (dynamicTreeCut::cutreeDynamic) | [dynamic_tree_cut.md](ml/dynamic_tree_cut.md) | R-pinned |
 | PCA | [pca.md](ml/pca.md) | R-pinned, known deviations (ML-35) |
@@ -472,7 +472,9 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | C5.0-style classification trees (Quinlan 1993, 1996; R's C50 not installed) | [c50.md](ml/c50.md) | not R-pinned |
 | Cubist leaf linear model with collinear attributes | [cubist.md](ml/cubist.md) | R-pinned |
 | Quantile regression forest (quantile predictions; tree growth and importance pinned via rpart and randomForest) | [quantile_rf.md](ml/quantile_rf.md) | not R-pinned |
-| PAM and CLARA (cluster::pam, clara); fuzzy c-means partition and FANNY recorded (e1071::cmeans, cluster::fanny) | [partitioning.md](ml/partitioning.md) | R-pinned, known deviations (ML-11, ML-9) |
+| PAM, CLARA and kmedoids_optimized (cluster::pam, clara); fuzzy c-means and FANNY (e1071::cmeans, cluster::fanny) | [partitioning.md](ml/partitioning.md) | R-pinned |
+| Spectral clustering (kernlab::specc's Ng-Jordan-Weiss embedding, exact eigensolver) | [spectral.md](ml/spectral.md) | R-pinned |
+| Cluster indices (clusterCrit CH, DB, Dunn; aricode ARI, NMI; fpc::cluster.stats; cluster::clusGap's log W and rule) | [cluster_indices.md](ml/cluster_indices.md) | R-pinned |
 | SHAP (TreeSHAP with interaction values; Kernel SHAP) | [shap.md](ml/shap.md) | R-pinned, known deviations (ML-100) |
 | Partial dependence (one and two features) and ICE / centred ICE curves on pdp::partial's grid rules | [pdp.md](ml/pdp.md) | R-pinned, known deviations (ML-137) |
 | CART (rpart: complexity table, V-fold cross-validation, prune, importance) | [cart.md](ml/cart.md) | R-pinned, known deviations (ML-125) |

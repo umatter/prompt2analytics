@@ -289,16 +289,26 @@ impl Component {
     /// negligible against its own diagonal entry (`L_ii^2 <= SYM_RANK_TOL * d * cov_ii`, which does
     /// not depend on the units of the columns).
     pub(crate) fn new(mean: Vec<f64>, cov: Array2<f64>) -> Option<Component> {
+        Self::try_new(mean, cov).ok()
+    }
+
+    /// As [`Component::new`], returning the inputs when `cov` is not positive definite.
+    pub(crate) fn try_new(
+        mean: Vec<f64>,
+        cov: Array2<f64>,
+    ) -> Result<Component, (Vec<f64>, Array2<f64>)> {
         let d = cov.nrows();
-        let l = cholesky(&cov.view()).ok()?;
+        let Ok(l) = cholesky(&cov.view()) else {
+            return Err((mean, cov));
+        };
         let mut log_det = 0.0;
         for i in 0..d {
             let (pivot, diag) = (l[[i, i]], cov[[i, i]]);
             if !pivot.is_finite() || pivot <= 0.0 {
-                return None;
+                return Err((mean, cov));
             }
             if pivot * pivot <= SYM_RANK_TOL * d as f64 * diag {
-                return None;
+                return Err((mean, cov));
             }
             log_det += 2.0 * pivot.ln();
         }
@@ -307,7 +317,7 @@ impl Component {
             chol.extend(row.iter().copied());
         }
         let log_const = d as f64 * (2.0 * std::f64::consts::PI).ln() + log_det;
-        Some(Component {
+        Ok(Component {
             mean,
             cov,
             chol,
@@ -524,10 +534,13 @@ fn factor_components(
                 continue;
             }
         }
-        if let Some(c) = Component::new(mean.clone(), cov.clone()) {
-            comps.push(c);
-            continue;
-        }
+        let (mean, cov) = match Component::try_new(mean, cov) {
+            Ok(c) => {
+                comps.push(c);
+                continue;
+            }
+            Err(inputs) => inputs,
+        };
         let what = if cov_type == CovarianceType::Tied {
             "the pooled covariance".to_string()
         } else {
@@ -740,6 +753,8 @@ pub fn gaussian_mixture_with(
                     }
                     let s = scale.mean_variance.sqrt();
                     let scaled = data.mapv(|v| v / s);
+                    // scikit-learn's GaussianMixture initialises with KMeans(tol = 1e-4), the
+                    // same relative rule
                     let km = match crate::ml::kmeans(
                         scaled.view(),
                         k,
@@ -1282,5 +1297,18 @@ mod tests {
             "{s}"
         );
         assert!(r.warnings.iter().any(|w| w.contains("did not converge")));
+    }
+
+    #[test]
+    fn test_gaussian_mixture_is_cancellable() {
+        use crate::ml::advanced_clustering_mod::common::test_data::cancelled;
+        let x = ndarray::Array2::from_shape_fn((60, 2), |(i, j)| {
+            (i % 3) as f64 * 4.0 + 0.3 * ((i * 7 + j * 3) as f64).sin() + 0.1 * j as f64
+        });
+        let e = crate::resource::with_budget(cancelled(), || {
+            gaussian_mixture(x.view(), 3, None, None, None, Some(1))
+        })
+        .unwrap_err();
+        assert!(e.contains("cancelled"), "{e}");
     }
 }

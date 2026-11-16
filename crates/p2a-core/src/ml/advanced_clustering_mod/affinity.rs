@@ -622,4 +622,17 @@ mod tests {
         assert_eq!((result.n_clusters, result.converged), (2, true));
         assert_eq!(result.labels, vec![0, 0, 0, 1, 1, 1]);
     }
+
+    #[test]
+    fn test_affinity_propagation_is_cancellable() {
+        use crate::ml::advanced_clustering_mod::common::test_data::cancelled;
+        let x = ndarray::Array2::from_shape_fn((60, 2), |(i, j)| {
+            (i % 3) as f64 * 4.0 + 0.3 * ((i * 7 + j * 3) as f64).sin() + 0.1 * j as f64
+        });
+        let e = crate::resource::with_budget(cancelled(), || {
+            affinity_propagation(x.view(), None, None, None, None)
+        })
+        .unwrap_err();
+        assert!(e.contains("cancelled"), "{e}");
+    }
 }

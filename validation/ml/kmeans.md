@@ -16,7 +16,17 @@ assignment pass, so the labels are always those of the returned centroids (that 
 `tolerance = None` (the MCP and CLI default) is 0: until no point is reassigned. A run that reaches the
 limit has `convergence.converged == false` and a warning ("k-means (Lloyd) did not converge after ...").
 
+With a tolerance, `convergence` records the relative centroid shift of the last update (sum of the squared
+shifts over the mean column variance) against `tolerance`; without one, the points reassigned in the last pass
+against 0.
+
 `kmeans` starts each of `n_init` runs from k-means++ and keeps the smallest inertia (the first on ties).
+k-means++ draws only among points not yet a centre, so `k` above the number of distinct rows is an error with R's
+text ("more cluster centers than distinct data points."); the internal callers (the Gaussian mixture's k-means
+start, the spectral embedding's k-means, `gap_statistic` with `k_max` above the distinct rows) report the same
+error. A run whose centroid update leaves a cluster without points keeps that centroid and carries R's warning
+"empty cluster: try a better set of initial centers". Finite data whose squared distances overflow is an error
+("squared distances overflow; rescale the data").
 `kmeans_from_centers` starts from given centres, as R's `centers =` matrix: the centres must be finite,
 have the data's columns and be distinct ("initial centers are not distinct"), and a cluster that empties is
 an error ("empty cluster: try a better set of initial centers"), both R's texts.
@@ -68,6 +78,16 @@ the same on `X * 1e-5`, and with `iter.max = 2`.
   `test_mcp_ml_matrix_tools_int64_equals_float64` (`crates/p2a-mcp/src/tools/handlers/ml.rs`),
   `test_cli_ml_integer_columns_accepted` (`crates/p2a-cli/tests/tier2/wp17_ml.rs`). They
   compare p2a with p2a and pin no R number.
+
+## Timing
+
+Release builds of v0.5.0 (`f80b0131`) and this change, `p2a-core` with `spectral-analysis` only, one thread (`RAYON_NUM_THREADS=1`, pinned to one core); noisy three-blob data (2 columns unless stated); 3 interleaved processes per side, each the median of up to 2,001 calls after up to 10 warm-ups; median of the medians. The machine was shared (load 23-53), so ratios within about 10% are noise.
+
+| Call | n | v0.5.0 | this change | ratio |
+|---|---|---|---|---|
+| kmeans, k 3, n_init 5 | 100 | 50.0 µs | 44.9 µs | 0.90 |
+| kmeans, k 3, n_init 5 | 1,000 | 494.5 µs | 401.1 µs | 0.81 |
+| kmeans, k 3, n_init 5 | 10,000 | 4.75 ms | 4.10 ms | 0.86 |
 
 ## Running the Tests
 
