@@ -88,8 +88,6 @@ fn benchmark_rust_ml() {
         config_cart.min_bucket = 5;
         config_cart.cp = 0.01;
         config_cart.xval = 0;
-        config_cart.max_surrogate = 0;
-        config_cart.use_surrogate = false;
         config_cart.seed = Some(42);
 
         let start = Instant::now();
@@ -105,8 +103,6 @@ fn benchmark_rust_ml() {
         config_cart_class.min_bucket = 5;
         config_cart_class.cp = 0.01;
         config_cart_class.xval = 0;
-        config_cart_class.max_surrogate = 0;
-        config_cart_class.use_surrogate = false;
         config_cart_class.seed = Some(42);
 
         let start = Instant::now();

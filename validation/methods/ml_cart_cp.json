@@ -40,7 +40,7 @@
         {
           "finding": "ML-125",
           "quantity": "surrogate and competitor splits, missing feature values",
-          "note": "not implemented: the cases use maxsurrogate = 0, maxcompete = 0, usesurrogate = 0, and cart() refuses non-finite features"
+          "note": "not implemented and not configurable (CartConfig has no surrogate options): the cases use maxsurrogate = 0, maxcompete = 0, usesurrogate = 0, and cart() refuses non-finite features"
         },
         {
           "finding": "ML-125",

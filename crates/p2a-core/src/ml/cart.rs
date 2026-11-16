@@ -94,10 +94,6 @@ pub struct CartConfig {
     /// Number of random cross-validation folds when `folds` is not given; below 2 there is no
     /// cross-validation. Default 10, as rpart.
     pub xval: usize,
-    /// Not implemented (surrogate splits, ML-125): has no effect; non-finite features are refused.
-    pub max_surrogate: usize,
-    /// Not implemented (surrogate splits, ML-125): has no effect; non-finite features are refused.
-    pub use_surrogate: bool,
     /// Seed of the random folds; `None` means 42.
     pub seed: Option<u64>,
     /// The fold (1..=V, every label used) of every row, rpart's `xval = <vector>`. Takes precedence
@@ -115,8 +111,6 @@ impl Default for CartConfig {
             min_bucket: 7,
             cp: 0.01,
             xval: 10,
-            max_surrogate: 5,
-            use_surrogate: true,
             seed: None,
             folds: None,
         }
@@ -1082,9 +1076,14 @@ fn single_leaf(
 ///
 /// # Errors
 ///
-/// `InvalidSpecification` for non-finite features or targets, a `cp` that is not finite or is
-/// negative, `max_depth` above 30, malformed `folds` or a matrix without columns;
-/// `InsufficientData` below 2 rows.
+/// - `InvalidSpecification` for non-finite features or targets, a `cp` that is not finite or is
+///   negative, `max_depth` above 30, malformed `folds`, a matrix without columns, more classes than
+///   `c50::max_classes` allows for `n` rows (gini and entropy), or a target whose sum of
+///   squares about its mean lies outside `sqrt(f64::MIN_POSITIVE)` to `sqrt(f64::MAX)`;
+/// - `InsufficientData` below 2 rows;
+/// - `Computation` when `x` and `y` differ in length;
+/// - `ResourceLimit` when a buffer exceeds the allocation ceiling;
+/// - `Cancelled` when the call's budget is cancelled or its deadline passes.
 ///
 /// # Returns
 ///
@@ -1239,15 +1238,18 @@ pub fn cart(x: ArrayView2<f64>, y: ArrayView1<f64>, config: &CartConfig) -> Econ
     // The split search squares sums of deviations and the table divides by the root risk. Within
     // these bounds neither can leave the range of a float.
     let root_risk = root_eval.risk;
-    if root_risk.is_nan() || root_risk > f64::MAX.sqrt() {
-        return Err(invalid(
-            "CART: the sum of squares of the target overflows; rescale the target".to_string(),
-        ));
+    let (lo, hi) = (f64::MIN_POSITIVE.sqrt(), f64::MAX.sqrt());
+    if !root_risk.is_finite() {
+        return Err(invalid(format!(
+            "CART: the target's sum of squares about its mean overflows to inf; the accepted range is \
+             {lo:e} to {hi:e} (sqrt(f64::MIN_POSITIVE) to sqrt(f64::MAX)); rescale the target"
+        )));
     }
-    if root_risk < f64::MIN_POSITIVE.sqrt() {
-        return Err(invalid(
-            "CART: the sum of squares of the target underflows; rescale the target".to_string(),
-        ));
+    if !(lo..=hi).contains(&root_risk) {
+        return Err(invalid(format!(
+            "CART: the target's sum of squares about its mean ({root_risk:e}) is outside the accepted range \
+             {lo:e} to {hi:e} (sqrt(f64::MIN_POSITIVE) to sqrt(f64::MAX)); rescale the target"
+        )));
     }
     let scale = 1.0 / root_risk;
     // Every fold starts again from the full fit's sort.
@@ -1896,8 +1898,6 @@ mod tests {
         config.cp = 0.001;
         config.min_split = 20;
         config.min_bucket = 7;
-        config.max_surrogate = 0;
-        config.use_surrogate = false;
         config.folds = Some(case_folds(ds));
         config
     }
@@ -2081,8 +2081,6 @@ mod tests {
         config.min_bucket = 1;
         config.max_depth = 1;
         config.xval = 0;
-        config.max_surrogate = 0;
-        config.use_surrogate = false;
         let r = run_cart(&ds, "cls", &["x", "z"], &config).unwrap();
         let (x, _, _) = extract_xy(&ds, "cls", &["x", "z"], NaPolicy::Fail).unwrap();
         let prob = cart_predict_proba(&r, x.view()).unwrap();
@@ -2516,9 +2514,11 @@ mod tests {
     }
 
     #[test]
-    fn test_cart_exact_step_target_has_no_noise_in_xerror() {
-        // A target that four separated clusters of x explain exactly: the deep rows' cross-validated
-        // risk is a difference of large sums and has to come out at (not below) zero.
+    fn test_cart_exact_step_target_has_zero_deepest_xerror() {
+        // A property test: a target that four separated clusters of x explain exactly has a deepest
+        // cross-validated risk of zero and no negative xerror. It passes without the clamp in `cumulate`
+        // too (checked with `Some(*sum)`); `test_cart_cumulate_stays_at_or_above_zero` is the regression
+        // test for the clamp.
         let sizes = [31usize, 47, 59, 83];
         let levels = [0.1, 3.7, 8.3, 11.9];
         let n: usize = sizes.iter().sum();
@@ -2571,6 +2571,19 @@ mod tests {
     }
 
     #[test]
+    fn cart_config_from_old_json_still_loads() {
+        // ML-125: the surrogate options were removed (surrogate splits are not implemented); a serialized
+        // configuration that still names them loads, the two keys ignored.
+        let json = r#"{"method":"Anova","max_depth":30,"min_split":20,"min_bucket":7,"cp":0.01,"xval":10,
+            "max_surrogate":5,"use_surrogate":true,"seed":null}"#;
+        let c: CartConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            (c.min_split, c.min_bucket, c.xval, c.folds),
+            (20, 7, 10, None)
+        );
+    }
+
+    #[test]
     fn test_cart_refuses_a_target_scale_out_of_range() {
         // Before: the guard caught overflow of the root risk only. A root risk of 0 or a subnormal one
         // passed it, and 1 / root_risk filled the table with NaN.
@@ -2581,16 +2594,64 @@ mod tests {
                 .unwrap_err()
                 .to_string()
         };
-        for factor in [1e77, 1e100] {
-            assert!(fit(factor).contains("overflows"), "{factor}");
-        }
-        for factor in [1e-90, 1e-160, 1e-170] {
+        // Out of range but finite: the message gives the value and the range, and says nothing overflowed.
+        for factor in [1e77, 1e100, 1e-90, 1e-160, 1e-170] {
             let e = fit(factor);
+            for part in [
+                "sum of squares",
+                "accepted range",
+                "rescale",
+                "e-154",
+                "e154",
+            ] {
+                assert!(e.contains(part), "{factor}: {part}: {e}");
+            }
+            assert!(!e.contains("overflows"), "{factor}: {e}");
+            let scaled = y.mapv(|v| v * factor);
+            let mean = scaled.mean().unwrap();
+            let ss: f64 = scaled.iter().map(|v| (v - mean) * (v - mean)).sum();
+            let shown = format!("({ss:e})");
+            // the value as computed by the tree's own sum (it may differ from this one in the last digits)
+            let exponent = shown.split('e').nth(1).unwrap().trim_end_matches(')');
             assert!(
-                e.contains("underflows") && e.contains("rescale"),
-                "{factor}: {e}"
+                e.contains(&format!("e{exponent})")),
+                "{factor}: {shown}: {e}"
             );
         }
+        // The squares overflow: the root risk is inf.
+        let e = fit(1e155);
+        assert!(
+            e.contains("overflows to inf") && e.contains("accepted range"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn test_cart_cv_sums_stay_finite_near_the_upper_scale_bound() {
+        // The unscaled quantity that overflowed was r * r, r the root row's summed fold error (about
+        // xerror_root times the root risk). With the root risk at sqrt(f64::MAX) / sqrt(xerror_root) it is
+        // still accepted, but r * r is above f64::MAX: summed in the target's units, row 0's xstd came out 0
+        // (`.max(0.0)` clamps sq - inf), not inf or NaN.
+        let (x, y) = noisy(200, 11);
+        let base = cart(x.view(), y.view(), &CartConfig::default()).unwrap();
+        let x0 = base.cp_table[0].xerror.unwrap();
+        assert!(x0 > 1.001, "{x0}");
+        let target = f64::MAX.sqrt() / x0.sqrt();
+        let factor = (target / base.root_risk).sqrt();
+        let scaled = y.mapv(|v| v * factor);
+        let r = cart(x.view(), scaled.view(), &CartConfig::default()).unwrap();
+        assert!(r.root_risk * x0 > f64::MAX.sqrt());
+        assert_eq!(r.cp_table.len(), base.cp_table.len());
+        for (a, b) in r.cp_table.iter().zip(&base.cp_table) {
+            for (u, v) in [
+                (a.xerror.unwrap(), b.xerror.unwrap()),
+                (a.xstd.unwrap(), b.xstd.unwrap()),
+            ] {
+                assert!(u.is_finite());
+                assert!((u - v).abs() <= 1e-9 * v.abs().max(1e-3), "{u} {v}");
+            }
+        }
+        assert!(r.cp_table[0].xstd.unwrap() > 0.0);
     }
 
     #[test]
@@ -2769,8 +2830,6 @@ mod tests {
         config.min_split = 20;
         config.min_bucket = 7;
         config.xval = 0;
-        config.max_surrogate = 0;
-        config.use_surrogate = false;
         let r = run_cart(&ds, "y", &["x0", "x1"], &config).unwrap();
         let p5 = cart_prune(&r, 0.05).unwrap();
         let p50 = cart_prune(&r, 0.5).unwrap();

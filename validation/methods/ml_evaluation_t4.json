@@ -1,0 +1,37 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "ml_roc_auc",
+      "name": "ROC curve, AUC and Youden optimum",
+      "category": "ml",
+      "reference": "pROC 1.19.1 roc/auc/coords(best, youden)",
+      "doc": "validation/ml/roc_auc.md",
+      "cases": [
+        "ml_roc_small",
+        "ml_roc_ties"
+      ],
+      "tests": [
+        "p2a-core::ml::evaluation::tests::test_validate_roc_auc_small",
+        "p2a-core::ml::evaluation::tests::test_validate_roc_auc_ties",
+        "p2a-core::ml::evaluation_fast::tests::test_validate_fast_roc_auc_small",
+        "p2a-core::ml::evaluation_fast::tests::test_validate_fast_roc_auc_ties"
+      ],
+      "quantities": [
+        "AUC",
+        "tpr and fpr at every curve point",
+        "Youden optimum sensitivity and specificity",
+        "the observed score starting the optimal rule"
+      ],
+      "tolerance": "validation/README.md coefficient row (n = 6: 1e-6, n = 240: 1e-8 relative); thresholds exact",
+      "deviations": [
+        {
+          "finding": "ML-92",
+          "quantity": "optimal threshold",
+          "note": "p2a reports the observed score that starts the rule score >= threshold; pROC reports the midpoint below it; the case pins the observed score R derives from pROC's midpoint"
+        }
+      ],
+      "supersedes_legacy": []
+    }
+  ]
+}

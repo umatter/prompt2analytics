@@ -35,7 +35,7 @@ Case file: `validation/r/cases/ml_cart_cp.R`. Registry: `validation/methods/ml_c
 - **Limits.** `max_depth` is at most 30 and 0 means 30, as rpart.
   A classification tree accepts at most max(2, min(1000, n/2)) classes (C5.0's cap; rpart has none). A target whose
   sum of squares lies outside `sqrt(f64::MIN_POSITIVE)` to `sqrt(f64::MAX)`, about 1.5e-154 to 1.3e154, is refused
-  with a request to rescale it. Inside that range the table does not depend on the target's scale.
+  with the value, the range and a request to rescale it. Inside that range the table does not depend on the target's scale.
 
 ## Cases, values and tests
 
@@ -62,15 +62,19 @@ Property tests that load no case: `test_cart_exact_tie_takes_the_first_candidate
 `test_cart_rejects_bad_arguments`, `test_cart_random_folds_are_seeded_and_balanced`,
 `test_cart_constant_target_is_a_single_leaf`, `test_cart_unsplittable_root_has_one_cp_row`,
 `test_cart_method_parses_aliases_and_rejects_unknown`, `test_cart_cumulate_stays_at_or_above_zero`,
-`test_cart_exact_step_target_has_no_noise_in_xerror`,
+`test_cart_exact_step_target_has_zero_deepest_xerror`,
 `test_cart_table_does_not_depend_on_the_scale_of_the_target`,
-`test_cart_refuses_a_target_scale_out_of_range`, `test_cart_caps_the_class_count`,
+`test_cart_cv_sums_stay_finite_near_the_upper_scale_bound` (the root risk just inside the upper bound, where the
+fold errors summed in the target's units overflowed and `xstd` came out 0),
+`test_cart_refuses_a_target_scale_out_of_range` (the message gives the sum of squares and the accepted range),
+`test_cart_caps_the_class_count`, `cart_config_from_old_json_still_loads`,
 `a_min_bucket_above_half_of_usize_neither_panics_nor_wraps`.
 
 ## Deviations and what is not implemented
 
-- Surrogate and competitor splits and missing feature values (ML-125). `max_surrogate` (default 5) and
-  `use_surrogate` (default true) are accepted and have no effect, and non-finite features are refused. With complete
+- Surrogate and competitor splits and missing feature values (ML-125): not implemented and not configurable
+  (`CartConfig` has no surrogate options; a serialized configuration that names `max_surrogate` or `use_surrogate`
+  still loads, the keys ignored), and non-finite features are refused. With complete
   data surrogates do not change rpart's tree, but rpart's default `variable.importance` adds the surrogate splits'
   improvements. p2a's importance is rpart's with `maxsurrogate = 0`, so a default-to-default comparison with rpart
   differs in the importance only.
