@@ -1108,10 +1108,10 @@ fn arma_autocovariance_system(ar: &[f64], ma: &[f64], r: usize) -> EconResult<Ve
 
 /// Durbin-Levinson algorithm to compute PACF from ACF.
 ///
-/// Autocorrelations and AR coefficients below 1e-150 in magnitude are treated as 0, so no
-/// product of two of them leaves the normal range: subnormal arithmetic is slow, and an exact ACF
-/// of a long lag range decays into it. The PACF changes by less than 1e-150 times the number of
-/// lags.
+/// Autocorrelations, partial autocorrelations and AR coefficients below 1e-150 in magnitude are
+/// treated as 0, so no product of two of them leaves the normal range: subnormal arithmetic is
+/// slow, and an exact ACF of a long lag range decays into it. A partial autocorrelation below
+/// 1e-150 is reported as 0.
 fn durbin_levinson_from_acf(acf: &[f64]) -> EconResult<Vec<f64>> {
     const WHAT: &str = "the partial autocorrelations up to lag_max";
     const TINY: f64 = 1e-150;
@@ -1150,14 +1150,17 @@ fn durbin_levinson_from_acf(acf: &[f64]) -> EconResult<Vec<f64>> {
             continue;
         }
 
-        let phi_nn = num / den;
+        let phi_nn = flush(num / den);
         pacf.push(phi_nn);
 
-        prev[..n - 1].copy_from_slice(&phi[..n - 1]);
-        for k in 1..n {
-            phi[k - 1] = flush(prev[k - 1] - phi_nn * prev[n - k - 1]);
+        // A zero partial autocorrelation leaves the lower-order coefficients as they are.
+        if phi_nn != 0.0 {
+            prev[..n - 1].copy_from_slice(&phi[..n - 1]);
+            for k in 1..n {
+                phi[k - 1] = flush(prev[k - 1] - phi_nn * prev[n - k - 1]);
+            }
         }
-        phi[n - 1] = flush(phi_nn);
+        phi[n - 1] = phi_nn;
     }
 
     Ok(pacf)
