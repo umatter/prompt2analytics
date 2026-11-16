@@ -1302,6 +1302,15 @@ mod tests {
     }
 
     /// The columns `names` of a case dataset as a matrix, and its column `y`.
+    /// `validation/datasets/generated/<name>.csv`, for property tests that pin no R value.
+    fn generated_dataset(name: &str) -> crate::Dataset {
+        let path = p2a_validation::repo_path(&format!("validation/datasets/generated/{name}.csv"));
+        match crate::data::DataLoader::load_csv(&path) {
+            Ok(df) => crate::Dataset::new(df),
+            Err(e) => panic!("cannot load {}: {e}", path.display()),
+        }
+    }
+
     fn case_xy(ds: &crate::Dataset, names: &[&str], y: &str) -> (Array2<f64>, Array1<f64>) {
         use crate::data::columns::{NaPolicy, numeric_column};
         let col = |c: &str| Array1::from(numeric_column(ds.df(), c, NaPolicy::Fail).unwrap().0);
@@ -1670,8 +1679,7 @@ mod tests {
     #[test]
     fn test_ctree_classification_on_request() {
         // Numeric codes with classification = true fit the tree of the same classes as text.
-        let (case, ds) = crate::test_support::load_case("ctree_cls_t4");
-        let _ = case;
+        let ds = generated_dataset("ctree_cls_t4");
         let text = run_ctree(&ds, "cls", &["x1", "x2", "x3"], &CtreeConfig::default()).unwrap();
         let (x, code) = case_xy(&ds, &["x1", "x2", "x3"], "code");
         let codes = ctree(x.view(), code.view(), &classification_config()).unwrap();
@@ -1752,7 +1760,7 @@ mod tests {
 
     #[test]
     fn test_ctree_montecarlo_is_reproducible_and_seeded() {
-        let (_, ds) = crate::test_support::load_case("ctree_montecarlo_t4");
+        let ds = generated_dataset("ctree_montecarlo_t4");
         let (x, y) = case_xy(&ds, &["x1", "x2"], "y");
         let p = |seed: u64| {
             ctree(x.view(), y.view(), &monte_carlo_config(seed))
