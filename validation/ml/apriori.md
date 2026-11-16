@@ -47,3 +47,19 @@ Property tests: `apriori_keeps_itemsets_exactly_at_min_support` (every k / n for
 `eclat_reports_each_itemset_once` (against apriori and a brute-force count of all 255 itemsets),
 `apriori_refuses_invalid_settings`, `apriori_lists_itemsets_in_a_fixed_order`, `rules_have_one_item_on_the_right`,
 `rules_match_a_brute_force_enumeration`, `rule_generator_handles_a_40_item_itemset`, `apriori_stops_at_the_budget`.
+
+## Timing
+
+Preliminary (lane timing, 2026-11-16), protocol as `roc_auc.md`: release builds, base `f80b0131` (v0.5.0), one
+core, 9 interleaved processes per side, each the median of 2,001 / 401 / 41 calls, in µs. n baskets over 20
+items, each item present with probability 0.25; `min_support` 0.05, `min_confidence` 0.5, `min_lift` 0 on both
+sides (the base default 1.0 would drop rules this tree keeps).
+
+| Function | n | base (µs) | this tree (µs) | ratio |
+|---|---:|---:|---:|---:|
+| `apriori` | 100 | 9,130 | 934.5 | 0.10 |
+|  | 1,000 | 89,388 | 5,956 | 0.07 |
+|  | 10,000 | 1,049,158 | 63,754 | 0.06 |
+| `eclat` | 100 | 1,380 | 613.7 | 0.44 |
+|  | 1,000 | 9,189 | 3,999 | 0.44 |
+|  | 10,000 | 97,849 | 43,089 | 0.44 |

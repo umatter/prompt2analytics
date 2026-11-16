@@ -52,3 +52,33 @@ pair count, every point against a direct count), `roc_auc_refuses_infinite_score
 `roc_auc_reports_the_lowest_of_tied_optima`, `roc_auc_caps_the_returned_points`,
 `fast_roc_auc_parallel_does_not_depend_on_the_order_of_ties`, `fast_roc_auc_parallel_refuses_three_classes`,
 `fast_and_exact_agree_on_tied_scores`.
+
+## Timing
+
+Preliminary (lane timing, 2026-11-16): release builds, `--no-default-features --features ci`, base `f80b0131`
+(v0.5.0) against this tree; one core (`taskset -c 8`), `RAYON_NUM_THREADS=1`, 9 processes per side interleaved,
+each the median of 2,001 / 401 / 41 calls (11 for the base `roc_auc` at n = 10,000) after 10 warm-ups; cells are
+the median of the process medians, in µs. Machine shared with other builds (load average 3-18). Scores: logistic
+of a normal with a class shift ("continuous"), and the same rounded to 0.1 ("ties"); 40% positives;
+`roc_auc(.., Some(100))`.
+
+| Function | Scores | n | base (µs) | this tree (µs) | ratio |
+|---|---|---:|---:|---:|---:|
+| `roc_auc` | continuous | 100 | 74.1 | 6.9 | 0.09 |
+|  |  | 1,000 | 3,647 | 57.9 | 0.02 |
+|  |  | 10,000 | 747,648 | 1,173 | 0.002 |
+|  | ties | 100 | 38.6 | 4.3 | 0.11 |
+|  |  | 1,000 | 363.0 | 22.8 | 0.06 |
+|  |  | 10,000 | 10,184 | 264.9 | 0.03 |
+| `fast_roc_auc` | continuous | 100 | 7.4 | 7.3 | 0.98 |
+|  |  | 1,000 | 83.1 | 65.3 | 0.79 |
+|  |  | 10,000 | 1,968 | 1,328 | 0.68 |
+|  | ties | 100 | 7.2 | 4.3 | 0.59 |
+|  |  | 1,000 | 64.5 | 23.2 | 0.36 |
+|  |  | 10,000 | 1,045 | 415.0 | 0.40 |
+| `fast_roc_auc_parallel` | continuous | 100 | 62.8 | 24.8 | 0.39 |
+|  |  | 1,000 | 123.8 | 91.7 | 0.74 |
+|  |  | 10,000 | 1,375 | 1,402 | 1.02 |
+|  | ties | 100 | 59.7 | 23.6 | 0.40 |
+|  |  | 1,000 | 122.1 | 87.7 | 0.72 |
+|  |  | 10,000 | 1,319 | 1,330 | 1.01 |
