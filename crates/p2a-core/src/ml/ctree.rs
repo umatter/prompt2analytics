@@ -88,6 +88,11 @@ pub struct CtreeConfig {
     pub testtype: String,
     /// Random seed for reproducibility
     pub seed: Option<u64>,
+    /// Whether the target's distinct values are classes (R: `factor(y)`). [`ctree`] fits a
+    /// regression tree for `None` and `Some(false)`; [`run_ctree`] sets `Some(true)` for a
+    /// text, categorical or boolean target.
+    #[serde(default)]
+    pub classification: Option<bool>,
 }
 
 impl Default for CtreeConfig {
@@ -100,6 +105,7 @@ impl Default for CtreeConfig {
             teststat: "quadratic".to_string(),
             testtype: "bonferroni".to_string(),
             seed: None,
+            classification: None,
         }
     }
 }
@@ -838,7 +844,8 @@ fn predict_one(node: &CtreeNode, x: &ArrayView1<f64>) -> f64 {
 /// # Arguments
 ///
 /// * `x` - Feature matrix (n_samples x n_features)
-/// * `y` - Target values (n_samples)
+/// * `y` - Target values (n_samples): a regression tree, unless `config.classification` is
+///   `Some(true)`, when the distinct values are the classes (at most `max(2, min(1000, n / 2))`)
 /// * `config` - Tree configuration
 ///
 /// # Returns
@@ -852,7 +859,8 @@ fn predict_one(node: &CtreeNode, x: &ArrayView1<f64>) -> f64 {
 /// `InvalidSpecification` for an unknown `teststat` or `testtype`, for partykit's
 /// `MonteCarlo` or `Teststatistic` test types (not implemented), for `minsplit` below
 /// `2 * minbucket` (no node of that size can be split into two children of `minbucket` rows), for
-/// `teststat = maximum` with a classification target, when `x` or `y` holds a non-finite value or
+/// `teststat = maximum` with a classification target, for more classes than
+/// `max(2, min(1000, n / 2))`, when `x` or `y` holds a non-finite value or
 /// `maxdepth` exceeds 62 (`usize::BITS - 2` on 64-bit targets, since node ids
 /// double at each level); `Cancelled` once the installed computation budget
 /// expires (checked per node).
@@ -953,9 +961,8 @@ pub fn ctree(
         });
     }
 
-    // Determine if classification or regression
-    let unique_y: std::collections::HashSet<i64> = y.iter().map(|&v| (v * 1e10) as i64).collect();
-    let is_classification = ctree_classifies(unique_y.len(), n_samples);
+    // The task comes from the target, not from its values: classes only on request.
+    let is_classification = config.classification == Some(true);
     if teststat == CtreeTestStat::Maximum && is_classification {
         return Err(EconError::InvalidSpecification {
             message: "ctree: teststat = maximum is implemented for regression trees only (the \
@@ -964,24 +971,16 @@ pub fn ctree(
         });
     }
 
-    let classes: Option<Vec<f64>> = if is_classification {
-        let mut cls: Vec<f64> = unique_y.iter().map(|&v| v as f64 / 1e10).collect();
-        cls.sort_by(f64::total_cmp);
-        Some(cls)
+    let (classes, dense) = if is_classification {
+        let (labels, dense) = class_indices(&y)?;
+        (Some(labels), dense)
     } else {
-        None
+        (None, Vec::new())
     };
 
     let indices: Vec<usize> = (0..n_samples).collect();
     let mut importance = Array1::zeros(n_features);
 
-    let dense: Vec<usize> = match &classes {
-        Some(cls) => y
-            .iter()
-            .map(|&v| cls.iter().position(|&c| (c - v).abs() < 1e-10).unwrap_or(0))
-            .collect(),
-        None => Vec::new(),
-    };
     let response = match &classes {
         Some(cls) => Response::Classes {
             class: &dense,
@@ -1035,10 +1034,40 @@ pub fn ctree(
     })
 }
 
-/// Whether [`ctree`] fits a classification tree for a target with `n_unique` distinct
-/// values in `n` rows: at most 10 classes, and fewer than n / 2, rounded down.
-fn ctree_classifies(n_unique: usize, n: usize) -> bool {
-    n_unique <= 10 && n_unique < n / 2
+/// The refusal of `k` classes in `n` rows, above the cap `max(2, min(1000, n / 2))` that C5.0 and
+/// CART use, or `None` within it.
+fn class_cap_error(k: usize, n: usize, target: &str) -> Option<EconError> {
+    let cap = super::c50::max_classes(n);
+    (k > cap).then(|| EconError::InvalidSpecification {
+        message: format!(
+            "ctree fits a classification tree for at most {cap} classes for {n} rows \
+             (max(2, min(1000, n / 2)), n / 2 rounded down ({} for {n} rows)); {target} has {k} \
+             classes. Merge rare classes, or fit a regression tree",
+            n / 2
+        ),
+    })
+}
+
+/// The distinct values of `y` as classes, in ascending order (-0.0 and 0.0 are one class), and
+/// each row's class index.
+fn class_indices(y: &ArrayView1<f64>) -> EconResult<(Vec<f64>, Vec<usize>)> {
+    let canonical = |v: f64| if v == 0.0 { 0.0 } else { v };
+    let mut labels: Vec<f64> = y.iter().map(|&v| canonical(v)).collect();
+    labels.sort_by(f64::total_cmp);
+    labels.dedup_by(|a, b| a.to_bits() == b.to_bits());
+    if let Some(e) = class_cap_error(labels.len(), y.len(), "the target") {
+        return Err(e);
+    }
+    let dense = y
+        .iter()
+        .map(|&v| {
+            let v = canonical(v);
+            labels
+                .binary_search_by(|c| c.total_cmp(&v))
+                .unwrap_or_default()
+        })
+        .collect();
+    Ok((labels, dense))
 }
 
 /// Predict using a fitted ctree.
@@ -1110,9 +1139,9 @@ fn find_terminal_node<'a>(node: &'a CtreeNode, x: &ArrayView1<f64>) -> &'a Ctree
 /// # Arguments
 ///
 /// * `dataset` - Input dataset
-/// * `y_col` - Target column: numeric (integer and decimal columns; classification when
-///   it has at most 10 distinct values and fewer than n / 2, rounded down, as in [`ctree`]),
-///   or a text, categorical or boolean column, whose labels become the class codes 0..K-1
+/// * `y_col` - Target column: numeric (integer and decimal columns; a regression tree unless
+///   `config.classification` is `Some(true)`, as in [`ctree`]), or a text, categorical or
+///   boolean column, always a classification tree, whose labels become the class codes 0..K-1
 ///   in R `factor()` order (reported in [`CtreeResult::class_names`]). A missing value
 ///   (null or NaN) in the target or a feature is an error naming the column
 ///   (`EconError::NullValues`)
@@ -1121,8 +1150,9 @@ fn find_terminal_node<'a>(node: &'a CtreeNode, x: &ArrayView1<f64>) -> &'a Ctree
 ///
 /// # Returns
 ///
-/// CtreeResult with fitted tree and diagnostics. A text target with more classes than the
-/// classification rule allows is `EconError::InvalidSpecification` (no override yet).
+/// CtreeResult with fitted tree and diagnostics. A classification target with more than
+/// `max(2, min(1000, n / 2))` classes (the cap of C5.0 and CART), or a text, categorical or
+/// boolean target with `classification = Some(false)`, is `EconError::InvalidSpecification`.
 pub fn run_ctree(
     dataset: &Dataset,
     y_col: &str,
@@ -1135,24 +1165,25 @@ pub fn run_ctree(
         x_cols,
         crate::data::columns::NaPolicy::Fail,
     )?;
-    if let Some(labels) = &target.labels
-        && !ctree_classifies(labels.len(), x.nrows())
-    {
-        return Err(EconError::InvalidSpecification {
-            message: format!(
-                "ctree fits a classification tree only for at most 10 classes and fewer \
-                 classes than n / 2 rounded down ({} for {} rows); the target '{y_col}' has {} \
-                 classes in {} rows. Merge rare classes or use C5.0",
-                x.nrows() / 2,
-                x.nrows(),
-                labels.len(),
-                x.nrows()
-            ),
-        });
+    let mut config = config.clone();
+    if let Some(labels) = &target.labels {
+        if config.classification == Some(false) {
+            return Err(EconError::InvalidSpecification {
+                message: format!(
+                    "the target '{y_col}' is a text, categorical or boolean column, so ctree fits \
+                     a classification tree; classification = false needs a numeric target"
+                ),
+            });
+        }
+        if let Some(e) = class_cap_error(labels.len(), x.nrows(), &format!("the target '{y_col}'"))
+        {
+            return Err(e);
+        }
+        config.classification = Some(true);
     }
     let feature_names: Vec<String> = x_cols.iter().map(|s| s.to_string()).collect();
 
-    let mut result = ctree(x.view(), target.y.view(), config)?;
+    let mut result = ctree(x.view(), target.y.view(), &config)?;
     result.feature_names = Some(feature_names);
     result.class_names = target.labels;
 
@@ -1517,18 +1548,87 @@ mod tests {
         assert_eq!(r.root.prediction, 0.0);
     }
 
-    /// The default configuration for a classification of numeric class codes.
-    fn classification_config() -> CtreeConfig {
-        CtreeConfig::default()
+    #[test]
+    fn test_ctree_numeric_target_is_regression() {
+        // ML-87 (decision D5: the task comes from the target's type, as partykit). A numeric target
+        // with ten integer values was a classification tree.
+        let (x, y) = noisy_regression(200, 2, 4);
+        let y = y.mapv(|v| (v.clamp(-4.0, 13.0) / 2.0).round() + 2.0); // 0..=9
+        let r = ctree(x.view(), y.view(), &CtreeConfig::default()).unwrap();
+        assert!(!r.is_classification);
+        assert!(r.root.class_probs.is_none());
+        let mean = y.sum() / 200.0;
+        assert!((r.root.prediction - mean).abs() < 1e-12 * mean.abs());
     }
 
     #[test]
-    fn test_ctree_classifies_rule() {
-        // the rule ctree() always used: unique_y.len() <= 10 && unique_y.len() < n_samples / 2
-        // (n / 2 is integer division: 2 classes need at least 6 rows)
-        assert!(ctree_classifies(10, 22) && ctree_classifies(2, 6));
-        assert!(!ctree_classifies(11, 100) && !ctree_classifies(2, 4) && !ctree_classifies(2, 5));
-        assert!(!ctree_classifies(10, 21));
+    fn test_ctree_large_values_are_regression() {
+        // ML-29. `(v * 1e10) as i64` saturates above about 9.2e8, so every value of y in [1e9, 2e9]
+        // fell into one "class": a single node predicting 922337203.685.
+        let (x, y) = noisy_regression(200, 2, 9);
+        let y = y.mapv(|v| 1.5e9 + 2.0e7 * v);
+        let r = ctree(x.view(), y.view(), &CtreeConfig::default()).unwrap();
+        assert!(!r.is_classification);
+        assert!(r.n_nodes > 1, "a single node");
+        let (lo, hi) = (
+            y.iter().cloned().fold(f64::INFINITY, f64::min),
+            y.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
+        );
+        assert!(r.predictions.iter().all(|&p| p >= lo && p <= hi));
+    }
+
+    #[test]
+    fn test_ctree_classification_on_request() {
+        // Numeric codes with classification = true fit the tree of the same classes as text.
+        let (case, ds) = crate::test_support::load_case("ctree_cls_t4");
+        let _ = case;
+        let text = run_ctree(&ds, "cls", &["x1", "x2", "x3"], &CtreeConfig::default()).unwrap();
+        let (x, code) = case_xy(&ds, &["x1", "x2", "x3"], "code");
+        let codes = ctree(x.view(), code.view(), &classification_config()).unwrap();
+        assert!(codes.is_classification);
+        let sig = |r: &CtreeResult| {
+            preorder(&r.root)
+                .iter()
+                .map(|n| {
+                    (
+                        n.n,
+                        n.split.as_ref().map(|s| (s.feature, s.threshold.to_bits())),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(sig(&codes), sig(&text));
+        assert_eq!(codes.predictions, text.predictions);
+        // A text target cannot be a regression.
+        let cfg = CtreeConfig {
+            classification: Some(false),
+            ..Default::default()
+        };
+        let e = run_ctree(&ds, "cls", &["x1", "x2", "x3"], &cfg)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("text, categorical or boolean"), "{e}");
+    }
+
+    #[test]
+    fn test_ctree_class_cap() {
+        // The C5.0 and CART cap max(2, min(1000, n / 2)): 15 classes in 30 rows fit, 16 do not.
+        let x = Array2::from_shape_fn((30, 1), |(i, _)| i as f64);
+        let fit = |k: usize| {
+            let y = Array1::from_shape_fn(30, |i| (i % k) as f64);
+            ctree(x.view(), y.view(), &classification_config())
+        };
+        assert!(fit(15).is_ok());
+        let e = fit(16).unwrap_err().to_string();
+        assert!(e.contains("at most 15 classes"), "{e}");
+    }
+
+    /// The default configuration for a classification of numeric class codes.
+    fn classification_config() -> CtreeConfig {
+        CtreeConfig {
+            classification: Some(true),
+            ..Default::default()
+        }
     }
 
     fn cancelled_budget() -> Budget {
@@ -1745,6 +1845,7 @@ mod tests {
             minsplit: 4,
             minbucket: 2,
             maxdepth: 5,
+            classification: Some(true),
             ..Default::default()
         };
 
@@ -1922,6 +2023,7 @@ mod tests {
         assert_eq!(config.maxdepth, 0);
         assert_eq!(config.teststat, "quadratic");
         assert_eq!(config.testtype, "bonferroni");
+        assert_eq!(config.classification, None);
     }
 
     /// partykit's two-sample statistic of every admissible cut computed from scratch, the
@@ -2091,7 +2193,7 @@ mod tests {
             CtreeTestType::Bonferroni
         );
         let (x, y, y_cls) = rpart_reference_data();
-        let run = |ts: &str, tt: &str, y: &Array1<f64>| {
+        let run = |ts: &str, tt: &str, y: &Array1<f64>, classification: bool| {
             ctree(
                 x.view(),
                 y.view(),
@@ -2100,24 +2202,25 @@ mod tests {
                     minbucket: 5,
                     teststat: ts.into(),
                     testtype: tt.into(),
+                    classification: Some(classification),
                     ..Default::default()
                 },
             )
         };
         assert!(
-            run("qs2", "bonferroni", &y)
+            run("qs2", "bonferroni", &y, false)
                 .unwrap_err()
                 .to_string()
                 .contains("quadratic")
         );
         assert!(
-            run("quadratic", "MonteCarlo", &y)
+            run("quadratic", "MonteCarlo", &y, false)
                 .unwrap_err()
                 .to_string()
                 .contains("not implemented")
         );
         assert!(
-            run("maximum", "bonferroni", &y_cls)
+            run("maximum", "bonferroni", &y_cls, true)
                 .unwrap_err()
                 .to_string()
                 .contains("regression")
@@ -2152,11 +2255,12 @@ mod tests {
 
     #[test]
     fn test_ctree_class_rule_message_states_the_rounded_bound() {
-        // T2 leftover minor (T2-WP17 #0, plan sync 2026-11-01). The rule is n_unique < n / 2 with integer
-        // division, but the refusal said "fewer classes than half the rows": 2 classes in 5 rows were refused
-        // although 2 < 2.5. Property test of p2a's own rule; no number is compared with partykit.
+        // T2 leftover minor (T2-WP17 #0). The class cap is max(2, min(1000, n / 2)) with integer division:
+        // 3 classes in 5 rows are refused, and the refusal states the rounded bound. Property test of p2a's
+        // own rule; no number is compared with partykit (test_na_ctree_class_labels asserts the 15-class
+        // message of a 30-row fixture).
         let df = polars::prelude::df! {
-            "lab" => ["a", "b", "a", "b", "a"],
+            "lab" => ["a", "b", "c", "b", "a"],
             "x" => [0.1, 0.7, 0.3, 0.9, 0.2],
         }
         .unwrap();
@@ -2168,7 +2272,7 @@ mod tests {
         )
         .unwrap_err()
         .to_string();
-        assert!(e.contains("at most 10 classes"), "{e}"); // test_na_ctree_class_labels asserts this substring
+        assert!(e.contains("at most 2 classes"), "{e}");
         assert!(e.contains("n / 2 rounded down (2 for 5 rows)"), "{e}");
         assert!(!e.contains("half the rows"), "{e}");
     }
