@@ -152,6 +152,17 @@ struct Spectrum {
     ok: bool,
 }
 
+/// Parts of (I - ρW)^-1 from one dense inverse ([`SpatialWeights::dense_inverse_parts`]).
+#[derive(Debug, Clone)]
+pub(crate) struct InverseParts {
+    /// diag((I - ρW)^-1)
+    pub(crate) diag: Array1<f64>,
+    /// Σ_j [(I - ρW)^-1]_ij², the diagonal of ((I - ρW)'(I - ρW))^-1
+    pub(crate) row_sq_norms: Array1<f64>,
+    /// (I - ρW)^-1 rhs
+    pub(crate) solved: Array2<f64>,
+}
+
 /// The eigenvalues of W as the spatial likelihoods need them (spatialreg method "eigen").
 ///
 /// Built by [`SpatialWeights::try_spectrum`], which caches it; cheap to clone.
@@ -184,6 +195,11 @@ impl WeightsSpectrum {
             })
             .sum();
         reals + pairs
+    }
+
+    /// [`WeightsSpectrum::log_det`] at each of `rhos` (the grid of the griddy-Gibbs ρ step).
+    pub(crate) fn log_det_grid(&self, rhos: &[f64]) -> Vec<f64> {
+        rhos.iter().map(|&r| self.log_det(r)).collect()
     }
 
     /// tr((I - ρW)^-1) = Re Σ 1 / (1 - ρλ_i).
@@ -559,12 +575,67 @@ impl SpatialWeights {
         Ok(WeightsSpectrum(spectrum))
     }
 
-    /// tr((I - ρW)^-1) = Σ Re(1 / (1 - ρλ)) over the complex eigenvalues λ of W.
+    /// diag((I - ρW)^-1), the squared row norms of (I - ρW)^-1 (= [((I - ρW)'(I - ρW))^-1]_ii)
+    /// and (I - ρW)^-1 `rhs`, from one LU decomposition and inverse of the dense I - ρW.
     ///
-    /// `None` when the sum is not finite (1 - ρλ = 0).
-    pub(crate) fn trace_inverse_i_minus_rho_w(&mut self, rho: f64) -> EconResult<Option<f64>> {
-        let sum = self.try_spectrum()?.trace_inverse(rho);
-        Ok(sum.is_finite().then_some(sum))
+    /// # Errors
+    ///
+    /// `InvalidSpecification` when `rhs` does not have n rows; `ResourceLimit` when an n x n
+    /// matrix exceeds the allocation ceiling; `Cancelled` when an installed budget has
+    /// expired; `Computation` when I - ρW is singular (a non-finite inverse).
+    pub(crate) fn dense_inverse_parts(
+        &self,
+        rho: f64,
+        rhs: ndarray::ArrayView2<f64>,
+    ) -> EconResult<InverseParts> {
+        use faer::Mat;
+        use faer::linalg::solvers::{DenseSolveCore, Solve};
+
+        let n = self.n;
+        if rhs.nrows() != n {
+            return Err(EconError::InvalidSpecification {
+                message: format!(
+                    "(I - rho W)^-1 rhs: rhs has {} rows, W has {n}",
+                    rhs.nrows()
+                ),
+            });
+        }
+        let what = "dense matrix I - rho*W and its inverse";
+        crate::resource::check_alloc::<f64>(crate::resource::checked_len(&[n, n], what)?, what)?;
+        checkpoint()?;
+        let mut a = Mat::<f64>::zeros(n, n);
+        for (i, sw) in self.weights.iter().enumerate() {
+            a[(i, i)] = 1.0;
+            for (&j, &w) in sw.indices.iter().zip(sw.weights.iter()) {
+                a[(i, j)] -= rho * w;
+            }
+        }
+        let lu = a.partial_piv_lu();
+        drop(a);
+        let inv = lu.inverse();
+        let mut diag = crate::resource::try_zeros1(n, "diagonal of (I - rho*W)^-1")?;
+        let mut row_sq_norms = crate::resource::try_zeros1(n, "row norms of (I - rho*W)^-1")?;
+        for j in 0..n {
+            let col = inv.col_as_slice(j);
+            diag[j] = col[j];
+            for (i, &v) in col.iter().enumerate() {
+                row_sq_norms[i] += v * v;
+            }
+        }
+        let rhs_faer = Mat::<f64>::from_fn(n, rhs.ncols(), |i, j| rhs[[i, j]]);
+        let sol = lu.solve(&rhs_faer);
+        let solved = Array2::from_shape_fn((n, rhs.ncols()), |(i, j)| sol[(i, j)]);
+        let finite = diag.iter().chain(row_sq_norms.iter()).chain(solved.iter());
+        if !finite.into_iter().all(|v| v.is_finite()) {
+            return Err(EconError::Computation(format!(
+                "I - rho*W is singular at rho = {rho}"
+            )));
+        }
+        Ok(InverseParts {
+            diag,
+            row_sq_norms,
+            solved,
+        })
     }
 
     /// The common row sum of W, if every row sums to the same value (within 1e-12
@@ -926,6 +997,78 @@ fn spectrum_unavailable() -> EconError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// spatial_sim of the probit-pieces case: the 4-NN row-standardised W and X = [1, x1, x2].
+    fn probit_case() -> (p2a_validation::Case, SpatialWeights, Array2<f64>) {
+        let (case, ds) = crate::test_support::load_case("spatial_probit_pieces_t4");
+        let c = |name: &str| numeric_column(ds.df(), name, NaPolicy::Fail).unwrap().0;
+        let coords: Vec<(f64, f64)> = c("cx").into_iter().zip(c("cy")).collect();
+        let w = SpatialWeights::from_neighbors(
+            &Neighbors::try_from_knn(&coords, 4).unwrap(),
+            WeightStyle::RowStd,
+        );
+        let (x1, x2) = (c("x1"), c("x2"));
+        let x = Array2::from_shape_fn((x1.len(), 3), |(i, j)| match j {
+            0 => 1.0,
+            1 => x1[i],
+            _ => x2[i],
+        });
+        (case, w, x)
+    }
+
+    #[test]
+    fn log_det_grid_matches_log_det() {
+        let (_, mut w, _) = probit_case();
+        let s = w.try_spectrum().unwrap();
+        let rhos = [-0.9, -0.3, 0.0, 0.3, 0.6, 0.9, 0.987];
+        let grid = s.log_det_grid(&rhos);
+        for (g, &r) in grid.iter().zip(&rhos) {
+            assert_eq!(g.to_bits(), s.log_det(r).to_bits());
+        }
+    }
+
+    /// R: solve(diag(n) - rho * W) on the probit-pieces W (spatial_diag_t4.R, case
+    /// spatial_probit_pieces_t4): diag, sigma^2 = rowSums(Ai^2) and mu = Ai X b, exact linear
+    /// algebra on both sides.
+    #[test]
+    fn test_validate_dense_inverse_parts_spatial_sim() {
+        use p2a_validation::{Check, Tol};
+        let (case, w, x) = probit_case();
+        let b = Array1::from(case.vector("beta"));
+        let tol = Tol::new(1e-10, 1e-14);
+        let mut chk = Check::new(&case);
+        for (rho, tag) in [(0.5, "05"), (0.9, "09")] {
+            let parts = w.dense_inverse_parts(rho, x.view()).unwrap();
+            let sigma = parts.row_sq_norms.mapv(f64::sqrt);
+            let mu = parts.solved.dot(&b);
+            chk.vector(
+                &format!("sar_diag_rho{tag}"),
+                parts.diag.as_slice().unwrap(),
+                tol,
+            )
+            .vector(
+                &format!("sar_sigma_rho{tag}"),
+                sigma.as_slice().unwrap(),
+                tol,
+            )
+            .vector(&format!("sar_mu_rho{tag}"), mu.as_slice().unwrap(), tol);
+        }
+        chk.finish();
+    }
+
+    #[test]
+    fn dense_inverse_parts_respect_the_ceiling() {
+        let (_, w, x) = probit_case();
+        let r = crate::resource::with_alloc_ceiling(Some(80 * 80 * 8 - 1), || {
+            w.dense_inverse_parts(0.5, x.view())
+        });
+        assert!(matches!(r, Err(EconError::ResourceLimit(_))), "{r:?}");
+        let r = w.dense_inverse_parts(0.5, x.slice(ndarray::s![..10, ..]));
+        assert!(
+            matches!(r, Err(EconError::InvalidSpecification { .. })),
+            "{r:?}"
+        );
+    }
     use crate::data::columns::{NaPolicy, numeric_column};
     use crate::errors::EconError;
     use crate::spatial::{MoranAlternative, moran_test};
