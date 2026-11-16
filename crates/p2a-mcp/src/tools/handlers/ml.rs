@@ -753,7 +753,7 @@ impl AnalyticsServer {
 
     /// Run t-SNE dimensionality reduction.
     #[tool(
-        description = "Run t-SNE (t-distributed Stochastic Neighbor Embedding) for visualizing high-dimensional data in 2D or 3D. Preserves local structure while revealing clusters. Good for exploratory visualization. Returns the final KL divergence and the first 5 embedded points (no per-row output). Seed: seed, else set_seed, else 42."
+        description = "Run t-SNE (t-distributed Stochastic Neighbor Embedding) for visualizing high-dimensional data in 2D or 3D. Preserves local structure while revealing clusters. Follows Rtsne's defaults with the exact gradient (Rtsne theta = 0): exaggeration 12 for 250 iterations, momentum 0.5 then 0.8, eta (learning_rate) 200, a random N(0, 1e-4) start from the seed; the columns are used as given (no initial PCA, no normalisation). Returns the final KL divergence and the first 5 embedded points (no per-row output). Seed: seed, else set_seed, else 42."
     )]
     pub async fn ml_tsne(
         &self,
@@ -791,7 +791,7 @@ impl AnalyticsServer {
 
     /// Run Classical Multidimensional Scaling (cmdscale).
     #[tool(
-        description = "Classical Multidimensional Scaling (cmdscale) for embedding distances into Euclidean space. Takes a data matrix and computes a low-dimensional configuration that preserves pairwise Euclidean distances. Returns point coordinates and goodness-of-fit measures. Useful for visualizing similarity/dissimilarity data."
+        description = "Classical Multidimensional Scaling (cmdscale) for embedding distances into Euclidean space. Takes a data matrix and computes a low-dimensional configuration that preserves pairwise Euclidean distances. Returns point coordinates and R's two goodness-of-fit measures (GOF). Useful for visualizing similarity/dissimilarity data."
     )]
     pub async fn ml_cmdscale(
         &self,
@@ -833,8 +833,9 @@ impl AnalyticsServer {
                     "n_points": r.n,
                     "k_dimensions": r.k,
                     "gof": {
-                        "gof1_positive_eigenvalues": r.gof[0],
-                        "gof2_k_eigenvalues": r.gof[1]
+                        "gof1": r.gof[0],
+                        "gof2": r.gof[1],
+                        "definition": "R's cmdscale GOF: sum of the k eigenvalues over sum |eigenvalues|, and over the sum of the positive ones"
                     },
                     "eigenvalues": first(&r.eig, r.k.min(10)),
                     "configuration": first(&r.points, 20),
@@ -944,7 +945,7 @@ impl AnalyticsServer {
 
     /// Run Linear SVM classification.
     #[tool(
-        description = "Linear-kernel SVM for two classes (SMO; not pinned to e1071::svm). Rows with a missing value in the target or a feature are dropped (as e1071::svm's formula interface) and the count is reported. Returns the weights, bias, support-vector count, convergence and a JSON block with the first 20 predicted labels in the target's own labels. With output_column, writes each row's predicted label (null for dropped rows)."
+        description = "Linear-kernel SVM for two classes: LIBSVM's C-SVC solver with a linear kernel on the raw columns, as e1071::svm(kernel = 'linear', type = 'C-classification', scale = FALSE); the two target values must be whole numbers, and the larger is the positive class. Rows with a missing value in the target or a feature are dropped (as e1071::svm's formula interface) and the count is reported. Returns the weights, bias, support-vector count, convergence and a JSON block with the first 20 predicted labels in the target's own labels. With output_column, writes each row's predicted label (null for dropped rows)."
     )]
     pub async fn ml_svm(
         &self,

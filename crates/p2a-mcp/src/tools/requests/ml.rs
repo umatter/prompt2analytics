@@ -154,8 +154,10 @@ pub struct TsneRequest {
     #[schemars(description = "Maximum number of iterations. Default is 1000.")]
     pub max_iterations: Option<usize>,
 
-    /// Learning rate (default: 200.0)
-    #[schemars(description = "Learning rate for optimization. Default is 200.")]
+    /// Learning rate: Rtsne's eta (default: 200.0)
+    #[schemars(
+        description = "Learning rate: Rtsne's eta, the step on bhtsne's gradient (sklearn's learning_rate is 4 x eta). Default is 200."
+    )]
     pub learning_rate: Option<f64>,
 
     /// Random seed for reproducibility
@@ -289,12 +291,16 @@ pub struct SvmRequest {
     )]
     pub c: Option<f64>,
 
-    /// Maximum iterations (default: 1000)
-    #[schemars(description = "Maximum number of iterations. Default is 1000.")]
+    /// Budget of passes (default: 1000)
+    #[schemars(
+        description = "Budget of passes of n pair updates: LIBSVM runs at most max_iterations x n iterations (n the number of rows used). Default is 1000."
+    )]
     pub max_iterations: Option<usize>,
 
-    /// Convergence tolerance (default: 1e-3)
-    #[schemars(description = "Convergence tolerance. Default is 0.001.")]
+    /// LIBSVM's stopping tolerance (default: 1e-3)
+    #[schemars(
+        description = "LIBSVM's stopping tolerance on the maximal violating pair (e1071's tolerance). Default is 0.001."
+    )]
     pub tolerance: Option<f64>,
 
     /// Column to write the per-row result into (optional)

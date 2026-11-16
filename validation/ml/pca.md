@@ -6,12 +6,20 @@
 covariance matrix (n - 1 denominator) or, for n <= 4p, the SVD of the centred data; components are sorted by
 decreasing variance. `explained_variance` is R's `prcomp()$sdev^2`; `components` (rows = PCs) is R's
 `rotation` transposed. Loadings are unique up to sign: compare absolute values.
+`explained_variance_ratio` is of the full-spectrum total on both paths, as `summary(prcomp())`'s proportion of
+variance: `total_variance` is the sum of all `min(n, p)` component variances (the trace of the covariance), also
+when `n_components` keeps fewer.
 
 ## R code
 
 `validation/r/cases/ml_hierarchical.R`, case `kmeans_lloyd_pca_mds` (R 4.3.3):
 `prcomp(X, scale. = TRUE)` and `prcomp(X)` on `validation/datasets/generated/hclust_60.csv` (60 x 3). The
 scaled run passes the standardised data to `pca`.
+
+`validation/r/cases/ml_reduction_t4.R`, case `pca_svd_path` (R 4.3.3): `prcomp(X)` on
+`generated/pca_svd_20x8.csv` (20 x 8, three factors plus noise, n > p) and on `generated/pca_wide_6x10.csv`
+(6 x 10, n < p), both on the SVD path. Keys `tall_sdev`, `tall_prop`, `tall_total_variance`,
+`tall_rotation_abs_k2`, `wide_sdev` (the sixth value is roundoff, 1.45e-16), `wide_prop`, `wide_total_variance`.
 
 ## Values
 
@@ -22,15 +30,20 @@ scaled run passes the standardised data to `pca`.
 | `pca_unscaled_sdev` | 2.6485861925208094, 1.9008767308107948, 0.8828277799830404 |
 | `pca_unscaled_var_ratio` | 0.6149348946467286, 0.316744312461122, 0.06832079289214951 |
 | `pca_rotation_abs`, `pca_unscaled_rotation_abs` | `abs(rotation)`, column-major |
+| `tall_prop` | 0.582701993560246, 0.31193124781802695, 0.06197319959275349, ... |
+| `tall_total_variance` | 25.67187924104765 |
+| `wide_total_variance` | 12.475752141516308 |
 
-**Deviation ML-35** (Tier 4): with `n_components < p` on the SVD path (n <= 4p), `explained_variance_ratio` is
-relative to the kept components only. The pins use all components on the covariance path (n = 60 > 4p).
+ML-35 (fixed in Tier 4): with `n_components < min(n, p)` on the SVD path, the shares used to be relative to the
+kept components (0.65133, 0.34867 for the 20 x 8 data with two components).
 
 ## Tests and tolerances
 
 | Test (`crates/p2a-core/src/ml/reduction.rs`) | Keys | Tolerance |
 |---|---|---|
 | `test_validate_prcomp` | `pca_*`, `pca_unscaled_*` | sdev, ratio `Tol::stat(60)`; rotation `Tol::coef(60)` |
+| `test_validate_prcomp_svd_path` | `tall_*` (all components and two), `wide_*` (all and three) | sdev, share, total `Tol::stat(n)`; rotation `Tol::coef(20)`; the roundoff sdev abs 1e-12 |
+| `test_pca_ratio_agrees_across_paths` | p2a property: the SVD and covariance paths give the same shares | abs 1e-12 |
 | `test_pca_n_components_shapes`, `test_pca_components_orthonormal`, `test_pca_transformation_matches_projection`, `test_pca_n_components_bound`, `test_pca_deterministic`, `test_pca_centering` | p2a properties | |
 
 ## Missing and non-finite values
@@ -66,6 +79,26 @@ output_column: Q}`, case `mcp_pca_scores` (`validation/r/cases/mcp_ml_spatial.R`
 MCP text is compared at print precision (`Tol::printed`: 6 decimals, z 4 decimals), JSON blocks at the
 [validation/README.md](../README.md) table for the case's n (`Tol::coef(n)`), labels exactly. Registry:
 `validation/methods/mcp_ml_spatial.json`.
+
+## Timing
+
+Release builds of v0.5.0 (`f80b0131`) and of this change with `--no-default-features --features ci`, one core
+(`taskset -c 2`, `RAYON_NUM_THREADS=1`), base and head processes interleaved, each process the median of 51 / 9 / 3
+calls at n = 100 / 1,000 / 10,000 after a warm-up, the table the median over 5 processes (3 for the single-call
+rows); peak RSS from `/usr/bin/time -v`, one fit per process, the smallest of 3. Intel Core 7 150U, machine load
+10-20 from other jobs (preliminary; the integration run repeats it).
+
+Standard-normal data; the covariance path at n x 5, the SVD path at n x n/2.
+
+| Path | n | v0.5.0 | head | head / v0.5.0 |
+|---|---|---|---|---|
+| covariance | 100 | 34 us | 35 us | 1.01 |
+| covariance | 1,000 | 0.34 ms | 0.33 ms | 0.99 |
+| covariance | 10,000 | 3.6 ms | 3.5 ms | 0.99 |
+| SVD | 100 | 1.37 ms | 1.37 ms | 1.00 |
+| SVD | 1,000 | 0.218 s | 0.225 s | 1.03 |
+
+Peak RSS, covariance path at n = 10,000: 4.8 MB against 4.9 MB.
 
 ## References
 

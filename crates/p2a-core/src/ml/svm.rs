@@ -1,6 +1,8 @@
 //! Support Vector Machine (Linear and Kernel SVM).
 //!
-//! Pure Rust implementation using Sequential Minimal Optimization (SMO).
+//! [`linear_svm`] is the linear-kernel front of LIBSVM's solver
+//! ([`fast_svm`](super::svm_fast::fast_svm)), R-pinned against e1071.
+//! [`kernel_svm`] keeps a simplified SMO (library only) and is not R-pinned.
 //!
 //! Supports multiple kernel functions:
 //! - Linear: K(x, y) = x · y
@@ -12,8 +14,9 @@ use serde::{Deserialize, Serialize};
 
 use ndarray::{Array1, ArrayView1, ArrayView2, Axis};
 
-use crate::errors::EconResult;
+use super::svm_fast::{FastKernel, FastSvmConfig, fast_svm};
 use crate::resource;
+use crate::traits::convergence::{Convergence, ResultNotes, notes_text};
 
 /// SVM result.
 #[derive(Debug, Clone)]
@@ -36,6 +39,19 @@ pub struct SvmResult {
     pub class_labels: Option<(i32, i32)>,
     /// Feature names (if provided)
     pub feature_names: Option<Vec<String>>,
+    /// The convergence record of the solver
+    pub convergence: Option<Convergence>,
+    /// What the caller should know about this fit
+    pub warnings: Vec<String>,
+}
+
+impl ResultNotes for SvmResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
+    }
+    fn notes_convergence(&self) -> Option<Convergence> {
+        self.convergence.clone()
+    }
 }
 
 impl std::fmt::Display for SvmResult {
@@ -82,37 +98,48 @@ impl std::fmt::Display for SvmResult {
         writeln!(f)?;
         writeln!(f, "Predictions: {} samples", self.predictions.len())?;
 
-        // Count predictions per class
-        let neg_count = self.predictions.iter().filter(|&&p| p < 0).count();
-        let pos_count = self.predictions.len() - neg_count;
+        // Count predictions per class label
+        let (neg, pos) = self.class_labels.unwrap_or((-1, 1));
+        let neg_count = self.predictions.iter().filter(|&&p| p == neg).count();
+        let pos_count = self.predictions.iter().filter(|&&p| p == pos).count();
         writeln!(
             f,
-            "  Class distribution: {} negative, {} positive",
-            neg_count, pos_count
+            "  Class distribution: {neg_count} predicted {neg} (negative), {pos_count} predicted {pos} (positive)"
         )?;
 
-        Ok(())
+        write!(f, "{}", notes_text(self))
     }
 }
 
-/// Run Linear SVM using SMO (Sequential Minimal Optimization).
+/// Kernel cache of [`linear_svm`] in MB (e1071's `cachesize` default).
+const LINEAR_SVM_CACHE_MB: usize = 40;
+
+/// Linear C-SVC, solved by LIBSVM's algorithm: [`fast_svm`] with a linear
+/// kernel. R equivalent: `e1071::svm(x, factor(y), type = 'C-classification',
+/// kernel = 'linear', scale = FALSE, cost = c, tolerance = tolerance)`.
 ///
 /// # Arguments
 /// * `data` - Input feature matrix (n_samples x n_features); values must be finite
-/// * `target` - Target values (binary: will be converted to -1/+1); finite
+/// * `target` - Two class labels, whole numbers in the `i32` range; the larger is
+///   the positive class
 /// * `c` - Regularization parameter, finite and > 0 (default: 1.0)
-/// * `max_iterations` - Maximum SMO sweeps, at least 1 (default: 1000)
-/// * `tolerance` - KKT tolerance, finite and > 0 (default: 1e-3)
+/// * `max_iterations` - A budget of passes, at least 1 (default: 1000): LIBSVM
+///   runs at most `max_iterations * n` pair updates (saturating)
+/// * `tolerance` - LIBSVM's stopping tolerance `eps` on the maximal violating
+///   pair, finite and > 0 (default: 1e-3, e1071's `tolerance`)
 /// * `feature_names` - Optional feature names
+///
+/// `weights` is `sum_k alpha_k y_k x_k` over the support vectors, `bias` is
+/// LIBSVM's `-rho`, and a row is predicted as the larger label when its decision
+/// value is `> 0`, as LIBSVM. `n_iterations` counts LIBSVM pair updates;
+/// `convergence` and `warnings` say whether the optimality condition was met
+/// within the budget.
 ///
 /// # Cost
 ///
-/// The SMO loop keeps an error cache: it is rebuilt from the weight vector at
-/// the start of every sweep (O(n·p)) and updated in O(n·p) whenever an alpha or
-/// the bias changes, so a sweep costs O(n·(V + p·S)) for V KKT violators and S
-/// alpha changes. The installed computation budget is checked per sweep and
-/// per KKT violator; once it expires the "Computation stopped" message is
-/// returned.
+/// LIBSVM's second-order working-set selection with shrinking and a kernel
+/// cache of at most 40 MB (`4 n^2` bytes when that is smaller). The installed
+/// computation budget is checked before the solver starts and inside it.
 pub fn linear_svm(
     data: ArrayView2<f64>,
     target: ArrayView1<f64>,
@@ -148,11 +175,72 @@ pub fn linear_svm(
             "tolerance must be a finite number greater than 0, got {tol}"
         ));
     }
+    check_finite_features(&data, feature_names.as_deref())?;
+    let k = target.iter().filter(|v| !v.is_finite()).count();
+    if k > 0 {
+        return Err(format!(
+            "SVM: the target has {k} missing or non-finite values; remove or impute them first"
+        ));
+    }
+
+    // The two labels must be whole numbers (the result keeps them as i32)
+    let (_, class_labels) = convert_to_binary(&target)?;
+    // fast_svm checks the budget only every min(n, 1000) iterations
+    resource::checkpoint().map_err(|e| e.to_string())?;
+
+    let config = FastSvmConfig {
+        c: c_param,
+        kernel: FastKernel::Linear,
+        tolerance: tol,
+        max_iter: max_iter.saturating_mul(n_samples),
+        cache_size_mb: LINEAR_SVM_CACHE_MB,
+        shrinking: true,
+        min_working_set: 0,
+    };
+    // fast_svm's messages name it; the callers (ml_svm, p2a ml svm) know it as SVM
+    let fast = fast_svm(data, target, &config).map_err(|e| match e.strip_prefix("FastSVM:") {
+        Some(rest) => format!("SVM:{rest}"),
+        None => e,
+    })?;
+
+    // w = sum_k (alpha_k y_k) x_k over the support vectors
+    let mut weights = vec![0.0; n_features];
+    for (&i, &a) in fast
+        .support_vector_indices
+        .iter()
+        .zip(&fast.dual_coefficients)
+    {
+        for (j, w) in weights.iter_mut().enumerate() {
+            *w += a * data[[i, j]];
+        }
+    }
+    // LIBSVM's sign: a decision value > 0 is the larger label (whole numbers, checked above)
+    let predictions: Vec<i32> = fast.predictions.iter().map(|&p| p as i32).collect();
+
+    Ok(SvmResult {
+        predictions,
+        weights,
+        bias: fast.bias,
+        n_support_vectors: fast.n_support_vectors,
+        n_iterations: fast.n_iterations,
+        converged: fast.converged,
+        support_vector_indices: fast.support_vector_indices,
+        class_labels: Some(class_labels),
+        feature_names,
+        convergence: fast.convergence,
+        warnings: fast.warnings,
+    })
+}
+
+/// Refuses a feature column with a missing or non-finite value, naming it.
+fn check_finite_features(
+    data: &ArrayView2<f64>,
+    feature_names: Option<&[String]>,
+) -> Result<(), String> {
     for (j, column) in data.axis_iter(Axis(1)).enumerate() {
         let k = column.iter().filter(|v| !v.is_finite()).count();
         if k > 0 {
             let name = feature_names
-                .as_ref()
                 .and_then(|names| names.get(j))
                 .map(|name| format!("feature '{name}'"))
                 .unwrap_or_else(|| format!("column {j} (0-based)"));
@@ -161,62 +249,47 @@ pub fn linear_svm(
             ));
         }
     }
-    let k = target.iter().filter(|v| !v.is_finite()).count();
-    if k > 0 {
+    Ok(())
+}
+
+/// The parameter checks of [`kernel_svm`], as [`linear_svm`]'s plus the kernel's.
+fn check_kernel_config(config: &KernelSvmConfig) -> Result<(), String> {
+    if !(config.c.is_finite() && config.c > 0.0) {
         return Err(format!(
-            "SVM: the target has {k} missing or non-finite values; remove or impute them first"
+            "c must be a finite number greater than 0, got {}",
+            config.c
         ));
     }
-
-    // Convert target to -1/+1
-    let (y, class_labels) = convert_to_binary(&target)?;
-
-    let state = smo_linear(&data, &y, c_param, max_iter, tol).map_err(|e| e.to_string())?;
-    let alpha = &state.alpha;
-    let b = state.b;
-
-    // Compute weights w = sum(alpha_i * y_i * x_i)
-    let mut weights = vec![0.0; n_features];
-    let mut support_vector_indices = Vec::new();
-
-    for i in 0..n_samples {
-        if alpha[i] > 1e-8 {
-            support_vector_indices.push(i);
-            for j in 0..n_features {
-                weights[j] += alpha[i] * y[i] * data[[i, j]];
-            }
+    if !(config.tolerance.is_finite() && config.tolerance > 0.0) {
+        return Err(format!(
+            "tolerance must be a finite number greater than 0, got {}",
+            config.tolerance
+        ));
+    }
+    if config.max_iter == 0 {
+        return Err("max_iter must be at least 1".to_string());
+    }
+    if let Some(g) = config.gamma {
+        if !(g.is_finite() && g > 0.0) {
+            return Err(format!(
+                "gamma must be a finite number greater than 0, got {g}"
+            ));
         }
     }
-
-    // Make predictions: w . x_i + b is the decision function in O(p) per row.
-    let predictions: Vec<i32> = data
-        .outer_iter()
-        .map(|row| {
-            let f_i: f64 = row
-                .iter()
-                .zip(weights.iter())
-                .map(|(x, w)| x * w)
-                .sum::<f64>()
-                + b;
-            if f_i >= 0.0 {
-                class_labels.1
-            } else {
-                class_labels.0
-            }
-        })
-        .collect();
-
-    Ok(SvmResult {
-        predictions,
-        weights,
-        bias: b,
-        n_support_vectors: support_vector_indices.len(),
-        n_iterations: state.n_iterations,
-        converged: state.converged,
-        support_vector_indices,
-        class_labels: Some(class_labels),
-        feature_names,
-    })
+    if config.kernel == SvmKernel::Polynomial && config.degree == 0 {
+        return Err("degree must be at least 1 for the polynomial kernel".to_string());
+    }
+    if config.degree > i32::MAX as usize {
+        return Err(format!(
+            "degree must be at most {}, got {}",
+            i32::MAX,
+            config.degree
+        ));
+    }
+    if !config.coef0.is_finite() {
+        return Err(format!("coef0 must be finite, got {}", config.coef0));
+    }
+    Ok(())
 }
 
 /// Two classes in a response: the smaller value is -1, the larger +1.
@@ -252,251 +325,21 @@ pub(crate) fn binary_classes(target: &ArrayView1<f64>) -> Result<BinaryClasses, 
     })
 }
 
-/// Convert target values to binary -1/+1.
+/// Convert target values to binary -1/+1; the two labels must be whole numbers
+/// in the `i32` range (the result types keep them as `i32`).
 fn convert_to_binary(target: &ArrayView1<f64>) -> Result<(Array1<f64>, (i32, i32)), String> {
     let b = binary_classes(target)?;
+    let whole = |v: f64| v.fract() == 0.0 && v >= f64::from(i32::MIN) && v <= f64::from(i32::MAX);
+    if !(whole(b.negative) && whole(b.positive)) {
+        return Err(format!(
+            "SVM: class labels must be whole numbers between {} and {} (found {} and {}); recode the target, for example as 0/1",
+            i32::MIN,
+            i32::MAX,
+            b.negative,
+            b.positive
+        ));
+    }
     Ok((b.y, (b.negative as i32, b.positive as i32)))
-}
-
-/// The outcome of [`smo_linear`].
-struct SmoState {
-    alpha: Array1<f64>,
-    b: f64,
-    /// `errors[k]` = decision value of row k minus `y[k]` (the SMO error cache).
-    /// `linear_svm` does not use it; it is returned so the cache-invariant
-    /// test can compare it with freshly computed decision values.
-    errors: Vec<f64>,
-    n_iterations: usize,
-    converged: bool,
-}
-
-/// An alpha as the decision function sees it: alphas at or below 1e-8 do not
-/// contribute (the filter of the original decision function).
-fn effective_alpha(a: f64) -> f64 {
-    if a > 1e-8 { a } else { 0.0 }
-}
-
-/// Add `u . x_k + db` to every cached error.
-fn shift_errors(errors: &mut [f64], data: &ArrayView2<f64>, u: &[f64], db: f64) {
-    for (e, row) in errors.iter_mut().zip(data.outer_iter()) {
-        let dot: f64 = row.iter().zip(u.iter()).map(|(x, w)| x * w).sum();
-        *e += dot + db;
-    }
-}
-
-/// SMO for the linear kernel with an error cache.
-///
-/// Invariant: `errors[k] == b + sum_j effective_alpha(alpha[j]) * y[j] * <x_j, x_k> - y[k]`,
-/// the error the original loop recomputed from scratch for every candidate.
-/// The cache is rebuilt from `w` at the start of every sweep, so rounding
-/// cannot drift across sweeps, and updated in O(n·p) after every alpha or bias
-/// change. Every decision of the original loop is made in the same order.
-///
-/// The `1.0` upper bound in the second-alpha filter and the clipped `alpha[j]`
-/// that a rejected step leaves behind are ML-40 (Tier 4); they are kept here
-/// on purpose so that results do not change.
-fn smo_linear(
-    data: &ArrayView2<f64>,
-    y: &Array1<f64>,
-    c: f64,
-    max_iter: usize,
-    tol: f64,
-) -> EconResult<SmoState> {
-    let n_samples = data.nrows();
-    let n_features = data.ncols();
-
-    let mut alpha: Array1<f64> = Array1::zeros(n_samples);
-    let mut b = 0.0;
-    let mut errors = vec![0.0f64; n_samples];
-    let mut w = vec![0.0f64; n_features];
-    let mut u = vec![0.0f64; n_features];
-
-    let mut n_iterations = 0;
-    let mut converged = false;
-
-    for iter in 0..max_iter {
-        resource::checkpoint()?;
-
-        // Rebuild the error cache from w = sum_j eff(alpha_j) y_j x_j.
-        w.iter_mut().for_each(|v| *v = 0.0);
-        for (j, row) in data.outer_iter().enumerate() {
-            let coef = effective_alpha(alpha[j]) * y[j];
-            if coef != 0.0 {
-                for (wk, &xk) in w.iter_mut().zip(row.iter()) {
-                    *wk += coef * xk;
-                }
-            }
-        }
-        for (k, row) in data.outer_iter().enumerate() {
-            let dot: f64 = row.iter().zip(w.iter()).map(|(x, wk)| x * wk).sum();
-            errors[k] = dot + b - y[k];
-        }
-
-        let mut num_changed = 0;
-
-        for i in 0..n_samples {
-            // Error E_i = f(x_i) - y_i
-            let e_i = errors[i];
-
-            // Check KKT conditions
-            let r_i = e_i * y[i];
-
-            if (r_i < -tol && alpha[i] < c) || (r_i > tol && alpha[i] > 0.0) {
-                // A violator can cost O(n·p) (second-alpha choice plus the
-                // cache update), so the budget is checked once per violator.
-                resource::checkpoint()?;
-
-                // Select j using heuristics (max |E_i - E_j|)
-                let j = select_second_alpha(i, e_i, &errors, &alpha);
-
-                if j == i {
-                    continue;
-                }
-
-                let e_j = errors[j];
-
-                // Save old alphas
-                let alpha_i_old = alpha[i];
-                let alpha_j_old = alpha[j];
-
-                // Compute bounds L and H
-                let (l, h) = if (y[i] - y[j]).abs() < 1e-10 {
-                    // y_i == y_j
-                    (
-                        f64::max(0.0, alpha[i] + alpha[j] - c),
-                        f64::min(c, alpha[i] + alpha[j]),
-                    )
-                } else {
-                    // y_i != y_j
-                    (
-                        f64::max(0.0, alpha[j] - alpha[i]),
-                        f64::min(c, c + alpha[j] - alpha[i]),
-                    )
-                };
-
-                if (l - h).abs() < 1e-10 {
-                    continue;
-                }
-
-                // Compute eta = 2*K(i,j) - K(i,i) - K(j,j)
-                let k_ii = dot_product(&data.row(i), &data.row(i));
-                let k_jj = dot_product(&data.row(j), &data.row(j));
-                let k_ij = dot_product(&data.row(i), &data.row(j));
-                let eta = 2.0 * k_ij - k_ii - k_jj;
-
-                if eta >= 0.0 {
-                    continue;
-                }
-
-                // Update alpha_j
-                alpha[j] = alpha_j_old - y[j] * (e_i - e_j) / eta;
-
-                // Clip alpha_j
-                alpha[j] = alpha[j].max(l).min(h);
-
-                if (alpha[j] - alpha_j_old).abs() < 1e-5 {
-                    // The step is rejected but alpha_j keeps its clipped value
-                    // (ML-40): keep the cache in step with it.
-                    let coef_j = y[j] * (effective_alpha(alpha[j]) - effective_alpha(alpha_j_old));
-                    if coef_j != 0.0 {
-                        for (uk, &xk) in u.iter_mut().zip(data.row(j).iter()) {
-                            *uk = coef_j * xk;
-                        }
-                        shift_errors(&mut errors, data, &u, 0.0);
-                    }
-                    continue;
-                }
-
-                // Update alpha_i
-                alpha[i] = alpha_i_old + y[i] * y[j] * (alpha_j_old - alpha[j]);
-
-                // Update bias
-                let b1 = b
-                    - e_i
-                    - y[i] * (alpha[i] - alpha_i_old) * k_ii
-                    - y[j] * (alpha[j] - alpha_j_old) * k_ij;
-                let b2 = b
-                    - e_j
-                    - y[i] * (alpha[i] - alpha_i_old) * k_ij
-                    - y[j] * (alpha[j] - alpha_j_old) * k_jj;
-
-                let b_old = b;
-                if alpha[i] > 0.0 && alpha[i] < c {
-                    b = b1;
-                } else if alpha[j] > 0.0 && alpha[j] < c {
-                    b = b2;
-                } else {
-                    b = (b1 + b2) / 2.0;
-                }
-
-                // E_k += y_i dEff_i <x_i,x_k> + y_j dEff_j <x_j,x_k> + (b - b_old)
-                let coef_i = y[i] * (effective_alpha(alpha[i]) - effective_alpha(alpha_i_old));
-                let coef_j = y[j] * (effective_alpha(alpha[j]) - effective_alpha(alpha_j_old));
-                for ((uk, &xi), &xj) in u.iter_mut().zip(data.row(i).iter()).zip(data.row(j).iter())
-                {
-                    *uk = coef_i * xi + coef_j * xj;
-                }
-                shift_errors(&mut errors, data, &u, b - b_old);
-
-                num_changed += 1;
-            }
-        }
-
-        n_iterations = iter + 1;
-
-        if num_changed == 0 {
-            converged = true;
-            break;
-        }
-    }
-
-    Ok(SmoState {
-        alpha,
-        b,
-        errors,
-        n_iterations,
-        converged,
-    })
-}
-
-/// Select second alpha using maximum |E_i - E_j| heuristic, from the error cache.
-fn select_second_alpha(i: usize, e_i: f64, errors: &[f64], alpha: &Array1<f64>) -> usize {
-    let n_samples = errors.len();
-    let mut max_delta = 0.0;
-    let mut j_best = i;
-
-    // First try non-bound alphas
-    for j in 0..n_samples {
-        if j != i && alpha[j] > 1e-8 && alpha[j] < 1.0 - 1e-8 {
-            let delta = (e_i - errors[j]).abs();
-
-            if delta > max_delta {
-                max_delta = delta;
-                j_best = j;
-            }
-        }
-    }
-
-    // If no good candidate found, try all
-    if j_best == i {
-        for j in 0..n_samples {
-            if j != i {
-                let delta = (e_i - errors[j]).abs();
-
-                if delta > max_delta {
-                    max_delta = delta;
-                    j_best = j;
-                }
-            }
-        }
-    }
-
-    // Fallback to random different index
-    if j_best == i {
-        j_best = (i + 1) % n_samples;
-    }
-
-    j_best
 }
 
 /// Compute dot product of two vectors.
@@ -519,7 +362,8 @@ pub fn svm_predict(
                 .map(|(x, w)| x * w)
                 .sum::<f64>()
                 + bias;
-            if f >= 0.0 {
+            // LIBSVM's sign, as linear_svm: > 0 is the larger label
+            if f > 0.0 {
                 class_labels.1
             } else {
                 class_labels.0
@@ -621,6 +465,12 @@ pub struct KernelSvmResult {
     pub train_accuracy: f64,
     /// Feature names (if provided)
     pub feature_names: Option<Vec<String>>,
+    /// The kernel coefficient used (`config.gamma`, else `1 / n_features`)
+    #[serde(default)]
+    pub gamma: f64,
+    /// Number of features of the training data
+    #[serde(default)]
+    pub n_features: usize,
     /// Support vectors (stored for prediction)
     #[serde(skip)]
     support_vectors: Option<ndarray::Array2<f64>>,
@@ -636,7 +486,7 @@ impl std::fmt::Display for KernelSvmResult {
         writeln!(f, "Kernel: {:?}", self.config.kernel)?;
         writeln!(f, "C: {}", self.config.c)?;
         if self.config.kernel != SvmKernel::Linear {
-            writeln!(f, "Gamma: {:?}", self.config.gamma)?;
+            writeln!(f, "Gamma: {}", self.gamma)?;
         }
         if self.config.kernel == SvmKernel::Polynomial {
             writeln!(f, "Degree: {}", self.config.degree)?;
@@ -726,10 +576,19 @@ fn compute_decision_kernel(
 /// Run Kernel SVM using SMO.
 ///
 /// # Arguments
-/// * `data` - Input feature matrix (n_samples x n_features)
-/// * `target` - Binary target values
+/// * `data` - Input feature matrix (n_samples x n_features); values must be finite
+/// * `target` - Two class labels, whole numbers in the `i32` range
 /// * `config` - SVM configuration
 /// * `feature_names` - Optional feature names
+///
+/// # Errors
+///
+/// - `c` and `tolerance` not finite and positive, `max_iter = 0`, a `gamma`
+///   that is not finite and positive, `degree = 0` for the polynomial kernel,
+///   a non-finite `coef0`, a non-finite feature value, fractional labels.
+/// - `"Resource limit: ..."` when the `n x n` kernel matrix exceeds the
+///   allocation ceiling; `"Computation stopped: ..."` when the budget is
+///   cancelled or expires (checked per row of the kernel matrix and per sweep).
 pub fn kernel_svm(
     data: ArrayView2<f64>,
     target: ArrayView1<f64>,
@@ -745,6 +604,11 @@ pub fn kernel_svm(
     if n_samples != target.len() {
         return Err("Data and target must have same number of samples".to_string());
     }
+    if n_features == 0 {
+        return Err("SVM: need at least one feature".to_string());
+    }
+    check_kernel_config(config)?;
+    check_finite_features(&data, feature_names.as_deref())?;
 
     // Convert target to -1/+1
     let (y, class_labels) = convert_to_binary(&target)?;
@@ -757,8 +621,11 @@ pub fn kernel_svm(
     let mut b = 0.0;
 
     // Precompute kernel matrix for efficiency
-    let mut kernel_matrix = ndarray::Array2::zeros((n_samples, n_samples));
+    let to_string = |e: crate::errors::EconError| e.to_string();
+    let mut kernel_matrix =
+        resource::try_zeros2(n_samples, n_samples, "kernel SVM matrix").map_err(to_string)?;
     for i in 0..n_samples {
+        resource::checkpoint().map_err(to_string)?;
         for j in i..n_samples {
             let k_ij = compute_kernel(
                 &data.row(i),
@@ -778,6 +645,7 @@ pub fn kernel_svm(
 
     // SMO main loop
     for iter in 0..config.max_iter {
+        resource::checkpoint().map_err(to_string)?;
         let mut num_changed = 0;
 
         for i in 0..n_samples {
@@ -939,11 +807,11 @@ pub fn kernel_svm(
         })
         .collect();
 
-    // Compute training accuracy
+    // Training accuracy on the internal -1/+1 labels
     let correct = predictions
         .iter()
-        .zip(target.iter())
-        .filter(|(pred, actual)| **pred as f64 == **actual)
+        .zip(y.iter())
+        .filter(|&(&pred, &yi)| (pred == class_labels.1) == (yi > 0.0))
         .count();
     let train_accuracy = correct as f64 / n_samples as f64;
 
@@ -961,12 +829,15 @@ pub fn kernel_svm(
         config: config.clone(),
         train_accuracy,
         feature_names,
+        gamma,
+        n_features,
         support_vectors: Some(sv_data),
         support_vector_labels: Some(sv_labels),
     })
 }
 
-/// Predict class labels for new data using a trained kernel SVM.
+/// Predict class labels for new data using a trained kernel SVM, with the
+/// model's `gamma`; data of another width than the training data are refused.
 pub fn kernel_svm_predict(
     data: ArrayView2<f64>,
     result: &KernelSvmResult,
@@ -980,7 +851,14 @@ pub fn kernel_svm_predict(
         .as_ref()
         .ok_or("Support vector labels not stored - cannot predict")?;
 
-    let gamma = result.config.gamma.unwrap_or(1.0 / data.ncols() as f64);
+    if data.ncols() != result.n_features {
+        return Err(format!(
+            "Data has {} features, but the model was fit with {}",
+            data.ncols(),
+            result.n_features
+        ));
+    }
+    let gamma = result.gamma;
 
     let predictions: Vec<i32> = data
         .outer_iter()
@@ -1044,274 +922,111 @@ mod tests {
         (x, y)
     }
 
-    /// The SMO loop as it was before ML-39 (full decision function per candidate),
-    /// kept as the reference the error-cache loop must reproduce.
-    fn linear_svm_reference(
-        data: ArrayView2<f64>,
-        target: ArrayView1<f64>,
-        c: f64,
-        max_iter: usize,
-        tol: f64,
-    ) -> SvmResult {
-        let n_samples = data.nrows();
-        let n_features = data.ncols();
-
-        let c_param = c;
-
-        // Convert target to -1/+1
-        let (y, class_labels) = convert_to_binary(&target).unwrap();
-
-        // Initialize alphas and bias
-        let mut alpha: Array1<f64> = Array1::zeros(n_samples);
-        let mut b = 0.0;
-
-        let mut n_iterations = 0;
-        let mut converged = false;
-
-        // SMO main loop
-        for iter in 0..max_iter {
-            let mut num_changed = 0;
-
-            for i in 0..n_samples {
-                // Compute error E_i = f(x_i) - y_i
-                let f_i = compute_decision_reference(&data, &alpha.view(), &y.view(), b, i);
-                let e_i = f_i - y[i];
-
-                // Check KKT conditions
-                let r_i = e_i * y[i];
-
-                if (r_i < -tol && alpha[i] < c_param) || (r_i > tol && alpha[i] > 0.0) {
-                    // Select j using heuristics (max |E_i - E_j|)
-                    let j = select_second_alpha_reference(
-                        i,
-                        e_i,
-                        &data,
-                        &alpha.view(),
-                        &y.view(),
-                        b,
-                        n_samples,
-                    );
-
-                    if j == i {
-                        continue;
-                    }
-
-                    let f_j = compute_decision_reference(&data, &alpha.view(), &y.view(), b, j);
-                    let e_j = f_j - y[j];
-
-                    // Save old alphas
-                    let alpha_i_old = alpha[i];
-                    let alpha_j_old = alpha[j];
-
-                    // Compute bounds L and H
-                    let (l, h) = if (y[i] - y[j]).abs() < 1e-10 {
-                        // y_i == y_j
-                        (
-                            f64::max(0.0, alpha[i] + alpha[j] - c_param),
-                            f64::min(c_param, alpha[i] + alpha[j]),
-                        )
-                    } else {
-                        // y_i != y_j
-                        (
-                            f64::max(0.0, alpha[j] - alpha[i]),
-                            f64::min(c_param, c_param + alpha[j] - alpha[i]),
-                        )
-                    };
-
-                    if (l - h).abs() < 1e-10 {
-                        continue;
-                    }
-
-                    // Compute eta = 2*K(i,j) - K(i,i) - K(j,j)
-                    let k_ii = dot_product(&data.row(i), &data.row(i));
-                    let k_jj = dot_product(&data.row(j), &data.row(j));
-                    let k_ij = dot_product(&data.row(i), &data.row(j));
-                    let eta = 2.0 * k_ij - k_ii - k_jj;
-
-                    if eta >= 0.0 {
-                        continue;
-                    }
-
-                    // Update alpha_j
-                    alpha[j] = alpha_j_old - y[j] * (e_i - e_j) / eta;
-
-                    // Clip alpha_j
-                    alpha[j] = alpha[j].max(l).min(h);
-
-                    if (alpha[j] - alpha_j_old).abs() < 1e-5 {
-                        continue;
-                    }
-
-                    // Update alpha_i
-                    alpha[i] = alpha_i_old + y[i] * y[j] * (alpha_j_old - alpha[j]);
-
-                    // Update bias
-                    let b1 = b
-                        - e_i
-                        - y[i] * (alpha[i] - alpha_i_old) * k_ii
-                        - y[j] * (alpha[j] - alpha_j_old) * k_ij;
-                    let b2 = b
-                        - e_j
-                        - y[i] * (alpha[i] - alpha_i_old) * k_ij
-                        - y[j] * (alpha[j] - alpha_j_old) * k_jj;
-
-                    if alpha[i] > 0.0 && alpha[i] < c_param {
-                        b = b1;
-                    } else if alpha[j] > 0.0 && alpha[j] < c_param {
-                        b = b2;
-                    } else {
-                        b = (b1 + b2) / 2.0;
-                    }
-
-                    num_changed += 1;
-                }
-            }
-
-            n_iterations = iter + 1;
-
-            if num_changed == 0 {
-                converged = true;
-                break;
-            }
-        }
-
-        // Compute weights w = sum(alpha_i * y_i * x_i)
-        let mut weights = vec![0.0; n_features];
-        let mut support_vector_indices = Vec::new();
-
-        for i in 0..n_samples {
-            if alpha[i] > 1e-8 {
-                support_vector_indices.push(i);
-                for j in 0..n_features {
-                    weights[j] += alpha[i] * y[i] * data[[i, j]];
-                }
-            }
-        }
-
-        // Make predictions
-        let predictions: Vec<i32> = (0..n_samples)
-            .map(|i| {
-                let f_i = compute_decision_reference(&data, &alpha.view(), &y.view(), b, i);
-                if f_i >= 0.0 {
-                    class_labels.1
-                } else {
-                    class_labels.0
-                }
-            })
+    /// e1071's linear C-SVC on `svm_sim` `cls_lin` (labels 1 and 2), at e1071's tolerance 1e-10.
+    fn check_linear_svm_libsvm(case_id: &str, tag: &str, c: f64) {
+        use crate::data::columns::{NaPolicy, numeric_column};
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case(case_id);
+        let col = |n: &str| numeric_column(ds.df(), n, NaPolicy::Fail).unwrap().0;
+        let (x1, x2) = (col("x1"), col("x2"));
+        let x = Array2::from_shape_fn((x1.len(), 2), |(i, j)| if j == 0 { x1[i] } else { x2[i] });
+        let y = Array1::from_vec(col("cls_lin"));
+        let r = linear_svm(
+            x.view(),
+            y.view(),
+            Some(c),
+            Some(1_000_000),
+            Some(1e-10),
+            None,
+        )
+        .unwrap();
+        assert!(r.converged, "{r}");
+        let decision: Vec<f64> = x
+            .outer_iter()
+            .map(|row| row.dot(&Array1::from_vec(r.weights.clone())) + r.bias)
             .collect();
-
-        SvmResult {
-            predictions,
-            weights,
-            bias: b,
-            n_support_vectors: support_vector_indices.len(),
-            n_iterations,
-            converged,
-            support_vector_indices,
-            class_labels: Some(class_labels),
-            feature_names: None,
-        }
+        let pred: Vec<f64> = r.predictions.iter().map(|&p| f64::from(p)).collect();
+        // the fast_svm tolerance (validation/ml/svm.md)
+        let tol = Tol::iterative(4e-7);
+        Check::new(&case)
+            .vector(&format!("{tag}_w"), &r.weights, tol)
+            .scalar(&format!("{tag}_bias"), r.bias, tol)
+            .vector(&format!("{tag}_decision"), &decision, tol)
+            .vector(&format!("{tag}_pred"), &pred, Tol::exact())
+            .finish();
     }
 
-    /// Compute decision function f(x_i) for linear SVM.
-    fn compute_decision_reference(
-        data: &ArrayView2<f64>,
-        alpha: &ArrayView1<f64>,
-        y: &ArrayView1<f64>,
-        b: f64,
-        i: usize,
-    ) -> f64 {
-        let n_samples = data.nrows();
-        let mut result = b;
-
-        for j in 0..n_samples {
-            if alpha[j] > 1e-8 {
-                result += alpha[j] * y[j] * dot_product(&data.row(j), &data.row(i));
-            }
-        }
-
-        result
-    }
-
-    /// Select second alpha using maximum |E_i - E_j| heuristic.
-    fn select_second_alpha_reference(
-        i: usize,
-        e_i: f64,
-        data: &ArrayView2<f64>,
-        alpha: &ArrayView1<f64>,
-        y: &ArrayView1<f64>,
-        b: f64,
-        n_samples: usize,
-    ) -> usize {
-        let mut max_delta = 0.0;
-        let mut j_best = i;
-
-        // First try non-bound alphas
-        for j in 0..n_samples {
-            if j != i && alpha[j] > 1e-8 && alpha[j] < 1.0 - 1e-8 {
-                let f_j = compute_decision_reference(data, alpha, y, b, j);
-                let e_j = f_j - y[j];
-                let delta = (e_i - e_j).abs();
-
-                if delta > max_delta {
-                    max_delta = delta;
-                    j_best = j;
-                }
-            }
-        }
-
-        // If no good candidate found, try all
-        if j_best == i {
-            for j in 0..n_samples {
-                if j != i {
-                    let f_j = compute_decision_reference(data, alpha, y, b, j);
-                    let e_j = f_j - y[j];
-                    let delta = (e_i - e_j).abs();
-
-                    if delta > max_delta {
-                        max_delta = delta;
-                        j_best = j;
-                    }
-                }
-            }
-        }
-
-        // Fallback to random different index
-        if j_best == i {
-            j_best = (i + 1) % n_samples;
-        }
-
-        j_best
+    /// ML-40: the old SMO searched non-bound multipliers below a hard-coded 1 and stopped after
+    /// one sweep without a change, so it stopped short of the optimum at C != 1.
+    #[test]
+    fn test_validate_linear_svm_libsvm_c01() {
+        check_linear_svm_libsvm("svm_libsvm", "linear_c01", 0.1);
     }
 
     #[test]
-    fn test_linear_svm_matches_reference_smo() {
-        // Seeds 20 (c = 1.0) and 13 (c = 5.0) replace seeds 1 and 3. After an
-        // SMO step that leaves both alphas strictly inside (0, C), both errors
-        // are exactly 0 in exact arithmetic (b1 == b2), so a later
-        // second-alpha choice between two such rows is a tie in |E_i - E_j|
-        // that only rounding noise breaks. With seed 1 (c = 1.0) the reference
-        // picks row 13 and the error cache row 0 at sweep 0, row 14 (both
-        // fresh errors below 3e-16, deltas 4e-16 apart), and the two runs then
-        // converge in 21 and 17 sweeps; seed 3 (c = 5.0) hits the same kind of
-        // tie between rows 0 and 1 at sweep 0, row 2. A lockstep run of the
-        // two loops makes every decision identically for the three cases here.
-        for (seed, c) in [(20u64, 1.0), (2, 0.5), (13, 5.0)] {
-            let (x, y) = overlapping_classes(80, seed);
-            let new = linear_svm(x.view(), y.view(), Some(c), Some(100), Some(1e-3), None).unwrap();
-            let old = linear_svm_reference(x.view(), y.view(), c, 100, 1e-3);
-            assert_eq!(new.n_iterations, old.n_iterations, "seed {seed}");
-            assert_eq!(new.converged, old.converged, "seed {seed}");
-            assert_eq!(
-                new.support_vector_indices, old.support_vector_indices,
-                "seed {seed}"
-            );
-            assert_eq!(new.predictions, old.predictions, "seed {seed}");
-            for (a, b) in new.weights.iter().zip(&old.weights) {
-                assert!((a - b).abs() < 1e-8, "seed {seed}: {a} vs {b}");
-            }
-            assert!((new.bias - old.bias).abs() < 1e-8, "seed {seed}");
+    fn test_validate_linear_svm_libsvm_c10() {
+        check_linear_svm_libsvm("svm_libsvm", "linear_c10", 10.0);
+    }
+
+    fn fast_linear(c: f64, max_iter: usize) -> FastSvmConfig {
+        FastSvmConfig {
+            c,
+            kernel: FastKernel::Linear,
+            tolerance: 1e-3,
+            max_iter,
+            cache_size_mb: 40,
+            shrinking: true,
+            min_working_set: 0,
         }
+    }
+
+    /// linear_svm is fast_svm with a linear kernel, a 40 MB cache and a budget of
+    /// max_iterations x n LIBSVM iterations.
+    #[test]
+    fn test_linear_svm_equals_fast_svm() {
+        let (x, y) = overlapping_classes(120, 3);
+        for c in [0.1, 1.0, 10.0] {
+            let r = linear_svm(x.view(), y.view(), Some(c), None, None, None).unwrap();
+            let f = fast_svm(x.view(), y.view(), &fast_linear(c, 1000 * 120)).unwrap();
+            let mut w = [0.0; 3];
+            for (&i, &a) in f.support_vector_indices.iter().zip(&f.dual_coefficients) {
+                for (j, wj) in w.iter_mut().enumerate() {
+                    *wj += a * x[[i, j]];
+                }
+            }
+            assert_eq!(r.weights, w.to_vec(), "C = {c}");
+            assert_eq!(r.bias, f.bias, "C = {c}");
+            assert_eq!(
+                r.support_vector_indices, f.support_vector_indices,
+                "C = {c}"
+            );
+            assert_eq!(r.n_iterations, f.n_iterations, "C = {c}");
+            assert_eq!((r.converged, f.converged), (true, true), "C = {c}");
+            let fp: Vec<i32> = f.predictions.iter().map(|&p| p as i32).collect();
+            assert_eq!(r.predictions, fp, "C = {c}");
+        }
+    }
+
+    /// max_iterations counts passes of n LIBSVM pair updates; a run that stops at the budget says
+    /// so in its notes.
+    #[test]
+    fn test_linear_svm_iteration_budget() {
+        let (x, y) = overlapping_classes(200, 7);
+        let full = fast_svm(x.view(), y.view(), &fast_linear(100.0, 10_000_000)).unwrap();
+        assert!(
+            full.converged && full.n_iterations > 200,
+            "{}",
+            full.n_iterations
+        );
+        let r = linear_svm(x.view(), y.view(), Some(100.0), Some(1), None, None).unwrap();
+        assert!(!r.converged);
+        assert_eq!(r.n_iterations, 200);
+        let notes = crate::traits::convergence::notes_text(&r);
+        assert!(
+            !r.warnings.is_empty() && notes.contains("Warning: "),
+            "{notes}"
+        );
+        assert!(r.to_string().ends_with(&notes), "{r}");
     }
 
     #[test]
@@ -1359,22 +1074,6 @@ mod tests {
     }
 
     #[test]
-    fn test_smo_error_cache_matches_fresh_decision_values() {
-        let (x, y01) = overlapping_classes(60, 9);
-        let (y, _) = convert_to_binary(&y01.view()).unwrap();
-        let st = smo_linear(&x.view(), &y, 1.0, 40, 1e-3).unwrap();
-        for k in 0..60 {
-            let fresh =
-                compute_decision_reference(&x.view(), &st.alpha.view(), &y.view(), st.b, k) - y[k];
-            assert!(
-                (st.errors[k] - fresh).abs() <= 1e-9 * (1.0 + fresh.abs()),
-                "row {k}: {} vs {fresh}",
-                st.errors[k]
-            );
-        }
-    }
-
-    #[test]
     fn test_linear_svm_basic() {
         // Linearly separable data
         let x = array![
@@ -1419,11 +1118,11 @@ mod tests {
         let data = array![
             [1.0, 1.0], // 1+1-3 = -1 -> class 0
             [2.0, 2.0], // 2+2-3 = 1 -> class 1
-            [3.0, 0.0], // 3+0-3 = 0 -> class 1
+            [3.0, 0.0], // 3+0-3 = 0 -> class 0: LIBSVM's sign, > 0 is the larger label (was 1)
         ];
 
         let preds = svm_predict(data.view(), &weights, bias, class_labels);
-        assert_eq!(preds, vec![0, 1, 1]);
+        assert_eq!(preds, vec![0, 1, 0]);
     }
 
     #[test]
@@ -1607,6 +1306,172 @@ mod tests {
             "Train accuracy should be at least 50%, got {:.1}%",
             result.train_accuracy * 100.0
         );
+    }
+
+    /// `overlapping_classes` with its 0/1 labels recoded as `neg`/`pos`.
+    fn coded(n: usize, seed: u64, neg: f64, pos: f64) -> (Array2<f64>, Array1<f64>) {
+        let (x, y) = overlapping_classes(n, seed);
+        (x, y.mapv(|v| if v == 0.0 { neg } else { pos }))
+    }
+
+    /// ML-102: two fractional labels were truncated to integers (0.2 and 0.7 both became 0).
+    #[test]
+    fn test_svm_refuses_fractional_labels() {
+        let cfg = KernelSvmConfig::default();
+        for (neg, pos) in [(0.2, 0.7), (0.5, 1.5), (-0.5, 0.5), (0.0, 3e9)] {
+            let (x, y) = coded(40, 3, neg, pos);
+            let e = linear_svm(x.view(), y.view(), None, None, None, None).unwrap_err();
+            assert!(
+                e.contains("class labels must be whole numbers"),
+                "{neg}/{pos}: {e}"
+            );
+            let e = kernel_svm(x.view(), y.view(), &cfg, None).unwrap_err();
+            assert!(
+                e.contains("class labels must be whole numbers"),
+                "{neg}/{pos}: {e}"
+            );
+        }
+        for (neg, pos) in [(0.0, 1.0), (1.0, 2.0), (-1.0, 1.0), (-3.0, 7.0)] {
+            let (x, y) = coded(40, 3, neg, pos);
+            let r = linear_svm(x.view(), y.view(), None, None, None, None).unwrap();
+            assert_eq!(r.class_labels, Some((neg as i32, pos as i32)));
+            let k = kernel_svm(x.view(), y.view(), &cfg, None).unwrap();
+            assert_eq!(k.class_labels, (neg as i32, pos as i32));
+        }
+    }
+
+    /// ML-101: the class distribution counts the predicted labels (it counted predictions below
+    /// zero as negative, which a 0/1 coding never has).
+    #[test]
+    fn test_svm_display_counts_predicted_labels() {
+        let (x, y) = coded(100, 6, 0.0, 1.0);
+        let mut r = linear_svm(x.view(), y.view(), None, None, None, None).unwrap();
+        r.predictions = (0..100).map(|i| i32::from(i >= 45)).collect();
+        let text = r.to_string();
+        assert!(
+            text.contains(
+                "Class distribution: 45 predicted 0 (negative), 55 predicted 1 (positive)"
+            ),
+            "{text}"
+        );
+    }
+
+    /// The training accuracy does not depend on how the two classes are coded.
+    #[test]
+    fn test_kernel_svm_accuracy_uses_internal_labels() {
+        let cfg = KernelSvmConfig::default();
+        let (x, a) = coded(60, 8, 0.0, 1.0);
+        let (_, b) = coded(60, 8, 1.0, 2.0);
+        let ra = kernel_svm(x.view(), a.view(), &cfg, None).unwrap();
+        let rb = kernel_svm(x.view(), b.view(), &cfg, None).unwrap();
+        assert!(ra.train_accuracy > 0.5, "{}", ra.train_accuracy);
+        assert_eq!(ra.train_accuracy, rb.train_accuracy);
+    }
+
+    /// ML-140: kernel_svm's parameters and data went into SMO unchecked (C = 0 returned an
+    /// untrained model labelled converged).
+    #[test]
+    fn test_kernel_svm_rejects_bad_arguments() {
+        let (x, y) = overlapping_classes(30, 4);
+        let base = KernelSvmConfig::default();
+        let bad = |cfg: KernelSvmConfig, x: &Array2<f64>| {
+            kernel_svm(x.view(), y.view(), &cfg, None).unwrap_err()
+        };
+        for c in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let e = bad(KernelSvmConfig { c, ..base.clone() }, &x);
+            assert!(e.contains("c must be"), "{c}: {e}");
+        }
+        for tolerance in [0.0, f64::NAN] {
+            let e = bad(
+                KernelSvmConfig {
+                    tolerance,
+                    ..base.clone()
+                },
+                &x,
+            );
+            assert!(e.contains("tolerance must be"), "{tolerance}: {e}");
+        }
+        let e = bad(
+            KernelSvmConfig {
+                max_iter: 0,
+                ..base.clone()
+            },
+            &x,
+        );
+        assert!(e.contains("max_iter must be"), "{e}");
+        for g in [0.0, -1.0, f64::NAN] {
+            let e = bad(
+                KernelSvmConfig {
+                    gamma: Some(g),
+                    ..base.clone()
+                },
+                &x,
+            );
+            assert!(e.contains("gamma must be"), "{g}: {e}");
+        }
+        let poly = KernelSvmConfig {
+            kernel: SvmKernel::Polynomial,
+            degree: 0,
+            ..base.clone()
+        };
+        assert!(bad(poly, &x).contains("degree must be"));
+        let e = bad(
+            KernelSvmConfig {
+                coef0: f64::NAN,
+                ..base.clone()
+            },
+            &x,
+        );
+        assert!(e.contains("coef0 must be"), "{e}");
+        for v in [f64::NAN, f64::INFINITY] {
+            let mut xb = x.clone();
+            xb[[2, 1]] = v;
+            assert!(bad(base.clone(), &xb).contains("non-finite"), "{v}");
+        }
+    }
+
+    /// ML-140: the n x n kernel matrix is allocated fallibly, and the SMO sweeps check the budget.
+    #[test]
+    fn test_kernel_svm_honours_cancellation_and_ceiling() {
+        let (x, y) = overlapping_classes(40, 5);
+        let cfg = KernelSvmConfig::default();
+        let e = with_budget(cancelled_budget(), || {
+            kernel_svm(x.view(), y.view(), &cfg, None)
+        })
+        .unwrap_err();
+        assert!(e.contains("cancelled"), "{e}");
+        let e = crate::resource::with_alloc_ceiling(Some(40 * 40 * 8 - 8), || {
+            kernel_svm(x.view(), y.view(), &cfg, None)
+        })
+        .unwrap_err();
+        assert!(e.contains("Resource limit"), "{e}");
+    }
+
+    /// ML-141: prediction data of another width were silently truncated, and a defaulted gamma was
+    /// recomputed from them.
+    #[test]
+    fn test_kernel_svm_predict_checks_width_and_keeps_gamma() {
+        let x = array![
+            [0.0, 0.1],
+            [0.3, 0.2],
+            [0.1, 0.4],
+            [2.0, 2.1],
+            [2.2, 1.9],
+            [1.8, 2.3]
+        ];
+        let y = array![0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+        let r = kernel_svm(x.view(), y.view(), &KernelSvmConfig::default(), None).unwrap();
+        assert_eq!((r.gamma, r.n_features), (0.5, 2));
+        assert!(r.to_string().contains("Gamma: 0.5"), "{r}");
+        let e = kernel_svm_predict(array![[0.0], [1.0], [2.0]].view(), &r).unwrap_err();
+        assert!(
+            e.contains("has 1 features, but the model was fit with 2"),
+            "{e}"
+        );
+        assert_eq!(kernel_svm_predict(x.view(), &r).unwrap(), r.predictions);
+        let back: KernelSvmResult =
+            serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
+        assert_eq!((back.gamma, back.n_features), (0.5, 2));
     }
 
     #[test]

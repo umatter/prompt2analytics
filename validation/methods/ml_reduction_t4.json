@@ -1,0 +1,95 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "ml_pca_svd_path",
+      "name": "PCA on the SVD path (n <= 4p), with fewer components than min(n, p)",
+      "category": "ml",
+      "reference": "stats::prcomp(x) (center = TRUE, scale. = FALSE) and summary()'s proportion of variance",
+      "doc": "validation/ml/pca.md",
+      "cases": [
+        "pca_svd_path"
+      ],
+      "tests": [
+        "p2a-core::ml::reduction::tests::test_validate_prcomp_svd_path"
+      ],
+      "quantities": [
+        "sdev",
+        "proportion of variance (all components and the kept ones)",
+        "total variance",
+        "|rotation| of two components"
+      ],
+      "tolerance": "sdev, proportion and total Tol::stat(n) (n = 20, 6); rotation Tol::coef(20); the roundoff sixth sdev of the 6 x 10 data abs 1e-12",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "ml_cmdscale_gof_add",
+      "name": "Classical MDS: R's GOF pair and add = TRUE (Cailliez's additive constant)",
+      "category": "ml",
+      "reference": "stats::cmdscale(d, k, eig = TRUE, add = FALSE | TRUE)",
+      "doc": "validation/ml/cmdscale.md",
+      "cases": [
+        "cmdscale_gof_add"
+      ],
+      "tests": [
+        "p2a-core::ml::reduction::tests::test_validate_cmdscale_gof_add",
+        "p2a-mcp::tier3::wp57_ml_spatial::test_validate_mcp_cmdscale_gof"
+      ],
+      "quantities": [
+        "GOF (both measures)",
+        "ac",
+        "|points|",
+        "eig",
+        "MCP ml_cmdscale gof.gof1 and gof.gof2"
+      ],
+      "tolerance": "GOF, ac and points Tol::coef(n) (n = 21, 8); eig rel 1e-9 with abs 1e-6 (eurodist), abs 1e-5 (eurodist with add: the null eigenvalue moves with the roundoff of ac), abs 1e-9 (Manhattan)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "ml_tsne_exact",
+      "name": "t-SNE: bhtsne's exact path with Rtsne's optimiser (exaggeration 12 to iteration 250, eta 200)",
+      "category": "ml",
+      "reference": "Rtsne::Rtsne(theta = 0, pca = FALSE, normalize = FALSE, Y_init, eta = 200, exaggeration_factor = 12, stop_lying_iter = 250, mom_switch_iter = 250)",
+      "doc": "validation/ml/tsne.md",
+      "cases": [
+        "tsne_rtsne_exact"
+      ],
+      "tests": [
+        "p2a-core::ml::reduction::tests::test_validate_tsne_rtsne_exact"
+      ],
+      "quantities": [
+        "embedding after 1 and 10 iterations from a given start"
+      ],
+      "tolerance": "1 iteration rel 1e-10; 10 iterations rel 1e-9 and abs 1e-9 (the summation order separates the paths at about 1e-13)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "ml_linear_svm",
+      "name": "Linear SVM (linear_svm): LIBSVM C-SVC with a linear kernel",
+      "category": "ml",
+      "reference": "e1071::svm(type = 'C-classification', kernel = 'linear', cost, scale = FALSE, tolerance = 1e-10, cachesize = 40)",
+      "doc": "validation/ml/svm.md",
+      "cases": [
+        "svm_libsvm"
+      ],
+      "tests": [
+        "p2a-core::ml::svm::tests::test_validate_linear_svm_libsvm_c01",
+        "p2a-core::ml::svm::tests::test_validate_linear_svm_libsvm_c10",
+        "p2a-mcp::tier3::wp57_ml_spatial::test_validate_mcp_svm_linear_matches_e1071"
+      ],
+      "quantities": [
+        "w",
+        "bias",
+        "decision values on the training rows",
+        "predictions in the original labels",
+        "MCP ml_svm: the written prediction column at cost 10"
+      ],
+      "tolerance": "Tol::iterative(4e-7), as fast_svm (validation/ml/svm.md); predictions exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}

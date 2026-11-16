@@ -1,7 +1,9 @@
 # Support vector classification
 
 Two solvers live in `crates/p2a-core/src/ml/`. `fast_svm` (`svm_fast.rs`) is LIBSVM's C-SVC solver
-and is compared with `e1071::svm`. `linear_svm` and `kernel_svm` (`svm.rs`) are not pinned to R.
+and is compared with `e1071::svm`. `linear_svm` (`svm.rs`, the MCP tool `ml_svm` and `p2a ml svm`) is its
+linear-kernel front and is pinned to e1071 too. `kernel_svm` (`svm.rs`, a simplified SMO, library only) is not
+pinned.
 
 ## `fast_svm`: LIBSVM C-SVC
 
@@ -53,12 +55,93 @@ negates the decision values), `test_kernel_cache_evicts_least_recently_used`,
 - Linear kernels: the dual need not be unique, so alphas and indices are not compared, only `w`.
 - Polynomial kernels: no R case. They run through the same solver.
 
-## `linear_svm` and `kernel_svm`: not R-pinned
+## `linear_svm`: LIBSVM with a linear kernel
 
-`linear_svm` hard-codes the bound 1.0 in `select_second_alpha` (finding ML-40), so it is not optimal at
-`C != 1`; `kernel_svm` skips alpha steps below 1e-5 and is accurate only to its KKT tolerance.
+`linear_svm` runs `fast_svm` with `FastKernel::Linear`, a kernel cache of at most 40 MB (e1071's `cachesize`),
+shrinking on, and `max_iter = max_iterations * n` (saturating): `max_iterations` (default 1000) is a budget of
+passes of n pair updates, and `tolerance` is LIBSVM's `eps` (default 1e-3, e1071's `tolerance`). `weights` is
+`sum_k alpha_k y_k x_k`, `bias` LIBSVM's `-rho`; a decision value `> 0` is the larger label, as LIBSVM
+(`svm_predict` follows the same rule; it used `>= 0`). `n_iterations` counts LIBSVM pair updates, and the
+result carries the solver's convergence record and warnings (`ResultNotes`). R equivalent:
+`e1071::svm(kernel = 'linear', type = 'C-classification', scale = FALSE)`.
+
+Before ML-40 (Tier 4) `linear_svm` ran its own simplified SMO, which searched non-bound multipliers below a
+hard-coded 1 and stopped after one sweep without a change: at C = 0.1 on `cls_lin` it returned
+`w = (0.0259, 0.0385)` against e1071's `(1.1909, 0.7867)`, at C = 10 `w = (2.4035, 3.5791)` against
+`(2.0528, 1.2152)`, both reported as converged.
+
+| Test (`crates/p2a-core/src/ml/svm.rs`) | Compared with | Tolerance |
+|---|---|---|
+| `test_validate_linear_svm_libsvm_c01`, `test_validate_linear_svm_libsvm_c10` | e1071 `linear_c01_*`, `linear_c10_*`: `w`, bias, decision values `x w + b`, predictions; called at tolerance 1e-10 with a budget of 1,000,000 passes | `Tol::iterative(4e-7)`; predictions exact |
+| `test_linear_svm_equals_fast_svm` | `fast_svm` with the same settings at C = 0.1, 1, 10: weights, bias, support vectors, iterations, predictions | exact |
+| `test_linear_svm_iteration_budget` | one pass on a problem that needs more stops with `converged = false` and a convergence warning | property |
+
+MCP: `test_validate_mcp_svm_linear_matches_e1071` (`crates/p2a-mcp/tests/tier3/wp57_ml_spatial.rs`) runs
+`ml_svm` on `svm_sim` at cost 10 and tolerance 1e-10: the written prediction column equals `linear_c10_pred`.
+
+## `kernel_svm`: not R-pinned
+
+`kernel_svm` (library only; no MCP tool or CLI command) keeps a simplified SMO: it skips alpha steps below 1e-5
+and is accurate only to its KKT tolerance. It checks its inputs as `linear_svm` does (C and the tolerance finite
+and positive, `max_iter >= 1`, finite features) plus the kernel's (`gamma`, when given, finite and positive;
+`degree >= 1` for the polynomial kernel; finite `coef0`); before ML-140 C = 0 returned an untrained model
+labelled converged. The n x n kernel matrix is allocated fallibly, and the budget is checked per row of it and
+per SMO sweep. The result keeps the resolved `gamma` and the training width (`n_features`):
+`kernel_svm_predict` refuses data of another width and uses that `gamma` (before ML-141 it truncated wider or
+narrower data silently and recomputed a defaulted `gamma` from them). Tests:
+`test_kernel_svm_rejects_bad_arguments`, `test_kernel_svm_honours_cancellation_and_ceiling`,
+`test_kernel_svm_predict_checks_width_and_keeps_gamma`.
+
+## Class labels
+
+`linear_svm` and `kernel_svm` keep the two class labels as `i32`: the target must hold two whole numbers in the
+`i32` range ("SVM: class labels must be whole numbers ... (found 0.2 and 0.7); recode the target, for example
+as 0/1"). Before ML-102 two fractional labels were truncated (0.2 and 0.7 both became 0), and `kernel_svm`'s
+training accuracy compared the truncated predictions with the original values; it is now computed on the
+internal -1/+1 labels. The class-distribution line of `linear_svm`'s summary counts the predictions of each
+label ("45 predicted 0 (negative), 55 predicted 1 (positive)"); it counted predictions below zero as negative
+before (ML-101). Tests: `test_svm_refuses_fractional_labels`, `test_svm_display_counts_predicted_labels`,
+`test_kernel_svm_accuracy_uses_internal_labels`.
 
 ## Missing values
 
 `fast_svm` and `linear_svm` refuse non-finite input. The MCP tool `ml_svm` drops rows with a missing
 value (`NaPolicy::Omit`).
+
+## Timing
+
+Release builds of v0.5.0 (`f80b0131`) and of this change with `--no-default-features --features ci`, one core
+(`taskset -c 2`, `RAYON_NUM_THREADS=1`), base and head processes interleaved, each process the median of 51 / 9 / 3
+calls at n = 100 / 1,000 / 10,000 after a warm-up, the table the median over 5 processes (3 for the single-call
+rows); peak RSS from `/usr/bin/time -v`, one fit per process, the smallest of 3. Intel Core 7 150U, machine load
+10-20 from other jobs (preliminary; the integration run repeats it).
+
+`linear_svm` against the v0.5.0 SMO. "Benchmark" is `unified_benchmarks`' SVM row (cluster data, p = 5, label 1
+when `i % 3 == 0`, else -1, C = 1, defaults); "overlapping" is two overlapping classes (p = 5, the label a noisy
+linear rule) at C = 10 and default settings, where v0.5.0 stops short of the optimum, so its time is not a
+like-for-like row.
+
+| Data | n | v0.5.0 | head | head / v0.5.0 |
+|---|---|---|---|---|
+| benchmark | 100 | 30 us | 42 us | 1.40 |
+| benchmark | 1,000 | 0.41 ms | 0.19 ms | 0.47 |
+| benchmark | 10,000 | 4.9 ms | 2.3 ms | 0.47 |
+| overlapping, C = 10 | 100 | 1.37 ms | 0.34 ms | 0.25 |
+| overlapping, C = 10 | 1,000 | 8.0 ms | 13.5 ms | 1.70 |
+| overlapping, C = 10 | 10,000 | 0.65 s | 1.12 s | 1.71 |
+
+Peak RSS: benchmark at n = 10,000 3.8 MB against 5.3 MB; overlapping at n = 1,000 3.3 MB against 4.1 MB, at
+n = 10,000 3.9 MB against 47.5 MB (the kernel cache of at most 40 MB, e1071's default). The memory increase on hard
+problems was signed off with the choice of LIBSVM's solver; the overlapping time rows at n >= 1,000 compare an
+exact solver with one that stopped early.
+
+Benchmark outputs on the paper's `cluster_n*.csv` data (`n_support_vectors`, bias; all converged):
+
+| n | v0.5.0 | head | e1071 (`unified_r_20261110_173651.json`) |
+|---|---|---|---|
+| 100 | 4, 1.2445459858 | 4, 1.2444725584 | 4, 1.244473 |
+| 1,000 | 2, 1.3118137256 | 2, 1.3118137486 | 2, 1.311814 |
+| 10,000 | 2, 1.3444078174 | 2, 1.3443436295 | 2, 1.344344 |
+
+The v0.5.0 column equals the paper run of the same commit; `a0f5cf14^` (before `fast_svm`'s rewrite) was not
+rebuilt, v0.5.0 stands in for it.

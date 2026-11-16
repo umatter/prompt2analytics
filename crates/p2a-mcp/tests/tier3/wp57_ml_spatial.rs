@@ -1326,6 +1326,8 @@ fn test_mcp_ml_descriptions_state_defaults() {
     let d = tool_description("ml_tsne");
     assert!(d.ends_with("Seed: seed, else set_seed, else 42."), "{d}");
     assert!(field_description("ml_tsne", "seed").contains("42"));
+    assert!(d.contains("exaggeration 12") && d.contains("Rtsne"), "{d}");
+    assert!(field_description("ml_tsne", "learning_rate").contains("eta"));
     let d = tool_description("ml_causal_forest");
     assert!(d.contains("ceil(sqrt(p))"), "{d}");
     assert!(d.contains("min(ceil(sqrt(p) + 20), p)"), "{d}");
@@ -1636,6 +1638,41 @@ async fn test_validate_mcp_pca_output_column() {
     assert_eq!(json_block(&t2)["output_columns"], json!(["Q1", "Q2"]));
 }
 
+/// ML-98: ml_cmdscale on a distance matrix reports R's GOF pair (it reported the share of the
+/// positive eigenvalues and the k-eigenvalue share over sum |eigenvalues| before).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_cmdscale_gof() {
+    let (s, server) = session_with("cmdscale_gof_add");
+    let (case, df) = case_df("cmdscale_gof_add");
+    let cities: Vec<String> = df
+        .get_column_names()
+        .iter()
+        .map(|c| c.to_string())
+        .collect();
+    assert_eq!(cities.len(), 21);
+    let t = ok(&call(
+        &server,
+        &s,
+        "ml_cmdscale",
+        json!({"dataset": "eurodist_matrix", "columns": cities, "is_distance_matrix": true, "k": 2}),
+    )
+    .await);
+    let j: Value = serde_json::from_str(&t).unwrap_or_else(|e| panic!("{e}:\n{t}"));
+    let want = case.vector("euro_k2_gof");
+    close(
+        j["gof"]["gof1"].as_f64().unwrap(),
+        want[0],
+        Tol::coef(21),
+        "gof1",
+    );
+    close(
+        j["gof"]["gof2"].as_f64().unwrap(),
+        want[1],
+        Tol::coef(21),
+        "gof2",
+    );
+}
+
 /// No R value for the regression forest (RNG): the column equals the core's in-sample
 /// predictions for the same call.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1674,6 +1711,27 @@ async fn test_mcp_random_forest_output_column() {
         f64s(&json_block(&t)["predictions_sample"]),
         core.predictions[..20].to_vec()
     );
+}
+
+/// ML-40: ml_svm is e1071's linear C-SVC (it stopped short of the optimum at C != 1).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_svm_linear_matches_e1071() {
+    let (s, server) = session_with("svm_libsvm");
+    let case = Case::load("svm_libsvm");
+    let t = ok(&call(
+        &server,
+        &s,
+        "ml_svm",
+        json!({"dataset": "svm_sim", "features": ["x1", "x2"], "target": "cls_lin", "c": 10,
+               "tolerance": 1e-10, "max_iterations": 100000, "output_column": "pred"}),
+    )
+    .await);
+    let got: Vec<f64> = int_column(&s, "svm_sim", "pred")
+        .into_iter()
+        .map(|v| v.unwrap() as f64)
+        .collect();
+    assert_eq!(got, case.vector("linear_c10_pred"));
+    assert_eq!(json_block(&t)["converged"], json!(true));
 }
 
 /// SVM drops incomplete rows: their predictions are null; the rest equal the core's

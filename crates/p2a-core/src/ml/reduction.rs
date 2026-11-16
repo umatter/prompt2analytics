@@ -1,6 +1,7 @@
-//! Dimensionality reduction: PCA and t-SNE.
+//! Dimensionality reduction: PCA, t-SNE and classical MDS.
 //!
-//! Pure Rust implementations using ndarray.
+//! Pure Rust implementations using ndarray. t-SNE is bhtsne's exact-gradient
+//! path with `Rtsne()`'s optimiser defaults (see [`tsne`]).
 //!
 //! PCA uses SVD via faer for O(nm²) complexity instead of power iteration.
 
@@ -9,6 +10,7 @@ use crate::errors::{EconError, EconResult};
 use crate::resource::{
     check_alloc, checked_len, checkpoint, try_vec, try_with_capacity, try_zeros2,
 };
+use crate::traits::convergence::{ResultNotes, notes_text};
 use faer::Mat;
 use ndarray::{Array1, Array2, ArrayView2, Axis};
 
@@ -23,7 +25,9 @@ pub struct PCAResult {
     pub explained_variance_ratio: Array1<f64>,
     /// Mean of each feature (used for centering)
     pub mean: Array1<f64>,
-    /// Total variance in the original data
+    /// Total variance in the original data: the sum of all `min(n, p)` component
+    /// variances (the trace of the sample covariance), on both computation paths,
+    /// so `explained_variance_ratio` is prcomp's proportion of variance
     pub total_variance: f64,
     /// Number of components kept
     pub n_components: usize,
@@ -131,8 +135,9 @@ pub fn pca(
         pca_via_svd(&centered.view(), n_comp)?
     };
 
-    // Compute explained variance
-    let total_variance: f64 = eigenvalues.iter().take(n_features).sum();
+    // Both paths return every component variance (min(n, p) on the SVD path, p on the
+    // covariance path), so the shares are of the full-spectrum total, as prcomp's
+    let total_variance: f64 = eigenvalues.sum();
     let explained_variance = eigenvalues.slice(ndarray::s![..n_comp]).to_owned();
     let explained_variance_ratio = &explained_variance / total_variance;
 
@@ -173,7 +178,8 @@ fn covariance_matrix(centered: &ArrayView2<f64>) -> Array2<f64> {
 /// - Transformed data = U * S
 ///
 /// Optimized to compute thin SVD only once, extracting both singular values
-/// and right singular vectors in a single pass.
+/// and right singular vectors in a single pass. Returns all `min(n, p)`
+/// variances (for the total) and the first `n_components` vectors.
 fn pca_via_svd(
     centered: &ArrayView2<f64>,
     n_components: usize,
@@ -198,8 +204,8 @@ fn pca_via_svd(
     // Convert singular values to explained variance
     // Variance = s² / (n - 1)
     let n_minus_1 = (n - 1) as f64;
-    let mut eigenvalues = Array1::zeros(n_comp);
-    for i in 0..n_comp {
+    let mut eigenvalues = Array1::zeros(n_singular);
+    for i in 0..n_singular {
         eigenvalues[i] = s_vec[i].powi(2) / n_minus_1;
     }
 
@@ -319,6 +325,14 @@ pub struct TsneResult {
     pub n_iterations: usize,
     /// KL(P || Q) of the returned embedding, with the unexaggerated P
     pub kl_divergence: f64,
+    /// Warnings: points whose bandwidth search missed the perplexity tolerance
+    pub warnings: Vec<String>,
+}
+
+impl ResultNotes for TsneResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
+    }
 }
 
 impl std::fmt::Display for TsneResult {
@@ -352,19 +366,46 @@ impl std::fmt::Display for TsneResult {
         if self.embedding.nrows() > 5 {
             writeln!(f, "  ... ({} more points)", self.embedding.nrows() - 5)?;
         }
-        Ok(())
+        write!(f, "{}", notes_text(self))
     }
 }
 
+/// Early exaggeration of `P` (Rtsne's `exaggeration_factor`).
+const EXAGGERATION: f64 = 12.0;
+/// Iterations with exaggeration (Rtsne's `stop_lying_iter`).
+const STOP_LYING_ITER: usize = 250;
+/// Iterations with momentum 0.5; 0.8 after (Rtsne's `mom_switch_iter`).
+const MOMENTUM_SWITCH_ITER: usize = 250;
+
 /// Run t-SNE (t-distributed Stochastic Neighbor Embedding).
+///
+/// The exact-gradient t-SNE of bhtsne with `Rtsne()`'s optimiser defaults:
+/// - the start is N(0, 1e-4) per coordinate (standard deviation 1e-4), drawn from
+///   `StdRng::seed_from_u64(seed.unwrap_or(42))`, as Rtsne's random start;
+/// - early exaggeration 12 for iterations 0-249, momentum 0.5 for iterations
+///   0-249 and 0.8 after;
+/// - `learning_rate` is Rtsne's `eta` (default 200): the update is
+///   `-eta * gains * dY` with the gradient `dY` of bhtsne, which has no factor 4
+///   (sklearn's `learning_rate` is 4 times this);
+/// - gains +0.2 when the sign of the gradient differs from that of the update,
+///   else x0.8, floor 0.01; the embedding is centred after every step;
+/// - each point's bandwidth is calibrated as bhtsne's (see
+///   [`conditional_affinities`]); points whose search misses the tolerance are
+///   reported in `warnings`.
+///
+/// The remaining differences from `Rtsne()`'s own defaults: the gradient is exact
+/// (Rtsne's `theta = 0`; its default is Barnes-Hut with 0.5); the data are used as
+/// given (no initial PCA to 50 dimensions, `pca = TRUE`, and no centring and
+/// scaling, `normalize = TRUE`); the perplexity must be below `n / 3` (Rtsne:
+/// `3 * perplexity <= n - 1`).
 ///
 /// # Arguments
 /// * `data` - Input data matrix (n_samples x n_features)
 /// * `n_components` - Number of output dimensions (default: 2)
 /// * `perplexity` - Perplexity parameter (default: 30.0)
 /// * `max_iterations` - Maximum number of iterations (default: 1000)
-/// * `learning_rate` - Learning rate (default: 200.0)
-/// * `seed` - Random seed for reproducibility
+/// * `learning_rate` - Rtsne's `eta` (default: 200.0)
+/// * `seed` - Seed of the random start (default 42)
 pub fn tsne(
     data: ArrayView2<f64>,
     n_components: Option<usize>,
@@ -373,12 +414,34 @@ pub fn tsne(
     learning_rate: Option<f64>,
     seed: Option<u64>,
 ) -> Result<TsneResult, String> {
-    let n_samples = data.nrows();
+    use rand::SeedableRng;
+    use rand_distr::{Distribution, Normal};
+
     let n_comp = n_components.unwrap_or(2);
     let perp = perplexity.unwrap_or(30.0);
     let max_iter = max_iterations.unwrap_or(1000);
     let lr = learning_rate.unwrap_or(200.0);
+    check_tsne_inputs(&data, n_comp, perp, max_iter, lr)?;
 
+    let mut y0 =
+        try_zeros2(data.nrows(), n_comp, "t-SNE initial embedding").map_err(|e| e.to_string())?;
+    let mut rng = rand::rngs::StdRng::seed_from_u64(seed.unwrap_or(42));
+    let normal = Normal::new(0.0, 1e-4).map_err(|e| e.to_string())?;
+    for v in y0.iter_mut() {
+        *v = normal.sample(&mut rng);
+    }
+    tsne_from_init(data, y0, perp, max_iter, lr)
+}
+
+/// The parameter and data checks of [`tsne`] and [`tsne_from_init`].
+fn check_tsne_inputs(
+    data: &ArrayView2<f64>,
+    n_comp: usize,
+    perp: f64,
+    max_iter: usize,
+    lr: f64,
+) -> Result<(), String> {
+    let n_samples = data.nrows();
     if n_samples < 4 {
         return Err("Need at least 4 samples for t-SNE".to_string());
     }
@@ -410,22 +473,40 @@ pub fn tsne(
             n_samples / 3
         ));
     }
+    Ok(())
+}
+
+/// t-SNE from the given start `y0` (`n x n_components`), with the optimiser of
+/// [`tsne`]: Rtsne's exact path with `Y_init = y0`, `eta = learning_rate`,
+/// `exaggeration_factor = 12`, `stop_lying_iter = 250`, `mom_switch_iter = 250`.
+pub(crate) fn tsne_from_init(
+    data: ArrayView2<f64>,
+    y0: Array2<f64>,
+    perplexity: f64,
+    max_iter: usize,
+    learning_rate: f64,
+) -> Result<TsneResult, String> {
+    let n_samples = data.nrows();
+    let n_comp = y0.ncols();
+    check_tsne_inputs(&data, n_comp, perplexity, max_iter, learning_rate)?;
+    if y0.nrows() != n_samples {
+        return Err(format!(
+            "the start has {} rows, but the data have {n_samples}",
+            y0.nrows()
+        ));
+    }
+    if y0.iter().any(|v| !v.is_finite()) {
+        return Err("the start must contain only finite values".to_string());
+    }
+    let (perp, lr) = (perplexity, learning_rate);
 
     let to_string = |e: EconError| e.to_string();
 
     // Compute joint probabilities P_ij using Gaussian kernel (row by row; no
     // distance matrix is kept)
-    let p = compute_joint_probabilities(&data, perp)?;
+    let (p, calibration) = compute_joint_probabilities(&data, perp)?;
 
-    // Initialize low-dimensional embedding using PCA or random
-    let mut y = initialize_embedding(data.view(), n_comp, seed)?;
-
-    // Gradient descent parameters
-    let momentum = 0.5;
-    let final_momentum = 0.8;
-    let momentum_switch_iter = 250;
-    let early_exaggeration = 4.0;
-    let early_exaggeration_iter = 100;
+    let mut y = y0;
 
     let mut y_velocity = try_zeros2(n_samples, n_comp, "t-SNE velocity").map_err(to_string)?;
     let mut gains = try_zeros2(n_samples, n_comp, "t-SNE gains").map_err(to_string)?;
@@ -438,17 +519,17 @@ pub fn tsne(
         checkpoint().map_err(to_string)?;
 
         // Early exaggeration multiplies P for the first iterations
-        let exaggeration = if iter < early_exaggeration_iter {
-            early_exaggeration
+        let exaggeration = if iter < STOP_LYING_ITER {
+            EXAGGERATION
         } else {
             1.0
         };
 
         // Switch to final momentum
-        let current_momentum = if iter < momentum_switch_iter {
-            momentum
+        let current_momentum = if iter < MOMENTUM_SWITCH_ITER {
+            0.5
         } else {
-            final_momentum
+            0.8
         };
 
         // Compute Q distribution (Student-t with 1 DOF)
@@ -482,7 +563,7 @@ pub fn tsne(
 
     // KL(P || Q) of the returned embedding, with the unexaggerated P
     let sum_q = fill_q_distribution(&y.view(), &mut q);
-    let kl_div = compute_kl_divergence(&p.view(), 1.0, &q.view(), sum_q);
+    let kl_div = compute_kl_divergence(&p.view(), &q.view(), sum_q);
 
     Ok(TsneResult {
         embedding: y,
@@ -490,6 +571,7 @@ pub fn tsne(
         perplexity: perp,
         n_iterations: max_iter,
         kl_divergence: kl_div,
+        warnings: calibration.warning(n_samples, perp).into_iter().collect(),
     })
 }
 
@@ -504,17 +586,67 @@ fn sign3(v: f64) -> i8 {
     }
 }
 
-/// Compute joint probability matrix P using Gaussian kernel.
-/// Uses binary search to find sigma for each point to achieve target perplexity.
-///
-/// Row `i`'s squared distances are computed into a reusable buffer (pair
-/// `(min(i, j), max(i, j))`, the order a full distance matrix used), its
-/// conditional probabilities are written into row `i` of `P`, and `P` is then
-/// symmetrised in place. Only the `n x n` matrix `P` is allocated.
+/// Steps of the bandwidth search per point (bhtsne's limit).
+const PERPLEXITY_STEPS: usize = 200;
+/// Tolerance of the bandwidth search on `|H - ln(perplexity)|` (bhtsne's).
+const PERPLEXITY_TOL: f64 = 1e-5;
+
+/// Points whose bandwidth search missed [`PERPLEXITY_TOL`], and the largest miss.
+#[derive(Debug, Clone, Copy, Default)]
+struct Calibration {
+    missed: usize,
+    worst: f64,
+}
+
+impl Calibration {
+    /// The warning for points that missed the tolerance, if any.
+    fn warning(&self, n: usize, perplexity: f64) -> Option<String> {
+        (self.missed > 0).then(|| {
+            format!(
+                "the bandwidth search did not reach perplexity {perplexity} within {PERPLEXITY_TOL:e} for {} of {n} points in {PERPLEXITY_STEPS} steps (largest |H - ln(perplexity)| {:.4}); their affinities use the last bandwidth tried (exact duplicates or perplexity close to the number of distinct neighbours)",
+                self.missed, self.worst
+            )
+        })
+    }
+}
+
+/// The joint affinities `P` of t-SNE: the conditional rows of
+/// [`conditional_affinities`], symmetrised as `(P + P') / sum(P + P')` with no
+/// floor (bhtsne's exact path). Only the `n x n` matrix `P` is allocated.
 fn compute_joint_probabilities(
     data: &ArrayView2<f64>,
     perplexity: f64,
-) -> Result<Array2<f64>, String> {
+) -> Result<(Array2<f64>, Calibration), String> {
+    let (mut p, calibration) = conditional_affinities(data, perplexity)?;
+    let n = p.nrows();
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let val = p[[i, j]] + p[[j, i]];
+            p[[i, j]] = val;
+            p[[j, i]] = val;
+        }
+    }
+    let total = p.sum();
+    if total > 0.0 {
+        p /= total;
+    }
+    Ok((p, calibration))
+}
+
+/// The conditional affinities `p_{j|i}`, row by row, calibrated as bhtsne's
+/// `computeGaussianPerplexity`: for each point a search over the precision
+/// `beta = 1 / (2 sigma^2)`, starting at 1, doubling (or halving) while the
+/// other bound is open and bisecting once both are, for at most
+/// [`PERPLEXITY_STEPS`] steps, until the row entropy
+/// `H = beta sum_j d2_ij p_j / S + ln S` (`S = f64::MIN_POSITIVE + sum_j p_j`,
+/// `p_j = exp(-beta d2_ij)`) is within [`PERPLEXITY_TOL`] of `ln(perplexity)`.
+/// Every row is written, with the last bandwidth tried when the search misses;
+/// the misses are counted. The squared distances of row `i` go into a reused
+/// buffer (pair `(min(i, j), max(i, j))`); no distance matrix is kept.
+fn conditional_affinities(
+    data: &ArrayView2<f64>,
+    perplexity: f64,
+) -> Result<(Array2<f64>, Calibration), String> {
     let to_string = |e: EconError| e.to_string();
     let n = data.nrows();
     let n_features = data.ncols();
@@ -522,7 +654,7 @@ fn compute_joint_probabilities(
 
     let mut p = try_zeros2(n, n, "t-SNE affinity matrix").map_err(to_string)?;
     let mut distances = try_vec(n, 0.0f64, "t-SNE distance row").map_err(to_string)?;
-    let mut p_i = Array1::zeros(n);
+    let mut calibration = Calibration::default();
 
     for i in 0..n {
         checkpoint().map_err(to_string)?;
@@ -541,107 +673,55 @@ fn compute_joint_probabilities(
             };
         }
 
-        // The buffer is reused across rows: entry i must start at 0
-        p_i[i] = 0.0;
-
-        // Binary search for sigma_i
-        let mut sigma_min = 1e-10;
-        let mut sigma_max = 1e10;
-        let mut sigma = 1.0;
-
-        for _ in 0..50 {
-            // Compute conditional probability P_j|i (p_i[i] stays 0)
-            let mut sum_exp = 0.0;
-
+        let mut row = p.row_mut(i);
+        let mut beta = 1.0f64;
+        let mut min_beta: Option<f64> = None;
+        let mut max_beta: Option<f64> = None;
+        let mut sum_p = f64::MIN_POSITIVE;
+        let mut h_diff = f64::INFINITY;
+        for _ in 0..PERPLEXITY_STEPS {
+            sum_p = f64::MIN_POSITIVE;
+            let mut h = 0.0;
             for j in 0..n {
-                if i != j {
-                    let exp_val = (-distances[j] / (2.0 * sigma * sigma)).exp();
-                    p_i[j] = exp_val;
-                    sum_exp += exp_val;
+                if j == i {
+                    row[j] = 0.0;
+                    continue;
+                }
+                let v = (-beta * distances[j]).exp();
+                row[j] = v;
+                sum_p += v;
+                // an underflowed term adds nothing (and 0 x an overflowed distance is not NaN)
+                if v > 0.0 {
+                    h += beta * (distances[j] * v);
                 }
             }
-
-            if sum_exp > 0.0 {
-                p_i /= sum_exp;
-            }
-
-            // Compute entropy
-            let mut entropy = 0.0;
-            for j in 0..n {
-                if p_i[j] > 1e-10 {
-                    entropy -= p_i[j] * p_i[j].ln();
-                }
-            }
-
-            // Binary search
-            if (entropy - target_entropy).abs() < 1e-5 {
-                // Found good sigma
-                for j in 0..n {
-                    p[[i, j]] = p_i[j];
-                }
+            h_diff = h / sum_p + sum_p.ln() - target_entropy;
+            if h_diff.abs() < PERPLEXITY_TOL {
                 break;
-            } else if entropy > target_entropy {
-                sigma_max = sigma;
-                sigma = (sigma + sigma_min) / 2.0;
+            }
+            if h_diff > 0.0 {
+                // too flat: narrow the kernel
+                min_beta = Some(beta);
+                beta = match max_beta {
+                    None => beta * 2.0,
+                    Some(hi) => (beta + hi) / 2.0,
+                };
             } else {
-                sigma_min = sigma;
-                sigma = (sigma + sigma_max) / 2.0;
-            }
-
-            // If we exhausted iterations, use current sigma
-            if sigma_max - sigma_min < 1e-10 {
-                for j in 0..n {
-                    p[[i, j]] = p_i[j];
-                }
-                break;
+                max_beta = Some(beta);
+                beta = match min_beta {
+                    None => beta / 2.0,
+                    Some(lo) => (beta + lo) / 2.0,
+                };
             }
         }
-    }
-
-    // Symmetrize in place: P_ij = (P_j|i + P_i|j) / 2n; the diagonal stays 0
-    for i in 0..n {
-        for j in (i + 1)..n {
-            let val = (p[[i, j]] + p[[j, i]]) / (2.0 * n as f64);
-            // Ensure minimum probability for numerical stability
-            let val = val.max(1e-12);
-            p[[i, j]] = val;
-            p[[j, i]] = val;
+        // a NaN entropy (no finite bandwidth found) is a miss too
+        if h_diff.is_nan() || h_diff.abs() >= PERPLEXITY_TOL {
+            calibration.missed += 1;
+            calibration.worst = calibration.worst.max(h_diff.abs());
         }
+        row /= sum_p;
     }
-
-    Ok(p)
-}
-
-/// Initialize low-dimensional embedding.
-fn initialize_embedding(
-    data: ArrayView2<f64>,
-    n_components: usize,
-    seed: Option<u64>,
-) -> Result<Array2<f64>, String> {
-    let n_samples = data.nrows();
-
-    // Try PCA initialization first
-    if let Ok(pca_result) = pca(data, Some(n_components), true) {
-        if let Some(transformed) = pca_result.transformed {
-            // Scale down for better optimization
-            return Ok(transformed * 0.0001);
-        }
-    }
-
-    // Fallback to pseudo-random initialization using seed
-    let mut embedding = try_zeros2(n_samples, n_components, "t-SNE initial embedding")
-        .map_err(|e| e.to_string())?;
-    let seed = seed.unwrap_or(42);
-
-    for i in 0..n_samples {
-        for j in 0..n_components {
-            // Simple pseudo-random based on position and seed
-            let hash = ((i * 31 + j * 17 + seed as usize) as f64).sin();
-            embedding[[i, j]] = hash * 0.0001;
-        }
-    }
-
-    Ok(embedding)
+    Ok((p, calibration))
 }
 
 /// Compute Q distribution (Student-t with 1 degree of freedom).
@@ -671,7 +751,10 @@ fn fill_q_distribution(y: &ArrayView2<f64>, q: &mut Array2<f64>) -> f64 {
     sum_q
 }
 
-/// Compute gradient of KL divergence for `P * exaggeration`.
+/// Gradient of KL(P * exaggeration || Q) as bhtsne's exact gradient:
+/// `dY_i = sum_j (P_ij * exaggeration - Q_ij / sum_Q) * Q_ij * (y_i - y_j)`, with
+/// `Q_ij = 1 / (1 + |y_i - y_j|^2)` unnormalised. It has no factor 4, so the
+/// learning rate is Rtsne's `eta` (sklearn's `learning_rate` = 4 x `eta`).
 fn compute_gradient(
     p: &ArrayView2<f64>,
     exaggeration: f64,
@@ -687,8 +770,8 @@ fn compute_gradient(
         for j in 0..n {
             if i != j {
                 let q_ij = q[[i, j]] / sum_q;
-                // Factor: 4 * (p_ij - q_ij) * (1 + ||y_i - y_j||^2)^(-1)
-                let factor = 4.0 * (p[[i, j]] * exaggeration - q_ij) * q[[i, j]];
+                // (p_ij - q_ij) * (1 + ||y_i - y_j||^2)^(-1)
+                let factor = (p[[i, j]] * exaggeration - q_ij) * q[[i, j]];
 
                 for k in 0..n_comp {
                     gradient[[i, k]] += factor * (y[[i, k]] - y[[j, k]]);
@@ -700,22 +783,19 @@ fn compute_gradient(
     gradient
 }
 
-/// Compute KL divergence between `P * exaggeration` and Q.
-fn compute_kl_divergence(
-    p: &ArrayView2<f64>,
-    exaggeration: f64,
-    q: &ArrayView2<f64>,
-    sum_q: f64,
-) -> f64 {
+/// KL(P || Q) in Rtsne's form, `sum_{i != j} p_ij ln((p_ij + FLT_MIN) / (q_ij + FLT_MIN))`
+/// with `q_ij = Q_ij / sum_Q` and `FLT_MIN = f32::MIN_POSITIVE`.
+fn compute_kl_divergence(p: &ArrayView2<f64>, q: &ArrayView2<f64>, sum_q: f64) -> f64 {
     let n = p.nrows();
+    let tiny = f64::from(f32::MIN_POSITIVE);
     let mut kl = 0.0;
 
     for i in 0..n {
         for j in 0..n {
-            let p_ij = p[[i, j]] * exaggeration;
-            if i != j && p_ij > 1e-12 {
-                let q_ij = (q[[i, j]] / sum_q).max(1e-12);
-                kl += p_ij * (p_ij / q_ij).ln();
+            if i != j {
+                let p_ij = p[[i, j]];
+                let q_ij = q[[i, j]] / sum_q;
+                kl += p_ij * ((p_ij + tiny) / (q_ij + tiny)).ln();
             }
         }
     }
@@ -747,9 +827,10 @@ pub struct CmdscaleResult {
     /// algebraic order as `stats::cmdscale` returns them (negative
     /// eigenvalues, from non-Euclidean input, come last).
     pub eig: Vec<f64>,
-    /// Goodness of fit (GOF) measures.
-    /// First value: sum of positive eigenvalues / sum of absolute eigenvalues.
-    /// Second value: sum of k largest eigenvalues / sum of absolute eigenvalues.
+    /// Goodness of fit, R's `GOF`: the sum of the positive eigenvalues among
+    /// the first `k` over the sum of the absolute eigenvalues, and over the sum
+    /// of the positive eigenvalues (`[1, 1]` when a denominator is 0, all
+    /// distances 0).
     pub gof: [f64; 2],
     /// Number of dimensions in the output.
     pub k: usize,
@@ -757,6 +838,10 @@ pub struct CmdscaleResult {
     pub n: usize,
     /// Whether the input was a distance matrix or data matrix.
     pub is_distance_matrix: bool,
+    /// Cailliez's additive constant (R's `ac`): added to every off-diagonal
+    /// distance with `add = Some(true)`; 0 otherwise.
+    #[serde(default)]
+    pub ac: f64,
 }
 
 impl std::fmt::Display for CmdscaleResult {
@@ -769,10 +854,17 @@ impl std::fmt::Display for CmdscaleResult {
         writeln!(f, "Goodness of fit:")?;
         writeln!(
             f,
-            "  GOF1 (positive eigenvalues / |all|): {:.4}",
+            "  GOF (k eigenvalues / sum |eigenvalues|): {:.4}",
             self.gof[0]
         )?;
-        writeln!(f, "  GOF2 (k eigenvalues / |all|): {:.4}", self.gof[1])?;
+        writeln!(
+            f,
+            "  GOF (k eigenvalues / sum of positive eigenvalues): {:.4}",
+            self.gof[1]
+        )?;
+        if self.ac != 0.0 {
+            writeln!(f, "Additive constant (Cailliez): {}", self.ac)?;
+        }
         writeln!(f)?;
 
         // Show eigenvalues
@@ -808,9 +900,14 @@ impl std::fmt::Display for CmdscaleResult {
 ///
 /// # Arguments
 /// * `d` - Square symmetric distance matrix (n x n) as nested vectors
-/// * `k` - Number of output dimensions (default: 2)
-/// * `eig` - Return all eigenvalues if true (default: false)
-/// * `add` - Add a constant to non-diagonal distances for approximate Euclidean embedding
+/// * `k` - Number of output dimensions (default: 2), clamped to `n - 1`
+///   (R stops instead)
+/// * `eig` - accepted for R compatibility; all `n` eigenvalues are always
+///   returned
+/// * `add` - `Some(true)` is R's `add = TRUE`: Cailliez's additive constant
+///   `ac` (the largest real eigenvalue of R's `2n x 2n` matrix
+///   `[[0, -DC(D^2)], [-I, DC(2D)]]`, `DC` the double centring) is added to
+///   every off-diagonal distance before the embedding
 ///
 /// # Returns
 /// * `CmdscaleResult` containing the configuration and diagnostics
@@ -820,7 +917,9 @@ impl std::fmt::Display for CmdscaleResult {
 /// - Fewer than 2 points; a non-square, non-symmetric or non-finite `d`, a
 ///   non-zero diagonal or a negative distance; `k = 0`.
 /// - `"Resource limit: ..."` when the `n x n` matrix or the eigensolver's
-///   workspace (about `3 n^2` `f64`) exceeds the per-allocation ceiling.
+///   workspace (about `3 n^2` `f64`) exceeds the per-allocation ceiling, and
+///   with `add`, when the `2n x 2n` matrix of the additive constant or its
+///   eigensolver's workspace does.
 /// - `"Computation stopped: ..."` when the budget is cancelled or expires.
 /// - A failed eigendecomposition.
 ///
@@ -894,12 +993,116 @@ pub fn cmdscale(
     }
 
     let k = cmdscale_dims(k, n)?;
-    // All n eigenvalues are always returned; `eig` and `add` are kept for
-    // API compatibility (ML-98 revisits them).
-    let _ = (eig, add);
+    // All n eigenvalues are always returned: `eig` is accepted for R compatibility
+    let _ = eig;
 
+    if add == Some(true) {
+        let ac = cailliez_constant(d)?;
+        let shifted = |i: usize, j: usize| if i == j { 0.0 } else { d[i][j] + ac };
+        let (points, eig_vec) = cmdscale_core(n, shifted, k)?;
+        let mut result = cmdscale_result(points, eig_vec, k, n, true);
+        result.ac = ac;
+        return Ok(result);
+    }
     let (points, eig_vec) = cmdscale_core(n, |i, j| d[i][j], k)?;
     Ok(cmdscale_result(points, eig_vec, k, n, true))
+}
+
+/// Writes `sign * DC(f)` into the `n x n` block of `z` at `(r0, c0)`, where `DC`
+/// is R's `C_DoubleCentre`: the row means are subtracted, then the column means.
+fn double_centre_into(
+    z: &mut Mat<f64>,
+    (r0, c0): (usize, usize),
+    n: usize,
+    f: impl Fn(usize, usize) -> f64,
+    sign: f64,
+) -> EconResult<()> {
+    for i in 0..n {
+        checkpoint()?;
+        let mut sum = 0.0;
+        for j in 0..n {
+            let v = f(i, j);
+            z[(r0 + i, c0 + j)] = v;
+            sum += v;
+        }
+        let mean = sum / n as f64;
+        for j in 0..n {
+            z[(r0 + i, c0 + j)] -= mean;
+        }
+    }
+    for j in 0..n {
+        checkpoint()?;
+        let mut sum = 0.0;
+        for i in 0..n {
+            sum += z[(r0 + i, c0 + j)];
+        }
+        let mean = sum / n as f64;
+        for i in 0..n {
+            let v = z[(r0 + i, c0 + j)] - mean;
+            z[(r0 + i, c0 + j)] = sign * v;
+        }
+    }
+    Ok(())
+}
+
+/// Cailliez's additive constant, as `stats::cmdscale(add = TRUE)`: the largest
+/// real part among the eigenvalues of the `2n x 2n` matrix
+/// `[[0, -DC(D^2)], [-I, DC(2D)]]`. The matrix and the general eigensolver's
+/// workspace are pre-flighted against the allocation ceiling.
+fn cailliez_constant(d: &[Vec<f64>]) -> Result<f64, String> {
+    use faer::dyn_stack::{MemBuffer, MemStack};
+    use faer::linalg::evd::{ComputeEigenvectors, evd_real, evd_scratch};
+
+    let to_string = |e: EconError| e.to_string();
+    let n = d.len();
+    let what = "cmdscale additive constant matrix";
+    let m = n
+        .checked_mul(2)
+        .ok_or_else(|| crate::resource::overflow(what).to_string())?;
+    checkpoint().map_err(to_string)?;
+    check_alloc::<f64>(checked_len(&[m, m], what).map_err(to_string)?, what).map_err(to_string)?;
+    let ws = "cmdscale additive constant eigensolver workspace";
+    let par = faer::get_global_parallelism();
+    let scratch = evd_scratch::<f64>(
+        m,
+        ComputeEigenvectors::No,
+        ComputeEigenvectors::No,
+        par,
+        Default::default(),
+    );
+    if scratch.layout().is_err() {
+        return Err(crate::resource::overflow(ws).to_string());
+    }
+    check_alloc::<u8>(scratch.size_bytes(), ws).map_err(to_string)?;
+
+    let mut z = Mat::<f64>::zeros(m, m);
+    double_centre_into(&mut z, (0, n), n, |i, j| d[i][j] * d[i][j], -1.0).map_err(to_string)?;
+    double_centre_into(&mut z, (n, n), n, |i, j| 2.0 * d[i][j], 1.0).map_err(to_string)?;
+    for i in 0..n {
+        z[(n + i, i)] = -1.0;
+    }
+
+    checkpoint().map_err(to_string)?;
+    let mut buf = MemBuffer::try_new(scratch)
+        .map_err(|_| crate::resource::reserve_failed(ws, scratch.size_bytes(), 1).to_string())?;
+    let mut re = faer::diag::Diag::<f64>::zeros(m);
+    let mut im = faer::diag::Diag::<f64>::zeros(m);
+    evd_real(
+        z.as_ref(),
+        re.as_mut(),
+        im.as_mut(),
+        None,
+        None,
+        par,
+        MemStack::new(&mut buf),
+        Default::default(),
+    )
+    .map_err(|_| "cmdscale additive constant: eigendecomposition failed".to_string())?;
+    Ok(re
+        .column_vector()
+        .iter()
+        .copied()
+        .fold(f64::NEG_INFINITY, f64::max))
 }
 
 /// The output dimension: `k` (default 2) clamped to `n - 1`; `k = 0` is refused.
@@ -1031,16 +1234,13 @@ fn cmdscale_result(
     n: usize,
     is_distance_matrix: bool,
 ) -> CmdscaleResult {
-    // Compute GOF measures
+    // R's GOF: the positive eigenvalues among the first k (R drops the others)
+    // over sum |eig| and over sum max(eig, 0)
     let sum_abs: f64 = eig_vec.iter().map(|&x| x.abs()).sum();
     let sum_pos: f64 = eig_vec.iter().filter(|&&x| x > 0.0).sum();
     let sum_k: f64 = eig_vec.iter().take(k).filter(|&&x| x > 0.0).sum();
-
-    let gof = if sum_abs > 1e-10 {
-        [sum_pos / sum_abs, sum_k / sum_abs]
-    } else {
-        [1.0, 1.0]
-    };
+    let share = |den: f64| if den > 0.0 { sum_k / den } else { 1.0 };
+    let gof = [share(sum_abs), share(sum_pos)];
 
     CmdscaleResult {
         points,
@@ -1049,6 +1249,7 @@ fn cmdscale_result(
         k,
         n,
         is_distance_matrix,
+        ac: 0.0,
     }
 }
 
@@ -1237,18 +1438,130 @@ mod tests {
         ]
     }
 
+    /// Row entropies `-sum p ln p` of conditional affinity rows.
+    fn row_entropies(p: &Array2<f64>) -> Vec<f64> {
+        p.rows()
+            .into_iter()
+            .map(|r| {
+                -r.iter()
+                    .filter(|&&v| v > 0.0)
+                    .map(|&v| v * v.ln())
+                    .sum::<f64>()
+            })
+            .collect()
+    }
+
+    /// ML-37: every point's bandwidth reaches the perplexity, on standard-normal data in 20
+    /// dimensions and on the same data rescaled (the old linear sigma search left about 220 of
+    /// 300 rows all zero here).
+    #[test]
+    fn test_tsne_affinities_calibrate_every_row() {
+        use rand_distr::{Distribution, Normal};
+        let mut rng = StdRng::seed_from_u64(20261118);
+        let normal = Normal::new(0.0, 1.0).unwrap();
+        let x = Array2::from_shape_fn((300, 20), |_| normal.sample(&mut rng));
+        let target = 30f64.ln();
+        let base = conditional_affinities(&x.view(), 30.0).unwrap().0;
+        for scale in [1.0, 10.0, 0.01] {
+            let xs = &x * scale;
+            let p = conditional_affinities(&xs.view(), 30.0).unwrap().0;
+            let zero = p.rows().into_iter().filter(|r| r.sum() == 0.0).count();
+            assert_eq!(zero, 0, "scale {scale}: {zero} of 300 rows are all zero");
+            for (i, r) in p.rows().into_iter().enumerate() {
+                assert!(
+                    (r.sum() - 1.0).abs() <= 1e-12,
+                    "scale {scale}, row {i}: {}",
+                    r.sum()
+                );
+            }
+            for (i, h) in row_entropies(&p).into_iter().enumerate() {
+                assert!((h - target).abs() < 1e-5, "scale {scale}, row {i}: H = {h}");
+            }
+            // the search is scale-free up to its entropy tolerance: each row agrees to 1e-4 of
+            // its largest entry (a relative error in beta moves an entry by beta d^2 times it)
+            for (row, base_row) in p.rows().into_iter().zip(base.rows()) {
+                let top = base_row.iter().copied().fold(0.0, f64::max);
+                for (a, b) in row.iter().zip(base_row.iter()) {
+                    assert!((a - b).abs() <= 1e-4 * top, "scale {scale}: {a} vs {b}");
+                }
+            }
+        }
+    }
+
+    /// The search cannot reach a perplexity below the number of exact duplicates: those rows are
+    /// written anyway (uniform over the duplicates) and reported.
+    #[test]
+    fn test_tsne_calibration_warns_when_unreached() {
+        let mut rows = vec![[0.0, 0.0]; 9];
+        rows.extend([[10.0, 10.0], [10.5, 10.0], [10.0, 11.0]]);
+        let x = Array2::from_shape_fn((12, 2), |(i, j)| rows[i][j]);
+        let r = tsne(x.view(), Some(2), Some(3.9), Some(5), None, Some(1)).unwrap();
+        assert_eq!(r.warnings.len(), 1, "{:?}", r.warnings);
+        let w = &r.warnings[0];
+        let miss = 8f64.ln() - 3.9f64.ln();
+        assert!(
+            w.contains("9 of 12 points") && w.contains(&format!("{miss:.4}")),
+            "{w}"
+        );
+        assert!(r.to_string().contains(&format!("Warning: {w}")));
+        let p = conditional_affinities(&x.view(), 3.9).unwrap().0;
+        for i in 0..9 {
+            let row = p.row(i);
+            assert!((row.sum() - 1.0).abs() <= 1e-12, "row {i}: {}", row.sum());
+            assert!(
+                row.iter()
+                    .take(9)
+                    .enumerate()
+                    .all(|(j, &v)| j == i || (v - 0.125).abs() < 1e-12)
+            );
+        }
+    }
+
+    /// ML-37: the joint affinities carry no 1e-12 floor and sum to one (perplexity 2: at 4 the
+    /// kernel must reach past the four neighbours of a group, and the cross-group entries are
+    /// about 6e-11).
+    #[test]
+    fn test_tsne_affinities_have_no_floor() {
+        let data = tsne_fixture();
+        let (p, _) = compute_joint_probabilities(&data.view(), 2.0).unwrap();
+        assert!((p.sum() - 1.0).abs() <= 1e-12, "{}", p.sum());
+        for i in 0..15 {
+            for j in 0..15 {
+                if i / 5 != j / 5 {
+                    assert!(p[[i, j]] < 1e-12, "P[{i},{j}] = {}", p[[i, j]]);
+                }
+            }
+        }
+    }
+
     /// ML-145: one iteration is bhtsne's first step. Velocity starts at 0 and sign(0) = 0, so
     /// every gain becomes 1.2 (gains + 0.2) wherever the gradient is non-zero; momentum times 0
-    /// vanishes; then Y is centred.
+    /// vanishes; then Y is centred. ML-97: exaggeration 12 on iteration 0, and the gradient of
+    /// bhtsne (no factor 4) times eta.
     #[test]
     fn test_tsne_first_step_matches_bhtsne_update() {
         let data = tsne_fixture();
-        let p = compute_joint_probabilities(&data.view(), 4.0).unwrap();
-        let y0 = initialize_embedding(data.view(), 2, Some(42)).unwrap();
+        let (p, _) = compute_joint_probabilities(&data.view(), 4.0).unwrap();
+        let y0 = Array2::from_shape_fn((15, 2), |(i, j)| 1e-4 * ((2 * i + j) as f64 * 0.7).sin());
         let mut q = Array2::zeros((15, 15));
         let sq = fill_q_distribution(&y0.view(), &mut q);
-        // exaggeration 4 on iteration 0
-        let g = compute_gradient(&p.view(), 4.0, &q.view(), &y0.view(), sq);
+        let g = compute_gradient(&p.view(), 12.0, &q.view(), &y0.view(), sq);
+        // the same gradient written out: sum_j (12 p_ij - q_ij / sum_q) q_ij (y_i - y_j)
+        for i in 0..15 {
+            for k in 0..2 {
+                let direct: f64 = (0..15)
+                    .filter(|&j| j != i)
+                    .map(|j| {
+                        (12.0 * p[[i, j]] - q[[i, j]] / sq) * q[[i, j]] * (y0[[i, k]] - y0[[j, k]])
+                    })
+                    .sum();
+                assert!(
+                    (g[[i, k]] - direct).abs() <= 1e-12 * direct.abs().max(1e-300),
+                    "{} vs {direct}",
+                    g[[i, k]]
+                );
+            }
+        }
         assert!(
             g.iter().any(|&v| v < 0.0),
             "the fixture must have a negative gradient entry"
@@ -1259,19 +1572,82 @@ mod tests {
         for mut row in want.rows_mut() {
             row -= &mean;
         }
-        let r = tsne(
-            data.view(),
-            Some(2),
-            Some(4.0),
-            Some(1),
-            Some(200.0),
-            Some(42),
-        )
-        .unwrap();
+        let r = tsne_from_init(data.view(), y0.clone(), 4.0, 1, 200.0).unwrap();
         for (a, b) in r.embedding.iter().zip(want.iter()) {
             // before: entries with g < 0 used gain 0.8
             assert!((a - b).abs() <= 1e-12 * (1.0 + b.abs()), "{a} vs {b}");
         }
+    }
+
+    /// ML-97: Rtsne's exact path from a given start (R 4.3.3, Rtsne 0.17, theta 0, no PCA, no
+    /// normalisation, eta 200, exaggeration 12 to iteration 250). Later iterations are chaotic
+    /// in the summation order, so 1 and 10 iterations are pinned.
+    #[test]
+    fn test_validate_tsne_rtsne_exact() {
+        let (case, ds) = crate::test_support::load_case("tsne_rtsne_exact");
+        let colmajor = |y: &Array2<f64>| -> Vec<f64> { y.t().iter().copied().collect() };
+        let blobs = matrix(ds.df(), &["x1", "x2", "x3", "x4", "x5"]);
+        let blobs_y0 = matrix(ds.df(), &["y0_1", "y0_2"]);
+        let unit_df = case_frame(&case, "tsne_unit.csv");
+        let u: Vec<String> = (1..=20).map(|i| format!("u{i}")).collect();
+        let u: Vec<&str> = u.iter().map(String::as_str).collect();
+        let unit = matrix(&unit_df, &u);
+        let unit_y0 = matrix(&unit_df, &["y0_1", "y0_2"]);
+        let run = |x: &Array2<f64>, y0: &Array2<f64>, perp: f64, iters: usize| {
+            let r = tsne_from_init(x.view(), y0.clone(), perp, iters, 200.0).unwrap();
+            assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+            colmajor(&r.embedding)
+        };
+        Check::new(&case)
+            .vector(
+                "blobs_y_iter1",
+                &run(&blobs, &blobs_y0, 10.0, 1),
+                Tol::new(1e-10, 1e-15),
+            )
+            // the summation order separates the two paths at about 1e-13 after 10 steps
+            .vector(
+                "blobs_y_iter10",
+                &run(&blobs, &blobs_y0, 10.0, 10),
+                Tol::new(1e-9, 1e-9),
+            )
+            .vector(
+                "unit_y_iter1",
+                &run(&unit, &unit_y0, 30.0, 1),
+                Tol::new(1e-10, 1e-15),
+            )
+            .finish();
+    }
+
+    /// ML-97: the seed sets the start (it was used only by an unreachable fallback).
+    #[test]
+    fn test_tsne_seed_changes_the_embedding() {
+        let data = tsne_fixture();
+        let run = |seed| {
+            tsne(data.view(), Some(2), Some(4.0), Some(20), None, seed)
+                .unwrap()
+                .embedding
+        };
+        assert_ne!(run(Some(1)), run(Some(999)));
+        assert_eq!(run(Some(7)), run(Some(7)));
+        assert_eq!(run(None), run(Some(42)));
+    }
+
+    /// ML-97: the start is N(0, 1e-4), Rtsne's random start (it was the PCA scores x 1e-4).
+    #[test]
+    fn test_tsne_start_is_rtsne_scale() {
+        let data = blobs(500, 3, 9);
+        use rand::SeedableRng;
+        use rand_distr::{Distribution, Normal};
+        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+        let normal = Normal::new(0.0, 1e-4).unwrap();
+        let draws: Vec<f64> = (0..1000).map(|_| normal.sample(&mut rng)).collect();
+        let sd = (draws.iter().map(|v| v * v).sum::<f64>() / draws.len() as f64).sqrt();
+        assert!((sd / 1e-4 - 1.0).abs() < 0.1, "{sd}");
+        // tsne's start is these draws, row by row: one step from them is tsne's first step
+        let y0 = Array2::from_shape_vec((500, 2), draws).unwrap();
+        let a = tsne(data.view(), Some(2), Some(5.0), Some(1), None, Some(42)).unwrap();
+        let b = tsne_from_init(data.view(), y0, 5.0, 1, 200.0).unwrap();
+        assert_eq!(a.embedding, b.embedding);
     }
 
     /// ML-146 (and ML-97's KL part): the reported KL is KL(P || Q(Y)) of the returned Y, with
@@ -1279,7 +1655,7 @@ mod tests {
     #[test]
     fn test_tsne_reports_kl_of_returned_embedding() {
         let data = tsne_fixture();
-        let p = compute_joint_probabilities(&data.view(), 4.0).unwrap();
+        let (p, _) = compute_joint_probabilities(&data.view(), 4.0).unwrap();
         // 1 and 50: inside early exaggeration
         for iters in [1usize, 50, 120] {
             let r = tsne(
@@ -1293,7 +1669,7 @@ mod tests {
             .unwrap();
             let mut q = Array2::zeros((15, 15));
             let sq = fill_q_distribution(&r.embedding.view(), &mut q);
-            let want = compute_kl_divergence(&p.view(), 1.0, &q.view(), sq);
+            let want = compute_kl_divergence(&p.view(), &q.view(), sq);
             assert!(
                 (r.kl_divergence - want).abs() <= 1e-12 * want.abs(),
                 "iters={iters}: {} vs {want}",
@@ -1302,22 +1678,24 @@ mod tests {
         }
     }
 
-    /// Re-captured at T3-WP42 (ML-145 changes the path from step 1, ML-146 the reported KL).
+    /// Re-captured at T3-WP42 (ML-145 changes the path from step 1, ML-146 the reported KL), and
+    /// for ML-37 (bhtsne's bandwidth search, no floor on P, Rtsne's KL form) and ML-97 (seeded
+    /// N(0, 1e-4) start, exaggeration 12 to iteration 250, the gradient without the factor 4).
     #[test]
     fn tsne_memory_refactor_is_bit_identical() {
         const GOLDEN: [u64; 4] = [
-            13859390039091109202,
-            13872640547727622304,
-            13858743226655607939,
-            4613615299525055005,
+            13850688072866429329,
+            4637588052825448399,
+            4618886929027901594,
+            4611220452119951649,
         ];
         let data = tsne_fixture();
-        // 120 iterations cross the early-exaggeration switch at 100
+        // 260 iterations cross the exaggeration and momentum switches at 250
         let r = tsne(
             data.view(),
             Some(2),
             Some(4.0),
-            Some(120),
+            Some(260),
             Some(200.0),
             Some(42),
         )
@@ -1750,8 +2128,47 @@ mod tests {
         assert!(result.gof[0] >= 0.0 && result.gof[0] <= 1.0);
         assert!(result.gof[1] >= 0.0 && result.gof[1] <= 1.0);
 
-        // GOF2 <= GOF1 (since k eigenvalues <= positive eigenvalues)
-        assert!(result.gof[1] <= result.gof[0] + 0.01);
+        // R's pair shares a numerator; sum |eig| >= sum max(eig, 0), so GOF[0] <= GOF[1]
+        assert!(result.gof[0] <= result.gof[1] + 1e-12);
+
+        // ML-98: the text names R's two measures, and the additive constant when add was used
+        let text = result.to_string();
+        assert!(
+            text.contains("GOF (k eigenvalues / sum |eigenvalues|)")
+                && text.contains("GOF (k eigenvalues / sum of positive eigenvalues)")
+                && !text.contains("Additive constant"),
+            "{text}"
+        );
+        let added = cmdscale(&dist, Some(2), None, Some(true)).unwrap();
+        assert!(added.ac > 0.0, "{}", added.ac);
+        assert!(
+            added.to_string().contains("Additive constant (Cailliez): "),
+            "{added}"
+        );
+    }
+
+    /// The 2n x 2n eigenproblem of add = TRUE is pre-flighted; without add it is never built.
+    #[test]
+    fn test_cmdscale_add_preflights_its_matrix() {
+        let data = blobs(30, 3, 4);
+        let n = data.nrows();
+        let d: Vec<Vec<f64>> = (0..n)
+            .map(|i| {
+                (0..n)
+                    .map(|j| (0..3).map(|c| (data[[i, c]] - data[[j, c]]).abs()).sum())
+                    .collect()
+            })
+            .collect();
+        let ceiling = Some(4 * n * n * 8 - 8);
+        let e =
+            with_alloc_ceiling(ceiling, || cmdscale(&d, Some(2), None, Some(true))).unwrap_err();
+        assert!(
+            e.starts_with("Resource limit") && e.contains("cmdscale additive constant"),
+            "{e}"
+        );
+        assert!(with_alloc_ceiling(ceiling, || cmdscale(&d, Some(2), None, None)).is_ok());
+        let e = with_budget(cancelled(), || cmdscale(&d, Some(2), None, Some(true))).unwrap_err();
+        assert!(e.contains("cancelled"), "{e}");
     }
 
     #[test]
@@ -2014,8 +2431,7 @@ mod tests {
     fn test_validate_prcomp() {
         // prcomp(X, scale. = TRUE): sdev 1.3221524880813766 0.9819157249713941
         // 0.5364273551135557; prcomp(X) unscaled. Rotation signs are arbitrary: absolute values.
-        // n = 60 > 4p: the covariance path (ML-35's SVD-path ratio with n_components < p is not
-        // exercised; registry deviation ML-35).
+        // n = 60 > 4p: the covariance path (the SVD path: test_validate_prcomp_svd_path).
         let (case, ds) = crate::test_support::load_case("kmeans_lloyd_pca_mds");
         let x = matrix(ds.df(), &["a", "b", "c"]);
         let mean = x.mean_axis(ndarray::Axis(0)).unwrap();
@@ -2038,40 +2454,161 @@ mod tests {
         c.finish();
     }
 
+    /// ML-35: on the SVD path (n <= 4p) with fewer components than min(n, p), the shares were
+    /// taken over the kept components only (0.65135, 0.34865 here, against prcomp's 0.58270,
+    /// 0.31193).
     #[test]
-    fn test_validate_cmdscale_eurodist() {
-        // ML-36: before (power iteration) eig = 19538377, 11856555, -2251844, 1528844, ...; R
-        // sorts algebraically. GOF is ML-98 (Tier 4): deviation, not pinned.
-        let (case, _) = crate::test_support::load_case("kmeans_lloyd_pca_mds");
-        let df = case_frame(&case, "eurodist_matrix.csv");
+    fn test_validate_prcomp_svd_path() {
+        let (case, ds) = crate::test_support::load_case("pca_svd_path");
+        let v: Vec<String> = (1..=8).map(|i| format!("v{i}")).collect();
+        let v: Vec<&str> = v.iter().map(String::as_str).collect();
+        let w: Vec<String> = (1..=10).map(|i| format!("w{i}")).collect();
+        let w: Vec<&str> = w.iter().map(String::as_str).collect();
+        let tall = matrix(ds.df(), &v);
+        let wide = matrix(&case_frame(&case, "pca_wide_6x10.csv"), &w);
+        let sdev =
+            |r: &PCAResult| -> Vec<f64> { r.explained_variance.iter().map(|v| v.sqrt()).collect() };
+        let ratios = |r: &PCAResult| r.explained_variance_ratio.to_vec();
+        // a share of the kept components equals prcomp's share of the same component
+        let prefix = |r: &PCAResult, key: &str, tol: Tol| {
+            let want = case.vector(key);
+            for (i, &got) in r.explained_variance_ratio.iter().enumerate() {
+                assert!(
+                    tol.allows(got, want[i]),
+                    "{key}[{i}] with k = {}: {got} vs R {}",
+                    r.n_components,
+                    want[i]
+                );
+            }
+        };
+        let mut c = Check::new(&case);
+
+        let all = pca(tall.view(), None, false).unwrap();
+        c.vector("tall_sdev", &sdev(&all), Tol::stat(20))
+            .vector("tall_prop", &ratios(&all), Tol::stat(20))
+            .scalar("tall_total_variance", all.total_variance, Tol::stat(20));
+        let k2 = pca(tall.view(), Some(2), false).unwrap();
+        prefix(&k2, "tall_prop", Tol::stat(20));
+        // rows = PCs: R's p x 2 rotation in column-major order
+        let rot: Vec<f64> = k2.components.iter().map(|v| v.abs()).collect();
+        c.scalar("tall_total_variance", k2.total_variance, Tol::stat(20))
+            .vector("tall_rotation_abs_k2", &rot, Tol::coef(20));
+
+        // n < p: six singular values, the last one roundoff (R 1.45e-16)
+        let all = pca(wide.view(), None, false).unwrap();
+        c.vector("wide_sdev", &sdev(&all), Tol::new(Tol::stat(6).rel, 1e-12))
+            .vector("wide_prop", &ratios(&all), Tol::stat(6))
+            .scalar("wide_total_variance", all.total_variance, Tol::stat(6));
+        let k3 = pca(wide.view(), Some(3), false).unwrap();
+        prefix(&k3, "wide_prop", Tol::stat(6));
+        c.scalar("wide_total_variance", k3.total_variance, Tol::stat(6));
+        c.finish();
+    }
+
+    /// ML-35: the SVD path (n <= 4p) and the covariance path (n > 4p) give the same shares.
+    /// Repeating every row 10 times keeps the shares and scales the covariance by 10 x 19 / 199.
+    #[test]
+    fn test_pca_ratio_agrees_across_paths() {
+        let mut rng = StdRng::seed_from_u64(20261115);
+        let z = Array2::from_shape_fn((20, 3), |_| rng.r#gen::<f64>() - 0.5);
+        let load = Array2::from_shape_fn((3, 8), |_| rng.r#gen::<f64>() * 2.0 - 1.0);
+        let x = z.dot(&load) + Array2::from_shape_fn((20, 8), |_| 0.3 * (rng.r#gen::<f64>() - 0.5));
+        let rep = Array2::from_shape_fn((200, 8), |(i, j)| x[[i % 20, j]]);
+        let svd = pca(x.view(), Some(2), false).unwrap();
+        let cov = pca(rep.view(), Some(2), false).unwrap();
+        for k in 0..2 {
+            let (a, b) = (
+                svd.explained_variance_ratio[k],
+                cov.explained_variance_ratio[k],
+            );
+            assert!(
+                (a - b).abs() <= 1e-12,
+                "PC{}: {a} (SVD path) vs {b} (covariance path)",
+                k + 1
+            );
+        }
+        let scaled = svd.total_variance * 10.0 * 19.0 / 199.0;
+        assert!(
+            (scaled - cov.total_variance).abs() <= 1e-12 * cov.total_variance,
+            "{scaled} vs {}",
+            cov.total_variance
+        );
+    }
+
+    /// The 21 x 21 eurodist matrix of a case, as rows.
+    fn eurodist(case: &p2a_validation::Case) -> Vec<Vec<f64>> {
+        let df = case_frame(case, "eurodist_matrix.csv");
         let names: Vec<String> = df
             .get_column_names()
             .iter()
             .map(|s| s.to_string())
             .collect();
-        let cols: Vec<Vec<f64>> = names
-            .iter()
-            .map(|n| {
-                crate::data::columns::numeric_column(&df, n, crate::data::columns::NaPolicy::Fail)
-                    .unwrap()
-                    .0
-            })
-            .collect();
-        let d: Vec<Vec<f64>> = (0..21)
-            .map(|i| (0..21).map(|j| cols[j][i]).collect())
-            .collect();
-        let r = cmdscale(&d, Some(2), Some(true), None).unwrap();
-        let pts: Vec<f64> = (0..2)
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        let m = matrix(&df, &names);
+        m.rows().into_iter().map(|r| r.to_vec()).collect()
+    }
+
+    /// `|points|` in R's column-major order.
+    fn points_abs(r: &CmdscaleResult) -> Vec<f64> {
+        (0..r.k)
             .flat_map(|j| r.points.iter().map(move |p| p[j].abs()))
-            .collect();
-        // deviation ML-98: r.gof is [sum_pos/sum_abs, sum_k/sum_abs], R GOF 0.7537543155079838
-        // 0.8679134296478231
+            .collect()
+    }
+
+    #[test]
+    fn test_validate_cmdscale_eurodist() {
+        // ML-36: before (power iteration) eig = 19538377, 11856555, -2251844, 1528844, ...; R
+        // sorts algebraically. ML-98: GOF was [sum_pos/sum_abs, sum_k/sum_abs] = 0.8685, 0.7538.
+        let (case, _) = crate::test_support::load_case("kmeans_lloyd_pca_mds");
+        let r = cmdscale(&eurodist(&case), Some(2), Some(true), None).unwrap();
         Check::new(&case)
-            .vector("mds_points_abs", &pts, Tol::coef(21))
+            .vector("mds_points_abs", &points_abs(&r), Tol::coef(21))
             // the null eigenvalue is roundoff (R -3.7e-09; |lambda| <~ 21 eps lambda_max ~ 1e-7):
             // abs 1e-6
             .vector("mds_eig", &r.eig, Tol::new(1e-9, 1e-6))
+            .vector("mds_gof", &r.gof, Tol::coef(21))
             .finish();
+    }
+
+    /// ML-98: R's GOF pair, and add = TRUE (Cailliez's additive constant), on eurodist and on
+    /// Manhattan distances (negative eigenvalues: the two GOF measures differ). Before, add was
+    /// ignored.
+    #[test]
+    fn test_validate_cmdscale_gof_add() {
+        let (case, _) = crate::test_support::load_case("cmdscale_gof_add");
+        let x = matrix(&case_frame(&case, "mds_points8.csv"), &["a", "b", "c"]);
+        let manh: Vec<Vec<f64>> = (0..8)
+            .map(|i| {
+                (0..8)
+                    .map(|j| (0..3).map(|c| (x[[i, c]] - x[[j, c]]).abs()).sum())
+                    .collect()
+            })
+            .collect();
+        let euro = eurodist(&case);
+        let mut c = Check::new(&case);
+        for (tag, d, k, add) in [
+            ("euro_k2", &euro, 2, None),
+            ("euro_k2_add", &euro, 2, Some(true)),
+            ("manh_k2", &manh, 2, None),
+            ("manh_k3_add", &manh, 3, Some(true)),
+        ] {
+            let n = d.len();
+            let r = cmdscale(d, Some(k), Some(true), add).unwrap();
+            // eurodist: null eigenvalues are roundoff of a 4e7 spectrum (abs 1e-6). With add,
+            // the null eigenvalue moves with ac to first order: ac agrees with R's dgeev to about
+            // 3e-13 relative (6.7e-10), which moves it by about 1e-6, so abs 1e-5 (2.4e-13 of
+            // the largest eigenvalue)
+            let eig_tol = match (n, add) {
+                (21, None) => Tol::new(1e-9, 1e-6),
+                (21, _) => Tol::new(1e-9, 1e-5),
+                _ => Tol::new(1e-9, 1e-9),
+            };
+            c.vector(&format!("{tag}_gof"), &r.gof, Tol::coef(n))
+                .scalar(&format!("{tag}_ac"), r.ac, Tol::coef(n))
+                .vector(&format!("{tag}_points_abs"), &points_abs(&r), Tol::coef(n))
+                .vector(&format!("{tag}_eig"), &r.eig, eig_tol);
+        }
+        c.finish();
     }
 
     #[test]
