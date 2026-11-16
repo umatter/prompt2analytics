@@ -74,6 +74,29 @@ equal `euro_k2_gof` (`Tol::coef(21)`). Test: `test_validate_mcp_cmdscale_gof`
 (`crates/p2a-mcp/tests/tier3/wp57_ml_spatial.rs`). The JSON keys were `gof1_positive_eigenvalues` and
 `gof2_k_eigenvalues` before ML-98.
 
+## Timing
+
+Release builds of v0.5.0 (`f80b0131`) and of this change with `--no-default-features --features ci`, one core
+(`taskset -c 2`, `RAYON_NUM_THREADS=1`), base and head processes interleaved, each process the median of 51 / 9 / 3
+calls at n = 100 / 1,000 / 10,000 after a warm-up, the table the median over 5 processes (3 for the single-call
+rows); peak RSS from `/usr/bin/time -v`, one fit per process, the smallest of 3. Intel Core 7 150U, machine load
+10-20 from other jobs (preliminary; the integration run repeats it).
+
+`cmdscale_from_data` (k = 2) on standard-normal data in 3 dimensions; `add = TRUE` is new and is timed against
+`add = FALSE` on the same Manhattan distances (head only).
+
+| Run | n | v0.5.0 | head | head / v0.5.0 |
+|---|---|---|---|---|
+| default | 100 | 1.96 ms | 1.96 ms | 1.00 |
+| default | 1,000 | 0.317 s | 0.324 s | 1.02 |
+| `add = FALSE` | 100 | | 1.9 ms | |
+| `add = TRUE` | 100 | | 31.5 ms | |
+| `add = FALSE` | 1,000 | | 0.44 s | |
+| `add = TRUE` | 1,000 | | 8.2 s | |
+
+Peak RSS at n = 1,000: 41.3 MB against 41.3 MB (default); 52.9 MB (`add = FALSE`) and 93.8 MB (`add = TRUE`, the
+2n x 2n matrix of the additive constant).
+
 ## References
 
 - Torgerson, W. S. (1952). "Multidimensional scaling: I. Theory and method". *Psychometrika*, 17, 401-419.

@@ -78,6 +78,33 @@ cargo test -p p2a-core --lib --no-default-features --features ci -- ml::reductio
 `ml_tsne` calls `tsne` with the request's settings; its description states the defaults above
 (`test_mcp_ml_descriptions_state_defaults`, `crates/p2a-mcp/tests/tier3/wp57_ml_spatial.rs`).
 
+## Timing
+
+Release builds of v0.5.0 (`f80b0131`) and of this change with `--no-default-features --features ci`, one core
+(`taskset -c 2`, `RAYON_NUM_THREADS=1`), base and head processes interleaved, each process the median of 51 / 9 / 3
+calls at n = 100 / 1,000 / 10,000 after a warm-up, the table the median over 5 processes (3 for the single-call
+rows); peak RSS from `/usr/bin/time -v`, one fit per process, the smallest of 3. Intel Core 7 150U, machine load
+10-20 from other jobs (preliminary; the integration run repeats it).
+
+"P" is `tsne` with one iteration on standard-normal data at perplexity 30 (the affinities dominate); "full" is
+`unified_benchmarks`' call on its cluster data (perplexity `min(30, n / 3 - 1)`, eta 200, seed 42) with 500
+iterations, 10 at n = 10,000.
+
+| Run | n | v0.5.0 | head | head / v0.5.0 |
+|---|---|---|---|---|
+| P, d = 5 | 100 | 6.3 ms | 2.2 ms | 0.35 |
+| P, d = 5 | 1,000 | 0.42 s | 0.24 s | 0.57 |
+| P, d = 20 | 100 | 10.2 ms | 2.6 ms | 0.25 |
+| P, d = 20 | 1,000 | 0.86 s | 0.26 s | 0.31 |
+| P, d = 20 | 10,000 | 68.8 s | 40.8 s | 0.59 |
+| full, 500 iterations | 100 | 92 ms | 90 ms | 0.97 |
+| full, 500 iterations | 1,000 | 9.41 s | 9.44 s | 1.00 |
+| full, 10 iterations | 10,000 | 62.3 s | 64.9 s | 1.04 |
+
+Peak RSS at n = 1,000: 20.0 MB against 19.1 MB (P), 19.7 MB against 19.0 MB (full). The benchmark's
+`kl_divergence` on the paper's `cluster_n*.csv` data changes with the start and the defaults (ML-97): 0.0317 to
+0.0321 at n = 100 and 0.9257 to 0.9821 at n = 1,000.
+
 ## References
 
 - van der Maaten, L. and Hinton, G. (2008). "Visualizing Data using t-SNE". *JMLR*, 9, 2579-2605.

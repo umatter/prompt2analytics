@@ -80,6 +80,26 @@ MCP text is compared at print precision (`Tol::printed`: 6 decimals, z 4 decimal
 [validation/README.md](../README.md) table for the case's n (`Tol::coef(n)`), labels exactly. Registry:
 `validation/methods/mcp_ml_spatial.json`.
 
+## Timing
+
+Release builds of v0.5.0 (`f80b0131`) and of this change with `--no-default-features --features ci`, one core
+(`taskset -c 2`, `RAYON_NUM_THREADS=1`), base and head processes interleaved, each process the median of 51 / 9 / 3
+calls at n = 100 / 1,000 / 10,000 after a warm-up, the table the median over 5 processes (3 for the single-call
+rows); peak RSS from `/usr/bin/time -v`, one fit per process, the smallest of 3. Intel Core 7 150U, machine load
+10-20 from other jobs (preliminary; the integration run repeats it).
+
+Standard-normal data; the covariance path at n x 5, the SVD path at n x n/2.
+
+| Path | n | v0.5.0 | head | head / v0.5.0 |
+|---|---|---|---|---|
+| covariance | 100 | 34 us | 35 us | 1.01 |
+| covariance | 1,000 | 0.34 ms | 0.33 ms | 0.99 |
+| covariance | 10,000 | 3.6 ms | 3.5 ms | 0.99 |
+| SVD | 100 | 1.37 ms | 1.37 ms | 1.00 |
+| SVD | 1,000 | 0.218 s | 0.225 s | 1.03 |
+
+Peak RSS, covariance path at n = 10,000: 4.8 MB against 4.9 MB.
+
 ## References
 
 - Jolliffe, I.T. (2002). *Principal Component Analysis*, 2nd ed. Springer.
