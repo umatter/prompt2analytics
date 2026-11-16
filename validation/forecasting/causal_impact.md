@@ -138,19 +138,21 @@ simulation covered 0.89-0.92 with the diffuse regression states. A property test
 
 ## Timing
 
-Release builds (`--no-default-features --features ci`) of v0.5.0 (f80b0131) and of this change, one row per process,
-pinned to one core with `RAYON_NUM_THREADS=1`, 9 interleaved processes per side, the median over processes of each
-process's median call. The machine was shared (load average 8-21 during the runs). n is the pre-period length; the post-period has 30
-points. Median time per call against v0.5.0:
+Quiet integration re-time, 2026-11-16: release builds of v0.5.0 (`f80b0131`) and of the integrated branch,
+`--no-default-features --features ci`; one core (`taskset -c 2`), `RAYON_NUM_THREADS=1` (one thread for polars and
+BLAS too), cwd `/dev/shm`; per row five processes per side, interleaved with the order alternating (nine for rows
+within 1.05-1.15x), each the median of its calls after a warm-up; cells are the median over the processes, the ratio
+of the minima in brackets. 1-minute load average 0.7-2.7 on 12 cores, nothing else building. n is the pre-period
+length; the post-period has 30 points. Median time per call against v0.5.0:
 
 | Model | n = 100 | n = 1,000 | n = 10,000 | Ratio |
 |---|---|---|---|---|
-| level | 1.07 ms / 1.07 ms | 7.38 ms / 7.34 ms | 63.2 ms / 63.5 ms | 0.99-1.00 |
-| level + trend + seasonal 12 | 16.0 ms / 16.3 ms | 291 ms / 304 ms | 4.14 s / 4.28 s | 1.02-1.04 |
-| level, 1 control | 0.97 ms / 1.00 ms | 7.46 ms / 7.78 ms | 62.9 ms / 64.4 ms | 1.02-1.04 |
-| level, 5 controls | 1.03 ms / 1.15 ms | 7.54 ms / 8.06 ms | 64.9 ms / 68.7 ms | 1.06-1.11 |
+| level | 671 µs / 677 µs | 4.51 ms / 4.46 ms | 38.8 ms / 38.3 ms | 0.99-1.01 |
+| level + trend + seasonal 12 | 9.15 ms / 9.1 ms | 165.2 ms / 163.7 ms | 2.35 s / 2.32 s | 0.98-0.99 |
+| level, 1 control | 632 µs / 646 µs | 4.55 ms / 4.55 ms | 39.2 ms / 39.6 ms | 1.00-1.02 |
+| level, 5 controls | 686 µs / 726 µs | 4.68 ms / 4.84 ms | 40.4 ms / 42.5 ms | 1.03-1.06 |
 
 The controls now cost one mean-only filter pass each and a GLS solve on the n x k innovations, beside the OLS fit the
-variances are estimated from. A second run of the control rows at a lower load gave 1.01 / 1.02 (one control) and
-1.05 / 1.01 (five controls) at n = 100 / 1,000; the 1.11 at n = 100 with five controls is 0.12 ms per call. Peak
-resident memory of one call with five controls at n = 10,000: 14.1 MiB at v0.5.0, 16.1 MiB here.
+variances are estimated from. Five controls at n = 100: 1.06x (686 µs / 726 µs, nine rounds), within the
+1.15x accepted; signed off 2026-11-16. Peak resident memory of one process with five controls at n = 10,000
+(median of three): 14.3 MiB at v0.5.0, 16.2 MiB here (1.13x; a memory row no sign-off names, gone to the user).

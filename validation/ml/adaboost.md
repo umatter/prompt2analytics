@@ -84,11 +84,13 @@ that name) and depth 3 (the base ignored `max_depth` and fitted stumps; this tre
 
 The like-for-like rows are faster than the base.
 
-T4 (Drucker's stopping rule): `release`, `ci` features, the T4 boosting/forest fixes against the code before them
-(`34a4186a`), nine processes per side interleaved, one core (`taskset`), one rayon thread, 2026-11-16, load average
-22-42 on 12 cores (a loaded machine: read ratios near 1 as within noise). Cells are the median of the process
-medians; "min ratio" is the ratio of the minima. Design: n rows, 5 features uniform on [0, 10], `y = 2 x0 - x4 +
-(x1 - 5)^2 / 5` plus noise. AdaBoost.R2, stumps, n = 1,000: base 52.01 ms, this tree 50.74 ms (0.98; minima 0.97).
+T4 (Drucker's stopping rule), against v0.5.0 (`f80b0131`). Quiet integration re-time, 2026-11-16: release builds of
+v0.5.0 (`f80b0131`) and of the integrated branch, `--no-default-features --features ci`; one core (`taskset -c 2`),
+`RAYON_NUM_THREADS=1` (one thread for polars and BLAS too), cwd `/dev/shm`; per row five processes per side,
+interleaved with the order alternating (nine for rows within 1.05-1.15x), each the median of its calls after a
+warm-up; cells are the median over the processes, the ratio of the minima in brackets. 1-minute load average 0.7-2.7
+on 12 cores, nothing else building. Design: n rows, 5 features uniform on [0, 10], `y = 2 x0 - x4 + (x1 - 5)^2 / 5`
+plus noise. AdaBoost.R2, stumps, n = 1,000: v0.5.0 34.30 ms, this tree 33.68 ms (0.98; minima 0.98).
 
 ## Not pinned
 

@@ -50,16 +50,20 @@ Property tests: `apriori_keeps_itemsets_exactly_at_min_support` (every k / n for
 
 ## Timing
 
-Preliminary (lane timing, 2026-11-16), protocol as `roc_auc.md`: release builds, base `f80b0131` (v0.5.0), one
-core, 9 interleaved processes per side, each the median of 2,001 / 401 / 41 calls, in µs. n baskets over 20
+Quiet integration re-time, 2026-11-16: release builds of v0.5.0 (`f80b0131`) and of the integrated branch,
+`--no-default-features --features ci`; one core (`taskset -c 2`), `RAYON_NUM_THREADS=1` (one thread for polars and
+BLAS too), cwd `/dev/shm`; per row five processes per side, interleaved with the order alternating (nine for rows
+within 1.05-1.15x), each the median of its calls after a warm-up; cells are the median over the processes, the ratio
+of the minima in brackets. 1-minute load average 0.7-2.7 on 12 cores, nothing else building. Calls per process 2,001 /
+401 / 41, in µs. n baskets over 20
 items, each item present with probability 0.25; `min_support` 0.05, `min_confidence` 0.5, `min_lift` 0 on both
 sides (the base default 1.0 would drop rules this tree keeps).
 
-| Function | n | base (µs) | this tree (µs) | ratio |
-|---|---:|---:|---:|---:|
-| `apriori` | 100 | 9,130 | 934.5 | 0.10 |
-|  | 1,000 | 89,388 | 5,956 | 0.07 |
-|  | 10,000 | 1,049,158 | 63,754 | 0.06 |
-| `eclat` | 100 | 1,380 | 613.7 | 0.44 |
-|  | 1,000 | 9,189 | 3,999 | 0.44 |
-|  | 10,000 | 97,849 | 43,089 | 0.44 |
+| Function | n | base (µs) | this tree (µs) | ratio [min] |
+|---|---:|---:|---:|---|
+| `apriori` | 100 | 6,132 | 760.4 | 0.12 [0.12] |
+|  | 1,000 | 50,897 | 4,840 | 0.10 [0.10] |
+|  | 10,000 | 564,789 | 50,276 | 0.09 [0.09] |
+| `eclat` | 100 | 1,010 | 535.6 | 0.53 [0.53] |
+|  | 1,000 | 6,282 | 3,661 | 0.58 [0.58] |
+|  | 10,000 | 63,117 | 37,690 | 0.60 [0.59] |

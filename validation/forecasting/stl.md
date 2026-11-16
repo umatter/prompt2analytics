@@ -41,17 +41,17 @@ and `test_stl_constant_series` hold the properties; `test_stl_recovers_dgp` is a
 
 ## Timing against v0.5.0
 
-Release builds of a scratch harness against f80b0131 (v0.5.0) and against this change, `--no-default-features
---features ci`; one core (`taskset -c 10`), `RAYON_NUM_THREADS=1`, cwd `/dev/shm`; per row nine processes per side,
-interleaved, each the median of its calls after ten warm-ups; cells are the median over the processes, the ratio of the
-minima in brackets. The machine was heavily loaded (1-minute load average 11-36 on 12 cores), so the absolute times are
-preliminary and ratios within about 5% are noise. Measured 2026-11-16.
+Quiet integration re-time, 2026-11-16: release builds of v0.5.0 (`f80b0131`) and of the integrated branch,
+`--no-default-features --features ci`; one core (`taskset -c 2`), `RAYON_NUM_THREADS=1` (one thread for polars and
+BLAS too), cwd `/dev/shm`; per row five processes per side, interleaved with the order alternating (nine for rows
+within 1.05-1.15x), each the median of its calls after a warm-up; cells are the median over the processes, the ratio
+of the minima in brackets. 1-minute load average 0.7-2.7 on 12 cores, nothing else building.
 
 | Method | n | f80b0131 (µs) | this change (µs) | ratio [min] |
 |---|---|---|---|---|
-| `stl`, period 12, default windows | 100 | 60.6 | 61.0 | 1.01 [1.01] |
-| `stl`, period 12, default windows | 1,000 | 559.3 | 565.9 | 1.01 [1.01] |
-| `stl`, period 12, default windows | 10,000 | 5,385.3 | 5,458.7 | 1.01 [1.01] |
+| `stl`, period 12, default windows | 100 | 43.29 | 43.59 | 1.01 [1.01] |
+| `stl`, period 12, default windows | 1,000 | 393.4 | 397.2 | 1.01 [1.01] |
+| `stl`, period 12, default windows | 10,000 | 3,653 | 3,677 | 1.01 [1.01] |
 
 The centring and rescaling add three O(n) passes around the f32 fit.
 

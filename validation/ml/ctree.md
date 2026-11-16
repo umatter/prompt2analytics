@@ -89,25 +89,29 @@ R parity (X-10).
 
 ## Timing
 
-Against v0.5.0 (`f80b0131`), lane timing (preliminary): release builds, `--no-default-features --features ci`, one
-core (`taskset`, `RAYON_NUM_THREADS=1`), 9 interleaved processes per side, each the median of 21-201 fits after 5
-warm-ups, median of medians; machine load average 6-13 on 12 cores. Inputs: p = 5 uniform on [0, 10); regression
+Against v0.5.0 (`f80b0131`). Quiet integration re-time, 2026-11-16: release builds of v0.5.0 (`f80b0131`) and of the
+integrated branch, `--no-default-features --features ci`; one core (`taskset -c 2`), `RAYON_NUM_THREADS=1` (one thread
+for polars and BLAS too), cwd `/dev/shm`; per row five processes per side, interleaved with the order alternating
+(nine for rows within 1.05-1.15x), each the median of its calls after a warm-up; cells are the median over the
+processes, the ratio of the minima in brackets. 1-minute load average 0.7-2.7 on 12 cores, nothing else building. Fits
+per process 201 / 51 / 21 at n = 100 / 1,000 / 10,000. Inputs: p = 5 uniform on [0, 10); regression
 `y = 3 (x1 > 5) + 0.5 x2 + U(-1, 1)`; classification K = 3 from x1 and x2 with 15% label noise. Defaults
 (Bonferroni, quadratic). Nodes are the nodes of the fitted tree; per node is the fit time divided by them.
 
 | Fit | n | v0.5.0 | nodes | now | nodes | per fit | per node | R `partykit::ctree` (nodes) |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| regression | 100 | 0.142 ms | 13 | 0.050 ms | 13 | 0.36x | 0.36x | 38 ms (15) |
-| regression | 1,000 | 2.77 ms | 33 | 0.729 ms | 35 | 0.26x | 0.25x | 108 ms (31) |
-| regression | 10,000 | 33.3 ms | 67 | 8.35 ms | 67 | 0.25x | 0.25x | 364 ms (75) |
-| classification | 100 | 0.182 ms | 7 | 0.051 ms | 5 | 0.28x | 0.39x | 29 ms (5) |
-| classification | 1,000 | 1.71 ms | 5 | 0.415 ms | 5 | 0.24x | 0.24x | 40 ms (5) |
-| classification | 10,000 | 23.3 ms | 9 | 5.15 ms | 5 | 0.22x | 0.40x | 179 ms (7) |
+| regression | 100 | 80.4 µs | 13 | 30.8 µs | 13 | 0.38x | 0.38x | 38 ms (15) |
+| regression | 1,000 | 1.7 ms | 33 | 424 µs | 35 | 0.25x | 0.24x | 108 ms (31) |
+| regression | 10,000 | 21.1 ms | 67 | 5.53 ms | 67 | 0.26x | 0.26x | 364 ms (75) |
+| classification | 100 | 93.7 µs | 7 | 32.3 µs | 5 | 0.34x | 0.48x | 29 ms (5) |
+| classification | 1,000 | 1.05 ms | 5 | 234 µs | 5 | 0.22x | 0.22x | 40 ms (5) |
+| classification | 10,000 | 14.8 ms | 9 | 3.33 ms | 5 | 0.22x | 0.40x | 179 ms (7) |
 
 v0.5.0 fitted the classification rows as classification trees too (integer class codes), with its own tests and
 splits; the R column uses R's generator on the same design, so its trees differ.
 
-Monte Carlo p-values (`testtype = montecarlo`, new, no base; regression design; median of 3-5 processes):
+Monte Carlo p-values (`testtype = montecarlo`, new, no base; regression design; median of 3-5 processes; lane timing
+on the loaded machine, not repeated in the quiet re-time):
 
 | n | nresample = 999 | nodes | nresample = 9,999 (default) | nodes | R, nresample = 999 |
 |---:|---:|---:|---:|---:|---:|
@@ -117,7 +121,8 @@ Monte Carlo p-values (`testtype = montecarlo`, new, no base; regression design; 
 
 At n = 10,000 the default 9,999 permutations take 18.6 s, inside the hosted 60 s deadline; the call is
 interruptible at every permutation. Peak RSS of a process fitting twice at n = 10,000: regression 4.0 MB (v0.5.0)
-and 3.7 MB (now), classification 3.9 MB and 3.9 MB, Monte Carlo (999) 4.2 MB.
+and 3.7 MB (now), classification 3.9 MB and 3.9 MB, Monte Carlo (999) 4.2 MB (lane). Quiet re-time, regression at
+n = 10,000, one process per side, median of three: 3.9 MB (v0.5.0) and 3.8 MB (now).
 
 ## Release notes
 

@@ -126,36 +126,38 @@ conditional and total randomisation; global I = 0.370321.
 
 ## Timing against the previous implementation (Tier 4)
 
-Release build, scratch harness at f80b0131 and with this change; `--no-default-features --features ci`;
-one core (`taskset -c 8`, `RAYON_NUM_THREADS=1`), cwd `/dev/shm`; the two builds interleaved, seven
-processes each, the order alternating per round, each process the median of its calls after a warm-up;
-cells are the median over the seven processes, the ratio of the minima in brackets; 1-minute load
-average 6-21 (the machine was shared). Data: points on a jittered square grid, 4-nearest-neighbour weights, row-standardised;
+Quiet integration re-time, 2026-11-16: release builds of v0.5.0 (`f80b0131`) and of the integrated branch,
+`--no-default-features --features ci`; one core (`taskset -c 2`), `RAYON_NUM_THREADS=1` (one thread for polars and
+BLAS too), cwd `/dev/shm`; per row five processes per side, interleaved with the order alternating (nine for rows
+within 1.05-1.15x), each the median of its calls after a warm-up; cells are the median over the processes, the ratio
+of the minima in brackets. 1-minute load average 0.7-2.7 on 12 cores, nothing else building. Data: points on a
+jittered square grid, 4-nearest-neighbour weights, row-standardised;
 regressions with an intercept and two regressors.
 
 | Method | n | f80b0131 (µs) | this change (µs) | ratio [min] |
 |---|---|---|---|---|
-| `moran_test_residuals` | 100 | 20.4 | 38.4 | 1.88 [1.89] |
-| `moran_test_residuals` | 1,000 | 211.4 | 363.2 | 1.72 [1.73] |
-| `moran_test_residuals` | 10,000 | 2,296.9 | 4,638.4 | 2.02 [2.02] |
-| `spatial_lm_tests` | 100 | 39.2 | 38.8 | 0.99 [0.99] |
-| `spatial_lm_tests` | 1,000 | 318.0 | 356.8 | 1.12 [1.11] |
-| `spatial_lm_tests` | 10,000 | 3,284.3 | 4,500.1 | 1.37 [1.36] |
-| `spatial_lm_tests`, the MCP path (OLS fit included) | 100 | 76.4 | 54.5 | 0.71 [0.70] |
-| `spatial_lm_tests`, the MCP path (OLS fit included) | 1,000 | 460.4 | 495.1 | 1.08 [1.07] |
-| `spatial_lm_tests`, the MCP path (OLS fit included) | 10,000 | 5,171.1 | 5,377.9 | 1.04 [1.04] |
-| `localmoran`, normal p-values | 100 | 24.8 | 26.2 | 1.06 [1.06] |
-| `localmoran`, normal p-values | 1,000 | 256.0 | 274.7 | 1.07 [1.08] |
-| `localmoran`, normal p-values | 10,000 | 2,794.8 | 2,990.1 | 1.07 [1.06] |
-| `localmoran`, 99 permutations | 100 | 419.5 | 1,086.0 | 2.59 [2.60] |
-| `localmoran`, 99 permutations | 1,000 | 4,511.3 | 8,201.0 | 1.82 [1.81] |
-| `localmoran`, 99 permutations | 10,000 | 53,372.9 | 159,840.6 | 2.99 [3.18] |
+| `moran_test_residuals` | 100 | 14.49 | 27.62 | 1.91 [1.91] |
+| `moran_test_residuals` | 1,000 | 148.9 | 252.7 | 1.70 [1.68] |
+| `moran_test_residuals` | 10,000 | 1,600 | 3,075 | 1.92 [1.93] |
+| `spatial_lm_tests` | 100 | 31.39 | 27.69 | 0.88 [0.88] |
+| `spatial_lm_tests` | 1,000 | 248.0 | 235.8 | 0.95 [0.94] |
+| `spatial_lm_tests` | 10,000 | 2,552 | 3,028 | 1.19 [1.21] |
+| `spatial_lm_tests`, the MCP path (OLS fit included) | 100 | 55.53 | 36.96 | 0.67 [0.68] |
+| `spatial_lm_tests`, the MCP path (OLS fit included) | 1,000 | 334.5 | 330.3 | 0.99 [0.97] |
+| `spatial_lm_tests`, the MCP path (OLS fit included) | 10,000 | 3,905 | 3,858 | 0.99 [0.96] |
+| `localmoran`, normal p-values | 100 | 17.02 | 17.87 | 1.05 [1.06] |
+| `localmoran`, normal p-values | 1,000 | 173.0 | 179.4 | 1.04 [1.05] |
+| `localmoran`, normal p-values | 10,000 | 2,037 | 2,180 | 1.07 [1.07] |
+| `localmoran`, 99 permutations | 100 | 338.1 | 871.2 | 2.58 [2.83] |
+| `localmoran`, 99 permutations | 1,000 | 3,731 | 5,993 | 1.61 [1.59] |
+| `localmoran`, 99 permutations | 10,000 | 39,972 | 123,207 | 3.08 [3.08] |
 
 The residual Moran test now forms `lm.morantest`'s moments through the regression's projection (solves
 with the k-column design and its trace terms), and the score tests their trace term and projected lag;
 the permutations of `localmoran` draw each unit's neighbours without repeats from the other n - 1
 values, from a generator per permutation. The ratios are within the estimates signed off 2026-11-15
-(2-6x, 1.2-2x and 1.5-3x).
+(2-6x, 1.2-2x and 1.5-3x), except `localmoran` with 99 permutations at n = 10,000: 3.08x by the median (39.97 -> 123.2 ms),
+above the 2.99x signed off 2026-11-16 and within its 3.18x by the minima; that row has gone to the user.
 
 ## Known differences
 

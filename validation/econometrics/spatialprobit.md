@@ -151,33 +151,35 @@ with another implementation only up to Monte Carlo error.
 
 ## Timing against the previous implementation (Tier 4)
 
-Release build, scratch harness at f80b0131 and with this change; `--no-default-features --features ci`;
-one core (`taskset -c 8`, `RAYON_NUM_THREADS=1`), cwd `/dev/shm`; the two builds interleaved, seven
-processes each, the order alternating per round, each process the median of its calls after a warm-up;
-cells are the median over the seven processes, the ratio of the minima in brackets; 1-minute load
-average 6-21 (the machine was shared). Data: a binary outcome on a jittered grid with 4-nearest-neighbour weights, two regressors,
-the default configuration (seed 1); one call per process at n = 1,000 and 2,000. The rows with impacts
-were measured at commit 9f2f058f, before the griddy draw skipped negligible cells (which only removes
-work); the others with this change.
+Quiet integration re-time, 2026-11-16: release builds of v0.5.0 (`f80b0131`) and of the integrated branch,
+`--no-default-features --features ci`; one core (`taskset -c 2`), `RAYON_NUM_THREADS=1` (one thread for polars and
+BLAS too), cwd `/dev/shm`; per row five processes per side, interleaved with the order alternating (nine for rows
+within 1.05-1.15x), each the median of its calls after a warm-up; cells are the median over the processes, the ratio
+of the minima in brackets. 1-minute load average 0.7-2.7 on 12 cores, nothing else building. Data: a binary outcome on
+a jittered grid with 4-nearest-neighbour weights, two regressors,
+the default configuration (seed 1); five calls per process at n = 100, one at n = 1,000 and 2,000.
 
 | Model | n | f80b0131 (ms) | this change (ms) | ratio [min] |
 |---|---|---|---|---|
-| SAR probit, impacts | 100 | 115.2 | 125.7 | 1.09 [1.09] |
-| SAR probit, impacts | 1,000 | 2,777 | 6,564 | 2.36 [2.46] |
-| SAR probit, impacts | 2,000 | 12,710 | 43,611 | 3.43 [3.70] |
-| SAR probit, no impacts | 100 | 92.1 | 83.7 | 0.91 [0.90] |
-| SAR probit, no impacts | 1,000 | 2,421 | 2,181 | 0.90 [0.90] |
-| SAR probit, no impacts | 2,000 | 11,292 | 12,433 | 1.10 [1.06] |
-| SEM probit, no impacts | 100 | 69.6 | 88.6 | 1.27 [1.26] |
-| SEM probit, no impacts | 1,000 | 2,204 | 2,184 | 0.99 [1.05] |
-| SEM probit, no impacts | 2,000 | 10,514 | 11,742 | 1.12 [1.12] |
+| SAR probit, impacts | 100 | 74.56 | 87.10 | 1.17 [1.10] |
+| SAR probit, impacts | 1,000 | 1,554 | 3,652 | 2.35 [2.35] |
+| SAR probit, impacts | 2,000 | 6,368 | 21,318 | 3.35 [3.35] |
+| SAR probit, no impacts | 100 | 63.13 | 61.21 | 0.97 [0.96] |
+| SAR probit, no impacts | 1,000 | 1,439 | 1,224 | 0.85 [0.85] |
+| SAR probit, no impacts | 2,000 | 6,132 | 6,263 | 1.02 [1.02] |
+| SEM probit, no impacts | 100 | 48.52 | 63.18 | 1.30 [1.30] |
+| SEM probit, no impacts | 1,000 | 1,217 | 1,234 | 1.01 [1.01] |
+| SEM probit, no impacts | 2,000 | 5,695 | 6,300 | 1.11 [1.11] |
 
 The impacts cost 17 to 19 dense LU inverses of I - rho W (17 interpolation nodes and two checks against
 the dense inverse in the end cells), O(n^3) each, where the old code summed a truncated power series in
 W; above about n = 1,000 they dominate the run. The sampler itself (no impacts) costs what the old one
 did within about 10% from n = 1,000; at n = 100 the 2,000-cell rho grid evaluated per iteration
 dominates the SEM run. The SAR rows with impacts at n = 1,000 and 2,000 and the SEM row at n = 100 are
-signed off 2026-11-16; the SEM row at n = 2,000 (1.12x) is within the estimates signed off 2026-11-15.
+signed off 2026-11-16 (quiet 2.35 / 3.35x and 1.30x against the signed 2.36 / 3.43x and 1.27x); the SAR row with
+impacts at n = 100 (1.17x) and the SEM row at n = 2,000 (1.11x) are within the estimates signed off 2026-11-15
+(0.8-1.2x). Peak resident memory of one process at n = 2,000 (median of three): SAR with impacts 112.4 -> 201.5 MB
+(1.79x), SEM 112.5 -> 170.8 MB (1.52x), the dense n x n inverses; a memory row no sign-off names, gone to the user.
 On a hosted server `probit_impact_rows` holds `sar_probit_model` with impacts to 1,500 rows.
 
 ## MCMC Diagnostics

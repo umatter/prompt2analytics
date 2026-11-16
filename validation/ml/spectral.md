@@ -57,16 +57,24 @@ R-pinned: `test_validate_spectral_njw_blobs`, `test_validate_spectral_njw_pair`.
 
 ## Timing
 
-Release builds of v0.5.0 (`f80b0131`) and this change, `p2a-core` with `spectral-analysis` only, one thread (`RAYON_NUM_THREADS=1`, pinned to one core); noisy three-blob data (2 columns unless stated); 3 interleaved processes per side, each the median of up to 2,001 calls after up to 10 warm-ups; median of the medians. The machine was shared (load 23-53), so ratios within about 10% are noise. Peak memory at n = 10,000 (RBF): 0.80 GB.
+Quiet integration re-time, 2026-11-16: release builds of v0.5.0 (`f80b0131`) and of the integrated branch,
+`--no-default-features --features ci`; one core (`taskset -c 2`), `RAYON_NUM_THREADS=1` (one thread for polars and
+BLAS too), cwd `/dev/shm`; per row five processes per side, interleaved with the order alternating (nine for rows
+within 1.05-1.15x), each the median of its calls after a warm-up; cells are the median over the processes, the ratio
+of the minima in brackets. 1-minute load average 0.7-2.7 on 12 cores, nothing else building. Data: noisy three blobs
+(centres (0, 0), (4, 4), (8, 0), unit normal noise; 2 columns unless stated); gapped labels are 0, 4, 9; the pair
+indices compare the labels with a copy in which 10% are moved to the next cluster. Rows marked † are the lane's (load
+23-53, three processes per side) and were not repeated. Peak memory at n = 10,000 (RBF, lane): 0.80 GB; at n = 1,000
+(quiet re-time, median of three): 18.3 MB at v0.5.0, 13.7 MB now.
 
-| Affinity | n | v0.5.0 | this change | ratio |
+| Affinity | n | v0.5.0 | this change | ratio [min] |
 |---|---|---|---|---|
-| RBF, default gamma, k 3 | 100 | 18.04 ms | 3.41 ms | 0.19 |
-| RBF, default gamma, k 3 | 1,000 | 2.13 s | 504.88 ms | 0.24 |
-| RBF, default gamma, k 3 | 10,000 | 217.09 s | 16.31 s | 0.08 |
-| k-NN, k 10, 3 clusters | 100 | 18.64 ms | 1.71 ms | 0.09 |
-| k-NN, k 10, 3 clusters | 1,000 | 2.37 s | 677.43 ms | 0.29 |
-| k-NN, k 10, 3 clusters | 10,000 | 219.14 s | 39.96 s | 0.18 |
+| RBF, default gamma, k 3 | 100 | 9.52 ms | 1.86 ms | 0.19 [0.19] |
+| RBF, default gamma, k 3 | 1,000 | 1.33 s | 117.1 ms | 0.09 [0.09] |
+| k-NN, k 10, 3 clusters | 100 | 9.89 ms | 2.13 ms | 0.22 [0.21] |
+| k-NN, k 10, 3 clusters | 1,000 | 1.38 s | 295.0 ms | 0.21 [0.21] |
+| RBF, default gamma, k 3 † | 10,000 | 217.09 s | 16.31 s | 0.08 |
+| k-NN, k 10, 3 clusters † | 10,000 | 219.14 s | 39.96 s | 0.18 |
 
 ## Run
 

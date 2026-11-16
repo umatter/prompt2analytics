@@ -146,15 +146,18 @@ as a correctness-driven slowdown, every row of the table included: the `white` r
 
 ## Timing of binary segmentation
 
-Release builds (`--no-default-features --features ci`) of v0.5.0 (f80b0131) and of this change, one row per process,
-pinned to one core with `RAYON_NUM_THREADS=1`, 9 interleaved processes per side, the median over processes of each
-process's median call. The machine was shared (load average 8-21 during the runs). `white`: white noise with the defaults (v0.5.0: up to 10
+Quiet integration re-time, 2026-11-16: release builds of v0.5.0 (`f80b0131`) and of the integrated branch,
+`--no-default-features --features ci`; one core (`taskset -c 2`), `RAYON_NUM_THREADS=1` (one thread for polars and
+BLAS too), cwd `/dev/shm`; per row five processes per side, interleaved with the order alternating (nine for rows
+within 1.05-1.15x), each the median of its calls after a warm-up; cells are the median over the processes, the ratio
+of the minima in brackets. 1-minute load average 0.7-2.7 on 12 cores, nothing else building. `white`: white noise with
+the defaults (v0.5.0: up to 10
 splits at threshold 0, so it made 10; here MBIC, Q = 5, no split). `ten`: 10 mean changes of 6 standard deviations
 with a manual penalty of 50 and Q = 10, where both make the same 10 splits.
 
 | Series | n = 100 | n = 1,000 | n = 10,000 | Ratio |
 |---|---|---|---|---|
-| `white` | 11.8 us / 5.0 us | 115 us / 43 us | 1.14 ms / 0.43 ms | 0.38-0.43 |
-| `ten` | 11.9 us / 10.5 us | 114 us / 84 us | 1.20 ms / 0.83 ms | 0.69-0.88 |
+| `white` | 7.96 µs / 3.46 µs | 74.9 µs / 29.1 µs | 738 µs / 286 µs | 0.39-0.43 |
+| `ten` | 8 µs / 7.24 µs | 75.2 µs / 59.3 µs | 742 µs / 584 µs | 0.79-0.90 |
 
 Each segment's best split is computed once, when the segment is created, instead of once per pass.

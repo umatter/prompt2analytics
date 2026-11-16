@@ -81,13 +81,20 @@ the same on `X * 1e-5`, and with `iter.max = 2`.
 
 ## Timing
 
-Release builds of v0.5.0 (`f80b0131`) and this change, `p2a-core` with `spectral-analysis` only, one thread (`RAYON_NUM_THREADS=1`, pinned to one core); noisy three-blob data (2 columns unless stated); 3 interleaved processes per side, each the median of up to 2,001 calls after up to 10 warm-ups; median of the medians. The machine was shared (load 23-53), so ratios within about 10% are noise.
+Quiet integration re-time, 2026-11-16: release builds of v0.5.0 (`f80b0131`) and of the integrated branch,
+`--no-default-features --features ci`; one core (`taskset -c 2`), `RAYON_NUM_THREADS=1` (one thread for polars and
+BLAS too), cwd `/dev/shm`; per row five processes per side, interleaved with the order alternating (nine for rows
+within 1.05-1.15x), each the median of its calls after a warm-up; cells are the median over the processes, the ratio
+of the minima in brackets. 1-minute load average 0.7-2.7 on 12 cores, nothing else building. Data: noisy three blobs
+(centres (0, 0), (4, 4), (8, 0), unit normal noise; 2 columns unless stated); gapped labels are 0, 4, 9; the pair
+indices compare the labels with a copy in which 10% are moved to the next cluster. Rows marked † are the lane's (load
+23-53, three processes per side) and were not repeated.
 
-| Call | n | v0.5.0 | this change | ratio |
+| Call | n | v0.5.0 | this change | ratio [min] |
 |---|---|---|---|---|
-| kmeans, k 3, n_init 5 | 100 | 50.0 µs | 44.9 µs | 0.90 |
-| kmeans, k 3, n_init 5 | 1,000 | 494.5 µs | 401.1 µs | 0.81 |
-| kmeans, k 3, n_init 5 | 10,000 | 4.75 ms | 4.10 ms | 0.86 |
+| kmeans, k 3, n_init 5 | 100 | 50.2 µs | 49 µs | 0.98 [0.99] |
+| kmeans, k 3, n_init 5 | 1,000 | 371 µs | 369 µs | 1.00 [1.00] |
+| kmeans, k 3, n_init 5 | 10,000 | 4.23 ms | 4.15 ms | 0.98 [0.99] |
 
 ## Running the Tests
 

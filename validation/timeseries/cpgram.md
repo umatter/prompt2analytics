@@ -42,12 +42,14 @@ periodogram is a direct DFT, which `fft_periodogram_matches_direct_dft` compares
 
 ## Timing
 
-Release builds (`--no-default-features --features ci`) of v0.5.0 (f80b0131) and of this change, one row per process,
-pinned to one core with `RAYON_NUM_THREADS=1`, 9 interleaved processes per side, the median over processes of each
-process's median call. The machine was shared (load average 8-21 during the runs). White noise, taper 0.1:
+Quiet integration re-time, 2026-11-16: release builds of v0.5.0 (`f80b0131`) and of the integrated branch,
+`--no-default-features --features ci`; one core (`taskset -c 2`), `RAYON_NUM_THREADS=1` (one thread for polars and
+BLAS too), cwd `/dev/shm`; per row five processes per side, interleaved with the order alternating (nine for rows
+within 1.05-1.15x), each the median of its calls after a warm-up; cells are the median over the processes, the ratio
+of the minima in brackets. 1-minute load average 0.7-2.7 on 12 cores, nothing else building. White noise, taper 0.1:
 
 | n = 100 | n = 1,000 | n = 10,000 | Ratio |
 |---|---|---|---|
-| 8.7 us / 9.4 us | 66.1 us / 68.7 us | 855 us / 871 us | 1.02-1.08 |
+| 4.74 µs / 4.92 µs | 34.9 µs / 36.4 µs | 465 µs / 478 µs | 1.03-1.04 |
 
 The power-of-two scaling and the constant-series check are two passes over the series before the FFT.

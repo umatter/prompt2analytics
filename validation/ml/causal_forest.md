@@ -163,12 +163,13 @@ coverage 0.952.
 
 ## Wall-clock (T4)
 
-`release`, `ci` features, the T4 boosting/forest fixes against the code before them (`34a4186a`), nine processes per
-side interleaved, one core (`taskset`), one rayon thread, 2026-11-16, load average 22-42 on 12 cores (a loaded
-machine: read ratios near 1 as within noise). Cells are the median of the process medians; "min ratio" is the ratio
-of the minima. Design: n rows, 5 features uniform on [0, 10], `y = 2 x0 - x4 + (x1 - 5)^2 / 5` plus noise.
-`causal_forest_arrays` defaults, n = 1,000, treatment alternating: base 1,964 ms, this tree 1,976 ms (1.01; minima
-0.98).
+Against v0.5.0 (`f80b0131`). Quiet integration re-time, 2026-11-16: release builds of v0.5.0 (`f80b0131`) and of the
+integrated branch, `--no-default-features --features ci`; one core (`taskset -c 2`), `RAYON_NUM_THREADS=1` (one thread
+for polars and BLAS too), cwd `/dev/shm`; per row five processes per side, interleaved with the order alternating
+(nine for rows within 1.05-1.15x), each the median of its calls after a warm-up; cells are the median over the
+processes, the ratio of the minima in brackets. 1-minute load average 0.7-2.7 on 12 cores, nothing else building.
+Design: n rows, 5 features uniform on [0, 10], `y = 2 x0 - x4 + (x1 - 5)^2 / 5` plus noise. `causal_forest_arrays`
+defaults, n = 1,000, treatment alternating: v0.5.0 1,388 ms, this tree 1,391 ms (1.00; minima 1.00).
 
 ## Findings closed
 

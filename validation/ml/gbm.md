@@ -49,23 +49,25 @@ Tests (R-pinned, `Tol::coef(200)`, split variables exact): `test_validate_gbm_la
 
 ## Wall-clock
 
-`release`, `ci` features, the T4 boosting/forest fixes against the code before them (`34a4186a`), nine processes per
-side interleaved, one core (`taskset`), one rayon thread, 2026-11-16, load average 22-42 on 12 cores (a loaded
-machine: read ratios near 1 as within noise). Cells are the median of the process medians; "min ratio" is the ratio
-of the minima. Design: n rows, 5 features uniform on [0, 10], `y = 2 x0 - x4 + (x1 - 5)^2 / 5` plus noise.
+Against v0.5.0 (`f80b0131`). Quiet integration re-time, 2026-11-16: release builds of v0.5.0 (`f80b0131`) and of the
+integrated branch, `--no-default-features --features ci`; one core (`taskset -c 2`), `RAYON_NUM_THREADS=1` (one thread
+for polars and BLAS too), cwd `/dev/shm`; per row five processes per side, interleaved with the order alternating
+(nine for rows within 1.05-1.15x), each the median of its calls after a warm-up; cells are the median over the
+processes, the ratio of the minima in brackets. 1-minute load average 0.7-2.7 on 12 cores, nothing else building.
+Design: n rows, 5 features uniform on [0, 10], `y = 2 x0 - x4 + (x1 - 5)^2 / 5` plus noise.
 
 | `gbm()` defaults | n | base (ms) | this tree (ms) | ratio | min ratio |
 |---|---:|---:|---:|---:|---:|
-| Gaussian | 1,000 | 136.3 | 137.8 | 1.01 | 0.99 |
-|  | 10,000 | 1,681 | 1,662 | 0.99 | 0.99 |
-| Laplace | 1,000 | 133.3 | 132.5 | 0.99 | 1.00 |
-|  | 10,000 | 1,734 | 1,719 | 0.99 | 0.97 |
-| Bernoulli (`y > 5`) | 1,000 | 145.5 | 148.0 | 1.02 | 1.04 |
-|  | 10,000 | 1,873 | 1,906 | 1.02 | 1.01 |
-| Huber | 1,000 | 138.8 | 143.7 | 1.04 | 1.03 |
-|  | 10,000 | 1,792 | 1,839 | 1.03 | 0.99 |
+| Gaussian | 1,000 | 100.1 | 99.74 | 1.00 | 0.99 |
+|  | 10,000 | 1,182 | 1,172 | 0.99 | 0.99 |
+| Laplace | 1,000 | 100.5 | 100.9 | 1.00 | 1.00 |
+|  | 10,000 | 1,189 | 1,177 | 0.99 | 0.99 |
+| Bernoulli (`y > 5`) | 1,000 | 104.4 | 107.9 | 1.03 | 1.03 |
+|  | 10,000 | 1,237 | 1,258 | 1.02 | 1.02 |
+| Huber | 1,000 | 101.8 | 105.9 | 1.04 | 1.04 |
+|  | 10,000 | 1,202 | 1,238 | 1.03 | 1.03 |
 
-The leaf re-estimates are O(n) per tree against the split search's O(p n log n) per level: within 1.05x.
+The leaf re-estimates are O(n) per tree against the split search's O(p n log n) per level: within 1.04x.
 
 ## What does not match R
 

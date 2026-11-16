@@ -35,18 +35,20 @@ iteration (WT-1); `num_leaves` and `max_bin` below 2 panicked (ML-75).
 
 ## Wall-clock
 
-`release`, `ci` features, the T4 boosting/forest fixes against the code before them (`34a4186a`), nine processes per
-side interleaved, one core (`taskset`), one rayon thread, 2026-11-16, load average 22-42 on 12 cores (a loaded
-machine: read ratios near 1 as within noise). Cells are the median of the process medians; "min ratio" is the ratio
-of the minima. Design: n rows, 5 features uniform on [0, 10], `y = 2 x0 - x4 + (x1 - 5)^2 / 5` plus noise.
+Against v0.5.0 (`f80b0131`). Quiet integration re-time, 2026-11-16: release builds of v0.5.0 (`f80b0131`) and of the
+integrated branch, `--no-default-features --features ci`; one core (`taskset -c 2`), `RAYON_NUM_THREADS=1` (one thread
+for polars and BLAS too), cwd `/dev/shm`; per row five processes per side, interleaved with the order alternating
+(nine for rows within 1.05-1.15x), each the median of its calls after a warm-up; cells are the median over the
+processes, the ratio of the minima in brackets. 1-minute load average 0.7-2.7 on 12 cores, nothing else building.
+Design: n rows, 5 features uniform on [0, 10], `y = 2 x0 - x4 + (x1 - 5)^2 / 5` plus noise.
 
 | `lightgbm()` | n | base (ms) | this tree (ms) | ratio | min ratio |
 |---|---:|---:|---:|---:|---:|
-| defaults (regression) | 1,000 | 175.3 | 146.4 | 0.84 | 0.87 |
-|  | 10,000 | 2,218 | 414.8 | 0.19 | 0.19 |
-| `regression_l1` | 1,000 | 142.4 | 148.0 | 1.04 | 1.00 |
-|  | 10,000 | 1,662 | 406.1 | 0.24 | 0.25 |
-| bagging 0.8, `bagging_freq` 1 | 1,000 | 153.0 | 154.1 | 1.01 | 0.97 |
+| defaults (regression) | 1,000 | 98.68 | 82.14 | 0.83 | 0.83 |
+|  | 10,000 | 1,227 | 251.7 | 0.21 | 0.21 |
+| `regression_l1` | 1,000 | 79.95 | 81.97 | 1.03 | 1.03 |
+|  | 10,000 | 863.2 | 247.8 | 0.29 | 0.29 |
+| bagging 0.8, `bagging_freq` 1 | 1,000 | 78.08 | 77.33 | 0.99 | 0.99 |
 
 Not like-for-like: the base grew trees past `num_leaves` (the speed-up at 10,000 is the leaf cap).
 

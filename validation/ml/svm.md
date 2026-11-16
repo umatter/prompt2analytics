@@ -110,30 +110,34 @@ value (`NaPolicy::Omit`).
 
 ## Timing
 
-Release builds of v0.5.0 (`f80b0131`) and of this change with `--no-default-features --features ci`, one core
-(`taskset -c 2`, `RAYON_NUM_THREADS=1`), base and head processes interleaved, each process the median of 51 / 9 / 3
-calls at n = 100 / 1,000 / 10,000 after a warm-up, the table the median over 5 processes (3 for the single-call
-rows); peak RSS from `/usr/bin/time -v`, one fit per process, the smallest of 3. Intel Core 7 150U, machine load
-10-20 from other jobs (preliminary; the integration run repeats it).
+Quiet integration re-time, 2026-11-16: release builds of v0.5.0 (`f80b0131`) and of the integrated branch,
+`--no-default-features --features ci`; one core (`taskset -c 2`), `RAYON_NUM_THREADS=1` (one thread for polars and
+BLAS too), cwd `/dev/shm`; per row five processes per side, interleaved with the order alternating (nine for rows
+within 1.05-1.15x), each the median of its calls after a warm-up; cells are the median over the processes, the ratio
+of the minima in brackets. 1-minute load average 0.7-2.7 on 12 cores, nothing else building. Peak RSS: one process per
+side, the median of three (`/usr/bin/time`). Intel Core 7 150U.
 
 `linear_svm` against the v0.5.0 SMO. "Benchmark" is `unified_benchmarks`' SVM row (cluster data, p = 5, label 1
 when `i % 3 == 0`, else -1, C = 1, defaults); "overlapping" is two overlapping classes (p = 5, the label a noisy
 linear rule) at C = 10 and default settings, where v0.5.0 stops short of the optimum, so its time is not a
 like-for-like row.
 
-| Data | n | v0.5.0 | head | head / v0.5.0 |
+| Data | n | v0.5.0 | head | head / v0.5.0 [min] |
 |---|---|---|---|---|
-| benchmark | 100 | 30 us | 42 us | 1.40 |
-| benchmark | 1,000 | 0.41 ms | 0.19 ms | 0.47 |
-| benchmark | 10,000 | 4.9 ms | 2.3 ms | 0.47 |
-| overlapping, C = 10 | 100 | 1.37 ms | 0.34 ms | 0.25 |
-| overlapping, C = 10 | 1,000 | 8.0 ms | 13.5 ms | 1.70 |
-| overlapping, C = 10 | 10,000 | 0.65 s | 1.12 s | 1.71 |
+| benchmark | 100 | 29.5 µs | 42.9 µs | 1.45 [1.00] |
+| benchmark | 1,000 | 408 µs | 212 µs | 0.52 [0.50] |
+| benchmark | 10,000 | 4.84 ms | 2.45 ms | 0.51 [0.50] |
+| overlapping, C = 10 | 100 | 1.36 ms | 329 µs | 0.24 [0.23] |
+| overlapping, C = 10 | 1,000 | 7.92 ms | 13.2 ms | 1.67 [1.67] |
+| overlapping, C = 10 | 10,000 | 518.2 ms | 1.09 s | 2.10 [2.10] |
 
-Peak RSS: benchmark at n = 10,000 3.8 MB against 5.3 MB; overlapping at n = 1,000 3.3 MB against 4.1 MB, at
-n = 10,000 3.9 MB against 47.5 MB (the kernel cache of at most 40 MB, e1071's default). The memory increase on hard
-problems was signed off with the choice of LIBSVM's solver; the overlapping time rows at n >= 1,000 compare an
-exact solver with one that stopped early, and are signed off 2026-11-16.
+Peak RSS: benchmark at n = 10,000 3.8 MB against 5.0 MB; overlapping at n = 1,000 3.2 MB against 4.0 MB, at
+n = 10,000 3.8 MB against 46.4 MB (the kernel cache of at most 40 MB, e1071's default). The memory increase on hard
+problems was signed off with the choice of LIBSVM's solver. The overlapping time rows at n >= 1,000 compare an
+exact solver with one that stopped early: n = 1,000 (1.67x) is signed off 2026-11-16 (1.70x); n = 10,000 runs
+2.10x in the quiet re-time against the 1.71x signed (v0.5.0 was faster on the quiet machine, the head time
+is the same) and has gone back to the user, as has the benchmark row at n = 100 (median 1.45x, minima 1.00x: most
+calls of this tree take about 43 µs, the fastest 29 µs, as v0.5.0's).
 
 Benchmark outputs on the paper's `cluster_n*.csv` data (`n_support_vectors`, bias; all converged):
 

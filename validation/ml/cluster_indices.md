@@ -72,49 +72,59 @@ R-pinned: `test_validate_cluster_indices_blobs`, `test_validate_partition_agreem
 
 ## Timing
 
-Release builds of v0.5.0 (`f80b0131`) and this change, `p2a-core` with `spectral-analysis` only, one thread (`RAYON_NUM_THREADS=1`, pinned to one core); noisy three-blob data (2 columns unless stated); 3 interleaved processes per side, each the median of up to 2,001 calls after up to 10 warm-ups; median of the medians. The machine was shared (load 23-53), so ratios within about 10% are noise. Rand index and NMI build the contingency table from the raw labels when it is small; the remaining 10-24% is microseconds of extra passes over the labels.
+Quiet integration re-time, 2026-11-16: release builds of v0.5.0 (`f80b0131`) and of the integrated branch,
+`--no-default-features --features ci`; one core (`taskset -c 2`), `RAYON_NUM_THREADS=1` (one thread for polars and
+BLAS too), cwd `/dev/shm`; per row five processes per side, interleaved with the order alternating (nine for rows
+within 1.05-1.15x), each the median of its calls after a warm-up; cells are the median over the processes, the ratio
+of the minima in brackets. 1-minute load average 0.7-2.7 on 12 cores, nothing else building. Data: noisy three blobs
+(centres (0, 0), (4, 4), (8, 0), unit normal noise; 2 columns unless stated); gapped labels are 0, 4, 9; the pair
+indices compare the labels with a copy in which 10% are moved to the next cluster. Rows marked † are the lane's (load
+23-53, three processes per side) and were not repeated. Rand index and NMI build the contingency table from the raw
+labels when it is small; the quiet re-time still shows 1.2-1.5x for them (microseconds: the extra passes over the
+labels), and the Davies-Bouldin index 1.12-1.25x after the label compaction; these rows are not signed off and have
+gone to the user. Peak memory of `silhouette_optimized` at n = 10,000 (quiet re-time, median of three): 3,057 MB at v0.5.0, 767 MB now.
 
-| Call | n | v0.5.0 | this change | ratio |
+| Call | n | v0.5.0 | this change | ratio [min] |
 |---|---|---|---|---|
-| cluster_stats | 100 | 148.4 µs | 111.1 µs | 0.75 |
-| cluster_stats | 1,000 | 15.31 ms | 10.82 ms | 0.71 |
-| cluster_stats | 10,000 | 3.64 s | 3.36 s | 0.92 |
-| calinski_harabasz | 100 | 13.5 µs | 14.1 µs | 1.04 |
-| calinski_harabasz | 1,000 | 112.7 µs | 110.2 µs | 0.98 |
-| calinski_harabasz | 10,000 | 1.06 ms | 1.10 ms | 1.04 |
-| calinski_harabasz, gapped labels | 100 | 14.5 µs | 14.3 µs | 0.99 |
-| calinski_harabasz, gapped labels | 1,000 | 107.0 µs | 111.1 µs | 1.04 |
-| calinski_harabasz, gapped labels | 10,000 | 1.08 ms | 1.11 ms | 1.02 |
-| davies_bouldin | 100 | 11.7 µs | 12.2 µs | 1.04 |
-| davies_bouldin | 1,000 | 85.2 µs | 87.9 µs | 1.03 |
-| davies_bouldin | 10,000 | 851.0 µs | 890.8 µs | 1.05 |
-| davies_bouldin, gapped | 100 | 12.8 µs | 12.1 µs | 0.95 |
-| davies_bouldin, gapped | 1,000 | 95.5 µs | 96.7 µs | 1.01 |
-| davies_bouldin, gapped | 10,000 | 849.4 µs | 874.9 µs | 1.03 |
-| rand_index | 100 | 0.9 µs | 1.1 µs | 1.20 |
-| rand_index | 1,000 | 5.1 µs | 5.6 µs | 1.10 |
-| rand_index | 10,000 | 45.0 µs | 51.5 µs | 1.14 |
-| rand_index, gapped | 100 | 1.4 µs | 1.2 µs | 0.86 |
-| rand_index, gapped | 1,000 | 5.5 µs | 5.7 µs | 1.04 |
-| rand_index, gapped | 10,000 | 45.0 µs | 51.4 µs | 1.14 |
-| nmi | 100 | 1.2 µs | 1.5 µs | 1.20 |
-| nmi | 1,000 | 5.2 µs | 6.1 µs | 1.17 |
-| nmi | 10,000 | 42.1 µs | 52.1 µs | 1.24 |
-| nmi, gapped | 100 | 1.7 µs | 1.6 µs | 0.92 |
-| nmi, gapped | 1,000 | 5.6 µs | 6.2 µs | 1.10 |
-| nmi, gapped | 10,000 | 42.3 µs | 51.9 µs | 1.23 |
-| silhouette | 100 | 74.7 µs | 71.7 µs | 0.96 |
-| silhouette | 1,000 | 8.59 ms | 8.60 ms | 1.00 |
-| silhouette | 10,000 | 1.39 s | 1.40 s | 1.01 |
-| silhouette, gapped | 100 | 73.3 µs | 71.1 µs | 0.97 |
-| silhouette, gapped | 1,000 | 8.44 ms | 8.65 ms | 1.02 |
-| silhouette, gapped | 10,000 | 1.44 s | 1.44 s | 1.00 |
-| silhouette_optimized | 100 | 225.4 µs | 105.8 µs | 0.47 |
-| silhouette_optimized | 1,000 | 18.35 ms | 8.66 ms | 0.47 |
-| silhouette_optimized | 10,000 | 4.89 s | 1.42 s | 0.29 |
-| gap_statistic, k_max 5, B 20 | 100 | 7.88 ms | 6.92 ms | 0.88 |
-| gap_statistic, k_max 5, B 20 | 1,000 | 132.16 ms | 110.16 ms | 0.83 |
-| gap_statistic, k_max 5, B 20 | 10,000 | 1.56 s | 1.35 s | 0.87 |
+| cluster_stats | 100 | 92.7 µs | 75 µs | 0.81 [0.81] |
+| cluster_stats | 1,000 | 8.51 ms | 6.83 ms | 0.80 [0.81] |
+| calinski_harabasz | 100 | 10.1 µs | 10.7 µs | 1.06 [1.08] |
+| calinski_harabasz | 1,000 | 86.5 µs | 92.7 µs | 1.07 [1.06] |
+| calinski_harabasz | 10,000 | 869 µs | 931 µs | 1.07 [1.07] |
+| calinski_harabasz, gapped labels | 100 | 10.4 µs | 10.8 µs | 1.03 [1.05] |
+| calinski_harabasz, gapped labels | 10,000 | 870 µs | 930 µs | 1.07 [1.06] |
+| davies_bouldin | 100 | 6.93 µs | 8.53 µs | 1.23 [1.23] |
+| davies_bouldin | 1,000 | 55.3 µs | 69.3 µs | 1.25 [1.24] |
+| davies_bouldin | 10,000 | 556 µs | 682 µs | 1.23 [1.25] |
+| davies_bouldin, gapped | 100 | 7.64 µs | 8.55 µs | 1.12 [1.14] |
+| davies_bouldin, gapped | 10,000 | 547 µs | 685 µs | 1.25 [1.25] |
+| rand_index | 100 | 0.58 µs | 0.758 µs | 1.31 [1.33] |
+| rand_index | 1,000 | 3 µs | 4.58 µs | 1.53 [1.49] |
+| rand_index | 10,000 | 29.7 µs | 43.8 µs | 1.48 [1.49] |
+| rand_index, gapped | 100 | 1 µs | 0.872 µs | 0.87 [0.88] |
+| rand_index, gapped | 1,000 | 3.82 µs | 4.68 µs | 1.22 [1.32] |
+| rand_index, gapped | 10,000 | 30.3 µs | 45.6 µs | 1.50 [1.46] |
+| nmi | 100 | 0.715 µs | 0.88 µs | 1.23 [1.26] |
+| nmi | 1,000 | 3.21 µs | 4.69 µs | 1.46 [1.52] |
+| nmi | 10,000 | 29.4 µs | 45.1 µs | 1.54 [1.52] |
+| nmi, gapped | 100 | 1.19 µs | 0.999 µs | 0.84 [0.87] |
+| nmi, gapped | 1,000 | 4.29 µs | 4.81 µs | 1.12 [1.33] |
+| nmi, gapped | 10,000 | 34.2 µs | 44.6 µs | 1.30 [1.51] |
+| silhouette | 100 | 43.8 µs | 42.9 µs | 0.98 [0.97] |
+| silhouette | 1,000 | 4.79 ms | 4.73 ms | 0.99 [0.98] |
+| silhouette, gapped | 100 | 44.2 µs | 42.9 µs | 0.97 [0.97] |
+| silhouette, gapped | 1,000 | 4.82 ms | 4.75 ms | 0.98 [0.98] |
+| silhouette_optimized | 100 | 154 µs | 74.2 µs | 0.48 [0.43] |
+| silhouette_optimized | 1,000 | 12.1 ms | 5.32 ms | 0.44 [0.46] |
+| gap_statistic, k_max 5, B 20 | 100 | 4.59 ms | 4.58 ms | 1.00 [1.00] |
+| gap_statistic, k_max 5, B 20 | 1,000 | 69.4 ms | 69.5 ms | 1.00 [1.00] |
+| cluster_stats † | 10,000 | 3.64 s | 3.36 s | 0.92 |
+| calinski_harabasz, gapped labels † | 1,000 | 107.0 µs | 111.1 µs | 1.04 |
+| davies_bouldin, gapped † | 1,000 | 95.5 µs | 96.7 µs | 1.01 |
+| silhouette † | 10,000 | 1.39 s | 1.40 s | 1.01 |
+| silhouette, gapped † | 10,000 | 1.44 s | 1.44 s | 1.00 |
+| silhouette_optimized † | 10,000 | 4.89 s | 1.42 s | 0.29 |
+| gap_statistic, k_max 5, B 20 † | 10,000 | 1.56 s | 1.35 s | 0.87 |
 
 ## Run
 

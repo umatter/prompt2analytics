@@ -100,22 +100,32 @@ Properties: `test_kmedoids_result_does_not_depend_on_the_seed`, `test_clara_defa
 
 ## Timing
 
-Release builds of v0.5.0 (`f80b0131`) and this change, `p2a-core` with `spectral-analysis` only, one thread (`RAYON_NUM_THREADS=1`, pinned to one core); noisy three-blob data (2 columns unless stated); 3 interleaved processes per side, each the median of up to 2,001 calls after up to 10 warm-ups; median of the medians. The machine was shared (load 23-53), so ratios within about 10% are noise. c-means now stops later on the same relative rule because its memberships are softer (e1071's fixed point): per iteration it is no slower. FANNY at n = 5,000 was not run on v0.5.0 (about 1,000 s per call extrapolated). Peak memory of `silhouette_optimized` at n = 10,000: 3.13 GB on v0.5.0, 0.79 GB now.
+Quiet integration re-time, 2026-11-16: release builds of v0.5.0 (`f80b0131`) and of the integrated branch,
+`--no-default-features --features ci`; one core (`taskset -c 2`), `RAYON_NUM_THREADS=1` (one thread for polars and
+BLAS too), cwd `/dev/shm`; per row five processes per side, interleaved with the order alternating (nine for rows
+within 1.05-1.15x), each the median of its calls after a warm-up; cells are the median over the processes, the ratio
+of the minima in brackets. 1-minute load average 0.7-2.7 on 12 cores, nothing else building. Data: noisy three blobs
+(centres (0, 0), (4, 4), (8, 0), unit normal noise; 2 columns unless stated); gapped labels are 0, 4, 9; the pair
+indices compare the labels with a copy in which 10% are moved to the next cluster. Rows marked † are the lane's (load
+23-53, three processes per side) and were not repeated. c-means now stops later on the same relative rule because its
+memberships are softer (e1071's fixed point): per iteration it is no slower. Euclidean c-means at n = 1,000 and 10,000
+(1.11x, 1.41x) is not signed off and has gone to the user. FANNY at n = 5,000 was not run on v0.5.0 (about 1,000 s per
+call extrapolated). Peak memory of `silhouette_optimized` at n = 10,000: 3.13 GB on v0.5.0, 0.79 GB now.
 
-| Call | n | v0.5.0 | this change | ratio |
+| Call | n | v0.5.0 | this change | ratio [min] |
 |---|---|---|---|---|
-| fuzzy_cmeans Euclidean, k 3 (iterations 8 / 10) | 100 | 572.1 µs | 631.4 µs | 1.10 |
-| fuzzy_cmeans Euclidean, k 3 (iterations 9 / 12) | 1,000 | 6.40 ms | 7.56 ms | 1.18 |
-| fuzzy_cmeans Euclidean, k 3 (iterations 9 / 12) | 10,000 | 67.10 ms | 93.90 ms | 1.40 |
-| fuzzy_cmeans Manhattan, k 3 (iterations 13 / 11) | 100 | 894.3 µs | 702.4 µs | 0.79 |
-| fuzzy_cmeans Manhattan, k 3 (iterations 13 / 15) | 1,000 | 9.04 ms | 9.55 ms | 1.06 |
-| fuzzy_cmeans Manhattan, k 3 (iterations 12 / 18) | 10,000 | 102.85 ms | 135.33 ms | 1.32 |
-| fanny, k 3 (iterations 153 / 12) | 100 | 394.73 ms | 2.74 ms | 0.01 |
-| fanny, k 3 (iterations 180 / 14) | 1,000 | 43.07 s | 267.28 ms | 0.01 |
-| fanny, k 3 (iterations - / 14) | 5,000 | not run | 6.50 s |  |
-| kmedoids_optimized, k 3 | 100 | 660.5 µs | 391.1 µs | 0.59 |
-| kmedoids_optimized, k 3 | 1,000 | 51.52 ms | 30.59 ms | 0.59 |
-| kmedoids_optimized, k 3 | 5,000 | 4.78 s | 3.99 s | 0.83 |
+| fuzzy_cmeans Euclidean, k 3 | 100 | 431 µs | 449 µs | 1.04 [1.03] |
+| fuzzy_cmeans Euclidean, k 3 | 1,000 | 5.19 ms | 5.77 ms | 1.11 [1.11] |
+| fuzzy_cmeans Euclidean, k 3 | 10,000 | 43.4 ms | 61.2 ms | 1.41 [1.41] |
+| fuzzy_cmeans Manhattan, k 3 | 100 | 636 µs | 324 µs | 0.51 [0.51] |
+| fuzzy_cmeans Manhattan, k 3 | 1,000 | 7.67 ms | 7.22 ms | 0.94 [0.94] |
+| fuzzy_cmeans Manhattan, k 3 | 10,000 | 72.4 ms | 76.8 ms | 1.06 [1.06] |
+| fanny, k 3 | 100 | 88.4 ms | 1.57 ms | 0.02 [0.02] |
+| kmedoids_optimized, k 3 | 100 | 763 µs | 527 µs | 0.69 [0.59] |
+| kmedoids_optimized, k 3 | 1,000 | 88.6 ms | 34.2 ms | 0.39 [0.38] |
+| fanny, k 3 (iterations 180 / 14) † | 1,000 | 43.07 s | 267.28 ms | 0.01 |
+| fanny, k 3 (iterations - / 14) † | 5,000 | not run | 6.50 s |  |
+| kmedoids_optimized, k 3 † | 5,000 | 4.78 s | 3.99 s | 0.83 |
 
 ## Run
 

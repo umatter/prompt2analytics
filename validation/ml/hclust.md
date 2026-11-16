@@ -111,22 +111,31 @@ cargo test -p p2a-core --lib --no-default-features --features ci -- ml::hclust m
 
 ## Timing
 
-Release builds of v0.5.0 (`f80b0131`) and this change, `p2a-core` with `spectral-analysis` only, one thread (`RAYON_NUM_THREADS=1`, pinned to one core); noisy three-blob data (2 columns unless stated); 3 interleaved processes per side, each the median of up to 2,001 calls after up to 10 warm-ups; median of the medians. The machine was shared (load 23-53), so ratios within about 10% are noise. The Boruvka tree is now minimal (v0.5.0's tree weighed up to 13x the minimum on these data); at small n in 5 dimensions it costs more than the non-minimal tree (signed off up to 3x, 2026-11-15).
+Quiet integration re-time, 2026-11-16: release builds of v0.5.0 (`f80b0131`) and of the integrated branch,
+`--no-default-features --features ci`; one core (`taskset -c 2`), `RAYON_NUM_THREADS=1` (one thread for polars and
+BLAS too), cwd `/dev/shm`; per row five processes per side, interleaved with the order alternating (nine for rows
+within 1.05-1.15x), each the median of its calls after a warm-up; cells are the median over the processes, the ratio
+of the minima in brackets. 1-minute load average 0.7-2.7 on 12 cores, nothing else building. Data: noisy three blobs
+(centres (0, 0), (4, 4), (8, 0), unit normal noise; 2 columns unless stated); gapped labels are 0, 4, 9; the pair
+indices compare the labels with a copy in which 10% are moved to the next cluster. Rows marked † are the lane's (load
+23-53, three processes per side) and were not repeated. The Boruvka tree is now minimal (v0.5.0's tree weighed up to
+13x the minimum on these data); at small n in 5 dimensions it costs more than the non-minimal tree (1.85x and 1.52x at
+n = 100 and 1,000; signed off up to 3x, 2026-11-15).
 
-| Call | n | v0.5.0 | this change | ratio |
+| Call | n | v0.5.0 | this change | ratio [min] |
 |---|---|---|---|---|
-| pvclust average, 20 columns | 100 | 378.96 ms | 264.14 ms | 0.70 |
-| pvclust average, 20 columns | 1,000 | 2.67 s | 2.57 s | 0.96 |
-| pvclust average, 20 columns | 10,000 | 8.28 s | 8.06 s | 0.97 |
-| dual_tree_boruvka_mst, d 2, min_samples 5 | 100 | 355.8 µs | 366.3 µs | 1.03 |
-| dual_tree_boruvka_mst, d 2, min_samples 5 | 1,000 | 23.93 ms | 11.60 ms | 0.48 |
-| dual_tree_boruvka_mst, d 2, min_samples 5 | 10,000 | 3.92 s | 358.36 ms | 0.09 |
-| dual_tree_boruvka_mst, d 5 | 100 | 469.0 µs | 834.3 µs | 1.78 |
-| dual_tree_boruvka_mst, d 5 | 1,000 | 45.80 ms | 54.88 ms | 1.20 |
-| dual_tree_boruvka_mst, d 5 | 10,000 | 6.00 s | 1.68 s | 0.28 |
-| kdtree_prim_mst, d 5 (reference) | 100 | 95.6 µs | 89.0 µs | 0.93 |
-| kdtree_prim_mst, d 5 (reference) | 1,000 | 10.83 ms | 9.85 ms | 0.91 |
-| kdtree_prim_mst, d 5 (reference) | 10,000 | 1.22 s | 1.12 s | 0.92 |
+| pvclust average, 20 columns | 100 | 287.5 ms | 191.0 ms | 0.66 [0.66] |
+| dual_tree_boruvka_mst, d 2, min_samples 5 | 100 | 223 µs | 181 µs | 0.81 [0.79] |
+| dual_tree_boruvka_mst, d 2, min_samples 5 | 1,000 | 13.8 ms | 7.88 ms | 0.57 [0.57] |
+| dual_tree_boruvka_mst, d 2, min_samples 5 | 10,000 | 2.11 s | 176.1 ms | 0.08 [0.08] |
+| dual_tree_boruvka_mst, d 5, min_samples 5 | 100 | 305 µs | 564 µs | 1.85 [1.72] |
+| dual_tree_boruvka_mst, d 5, min_samples 5 | 1,000 | 30.1 ms | 45.7 ms | 1.52 [1.53] |
+| dual_tree_boruvka_mst, d 5, min_samples 5 | 10,000 | 3.80 s | 1.08 s | 0.28 [0.28] |
+| kdtree_prim_mst, d 5 (reference) | 100 | 49.3 µs | 51.4 µs | 1.04 [1.04] |
+| kdtree_prim_mst, d 5 (reference) | 1,000 | 6.56 ms | 6.78 ms | 1.03 [1.03] |
+| pvclust average, 20 columns † | 1,000 | 2.67 s | 2.57 s | 0.96 |
+| pvclust average, 20 columns † | 10,000 | 8.28 s | 8.06 s | 0.97 |
+| kdtree_prim_mst, d 5 (reference) † | 10,000 | 1.22 s | 1.12 s | 0.92 |
 
 ## MCP tools
 

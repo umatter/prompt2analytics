@@ -55,30 +55,33 @@ pair count, every point against a direct count), `roc_auc_refuses_infinite_score
 
 ## Timing
 
-Preliminary (lane timing, 2026-11-16): release builds, `--no-default-features --features ci`, base `f80b0131`
-(v0.5.0) against this tree; one core (`taskset -c 8`), `RAYON_NUM_THREADS=1`, 9 processes per side interleaved,
-each the median of 2,001 / 401 / 41 calls (11 for the base `roc_auc` at n = 10,000) after 10 warm-ups; cells are
-the median of the process medians, in µs. Machine shared with other builds (load average 3-18). Scores: logistic
+Quiet integration re-time, 2026-11-16: release builds of v0.5.0 (`f80b0131`) and of the integrated branch,
+`--no-default-features --features ci`; one core (`taskset -c 2`), `RAYON_NUM_THREADS=1` (one thread for polars and
+BLAS too), cwd `/dev/shm`; per row five processes per side, interleaved with the order alternating (nine for rows
+within 1.05-1.15x), each the median of its calls after a warm-up; cells are the median over the processes, the ratio
+of the minima in brackets. 1-minute load average 0.7-2.7 on 12 cores, nothing else building. Calls per process 2,001 /
+401 / 41 (11 for `roc_auc` at n = 10,000), in µs. With four threads (cores 0-3) `fast_roc_auc_parallel` at n = 10,000
+takes 745.7 µs at v0.5.0 and 782.4 µs here (1.05 [1.09]). Scores: logistic
 of a normal with a class shift ("continuous"), and the same rounded to 0.1 ("ties"); 40% positives;
 `roc_auc(.., Some(100))`.
 
-| Function | Scores | n | base (µs) | this tree (µs) | ratio |
-|---|---|---:|---:|---:|---:|
-| `roc_auc` | continuous | 100 | 74.1 | 6.9 | 0.09 |
-|  |  | 1,000 | 3,647 | 57.9 | 0.02 |
-|  |  | 10,000 | 747,648 | 1,173 | 0.002 |
-|  | ties | 100 | 38.6 | 4.3 | 0.11 |
-|  |  | 1,000 | 363.0 | 22.8 | 0.06 |
-|  |  | 10,000 | 10,184 | 264.9 | 0.03 |
-| `fast_roc_auc` | continuous | 100 | 7.4 | 7.3 | 0.98 |
-|  |  | 1,000 | 83.1 | 65.3 | 0.79 |
-|  |  | 10,000 | 1,968 | 1,328 | 0.68 |
-|  | ties | 100 | 7.2 | 4.3 | 0.59 |
-|  |  | 1,000 | 64.5 | 23.2 | 0.36 |
-|  |  | 10,000 | 1,045 | 415.0 | 0.40 |
-| `fast_roc_auc_parallel` | continuous | 100 | 62.8 | 24.8 | 0.39 |
-|  |  | 1,000 | 123.8 | 91.7 | 0.74 |
-|  |  | 10,000 | 1,375 | 1,402 | 1.02 |
-|  | ties | 100 | 59.7 | 23.6 | 0.40 |
-|  |  | 1,000 | 122.1 | 87.7 | 0.72 |
-|  |  | 10,000 | 1,319 | 1,330 | 1.01 |
+| Function | Scores | n | base (µs) | this tree (µs) | ratio [min] |
+|---|---|---:|---:|---:|---|
+| `roc_auc` | continuous | 100 | 54.29 | 5.509 | 0.10 [0.10] |
+|  |  | 1,000 | 2,699 | 43.46 | 0.02 [0.02] |
+|  |  | 10,000 | 723,407 | 873.6 | 0.00 [0.00] |
+|  | ties | 100 | 28.50 | 3.517 | 0.12 [0.12] |
+|  |  | 1,000 | 281.8 | 17.45 | 0.06 [0.07] |
+|  |  | 10,000 | 8,733 | 190.8 | 0.02 [0.02] |
+| `fast_roc_auc` | continuous | 100 | 5.415 | 5.022 | 0.93 [0.92] |
+|  |  | 1,000 | 59.16 | 44.60 | 0.75 [0.79] |
+|  |  | 10,000 | 1,365 | 942.2 | 0.69 [0.69] |
+|  | ties | 100 | 5.958 | 3.403 | 0.57 [0.57] |
+|  |  | 1,000 | 52.19 | 19.49 | 0.37 [0.34] |
+|  |  | 10,000 | 724.0 | 271.9 | 0.38 [0.36] |
+| `fast_roc_auc_parallel` | continuous | 100 | 58.64 | 22.96 | 0.39 [0.45] |
+|  |  | 1,000 | 122.3 | 89.01 | 0.73 [0.79] |
+|  |  | 10,000 | 1,280 | 1,322 | 1.03 [1.00] |
+|  | ties | 100 | 58.39 | 22.80 | 0.39 [0.30] |
+|  |  | 1,000 | 121.3 | 87.12 | 0.72 [0.78] |
+|  |  | 10,000 | 1,292 | 1,321 | 1.02 [0.97] |

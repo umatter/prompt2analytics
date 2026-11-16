@@ -82,23 +82,24 @@ MCP text is compared at print precision (`Tol::printed`: 6 decimals, z 4 decimal
 
 ## Timing
 
-Release builds of v0.5.0 (`f80b0131`) and of this change with `--no-default-features --features ci`, one core
-(`taskset -c 2`, `RAYON_NUM_THREADS=1`), base and head processes interleaved, each process the median of 51 / 9 / 3
-calls at n = 100 / 1,000 / 10,000 after a warm-up, the table the median over 5 processes (3 for the single-call
-rows); peak RSS from `/usr/bin/time -v`, one fit per process, the smallest of 3. Intel Core 7 150U, machine load
-10-20 from other jobs (preliminary; the integration run repeats it).
+Quiet integration re-time, 2026-11-16: release builds of v0.5.0 (`f80b0131`) and of the integrated branch,
+`--no-default-features --features ci`; one core (`taskset -c 2`), `RAYON_NUM_THREADS=1` (one thread for polars and
+BLAS too), cwd `/dev/shm`; per row five processes per side, interleaved with the order alternating (nine for rows
+within 1.05-1.15x), each the median of its calls after a warm-up; cells are the median over the processes, the ratio
+of the minima in brackets. 1-minute load average 0.7-2.7 on 12 cores, nothing else building. Peak RSS: one process per
+side, the median of three (`/usr/bin/time`). Intel Core 7 150U.
 
 Standard-normal data; the covariance path at n x 5, the SVD path at n x n/2.
 
-| Path | n | v0.5.0 | head | head / v0.5.0 |
+| Path | n | v0.5.0 | head | head / v0.5.0 [min] |
 |---|---|---|---|---|
-| covariance | 100 | 34 us | 35 us | 1.01 |
-| covariance | 1,000 | 0.34 ms | 0.33 ms | 0.99 |
-| covariance | 10,000 | 3.6 ms | 3.5 ms | 0.99 |
-| SVD | 100 | 1.37 ms | 1.37 ms | 1.00 |
-| SVD | 1,000 | 0.218 s | 0.225 s | 1.03 |
+| covariance | 100 | 34.2 µs | 34.4 µs | 1.01 [1.00] |
+| covariance | 1,000 | 318 µs | 321 µs | 1.01 [1.01] |
+| covariance | 10,000 | 3.49 ms | 3.49 ms | 1.00 [1.00] |
+| SVD | 100 | 1.34 ms | 1.34 ms | 1.00 [0.99] |
+| SVD | 1,000 | 213.9 ms | 213.3 ms | 1.00 [1.00] |
 
-Peak RSS, covariance path at n = 10,000: 4.8 MB against 4.9 MB.
+Peak RSS, covariance path at n = 10,000: 4.7 MB against 4.9 MB.
 
 ## References
 

@@ -89,17 +89,17 @@ Test: `test_na_mstl_int64_and_missing` (on `validation/datasets/generated/arima_
 
 ## Timing against v0.5.0
 
-Release builds of a scratch harness against f80b0131 (v0.5.0) and against this change, `--no-default-features
---features ci`; one core (`taskset -c 10`), `RAYON_NUM_THREADS=1`, cwd `/dev/shm`; per row nine processes per side,
-interleaved, each the median of its calls after ten warm-ups; cells are the median over the processes, the ratio of the
-minima in brackets. The machine was heavily loaded (1-minute load average 11-36 on 12 cores), so the absolute times are
-preliminary and ratios within about 5% are noise. Measured 2026-11-16.
+Quiet integration re-time, 2026-11-16: release builds of v0.5.0 (`f80b0131`) and of the integrated branch,
+`--no-default-features --features ci`; one core (`taskset -c 2`), `RAYON_NUM_THREADS=1` (one thread for polars and
+BLAS too), cwd `/dev/shm`; per row five processes per side, interleaved with the order alternating (nine for rows
+within 1.05-1.15x), each the median of its calls after a warm-up; cells are the median over the processes, the ratio
+of the minima in brackets. 1-minute load average 0.7-2.7 on 12 cores, nothing else building.
 
 | Method | n | f80b0131 (µs) | this change (µs) | ratio [min] |
 |---|---|---|---|---|
-| `run_mstl`, periods [12] | 100 | 67.0 | 68.1 | 1.02 [1.01] |
-| `run_mstl`, periods [12] | 1,000 | 575.2 | 585.1 | 1.02 [1.02] |
-| `run_mstl`, periods [12] | 10,000 | 5,515.1 | 5,696.4 | 1.03 [1.03] |
+| `run_mstl`, periods [12] | 100 | 46.73 | 47.29 | 1.01 [1.01] |
+| `run_mstl`, periods [12] | 1,000 | 407.9 | 413.1 | 1.01 [1.01] |
+| `run_mstl`, periods [12] | 10,000 | 3,797 | 3,897 | 1.03 [1.03] |
 
 The centring and rescaling add three O(n) passes around the f32 fit.
 

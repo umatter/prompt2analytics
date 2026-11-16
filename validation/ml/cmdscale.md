@@ -76,26 +76,27 @@ equal `euro_k2_gof` (`Tol::coef(21)`). Test: `test_validate_mcp_cmdscale_gof`
 
 ## Timing
 
-Release builds of v0.5.0 (`f80b0131`) and of this change with `--no-default-features --features ci`, one core
-(`taskset -c 2`, `RAYON_NUM_THREADS=1`), base and head processes interleaved, each process the median of 51 / 9 / 3
-calls at n = 100 / 1,000 / 10,000 after a warm-up, the table the median over 5 processes (3 for the single-call
-rows); peak RSS from `/usr/bin/time -v`, one fit per process, the smallest of 3. Intel Core 7 150U, machine load
-10-20 from other jobs (preliminary; the integration run repeats it).
+Quiet integration re-time, 2026-11-16: release builds of v0.5.0 (`f80b0131`) and of the integrated branch,
+`--no-default-features --features ci`; one core (`taskset -c 2`), `RAYON_NUM_THREADS=1` (one thread for polars and
+BLAS too), cwd `/dev/shm`; per row five processes per side, interleaved with the order alternating (nine for rows
+within 1.05-1.15x), each the median of its calls after a warm-up; cells are the median over the processes, the ratio
+of the minima in brackets. 1-minute load average 0.7-2.7 on 12 cores, nothing else building. Peak RSS: one process per
+side, the median of three (`/usr/bin/time`). Intel Core 7 150U.
 
 `cmdscale_from_data` (k = 2) on standard-normal data in 3 dimensions; `add = TRUE` is new and is timed against
 `add = FALSE` on the same Manhattan distances (head only).
 
-| Run | n | v0.5.0 | head | head / v0.5.0 |
+| Run | n | v0.5.0 | head | head / v0.5.0 [min] |
 |---|---|---|---|---|
-| default | 100 | 1.96 ms | 1.96 ms | 1.00 |
-| default | 1,000 | 0.317 s | 0.324 s | 1.02 |
+| default | 100 | 1.93 ms | 1.94 ms | 1.00 [1.01] |
+| default | 1,000 | 252.9 ms | 253.1 ms | 1.00 [1.00] |
 | `add = FALSE` | 100 | | 1.9 ms | |
 | `add = TRUE` | 100 | | 31.5 ms | |
 | `add = FALSE` | 1,000 | | 0.44 s | |
 | `add = TRUE` | 1,000 | | 8.2 s | |
 
-Peak RSS at n = 1,000: 41.3 MB against 41.3 MB (default); 52.9 MB (`add = FALSE`) and 93.8 MB (`add = TRUE`, the
-2n x 2n matrix of the additive constant).
+Peak RSS at n = 1,000: 40.2 MB against 40.4 MB (default); from the lane run (head only, not repeated): 52.9 MB
+(`add = FALSE`) and 93.8 MB (`add = TRUE`, the 2n x 2n matrix of the additive constant). The `add` rows are lane times.
 
 ## References
 

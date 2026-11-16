@@ -97,18 +97,21 @@ earlier base build. The Huber row is not like-for-like: the base's loss oscillat
 
 ### T4 early stopping and seeded draws
 
-`release`, `ci` features, the T4 boosting/forest fixes against the code before them (`34a4186a`), nine processes per
-side interleaved, one core (`taskset`), one rayon thread, 2026-11-16, load average 22-42 on 12 cores (a loaded
-machine: read ratios near 1 as within noise). Cells are the median of the process medians; "min ratio" is the ratio
-of the minima. Design: n rows, 5 features uniform on [0, 10], `y = 2 x0 - x4 + (x1 - 5)^2 / 5` plus noise.
+Against v0.5.0 (`f80b0131`). Quiet integration re-time, 2026-11-16: release builds of v0.5.0 (`f80b0131`) and of the
+integrated branch, `--no-default-features --features ci`; one core (`taskset -c 2`), `RAYON_NUM_THREADS=1` (one thread
+for polars and BLAS too), cwd `/dev/shm`; per row five processes per side, interleaved with the order alternating
+(nine for rows within 1.05-1.15x), each the median of its calls after a warm-up; cells are the median over the
+processes, the ratio of the minima in brackets. 1-minute load average 0.7-2.7 on 12 cores, nothing else building.
+Design: n rows, 5 features uniform on [0, 10], `y = 2 x0 - x4 + (x1 - 5)^2 / 5` plus noise. Rows marked † are the
+lane's (against `34a4186a`, on a loaded machine; informational, not repeated).
 
 | Row | n | base (ms) | this tree (ms) | ratio | min ratio |
 |---|---:|---:|---:|---:|---:|
-| `xgboost()` defaults | 1,000 | 208.7 | 204.6 | 0.98 | 0.94 |
-| `xgboost()`, 1,000 rounds, `early_stopping_rounds` 10 | 1,000 | 1,961 | 48.68 | 0.02 | 0.02 |
+| `xgboost()` defaults | 1,000 | 156.3 | 155.8 | 1.00 | 1.00 |
+| `xgboost()`, 1,000 rounds, `early_stopping_rounds` 10 † | 1,000 | 1,961 | 48.68 | 0.02 | 0.02 |
 |  | 10,000 | 26,378 | 790.3 | 0.03 | 0.03 |
-| `fast_xgboost()`, `subsample` 0.8, seed 1 | 1,000 | 242.1 | 261.6 | 1.08 | 1.12 |
-|  | 10,000 | 546.2 | 567.5 | 1.04 | 1.03 |
+| `fast_xgboost()`, `subsample` 0.8, seed 1 | 1,000 | 89.41 | 95.17 | 1.06 | 1.06 |
+|  | 10,000 | 275.9 | 291.3 | 1.06 | 1.05 |
 
 The early-stopping rows are informational: the base watched the training loss and ran all 1,000 rounds; this tree
 stops on the held-out rows after 14 (n = 1,000) and 15 (n = 10,000) rounds. The seeded `fast_xgboost` rows are not

@@ -87,26 +87,31 @@ ratio of the minima.
 |  | 1,000 | 3.22 | 3.20 | 0.99 | 0.98 |
 |  | 10,000 | 15.03 | 15.04 | 1.00 | 0.99 |
 
-Within 1.1x. Fast mboost at n = 100: single fits fall into two modes on both sides, about 0.65 ms and 1.9 ms;
-the minima agree (0.99) and the median of the per-round ratios is 1.02, while the median of the medians (1.23)
-counts more slow-mode rounds on this tree's side. The binomial family's definition changed (half log-odds), with
-the same work per step.
+Within 1.1x. Fast mboost at n = 100: single fits fall into two modes on both sides, about 0.65 ms and 1.9 ms; the
+minima agree (0.99) and the median of the per-round ratios is 1.02, while the median of the medians (1.23) counts more
+slow-mode rounds on this tree's side. The binomial family's definition changed (half log-odds), with the same work per
+step. Quiet re-time of the fast mboost defaults against v0.5.0 (2026-11-16, protocol as the T4 table below; n x 5
+uniform on [0, 1], y = 2 x1 + 0.5 x2 + noise): 1.00 [1.01] / 1.00 [1.00] / 0.99 [1.00] at n = 100 / 1,000 / 10,000
+(3.943 / 6.448 / 31.19 ms at v0.5.0, nine rounds at n = 100); the 1.23 at n = 100 does not recur.
 
-T4 (adaptive Huber threshold in `fast_mboost`): `release`, `ci` features, the T4 boosting/forest fixes against the
-code before them (`34a4186a`), nine processes per side interleaved, one core (`taskset`), one rayon thread,
-2026-11-16, load average 22-42 on 12 cores (a loaded machine: read ratios near 1 as within noise). Cells are the
-median of the process medians; "min ratio" is the ratio of the minima. Design: n rows, 5 features uniform on [0,
-10], `y = 2 x0 - x4 + (x1 - 5)^2 / 5` plus noise.
+T4 (adaptive Huber threshold in `fast_mboost`), against v0.5.0 (`f80b0131`). Quiet integration re-time, 2026-11-16:
+release builds of v0.5.0 (`f80b0131`) and of the integrated branch, `--no-default-features --features ci`; one core
+(`taskset -c 2`), `RAYON_NUM_THREADS=1` (one thread for polars and BLAS too), cwd `/dev/shm`; per row five processes
+per side, interleaved with the order alternating (nine for rows within 1.05-1.15x), each the median of its calls after
+a warm-up; cells are the median over the processes, the ratio of the minima in brackets. 1-minute load average 0.7-2.7
+on 12 cores, nothing else building. Design: n rows, 5 features uniform on [0, 10], `y = 2 x0 - x4 + (x1 - 5)^2 / 5`
+plus noise.
 
 | `fast_mboost()` Huber, componentwise linear, p = 5 | n | base (ms) | this tree (ms) | ratio | min ratio |
 |---|---:|---:|---:|---:|---:|
-|  | 100 | 4.56 | 4.61 | 1.01 | 0.94 |
-|  | 1,000 | 9.16 | 9.54 | 1.04 | 1.05 |
-|  | 10,000 | 61.08 | 68.15 | 1.12 | 1.14 |
+|  | 100 | 3.970 | 4.055 | 1.02 | 1.08 |
+|  | 1,000 | 6.813 | 7.386 | 1.08 | 1.09 |
+|  | 10,000 | 37.90 | 48.43 | 1.28 | 1.31 |
 
-One median of `|y - f|` (an O(n) selection) per iteration against a componentwise linear fit of 5 features: 1.12x at
-n = 10,000, above the 1.1x bound; the base used a fixed threshold in the units of `y`, which made the fit
-scale-dependent (WT-1). Awaiting the user's sign-off.
+One quantile of `|y - f|` (an O(n) selection) per iteration against a componentwise linear fit of 5 features: 1.28x at
+n = 10,000 (37.90 -> 48.43 ms; minima 1.31x), above the 1.15x accepted on 2026-11-16 for this row, so it has gone back
+to the user; 1.02x and 1.08x at n = 100 and 1,000. The base used a fixed threshold in the units of `y`, which made the
+fit scale-dependent (WT-1).
 
 ## Not pinned
 
