@@ -2129,6 +2129,76 @@ async fn test_validate_mcp_changepoint_binseg() {
     );
 }
 
+/// TS-5: causal_impact_analysis describes what it computes (a maximum-likelihood
+/// state-space forecast; no prior, no posterior) and reports the cumulative interval from the
+/// joint forecast-error covariance and the control coefficients' SEs
+/// (causal_impact_intervals_t4, control series). Before: "Bayesian", "credible", the sum of the
+/// marginal variances, no standard errors.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_causal_impact_texts() {
+    let case = Case::load("causal_impact_intervals_t4");
+    let (se, s) = session_with("causal_impact_intervals_t4");
+    let j = json_of(
+        &ok(
+            &s,
+            &se,
+            "causal_impact_analysis",
+            json!({"dataset": "causal_impact_control_t4", "response_col": "y", "time_col": "t",
+                "pre_period_start": 1, "pre_period_end": 80,
+                "post_period_start": 81, "post_period_end": 100, "control_cols": ["x"]}),
+        )
+        .await,
+    );
+    assert_eq!(
+        j["method"].as_str(),
+        Some(
+            "CausalImpact (structural time series: maximum-likelihood fit, Gaussian forecast intervals)"
+        )
+    );
+    let cum = &j["summary"]["cumulative_effect"];
+    Check::new(&case)
+        .vector("ctrl_cum_lower", &[f(&cum["ci_lower"])], Tol::printed(4))
+        .vector("ctrl_cum_upper", &[f(&cum["ci_upper"])], Tol::printed(4))
+        .finish();
+    let se_b = fs(&j["model"]["regression_std_errors"]);
+    assert_eq!(se_b.len(), 1);
+    assert!(
+        (se_b[0] - case.scalar("ctrl_beta_se")).abs() <= 1e-6 * se_b[0],
+        "{se_b:?}"
+    );
+    assert_eq!(
+        j["model"]["regression_coefficients"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let text = j["interpretation"].as_str().unwrap();
+    assert!(
+        text.contains("confidence interval") && text.contains("two-sided"),
+        "{text}"
+    );
+    let tools = s.router_tools();
+    let tool = tools
+        .iter()
+        .find(|t| t.name == "causal_impact_analysis")
+        .unwrap();
+    let desc = tool.description.clone().unwrap().to_string();
+    let alpha = tool.input_schema["properties"]["alpha"]["description"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    for text in [&desc, &alpha] {
+        for word in ["Bayesian", "credible", "posterior"] {
+            assert!(!text.contains(word), "{word} in {text}");
+        }
+    }
+    assert!(
+        desc.contains("two-sided p-value") && alpha.contains("confidence"),
+        "{desc}"
+    );
+}
+
 /// AR warnings in the JSON; the changepoint penalty, cpgram and filter descriptions.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_validate_mcp_timeseries_wp37_texts() {

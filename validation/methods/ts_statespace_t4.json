@@ -14,7 +14,8 @@
         "p2a-core::forecasting::causal_impact::tests::test_validate_causal_impact_intervals_nile_level",
         "p2a-core::forecasting::causal_impact::tests::test_validate_causal_impact_intervals_nile_trend",
         "p2a-core::forecasting::causal_impact::tests::test_validate_causal_impact_intervals_ukgas_bsm",
-        "p2a-core::forecasting::causal_impact::tests::test_validate_causal_impact_intervals_control"
+        "p2a-core::forecasting::causal_impact::tests::test_validate_causal_impact_intervals_control",
+        "p2a-mcp::tier3::wp56_stats_ts::test_validate_mcp_causal_impact_texts"
       ],
       "quantities": [
         "model variances at the tight optimum",
@@ -27,7 +28,7 @@
         "control coefficient and its standard error",
         "counterfactual and pointwise variance with a control"
       ],
-      "tolerance": "Tol::iterative(1e-6)",
+      "tolerance": "Tol::iterative(1e-6); MCP printed bounds Tol::printed(4)",
       "deviations": [],
       "supersedes_legacy": []
     }

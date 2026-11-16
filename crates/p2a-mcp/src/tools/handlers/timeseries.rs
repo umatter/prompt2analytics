@@ -1430,9 +1430,9 @@ impl AnalyticsServer {
         )]))
     }
 
-    /// CausalImpact analysis using Bayesian Structural Time Series.
+    /// CausalImpact analysis: a structural time-series model fitted by maximum likelihood.
     #[tool(
-        description = "Estimate the causal effect of an intervention using Bayesian Structural Time Series (BSTS). Uses pre-intervention data to build a counterfactual prediction, then compares with observed post-intervention data to estimate the causal effect. Optionally uses control time series that are correlated with the response but unaffected by the intervention. Returns cumulative/average effects with credible intervals and Bayesian p-value."
+        description = "Estimate the effect of an intervention from a structural time-series model fitted to the pre-period (local level, optional trend and seasonal, optional control series as regression terms) by maximum likelihood. The counterfactual is the model's forecast; the intervals and the p-value come from the joint covariance of its forecast errors (normal approximation, parameters plugged in). Returns the average, cumulative and relative effects with confidence intervals and a two-sided p-value."
     )]
     pub async fn causal_impact_analysis(
         &self,
@@ -1464,7 +1464,7 @@ impl AnalyticsServer {
 
         // Build output
         let mut output = serde_json::json!({
-            "method": "CausalImpact (Bayesian Structural Time Series)",
+            "method": "CausalImpact (structural time series: maximum-likelihood fit, Gaussian forecast intervals)",
             "periods": {
                 "pre_period": {
                     "start": request.pre_period_start,
@@ -1510,6 +1510,7 @@ impl AnalyticsServer {
                 "seasonal_variance": result.model.seasonal_variance.map(|v| format!("{:.6}", v)),
                 "observation_variance": format!("{:.6}", result.model.observation_variance),
                 "regression_coefficients": result.model.regression_coefficients,
+                "regression_std_errors": result.model.regression_std_errors,
                 "control_names": result.model.control_names,
                 "log_likelihood": format!("{:.4}", result.model.log_likelihood),
                 "aic": format!("{:.4}", result.model.aic),
@@ -1517,8 +1518,8 @@ impl AnalyticsServer {
             },
             "interpretation": if result.summary.significant {
                 format!(
-                    "The intervention had a statistically significant effect (p = {:.4}). \
-                    The cumulative effect over the post-period was {:.2} [{:.2}, {:.2}], \
+                    "The intervention had a statistically significant effect (two-sided p = {:.4}). \
+                    The cumulative effect over the post-period was {:.2} (confidence interval [{:.2}, {:.2}]), \
                     representing a {:.1}% change from what would have occurred without intervention.",
                     result.summary.p_value,
                     result.summary.cumulative_effect,
@@ -1528,15 +1529,14 @@ impl AnalyticsServer {
                 )
             } else {
                 format!(
-                    "The intervention did not have a statistically significant effect at alpha = {} (p = {:.4}). \
-                    While the estimated cumulative effect was {:.2}, this is within the range of natural variation \
-                    expected without intervention.",
+                    "The intervention did not have a statistically significant effect at alpha = {} (two-sided p = {:.4}). \
+                    The estimated cumulative effect was {:.2}; its confidence interval contains 0.",
                     result.summary.alpha,
                     result.summary.p_value,
                     result.summary.cumulative_effect
                 )
             },
-            "references": "Brodersen et al. (2015). Inferring causal impact using Bayesian structural time series models. Annals of Applied Statistics, 9(1), 247-274."
+            "references": "Brodersen et al. (2015). Inferring causal impact using Bayesian structural time series models. Annals of Applied Statistics, 9(1), 247-274 (the method's source). Durbin and Koopman (2012). Time Series Analysis by State Space Methods, 2nd ed., sec. 4.13 (forecasting)."
         });
         insert_notes(
             &mut output,

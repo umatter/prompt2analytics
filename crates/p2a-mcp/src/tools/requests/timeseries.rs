@@ -586,7 +586,7 @@ pub struct StructTsRequest {
     pub period: Option<usize>,
 }
 
-/// Request for CausalImpact analysis (Bayesian Structural Time Series for causal inference).
+/// Request for CausalImpact analysis (a structural time-series model fitted by maximum likelihood).
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CausalImpactRequest {
@@ -631,9 +631,7 @@ pub struct CausalImpactRequest {
     pub control_cols: Option<Vec<String>>,
 
     /// Significance level (default 0.05)
-    #[schemars(
-        description = "Significance level for credible intervals. Default: 0.05 (95% credible intervals)."
-    )]
+    #[schemars(description = "Significance level: 1 - alpha confidence intervals. Default 0.05.")]
     pub alpha: Option<f64>,
 
     /// Include trend component
