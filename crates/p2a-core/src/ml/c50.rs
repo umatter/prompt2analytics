@@ -448,7 +448,8 @@ fn gain_ratio(parent_counts: &[f64], left_counts: &[f64], right_counts: &[f64]) 
 }
 
 /// The confidence level of C4.5's pessimistic error: `cf` and the squared normal deviate
-/// `z^2` with `z = Phi^-1(1 - cf)`, computed once per fit.
+/// `z^2` with the exact `z = qnorm(1 - cf)` (C4.5 interpolates `z` in a table of deviates
+/// instead), computed once per fit in [`c50`] and passed down the tree.
 #[derive(Debug, Clone, Copy)]
 struct PruneLevel {
     cf: f64,
@@ -463,9 +464,11 @@ impl PruneLevel {
     }
 }
 
-/// C4.5's added errors (`AddErrs`, Quinlan 1993, ch. 4; Release 8 `stats.c`): the errors to
-/// add to `e` observed errors among `n` cases so that the total is the upper limit of the
-/// binomial error at confidence `cf`.
+/// C4.5's added-errors formula (`AddErrs`, Quinlan 1993, ch. 4; Release 8 `stats.c`) with the
+/// exact `z = qnorm(1 - cf)` in place of C4.5's interpolated deviate table: the errors to add
+/// to `e` observed errors among `n` cases so that the total is the upper limit of the binomial
+/// error at confidence `cf`. At `cf = 0.25` C4.5's table gives `z` of about 0.6925 where
+/// `qnorm(0.75)` is 0.6745, so the estimates of the last branch differ slightly from C4.5's.
 ///
 /// - `e < 1e-6`: `n (1 - cf^(1/n))`, the exact limit for no errors;
 /// - `e < 0.9999`: interpolated linearly between that and the value at `e = 1`;
@@ -784,6 +787,7 @@ fn build_c50_tree(
     weights: &Array1<f64>,
     indices: &[usize],
     config: &C50Config,
+    level: PruneLevel,
     n_classes: usize,
     depth: usize,
     node_id: &mut usize,
@@ -794,7 +798,7 @@ fn build_c50_tree(
     *node_id += 1;
 
     let n = indices.len();
-    let stats = c50_node_stats(y, weights, indices, n_classes, PruneLevel::new(config.cf)?);
+    let stats = c50_node_stats(y, weights, indices, n_classes, level);
     let node_weight: f64 = stats.class_weights.iter().sum();
 
     // Check stopping conditions (the node weight against 2 * min_cases, as C4.5), then find
@@ -834,6 +838,7 @@ fn build_c50_tree(
         weights,
         &left_indices,
         config,
+        level,
         n_classes,
         depth + 1,
         node_id,
@@ -845,6 +850,7 @@ fn build_c50_tree(
         weights,
         &right_indices,
         config,
+        level,
         n_classes,
         depth + 1,
         node_id,
@@ -949,6 +955,7 @@ fn winnow_features(
     x: &ArrayView2<f64>,
     y: &ArrayView1<f64>,
     config: &C50Config,
+    level: PruneLevel,
     n_classes: usize,
     rng_state: &mut u64,
 ) -> EconResult<Vec<usize>> {
@@ -966,6 +973,7 @@ fn winnow_features(
         &weights,
         &indices,
         config,
+        level,
         n_classes,
         0,
         &mut node_id,
@@ -1143,6 +1151,7 @@ pub fn c50(x: ArrayView2<f64>, y: ArrayView1<f64>, config: &C50Config) -> EconRe
             ),
         });
     }
+    let level = PruneLevel::new(config.cf)?;
     if !(1..=100).contains(&config.trials) {
         return Err(EconError::InvalidSpecification {
             message: format!(
@@ -1207,6 +1216,7 @@ pub fn c50(x: ArrayView2<f64>, y: ArrayView1<f64>, config: &C50Config) -> EconRe
             &x,
             &y_array.view(),
             config,
+            level,
             n_classes,
             &mut rng_state,
         )?)
@@ -1242,6 +1252,7 @@ pub fn c50(x: ArrayView2<f64>, y: ArrayView1<f64>, config: &C50Config) -> EconRe
             &weights,
             &indices,
             config,
+            level,
             n_classes,
             0,
             &mut node_id,
@@ -1728,7 +1739,9 @@ mod tests {
 
     #[test]
     fn test_c50_added_errors_match_c45() {
-        // C4.5 Release 8's AddErrs (stats.c), evaluated in C for these (cf, N, E).
+        // C4.5's AddErrs formula (Release 8 stats.c) with the exact z = qnorm(1 - cf) in place
+        // of C4.5's interpolated deviate table, evaluated in C for these (cf, N, E); these are
+        // not C4.5's own output, which differs in the normal-approximation branch.
         let cases: [(f64, [f64; 6]); 3] = [
             (
                 0.25,
@@ -1924,6 +1937,7 @@ mod tests {
             &w,
             &indices,
             &cfg,
+            PruneLevel::new(cfg.cf).unwrap(),
             2,
             0,
             &mut node_id,
