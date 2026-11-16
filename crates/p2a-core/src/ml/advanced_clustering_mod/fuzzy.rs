@@ -958,7 +958,7 @@ mod tests {
     }
 
     #[test]
-    fn test_fcm_random_start_reaches_cmeans_fixed_point() {
+    fn test_validate_fcm_random_start_reaches_cmeans_fixed_point() {
         // In R, 20 random point starts and 20 random-membership starts reach e1071's Euclidean
         // fixed point (max centre difference 8.9e-9); a random p2a start does too.
         let (case, ds) = crate::test_support::load_case("fcm_cmeans_from_start");
