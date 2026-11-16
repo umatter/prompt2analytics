@@ -65,6 +65,31 @@
       "tolerance": "1 iteration rel 1e-10; 10 iterations rel 1e-9 and abs 1e-9 (the summation order separates the paths at about 1e-13)",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "ml_linear_svm",
+      "name": "Linear SVM (linear_svm): LIBSVM C-SVC with a linear kernel",
+      "category": "ml",
+      "reference": "e1071::svm(type = 'C-classification', kernel = 'linear', cost, scale = FALSE, tolerance = 1e-10, cachesize = 40)",
+      "doc": "validation/ml/svm.md",
+      "cases": [
+        "svm_libsvm"
+      ],
+      "tests": [
+        "p2a-core::ml::svm::tests::test_validate_linear_svm_libsvm_c01",
+        "p2a-core::ml::svm::tests::test_validate_linear_svm_libsvm_c10",
+        "p2a-mcp::tier3::wp57_ml_spatial::test_validate_mcp_svm_linear_matches_e1071"
+      ],
+      "quantities": [
+        "w",
+        "bias",
+        "decision values on the training rows",
+        "predictions in the original labels",
+        "MCP ml_svm: the written prediction column at cost 10"
+      ],
+      "tolerance": "Tol::iterative(4e-7), as fast_svm (validation/ml/svm.md); predictions exact",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

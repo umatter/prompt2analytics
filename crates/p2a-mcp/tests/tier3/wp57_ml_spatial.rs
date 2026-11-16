@@ -1713,6 +1713,27 @@ async fn test_mcp_random_forest_output_column() {
     );
 }
 
+/// ML-40: ml_svm is e1071's linear C-SVC (it stopped short of the optimum at C != 1).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_svm_linear_matches_e1071() {
+    let (s, server) = session_with("svm_libsvm");
+    let case = Case::load("svm_libsvm");
+    let t = ok(&call(
+        &server,
+        &s,
+        "ml_svm",
+        json!({"dataset": "svm_sim", "features": ["x1", "x2"], "target": "cls_lin", "c": 10,
+               "tolerance": 1e-10, "max_iterations": 100000, "output_column": "pred"}),
+    )
+    .await);
+    let got: Vec<f64> = int_column(&s, "svm_sim", "pred")
+        .into_iter()
+        .map(|v| v.unwrap() as f64)
+        .collect();
+    assert_eq!(got, case.vector("linear_c10_pred"));
+    assert_eq!(json_block(&t)["converged"], json!(true));
+}
+
 /// SVM drops incomplete rows: their predictions are null; the rest equal the core's
 /// predictions on the complete rows.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

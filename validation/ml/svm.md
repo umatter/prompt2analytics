@@ -1,7 +1,9 @@
 # Support vector classification
 
 Two solvers live in `crates/p2a-core/src/ml/`. `fast_svm` (`svm_fast.rs`) is LIBSVM's C-SVC solver
-and is compared with `e1071::svm`. `linear_svm` and `kernel_svm` (`svm.rs`) are not pinned to R.
+and is compared with `e1071::svm`. `linear_svm` (`svm.rs`, the MCP tool `ml_svm` and `p2a ml svm`) is its
+linear-kernel front and is pinned to e1071 too. `kernel_svm` (`svm.rs`, a simplified SMO, library only) is not
+pinned.
 
 ## `fast_svm`: LIBSVM C-SVC
 
@@ -53,10 +55,34 @@ negates the decision values), `test_kernel_cache_evicts_least_recently_used`,
 - Linear kernels: the dual need not be unique, so alphas and indices are not compared, only `w`.
 - Polynomial kernels: no R case. They run through the same solver.
 
-## `linear_svm` and `kernel_svm`: not R-pinned
+## `linear_svm`: LIBSVM with a linear kernel
 
-`linear_svm` hard-codes the bound 1.0 in `select_second_alpha` (finding ML-40), so it is not optimal at
-`C != 1`; `kernel_svm` skips alpha steps below 1e-5 and is accurate only to its KKT tolerance.
+`linear_svm` runs `fast_svm` with `FastKernel::Linear`, a kernel cache of at most 40 MB (e1071's `cachesize`),
+shrinking on, and `max_iter = max_iterations * n` (saturating): `max_iterations` (default 1000) is a budget of
+passes of n pair updates, and `tolerance` is LIBSVM's `eps` (default 1e-3, e1071's `tolerance`). `weights` is
+`sum_k alpha_k y_k x_k`, `bias` LIBSVM's `-rho`; a decision value `> 0` is the larger label, as LIBSVM
+(`svm_predict` follows the same rule; it used `>= 0`). `n_iterations` counts LIBSVM pair updates, and the
+result carries the solver's convergence record and warnings (`ResultNotes`). R equivalent:
+`e1071::svm(kernel = 'linear', type = 'C-classification', scale = FALSE)`.
+
+Before ML-40 (Tier 4) `linear_svm` ran its own simplified SMO, which searched non-bound multipliers below a
+hard-coded 1 and stopped after one sweep without a change: at C = 0.1 on `cls_lin` it returned
+`w = (0.0259, 0.0385)` against e1071's `(1.1909, 0.7867)`, at C = 10 `w = (2.4035, 3.5791)` against
+`(2.0528, 1.2152)`, both reported as converged.
+
+| Test (`crates/p2a-core/src/ml/svm.rs`) | Compared with | Tolerance |
+|---|---|---|
+| `test_validate_linear_svm_libsvm_c01`, `test_validate_linear_svm_libsvm_c10` | e1071 `linear_c01_*`, `linear_c10_*`: `w`, bias, decision values `x w + b`, predictions; called at tolerance 1e-10 with a budget of 1,000,000 passes | `Tol::iterative(4e-7)`; predictions exact |
+| `test_linear_svm_equals_fast_svm` | `fast_svm` with the same settings at C = 0.1, 1, 10: weights, bias, support vectors, iterations, predictions | exact |
+| `test_linear_svm_iteration_budget` | one pass on a problem that needs more stops with `converged = false` and a convergence warning | property |
+
+MCP: `test_validate_mcp_svm_linear_matches_e1071` (`crates/p2a-mcp/tests/tier3/wp57_ml_spatial.rs`) runs
+`ml_svm` on `svm_sim` at cost 10 and tolerance 1e-10: the written prediction column equals `linear_c10_pred`.
+
+## `kernel_svm`: not R-pinned
+
+`kernel_svm` (library only; no MCP tool or CLI command) keeps a simplified SMO: it skips alpha steps below 1e-5
+and is accurate only to its KKT tolerance.
 
 ## Class labels
 

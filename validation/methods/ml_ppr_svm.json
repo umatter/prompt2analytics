@@ -93,11 +93,6 @@
           "finding": "ML-103",
           "quantity": "linear runs: alphas and support-vector indices (not compared)",
           "note": "The dual of a linear kernel need not be unique, so only w is compared; the dual objective of p2a's alphas is checked against e1071's."
-        },
-        {
-          "finding": "ML-40",
-          "quantity": "linear_svm and kernel_svm (ml/svm.rs) against svm_libsvm",
-          "note": "not pinned: linear_svm's select_second_alpha hard-codes the bound 1.0; kernel_svm's SMO skips alpha steps below 1e-5, so it is accurate only to its KKT tolerance. fast_svm is the LIBSVM-equivalent solver."
         }
       ],
       "supersedes_legacy": []

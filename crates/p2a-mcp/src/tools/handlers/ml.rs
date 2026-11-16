@@ -945,7 +945,7 @@ impl AnalyticsServer {
 
     /// Run Linear SVM classification.
     #[tool(
-        description = "Linear-kernel SVM for two classes (SMO; not pinned to e1071::svm). Rows with a missing value in the target or a feature are dropped (as e1071::svm's formula interface) and the count is reported. Returns the weights, bias, support-vector count, convergence and a JSON block with the first 20 predicted labels in the target's own labels. With output_column, writes each row's predicted label (null for dropped rows)."
+        description = "Linear-kernel SVM for two classes: LIBSVM's C-SVC solver with a linear kernel on the raw columns, as e1071::svm(kernel = 'linear', type = 'C-classification', scale = FALSE); the two target values must be whole numbers, and the larger is the positive class. Rows with a missing value in the target or a feature are dropped (as e1071::svm's formula interface) and the count is reported. Returns the weights, bias, support-vector count, convergence and a JSON block with the first 20 predicted labels in the target's own labels. With output_column, writes each row's predicted label (null for dropped rows)."
     )]
     pub async fn ml_svm(
         &self,
