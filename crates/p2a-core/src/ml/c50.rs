@@ -1,15 +1,19 @@
 //! C5.0 Decision Trees and Rule-Based Models.
 //!
-//! Pure Rust implementation of C5.0 based on Quinlan's algorithm.
-//! Similar to R's C50 package.
+//! A C5.0-style classifier in pure Rust. Follows Quinlan (1993, 1996); not checked against R's
+//! C50 package.
 //!
 //! ## Features
 //!
-//! - **Information gain ratio** for attribute selection (handles bias toward many-valued attributes)
-//! - **Global pruning** using pessimistic error estimates
-//! - **Winnowing** for automatic feature selection
+//! - **Thresholds** by information gain with Quinlan's (1996) MDL correction, **attributes** by
+//!   gain ratio among those with at least the average penalised gain (C4.5 Release 8)
+//! - **Pruning**: pessimistic-error pruning of each subtree at confidence `cf` (C4.5's added
+//!   errors; no subtree raising)
+//! - **Winnowing**: keeps the features above the 25th percentile of a first tree's importance
+//!   (a heuristic, not C5.0's winnowing)
 //! - **Rule extraction** from decision trees
-//! - **Boosting** with adaptive reweighting (AdaBoost variant)
+//! - **Boosting** with AdaBoost.M1 case weights (not C5.0's own boosting scheme), which enter
+//!   every count of the next tree
 //!
 //! ## Example
 //!
@@ -63,16 +67,16 @@ pub struct C50Config {
     pub trials: usize,
     /// Whether to extract rules from the tree. Default: false
     pub rules: bool,
-    /// Whether to use winnowing for feature selection. Default: false
+    /// Whether to winnow: keep the features above the 25th percentile of a first tree's
+    /// importance (a heuristic, not C5.0's winnowing). Default: false
     pub winnow: bool,
     /// Minimum cases in a terminal node. Default: 2
     pub min_cases: usize,
-    /// Confidence factor for pessimistic pruning (0-1). Lower = more pruning. Default: 0.25
+    /// Confidence factor of the pessimistic-error pruning, 0 < cf < 1. Lower = more pruning.
+    /// Default: 0.25
     pub cf: f64,
     /// Disable global pruning. Default: false
     pub no_global_pruning: bool,
-    /// Enable fuzzy thresholds for continuous attributes. Default: false
-    pub fuzzy_threshold: bool,
     /// Fraction of training data to sample (0-1). Default: 0.0 (use all data)
     pub sample: f64,
     /// Random seed for reproducibility
@@ -90,7 +94,6 @@ impl Default for C50Config {
             min_cases: 2,
             cf: 0.25,
             no_global_pruning: false,
-            fuzzy_threshold: false,
             sample: 0.0,
             seed: None,
             early_stopping: true,
@@ -227,7 +230,8 @@ pub struct C50Result {
     pub actual_trials: usize,
     /// Extracted rules (if rules=true)
     pub rules: Option<Vec<C50Rule>>,
-    /// Variable importance (sum of gain ratios)
+    /// Variable importance: the sum of the gain ratios of the splits on each feature in the
+    /// final (pruned) trees of every trial, normalised to sum 1 (not C5.0's attribute usage)
     pub variable_importance: Vec<f64>,
     /// Training predictions, as class codes (entries of `class_labels`)
     pub predictions: Vec<usize>,
@@ -250,6 +254,55 @@ pub struct C50Result {
     pub selected_features: Option<Vec<usize>>,
     /// Configuration used
     pub config: C50Config,
+}
+
+impl C50Result {
+    /// The name of feature `j`: its column name when known, else `X{j}`.
+    fn feature_text(&self, j: usize) -> String {
+        self.feature_names
+            .as_ref()
+            .and_then(|names| names.get(j))
+            .cloned()
+            .unwrap_or_else(|| format!("X{j}"))
+    }
+
+    /// A rule condition with the feature's name, e.g. `x1 <= 3.2500`.
+    pub fn condition_text(&self, condition: &C50RuleCondition) -> String {
+        format!(
+            "{} {} {:.4}",
+            self.feature_text(condition.feature),
+            condition.operator,
+            condition.threshold
+        )
+    }
+
+    /// The label of class code `code` when the target had labels ([`run_c50`] on a text,
+    /// categorical or boolean column), else the code itself.
+    pub fn class_text(&self, code: usize) -> String {
+        self.class_names
+            .as_ref()
+            .and_then(|names| names.get(code))
+            .cloned()
+            .unwrap_or_else(|| code.to_string())
+    }
+
+    /// A rule with feature and class names.
+    fn rule_text(&self, rule: &C50Rule) -> String {
+        let conditions: Vec<String> = rule
+            .conditions
+            .iter()
+            .map(|c| self.condition_text(c))
+            .collect();
+        format!(
+            "Rule {}: IF {} THEN class={} (conf={:.3}, support={}, lift={:.2})",
+            rule.id,
+            conditions.join(" AND "),
+            self.class_text(rule.predicted_class),
+            rule.confidence,
+            rule.support,
+            rule.lift
+        )
+    }
 }
 
 impl std::fmt::Display for C50Result {
@@ -285,10 +338,7 @@ impl std::fmt::Display for C50Result {
 
         let total: f64 = indexed.iter().map(|(_, v)| v).sum();
         for (i, importance) in indexed.iter().take(10) {
-            let name = match &self.feature_names {
-                Some(names) => names.get(*i).cloned().unwrap_or_else(|| format!("X{}", i)),
-                None => format!("X{}", i),
-            };
+            let name = self.feature_text(*i);
             let pct = if total > 0.0 {
                 importance / total * 100.0
             } else {
@@ -301,7 +351,7 @@ impl std::fmt::Display for C50Result {
             writeln!(f)?;
             writeln!(f, "Extracted Rules ({}):", rules.len())?;
             for rule in rules.iter().take(10) {
-                writeln!(f, "  {}", rule)?;
+                writeln!(f, "  {}", self.rule_text(rule))?;
             }
             if rules.len() > 10 {
                 writeln!(f, "  ... ({} more rules)", rules.len() - 10)?;
@@ -737,7 +787,6 @@ fn build_c50_tree(
     n_classes: usize,
     depth: usize,
     node_id: &mut usize,
-    importance: &mut Array1<f64>,
     selected_features: Option<&[usize]>,
 ) -> EconResult<Box<C50Node>> {
     crate::resource::checkpoint()?;
@@ -769,10 +818,7 @@ fn build_c50_tree(
     let Some(split) = best else {
         return Ok(c50_leaf(id, n, stats));
     };
-    let (feature, threshold, _, gr) = split;
-
-    // Update importance
-    importance[feature] += gr;
+    let (feature, threshold, _, _) = split;
 
     // Partition indices
     let (left_indices, right_indices): (Vec<usize>, Vec<usize>) =
@@ -791,7 +837,6 @@ fn build_c50_tree(
         n_classes,
         depth + 1,
         node_id,
-        importance,
         selected_features,
     )?;
     let right = build_c50_tree(
@@ -803,7 +848,6 @@ fn build_c50_tree(
         n_classes,
         depth + 1,
         node_id,
-        importance,
         selected_features,
     )?;
     Ok(c50_join(
@@ -885,6 +929,20 @@ fn predict_boosted(
         .unwrap_or(0)
 }
 
+/// Adds the gain ratio of every split of the tree under `node` to `importance[feature]`.
+/// Walked over the final trees, after pruning, so a pruned split counts nothing.
+fn add_split_importance(node: &C50Node, importance: &mut Array1<f64>) {
+    let mut stack = vec![node];
+    while let Some(node) = stack.pop() {
+        if let Some(split) = &node.split {
+            importance[split.feature] += split.gain_ratio;
+        }
+        for child in [&node.left, &node.right].into_iter().flatten() {
+            stack.push(child.as_ref());
+        }
+    }
+}
+
 /// Winnow features based on their importance.
 /// Returns indices of selected features.
 fn winnow_features(
@@ -900,10 +958,9 @@ fn winnow_features(
     // Build initial tree to compute importance
     let weights = Array1::ones(n_samples);
     let indices: Vec<usize> = (0..n_samples).collect();
-    let mut importance = Array1::zeros(n_features);
     let mut node_id = 0;
 
-    let _ = build_c50_tree(
+    let first = build_c50_tree(
         x,
         y,
         &weights,
@@ -912,12 +969,13 @@ fn winnow_features(
         n_classes,
         0,
         &mut node_id,
-        &mut importance,
         None,
     )?;
+    let mut importance = Array1::zeros(n_features);
+    add_split_importance(&first, &mut importance);
 
-    // Compute threshold for selection
-    // C5.0 uses a heuristic: keep features with importance > median importance
+    // Keep the features above the 25th percentile of the first tree's importance (a heuristic,
+    // not C5.0's winnowing).
     let mut sorted_importance: Vec<f64> = importance.to_vec();
     sorted_importance.sort_by(f64::total_cmp);
 
@@ -1026,7 +1084,9 @@ fn extract_rules(
     }
 }
 
-/// Fit a C5.0 decision tree classifier.
+/// Fit a C5.0-style decision tree classifier: thresholds by information gain with the MDL
+/// correction, attributes by gain ratio, pessimistic-error pruning of each subtree (no subtree
+/// raising), optional AdaBoost.M1 boosting and winnowing (see the module docs).
 ///
 /// # Arguments
 ///
@@ -1049,7 +1109,8 @@ fn extract_rules(
 /// # References
 ///
 /// - Quinlan, J. R. (1993). C4.5: Programs for Machine Learning. Morgan Kaufmann.
-/// - Implementation follows R package C50 by Kuhn et al.
+/// - Quinlan, J. R. (1996). Improved Use of Continuous Attributes in C4.5. JAIR 4, 77-90.
+/// - Follows Quinlan (1993, 1996); not checked against R's C50 package.
 pub fn c50(x: ArrayView2<f64>, y: ArrayView1<f64>, config: &C50Config) -> EconResult<C50Result> {
     let n_samples = x.nrows();
     let n_features = x.ncols();
@@ -1160,7 +1221,6 @@ pub fn c50(x: ArrayView2<f64>, y: ArrayView1<f64>, config: &C50Config) -> EconRe
     // Build boosted ensemble
     let mut trees: Vec<C50Node> = Vec::with_capacity(config.trials);
     let mut boosting_weights: Vec<f64> = Vec::with_capacity(config.trials);
-    let mut importance = Array1::zeros(n_features);
 
     for trial in 0..config.trials {
         crate::resource::checkpoint()?;
@@ -1185,7 +1245,6 @@ pub fn c50(x: ArrayView2<f64>, y: ArrayView1<f64>, config: &C50Config) -> EconRe
             n_classes,
             0,
             &mut node_id,
-            &mut importance,
             selected_features.as_deref(),
         )?;
 
@@ -1306,7 +1365,11 @@ pub fn c50(x: ArrayView2<f64>, y: ArrayView1<f64>, config: &C50Config) -> EconRe
         None
     };
 
-    // Normalize importance
+    // Importance: the gain ratios of the splits of the final trees, normalised to sum 1.
+    let mut importance = Array1::zeros(n_features);
+    for tree in &trees {
+        add_split_importance(tree, &mut importance);
+    }
     let imp_sum: f64 = importance.sum();
     if imp_sum > 0.0 {
         importance /= imp_sum;
@@ -1771,6 +1834,64 @@ mod tests {
     }
 
     #[test]
+    fn test_c50_importance_counts_only_kept_splits() {
+        // ML-124. Importance was added when a split was found, before its subtree could be pruned.
+        let mut u = lcg_uniforms(5);
+        let x = Array2::from_shape_fn((120, 3), |_| u());
+        let y = Array1::from_shape_fn(120, |i| {
+            let label = usize::from(x[[i, 0]] > 0.5);
+            (if i % 6 == 0 { 1 - label } else { label }) as f64
+        });
+        let cfg = C50Config {
+            cf: 0.01,
+            ..Default::default()
+        };
+        let r = c50(x.view(), y.view(), &cfg).unwrap();
+        // Every split keeps class 0 the majority on both sides, so pruning makes the root a leaf; the
+        // root's split counted as importance 1 all the same.
+        let x1 = Array2::from_shape_fn((20, 1), |(i, _)| (i + 1) as f64);
+        let y1 = Array1::from_shape_fn(20, |i| {
+            f64::from(u8::from([3, 8, 13, 18].contains(&(i + 1))))
+        });
+        let pruned = c50(x1.view(), y1.view(), &C50Config::default()).unwrap();
+        assert!(pruned.trees[0].split.is_none());
+        assert_eq!(pruned.variable_importance, vec![0.0]);
+        for j in 0..3 {
+            let used = r.trees.iter().any(|t| uses_feature(t, j));
+            assert_eq!(
+                r.variable_importance[j] > 0.0,
+                used,
+                "feature {j}: importance {} but used in the final trees: {used}",
+                r.variable_importance[j]
+            );
+        }
+    }
+
+    #[test]
+    fn test_c50_rules_print_names() {
+        // ML-144. Rules printed feature indices (X[0]) and dense class codes.
+        let df = polars::prelude::df! {
+            "x1" => [1.0, 1.5, 2.0, 2.5, 3.0, 3.2, 7.0, 7.5, 8.0, 8.5, 9.0, 9.4],
+            "x2" => [0.3, 0.9, 0.1, 0.7, 0.5, 0.2, 0.8, 0.4, 0.6, 0.0, 0.9, 0.1],
+            "lab" => ["no", "no", "no", "no", "no", "no", "yes", "yes", "yes", "yes", "yes", "yes"],
+        }
+        .unwrap();
+        let cfg = C50Config {
+            rules: true,
+            min_cases: 1,
+            ..Default::default()
+        };
+        let r = run_c50(&crate::Dataset::new(df), "lab", &["x1", "x2"], &cfg).unwrap();
+        let text = r.to_string();
+        assert!(text.contains("x1 > ") || text.contains("x1 <= "), "{text}");
+        assert!(
+            text.contains("class=yes") && text.contains("class=no"),
+            "{text}"
+        );
+        assert!(!text.contains("X[0]"), "{text}");
+    }
+
+    #[test]
     fn test_c50_first_trial_weights_are_case_counts() {
         // Every case weighs 1 in the first trial, so the case weights per class are the counts, and a
         // tree grown from any constant weights (rescaled to mean 1 per trial) is the same tree.
@@ -1796,7 +1917,7 @@ mod tests {
         let mut w = Array1::from_elem(80, 3.7);
         normalise_case_weights(&mut w);
         let indices: Vec<usize> = (0..80).collect();
-        let (mut node_id, mut importance) = (0, Array1::zeros(2));
+        let mut node_id = 0;
         let tree = build_c50_tree(
             &x.view(),
             &y.view(),
@@ -1806,7 +1927,6 @@ mod tests {
             2,
             0,
             &mut node_id,
-            &mut importance,
             None,
         )
         .unwrap();

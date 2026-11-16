@@ -431,7 +431,7 @@ pub struct C50Request {
 
     /// Number of boosting trials (default: 1 = no boosting)
     #[schemars(
-        description = "Number of boosting iterations. Default is 1 (no boosting). Set > 1 for AdaBoost.M1 ensemble."
+        description = "Number of boosting iterations, 1 to 100. Default is 1 (no boosting). Values > 1 boost with AdaBoost.M1 case weights."
     )]
     pub trials: Option<usize>,
 
@@ -443,7 +443,7 @@ pub struct C50Request {
 
     /// Enable feature winnowing (default: false)
     #[schemars(
-        description = "If true, perform feature selection to remove uninformative predictors. Default is false."
+        description = "If true, keep the features above the 25th percentile of a first tree's importance (a heuristic, not C5.0's winnowing). Default is false."
     )]
     pub winnow: Option<bool>,
 
@@ -453,7 +453,7 @@ pub struct C50Request {
 
     /// Confidence factor for pruning (default: 0.25)
     #[schemars(
-        description = "Confidence factor for pessimistic error pruning (0-1). Lower = more pruning. Default is 0.25."
+        description = "Confidence factor for pessimistic error pruning, in (0, 1), exclusive. Lower = more pruning. Default is 0.25."
     )]
     pub cf: Option<f64>,
 

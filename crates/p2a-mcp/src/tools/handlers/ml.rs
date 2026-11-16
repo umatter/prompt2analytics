@@ -1086,7 +1086,7 @@ impl AnalyticsServer {
 
     /// Run C5.0 Decision Tree classification.
     #[tool(
-        description = "C5.0 Decision Tree for classification (Quinlan's successor to C4.5). Uses information gain ratio for splitting, pessimistic error pruning, and optionally boosting via AdaBoost.M1. Features: automatic feature selection (winnowing), rule extraction, multiclass support. Returns tree structure, rules (if requested), variable importance, and class predictions. Based on R's C50 package. The target can be integer class codes or a text, categorical or boolean column; labels are reported as class_names."
+        description = "C5.0-style decision tree for classification (Quinlan's C4.5 rules): thresholds by information gain with Quinlan's (1996) MDL correction, attributes by gain ratio among those with at least mean gain, pessimistic-error pruning at confidence cf (0 < cf < 1); trials > 1 boosts with AdaBoost.M1 case weights, which enter every count of the next tree. Winnowing keeps the features above the 25th percentile of a first tree's importance. Returns rules by feature and class name, variable importance (gain ratios of the kept splits) and class predictions. Not checked against R's C50 package. The target can be integer class codes or a text, categorical or boolean column; labels are reported as class_names."
     )]
     pub async fn ml_c50(
         &self,
@@ -1146,10 +1146,9 @@ impl AnalyticsServer {
                 .map(|rule| {
                     serde_json::json!({
                         "rule_id": rule.id,
-                        "conditions": rule.conditions.iter().map(|c| {
-                            format!("{} {} {:.4}", c.feature, c.operator, c.threshold)
-                        }).collect::<Vec<_>>(),
+                        "conditions": rule.conditions.iter().map(|c| result.condition_text(c)).collect::<Vec<_>>(),
                         "predicted_class": rule.predicted_class,
+                        "predicted_class_name": result.class_names.as_ref().map(|_| result.class_text(rule.predicted_class)),
                         "confidence": rule.confidence,
                         "support": rule.support,
                         "lift": rule.lift
@@ -3469,6 +3468,41 @@ mod tests {
             !d.contains("permutation tests") || d.contains("Monte Carlo"),
             "{d}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_mcp_c50_rules_name_features_and_classes() {
+        // ML-144: conditions named the feature by index ("0 <= 3.2500") and rules had no class name.
+        let s = server().await;
+        let r = s
+            .ml_c50(req(
+                json!({"dataset": "ml", "features": ["x1", "x2"], "target": "lab",
+                               "rules": true, "min_cases": 1, "seed": 1}),
+            ))
+            .await
+            .unwrap();
+        let j = json_summary(&r);
+        let rules = j["rules"].as_array().unwrap();
+        assert!(!rules.is_empty(), "{j}");
+        for rule in rules {
+            for c in rule["conditions"].as_array().unwrap() {
+                let c = c.as_str().unwrap();
+                assert!(c.starts_with("x1 ") || c.starts_with("x2 "), "{c}");
+            }
+            let name = rule["predicted_class_name"].as_str().unwrap();
+            assert!(name == "no" || name == "yes", "{name}");
+        }
+        let codes = s
+            .ml_c50(req(
+                json!({"dataset": "ml", "features": ["x1", "x2"], "target": "cls",
+                               "rules": true, "min_cases": 1, "seed": 1}),
+            ))
+            .await
+            .unwrap();
+        let j = json_summary(&codes);
+        for rule in j["rules"].as_array().unwrap() {
+            assert!(rule["predicted_class_name"].is_null(), "{rule}");
+        }
     }
 
     #[tokio::test]
