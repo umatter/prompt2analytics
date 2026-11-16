@@ -295,6 +295,14 @@ fn weight_constants(
 ///
 /// Test result with statistic, p-value, etc.
 ///
+/// # Errors
+///
+/// - `InvalidSpecification`: `x` and the weights differ in length, `x` has a non-finite value
+///   or is constant, its moments overflow, or the weights have no links (S0 = 0).
+/// - `InsufficientData`: fewer than 4 units with a neighbour.
+/// - `Computation`: the randomisation variance is not positive (a degenerate permutation
+///   distribution of `x`).
+///
 /// # Example
 ///
 /// ```
@@ -538,6 +546,14 @@ pub fn moran_test_residuals(
 /// # Returns
 ///
 /// Test result with statistic, p-value, etc.
+///
+/// # Errors
+///
+/// - `InvalidSpecification`: `x` and the weights differ in length, `x` has a non-finite value
+///   or is constant, its moments overflow, or the weights have no links (S0 = 0).
+/// - `InsufficientData`: fewer than 4 units with a neighbour.
+/// - `Computation`: the randomisation variance is not above 1e-8 S1/S0² (its scale): a
+///   degenerate permutation distribution of `x`.
 pub fn geary_test(x: &Array1<f64>, listw: &SpatialWeights) -> EconResult<GearyResult> {
     let n = x.len();
     let WeightConstants {
@@ -565,7 +581,7 @@ pub fn geary_test(x: &Array1<f64>, listw: &SpatialWeights) -> EconResult<GearyRe
         - 0.25 * (nn - 1.0) * s2 * (nn * nn + 3.0 * nn - 6.0 - b2 * (nn * nn - nn + 2.0))
         + s0_sq * (nn * nn - 3.0 - b2 * (nn - 1.0) * (nn - 1.0)))
         / (nn * (nn - 2.0) * (nn - 3.0) * s0_sq);
-    if vc.is_nan() || vc <= 1e-8 {
+    if geary_variance_degenerate(vc, s0, s1) {
         return Err(EconError::Computation(format!(
             "Geary's C randomisation variance is not positive ({vc:e}): the permutation \
              distribution of x is degenerate"
@@ -610,6 +626,12 @@ impl Default for LocalMoranConfig {
             seed: 42,
         }
     }
+}
+
+/// Whether Geary's randomisation variance is degenerate: NaN, or not above 1e-8 of the scale
+/// S1/S0^2 that Var(C) has (about 2/(n k) for a k-regular binary W).
+fn geary_variance_degenerate(vc: f64, s0: f64, s1: f64) -> bool {
+    !(vc > 1e-8 * s1 / (s0 * s0))
 }
 
 /// Local Moran's I (LISA) with the default options of [`LocalMoranConfig`] (conditional
@@ -1202,6 +1224,31 @@ mod tests {
             Err(EconError::Computation(m)) => assert!(m.contains("variance"), "{m}"),
             other => panic!("expected Computation, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn geary_refuses_a_degenerate_permutation_distribution() {
+        let ring4 = SpatialWeights::from_neighbors(
+            &Neighbors::from_indices((0..4).map(|i| vec![(i + 1) % 4, (i + 3) % 4]).collect()),
+            crate::spatial::WeightStyle::RowStd,
+        );
+        match geary_test(&array![0.0, 0.0, 0.0, 1.0], &ring4) {
+            Err(EconError::Computation(m)) => assert!(m.contains("variance"), "{m}"),
+            other => panic!("expected Computation, got {other:?}"),
+        }
+    }
+
+    /// Var(C) scales as S1/S0^2 (about 2/(n k) for a k-regular binary W), so the guard is
+    /// relative to it: a large sparse W has a small but valid variance.
+    #[test]
+    fn geary_variance_guard_is_relative_to_s1_over_s0_squared() {
+        // n k = 1e9: S0 = 1e9, S1 = 2e9, S1/S0^2 = 2e-9
+        let (s0, s1) = (1e9, 2e9);
+        assert!(!geary_variance_degenerate(1e-9, s0, s1));
+        assert!(geary_variance_degenerate(1e-18, s0, s1));
+        assert!(geary_variance_degenerate(0.0, s0, s1));
+        assert!(geary_variance_degenerate(-1e-9, s0, s1));
+        assert!(geary_variance_degenerate(f64::NAN, s0, s1));
     }
 
     #[test]
