@@ -124,6 +124,39 @@ Rao score tests (same case):
 Local Moran (case `spatial_localmoran_t4`, kNN-4, W): the 80 values of I_i, E, Var, z and p under
 conditional and total randomisation; global I = 0.370321.
 
+## Timing against the previous implementation (Tier 4)
+
+Release build, scratch harness at f80b0131 and with this change; `--no-default-features --features ci`;
+one core (`taskset -c 8`, `RAYON_NUM_THREADS=1`), cwd `/dev/shm`; the two builds interleaved, seven
+processes each, the order alternating per round, each process the median of its calls after a warm-up;
+cells are the median over the seven processes, the ratio of the minima in brackets; 1-minute load
+average 6-21 (the machine was shared). Data: points on a jittered square grid, 4-nearest-neighbour weights, row-standardised;
+regressions with an intercept and two regressors.
+
+| Method | n | f80b0131 (µs) | this change (µs) | ratio [min] |
+|---|---|---|---|---|
+| `moran_test_residuals` | 100 | 20.4 | 38.4 | 1.88 [1.89] |
+| `moran_test_residuals` | 1,000 | 211.4 | 363.2 | 1.72 [1.73] |
+| `moran_test_residuals` | 10,000 | 2,296.9 | 4,638.4 | 2.02 [2.02] |
+| `spatial_lm_tests` | 100 | 39.2 | 38.8 | 0.99 [0.99] |
+| `spatial_lm_tests` | 1,000 | 318.0 | 356.8 | 1.12 [1.11] |
+| `spatial_lm_tests` | 10,000 | 3,284.3 | 4,500.1 | 1.37 [1.36] |
+| `spatial_lm_tests`, the MCP path (OLS fit included) | 100 | 76.4 | 54.5 | 0.71 [0.70] |
+| `spatial_lm_tests`, the MCP path (OLS fit included) | 1,000 | 460.4 | 495.1 | 1.08 [1.07] |
+| `spatial_lm_tests`, the MCP path (OLS fit included) | 10,000 | 5,171.1 | 5,377.9 | 1.04 [1.04] |
+| `localmoran`, normal p-values | 100 | 24.8 | 26.2 | 1.06 [1.06] |
+| `localmoran`, normal p-values | 1,000 | 256.0 | 274.7 | 1.07 [1.08] |
+| `localmoran`, normal p-values | 10,000 | 2,794.8 | 2,990.1 | 1.07 [1.06] |
+| `localmoran`, 99 permutations | 100 | 419.5 | 1,086.0 | 2.59 [2.60] |
+| `localmoran`, 99 permutations | 1,000 | 4,511.3 | 8,201.0 | 1.82 [1.81] |
+| `localmoran`, 99 permutations | 10,000 | 53,372.9 | 159,840.6 | 2.99 [3.18] |
+
+The residual Moran test now forms `lm.morantest`'s moments through the regression's projection (solves
+with the k-column design and its trace terms), and the score tests their trace term and projected lag;
+the permutations of `localmoran` draw each unit's neighbours without repeats from the other n - 1
+values, from a generator per permutation. The ratios are within the estimates signed off for the review
+(2-6x, 1.2-2x and 1.5-3x).
+
 ## Known differences
 
 spdep returns NaN where p2a refuses the input (table above).

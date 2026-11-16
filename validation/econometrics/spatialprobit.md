@@ -149,6 +149,35 @@ with another implementation only up to Monte Carlo error.
 3. **Fit statistics**: the composite log-likelihood at the posterior mean; no DIC or marginal
    likelihood.
 
+## Timing against the previous implementation (Tier 4)
+
+Release build, scratch harness at f80b0131 and with this change; `--no-default-features --features ci`;
+one core (`taskset -c 8`, `RAYON_NUM_THREADS=1`), cwd `/dev/shm`; the two builds interleaved, seven
+processes each, the order alternating per round, each process the median of its calls after a warm-up;
+cells are the median over the seven processes, the ratio of the minima in brackets; 1-minute load
+average 6-21 (the machine was shared). Data: a binary outcome on a jittered grid with 4-nearest-neighbour weights, two regressors,
+the default configuration (seed 1); one call per process at n = 1,000 and 2,000. The rows with impacts
+were measured at commit 9f2f058f, before the griddy draw skipped negligible cells (which only removes
+work); the others with this change.
+
+| Model | n | f80b0131 (ms) | this change (ms) | ratio [min] |
+|---|---|---|---|---|
+| SAR probit, impacts | 100 | 115.2 | 125.7 | 1.09 [1.09] |
+| SAR probit, impacts | 1,000 | 2,777 | 6,564 | 2.36 [2.46] |
+| SAR probit, impacts | 2,000 | 12,710 | 43,611 | 3.43 [3.70] |
+| SAR probit, no impacts | 100 | 92.1 | 83.7 | 0.91 [0.90] |
+| SAR probit, no impacts | 1,000 | 2,421 | 2,181 | 0.90 [0.90] |
+| SAR probit, no impacts | 2,000 | 11,292 | 12,433 | 1.10 [1.06] |
+| SEM probit, no impacts | 100 | 69.6 | 88.6 | 1.27 [1.26] |
+| SEM probit, no impacts | 1,000 | 2,204 | 2,184 | 0.99 [1.05] |
+| SEM probit, no impacts | 2,000 | 10,514 | 11,742 | 1.12 [1.12] |
+
+The impacts cost 17 to 19 dense LU inverses of I - rho W (17 interpolation nodes and two checks against
+the dense inverse in the end cells), O(n^3) each, where the old code summed a truncated power series in
+W; above about n = 1,000 they dominate the run. The sampler itself (no impacts) costs what the old one
+did within about 10% from n = 1,000; at n = 100 the 2,000-cell rho grid evaluated per iteration
+dominates the SEM run.
+
 ## MCMC Diagnostics
 
 The result includes:

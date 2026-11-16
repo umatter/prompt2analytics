@@ -62,6 +62,30 @@ The traces come from the cached eigenvalues. The total has a closed form when th
 sum, and otherwise takes a linear solve per term. When min |1 - ρλ| is at most 1e-10 (where R's
 `solve()` stops), or the solve fails, the impacts are NaN with a message in `SpatialImpacts.warnings`.
 
+## Timing against the previous implementation (Tier 4)
+
+Release build, scratch harness at f80b0131 and with this change; `--no-default-features --features ci`;
+one core (`taskset -c 8`, `RAYON_NUM_THREADS=1`), cwd `/dev/shm`; the two builds interleaved, seven
+processes each, the order alternating per round, each process the median of its calls after a warm-up;
+cells are the median over the seven processes, the ratio of the minima in brackets; 1-minute load
+average 6-21 (the machine was shared). Data: a continuous outcome on a jittered grid with 4-nearest-neighbour weights, two
+regressors, default configurations; the panel rows use n/5 units over five periods.
+
+| Method | n | f80b0131 (µs) | this change (µs) | ratio [min] |
+|---|---|---|---|---|
+| `run_sar` | 100 | 11,952 | 11,951 | 1.00 [1.00] |
+| `run_sar` | 1,000 | 1,793,508 | 1,824,668 | 1.02 [1.01] |
+| `run_sem` | 100 | 12,359 | 12,331 | 1.00 [1.00] |
+| `run_sem` | 1,000 | 1,752,357 | 1,705,560 | 0.97 [1.00] |
+| `run_sac` | 100 | 34,510 | 34,167 | 0.99 [0.99] |
+| `run_sac` | 1,000 | 1,832,954 | 1,803,416 | 0.98 [1.01] |
+| `run_sphet`, HAC with coordinates, variable bandwidth | 100 | 99.5 | 100.3 | 1.01 [1.01] |
+| `run_sphet`, HAC with coordinates, variable bandwidth | 1,000 | 869.9 | 887.7 | 1.02 [1.01] |
+| `run_sphet`, HAC with coordinates, variable bandwidth | 10,000 | 8,779.6 | 8,963.8 | 1.02 [1.00] |
+| `run_sphet`, SARAR GM | 1,000 | 3,618.3 | 3,521.5 | 0.97 [0.97] |
+| `run_spml`, lag | 1,000 | 867.4 | 864.9 | 1.00 [1.00] |
+| `run_spgm` | 1,000 | 554.3 | 539.4 | 0.97 [1.00] |
+
 ## Errors
 
 | Input | Error |
