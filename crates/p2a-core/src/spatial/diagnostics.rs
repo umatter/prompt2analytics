@@ -63,7 +63,9 @@ pub struct MoranResult {
     pub alternative: MoranAlternative,
     /// Number of observations
     pub n: usize,
-    /// Units without neighbours; the statistic uses n - n_islands (spdep adjust.n = TRUE)
+    /// Units without neighbours. `moran_test` and `geary_test` use n - n_islands in the
+    /// statistic and its moments (spdep `adjust.n = TRUE`); `moran_test_residuals` uses the
+    /// linked units (spdep `lm.morantest(zero.policy = TRUE)`). `n` stays the row count.
     #[serde(default)]
     pub n_islands: usize,
 }
@@ -341,12 +343,7 @@ pub fn moran_test(
 
     // Z-score and p-value
     let z_score = (i_stat - ei) / vi.sqrt();
-    let normal = Normal::standard();
-    let p_value = match alternative {
-        MoranAlternative::TwoSided => normal_p_value_two_sided(z_score),
-        MoranAlternative::Greater => normal.sf(z_score),
-        MoranAlternative::Less => normal.cdf(z_score),
-    };
+    let p_value = normal_p_value(z_score, alternative);
 
     Ok(MoranResult {
         statistic: i_stat,
@@ -360,59 +357,81 @@ pub fn moran_test(
     })
 }
 
-/// Moran's I test for regression residuals.
+/// The p-value of a standard normal z under `alternative`.
+fn normal_p_value(z: f64, alternative: MoranAlternative) -> f64 {
+    let normal = Normal::standard();
+    match alternative {
+        MoranAlternative::TwoSided => normal_p_value_two_sided(z),
+        MoranAlternative::Greater => normal.sf(z),
+        MoranAlternative::Less => normal.cdf(z),
+    }
+}
+
+/// Moran's I test for regression residuals, as spdep's `lm.morantest(zero.policy = TRUE)`.
 ///
-/// Tests for spatial autocorrelation in OLS residuals, which indicates
-/// potential spatial dependence not captured by the model.
+/// Tests for spatial autocorrelation in OLS residuals, which indicates potential spatial
+/// dependence not captured by the model. W enters through its symmetric part
+/// U = (W + W')/2 (spdep `listw2U`), which leaves u'Wu, S0 and S1 unchanged; the moments
+/// account for the estimated coefficients (Cliff & Ord 1981, under normal errors):
+///
+/// ```text
+/// I = N/S0 u'Wu / u'u,   Z = U X,   C1 = X'Z,   C3 = (X'X)^-1 C1,   tr A = tr C3
+/// E[I] = -N tr A / ((N - p) S0)
+/// Var[I] = N^2 / (S0^2 (N - p)(N - p + 2)) (S1 + 2 tr C3^2 - 4 tr((X'X)^-1 Z'Z) - 2 (tr A)^2 / (N - p))
+/// ```
+///
+/// N is the number of units with at least one neighbour (spdep `zero.policy = TRUE`), p the
+/// rank of X: aliased columns are dropped as `lm` drops them (pivoted QR, tolerance 1e-7).
+/// spdep's default alternative is [`MoranAlternative::Greater`].
 ///
 /// # Arguments
 ///
-/// * `residuals` - OLS residuals
-/// * `x` - Design matrix (including intercept if applicable)
+/// * `residuals` - OLS residuals of y on `x`
+/// * `x` - Design matrix (including the intercept column if the model has one)
 /// * `listw` - Spatial weights
+/// * `alternative` - Alternative hypothesis
 ///
-/// # Returns
+/// # Errors
 ///
-/// Test result with statistic, p-value, etc.
+/// - `InvalidSpecification`: lengths differ, the weights have no links, the residuals are all
+///   zero or not finite, or `x` has a non-finite entry.
+/// - `InsufficientData`: N - p < 1.
+/// - `Computation`: the variance is not positive (a degenerate design).
 pub fn moran_test_residuals(
     residuals: &Array1<f64>,
     x: &Array2<f64>,
     listw: &SpatialWeights,
+    alternative: MoranAlternative,
 ) -> EconResult<MoranResult> {
-    // For residuals, we use a slightly different variance formula
-    // that accounts for the estimation of regression parameters
+    use crate::linalg::solve::{LM_QR_TOL, Qr};
+    use ndarray::Axis;
 
     let n = residuals.len();
     if n != listw.n() || n != x.nrows() {
         return Err(EconError::InvalidSpecification {
-            message: "Dimensions must match".to_string(),
+            message: format!(
+                "moran_test_residuals: the residuals ({n}), the rows of x ({}) and the weights \
+                 ({}) must have the same length",
+                x.nrows(),
+                listw.n()
+            ),
         });
     }
 
-    let k = x.ncols();
-    let df = n
-        .checked_sub(k)
-        .filter(|&d| d >= 1)
-        .ok_or_else(|| EconError::InsufficientData {
-            required: k + 1,
-            provided: n,
-            context: "moran_test_residuals: residual degrees of freedom n - k must be at least 1"
-                .to_string(),
-        })?;
-
-    // Compute Moran's I for residuals
+    // u'Wu = u'Uu, S0 and the islands in one pass over the links
     let mut numerator = 0.0;
     let mut s0 = 0.0;
-
+    let mut n_islands = 0;
     for i in 0..n {
         let sw = listw.get_weights(i);
-        for (idx, &j) in sw.indices.iter().enumerate() {
-            let w_ij = sw.weights[idx];
+        if sw.indices.is_empty() {
+            n_islands += 1;
+        }
+        for (&j, &w_ij) in sw.indices.iter().zip(sw.weights.iter()) {
             numerator += w_ij * residuals[i] * residuals[j];
             s0 += w_ij;
         }
     }
-
     if !(s0 > 0.0 && s0.is_finite()) {
         return Err(EconError::InvalidSpecification {
             message: "moran_test_residuals: the spatial weights have no links (S0 = 0): every \
@@ -428,34 +447,74 @@ pub fn moran_test_residuals(
                 .to_string(),
         });
     }
-    let i_stat = (n as f64 / s0) * (numerator / denominator);
 
-    // Expected value for residuals
-    let ei = -1.0 / (df as f64);
+    // The kept columns of X (lm drops aliased ones) and (X'X)^-1 on them
+    let qr = Qr::decompose(x.view(), LM_QR_TOL)?;
+    let p = qr.rank();
+    let n_linked = n - n_islands;
+    let df =
+        n_linked
+            .checked_sub(p)
+            .filter(|&d| d >= 1)
+            .ok_or_else(|| EconError::InsufficientData {
+                required: p + 1,
+                provided: n_linked,
+                context:
+                    "moran_test_residuals: units with a neighbour minus the rank of x must be at \
+                      least 1"
+                        .to_string(),
+            })?;
+    let aliased = qr.aliased();
+    let keep: Vec<usize> = (0..x.ncols()).filter(|j| !aliased.contains(j)).collect();
+    let cov = qr.unscaled_covariance()?;
+    let xtx_inv = cov.select(Axis(0), &keep).select(Axis(1), &keep);
+    let xk = x.select(Axis(1), &keep);
 
-    // Simplified variance (can be refined with more complex formula)
+    // Z = U X = (W X + W'X) / 2
+    let mut z = crate::resource::try_zeros2(n, p, "moran_test_residuals: U X")?;
+    for (c, col) in xk.columns().into_iter().enumerate() {
+        let col = col.to_owned();
+        let zc = 0.5 * (&listw.lag(&col) + &listw.lag_transpose(&col));
+        z.column_mut(c).assign(&zc);
+    }
+    let c1 = xk.t().dot(&z);
+    let c2 = z.t().dot(&z);
+    let c3 = xtx_inv.dot(&c1);
+    let tr_a: f64 = c3.diag().sum();
+    let tr_a2: f64 = (0..p)
+        .flat_map(|i| (0..p).map(move |j| (i, j)))
+        .map(|(i, j)| c3[[i, j]] * c3[[j, i]])
+        .sum();
+    let tr_b: f64 = 4.0
+        * (0..p)
+            .flat_map(|i| (0..p).map(move |j| (i, j)))
+            .map(|(i, j)| xtx_inv[[i, j]] * c2[[j, i]])
+            .sum::<f64>();
     let (s1, _s2) = compute_s1_s2(listw);
-    let n_f = n as f64;
-    let s0_sq = s0 * s0;
 
-    // Use simpler variance formula for residuals
-    let vi = (n_f * s1 - s0_sq) / ((n_f - 1.0) * s0_sq) - ei * ei;
-    let vi = vi.max(1e-10); // Ensure positive
+    let nn = n_linked as f64;
+    let dfp = df as f64;
+    let i_stat = (nn / s0) * (numerator / denominator);
+    let ei = -(nn * tr_a) / (dfp * s0);
+    let vi = (nn * nn) / (s0 * s0 * dfp * (dfp + 2.0))
+        * (s1 + 2.0 * tr_a2 - tr_b - 2.0 * tr_a * tr_a / dfp);
+    if !(vi > 0.0 && vi.is_finite()) {
+        return Err(EconError::Computation(format!(
+            "moran_test_residuals: the variance of I is not positive ({vi:e}); the design leaves \
+             no spatial variation in the residuals"
+        )));
+    }
 
     let z_score = (i_stat - ei) / vi.sqrt();
-    let p_value = normal_p_value_two_sided(z_score);
-
     Ok(MoranResult {
         statistic: i_stat,
         expectation: ei,
         variance: vi,
         z_score,
-        p_value,
-        alternative: MoranAlternative::TwoSided,
+        p_value: normal_p_value(z_score, alternative),
+        alternative,
         n,
-        n_islands: (0..n)
-            .filter(|&i| listw.get_weights(i).indices.is_empty())
-            .count(),
+        n_islands,
     })
 }
 
@@ -1144,13 +1203,19 @@ mod tests {
             crate::spatial::WeightStyle::RowStd,
         );
         let e = Array1::from_vec(vec![0.1, -0.2, 0.1]);
-        match moran_test_residuals(&e, &Array2::ones((3, 4)), &ring3) {
+        // rank 3: N - p = 0 (the rank counts, not the columns: lm drops aliased ones)
+        let x = Array2::from_shape_vec(
+            (3, 4),
+            vec![1.0, 0.2, 0.5, 1.1, 1.0, 1.3, -0.4, 0.7, 1.0, -0.8, 0.9, 2.0],
+        )
+        .unwrap();
+        match moran_test_residuals(&e, &x, &ring3, MoranAlternative::Greater) {
             Err(EconError::InsufficientData {
-                required: 5,
+                required: 4,
                 provided: 3,
                 ..
             }) => {}
-            other => panic!("expected InsufficientData {{ 5, 3 }}, got {other:?}"),
+            other => panic!("expected InsufficientData {{ 4, 3 }}, got {other:?}"),
         }
     }
 
@@ -1428,6 +1493,173 @@ mod tests {
             assert_close(r.rlm_error.statistic, others[2], 1e-10);
             assert_close(r.lm_sarma.statistic, others[3], 1e-10);
         }
+    }
+
+    /// spatial_sim (n = 80) of a T4 case: y, X = [1, x1, x2] and the coordinates.
+    fn sim_design(ds: &crate::data::Dataset) -> (Array1<f64>, Array2<f64>, Vec<(f64, f64)>) {
+        let (x1, x2) = (col(ds, "x1"), col(ds, "x2"));
+        let mut x = Array2::ones((x1.len(), 3));
+        for i in 0..x1.len() {
+            x[[i, 1]] = x1[i];
+            x[[i, 2]] = x2[i];
+        }
+        (Array1::from(col(ds, "y")), x, coords_of(ds))
+    }
+
+    /// Residuals of lm(y ~ X).
+    fn ols_residuals(y: &Array1<f64>, x: &Array2<f64>) -> Array1<f64> {
+        crate::linalg::solve::least_squares(x.view(), y.view())
+            .unwrap()
+            .residuals
+    }
+
+    fn sim_knn4(coords: &[(f64, f64)]) -> SpatialWeights {
+        SpatialWeights::from_neighbors(
+            &Neighbors::try_from_knn(coords, 4).unwrap(),
+            WeightStyle::RowStd,
+        )
+    }
+
+    fn sim_band(coords: &[(f64, f64)], d: f64, style: WeightStyle) -> SpatialWeights {
+        SpatialWeights::from_neighbors(
+            &Neighbors::try_from_distance(coords, 0.0, d, None).unwrap(),
+            style,
+        )
+    }
+
+    const MORAN_KEYS: [&str; 4] = ["I", "E", "V", "z"];
+
+    fn check_lm_moran(chk: &mut p2a_validation::Check<'_>, key: &str, r: &MoranResult, n: usize) {
+        use p2a_validation::Tol;
+        let names = ["I", "E", "V", "z", "p"];
+        let vals = [r.statistic, r.expectation, r.variance, r.z_score, r.p_value];
+        chk.named_subset(key, &MORAN_KEYS, &names, &vals, Tol::stat(n))
+            .named_subset(key, &["p"], &names, &vals, Tol::p_value(n));
+    }
+
+    /// R: spdep::lm.morantest(lm(y ~ x1 + x2), nb2listw(knn 4), alternative, zero.policy = TRUE)
+    /// (spatial_diag_t4.R, case spatial_lm_diag_t4).
+    #[test]
+    fn test_validate_lm_morantest_knn_spatial_sim() {
+        let (case, ds) = crate::test_support::load_case("spatial_lm_diag_t4");
+        let (y, x, coords) = sim_design(&ds);
+        let u = ols_residuals(&y, &x);
+        let w = sim_knn4(&coords);
+        let n = y.len();
+        let mut chk = p2a_validation::Check::new(&case);
+        chk.vector(
+            "residuals",
+            u.as_slice().unwrap(),
+            p2a_validation::Tol::coef(n),
+        );
+        for (key, alt) in [
+            ("lmmoran_knn_greater", MoranAlternative::Greater),
+            ("lmmoran_knn_two_sided", MoranAlternative::TwoSided),
+            ("lmmoran_knn_less", MoranAlternative::Less),
+        ] {
+            let r = moran_test_residuals(&u, &x, &w, alt).unwrap();
+            assert_eq!(r.alternative, alt);
+            check_lm_moran(&mut chk, key, &r, n);
+        }
+        chk.finish();
+    }
+
+    /// R: lm.morantest on a distance band (0, 0.2] whose row sums vary, style W (asymmetric
+    /// after standardisation, so listw2U matters) and B.
+    #[test]
+    fn test_validate_lm_morantest_band_styles_spatial_sim() {
+        let (case, ds) = crate::test_support::load_case("spatial_lm_diag_t4");
+        let (y, x, coords) = sim_design(&ds);
+        let u = ols_residuals(&y, &x);
+        let mut chk = p2a_validation::Check::new(&case);
+        for (key, style) in [
+            ("lmmoran_band_W", WeightStyle::RowStd),
+            ("lmmoran_band_B", WeightStyle::Binary),
+        ] {
+            let w = sim_band(&coords, 0.2, style);
+            let r = moran_test_residuals(&u, &x, &w, MoranAlternative::Greater).unwrap();
+            check_lm_moran(&mut chk, key, &r, y.len());
+        }
+        chk.finish();
+    }
+
+    /// R: lm.morantest(zero.policy = TRUE) on the band (0, 0.12] with four islands: N counts
+    /// the 76 linked units.
+    #[test]
+    fn test_validate_lm_morantest_islands_spatial_sim() {
+        let (case, ds) = crate::test_support::load_case("spatial_lm_diag_t4");
+        let (y, x, coords) = sim_design(&ds);
+        let u = ols_residuals(&y, &x);
+        let w = sim_band(&coords, 0.12, WeightStyle::RowStd);
+        let r = moran_test_residuals(&u, &x, &w, MoranAlternative::Greater).unwrap();
+        assert_eq!((r.n, r.n_islands), (80, 4));
+        let mut chk = p2a_validation::Check::new(&case);
+        check_lm_moran(&mut chk, "lmmoran_islands_W", &r, y.len());
+        chk.finish();
+    }
+
+    /// A 12 x 12 rook grid, row-standardised.
+    fn rook_grid(side: usize) -> SpatialWeights {
+        let lists = (0..side * side)
+            .map(|i| {
+                let (r, c) = (i / side, i % side);
+                let mut v = Vec::new();
+                if r > 0 {
+                    v.push(i - side);
+                }
+                if c > 0 {
+                    v.push(i - 1);
+                }
+                if c + 1 < side {
+                    v.push(i + 1);
+                }
+                if r + 1 < side {
+                    v.push(i + side);
+                }
+                v
+            })
+            .collect();
+        SpatialWeights::from_neighbors(&Neighbors::from_indices(lists), WeightStyle::RowStd)
+    }
+
+    /// Under H0 (independent normal errors) the lm.morantest z-score has mean 0 and variance 1
+    /// and the 5% two-sided test rejects about 5% of the time.
+    #[test]
+    fn lm_morantest_under_h0_has_unit_variance_z() {
+        use rand::SeedableRng;
+        use rand_distr::{Distribution, StandardNormal};
+        let w = rook_grid(12);
+        let n = w.n();
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(7);
+        let mut x = Array2::ones((n, 2));
+        for i in 0..n {
+            x[[i, 1]] = StandardNormal.sample(&mut rng);
+        }
+        let reps = 2000;
+        let mut zs = Vec::with_capacity(reps);
+        for rep in 0..reps {
+            let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(1000 + rep as u64);
+            let y = Array1::from_iter((0..n).map(|i| {
+                let e: f64 = StandardNormal.sample(&mut rng);
+                1.0 + 0.5 * x[[i, 1]] + e
+            }));
+            let u = ols_residuals(&y, &x);
+            zs.push(
+                moran_test_residuals(&u, &x, &w, MoranAlternative::TwoSided)
+                    .unwrap()
+                    .z_score,
+            );
+        }
+        let mean = zs.iter().sum::<f64>() / reps as f64;
+        let var = zs.iter().map(|z| (z - mean).powi(2)).sum::<f64>() / (reps - 1) as f64;
+        let reject = zs
+            .iter()
+            .filter(|&&z| normal_p_value_two_sided(z) <= 0.05)
+            .count() as f64
+            / reps as f64;
+        assert!(mean.abs() < 0.1, "mean {mean}");
+        assert!((0.85..=1.15).contains(&var), "variance {var}");
+        assert!(reject < 0.08, "rejection rate {reject}");
     }
 
     #[test]
