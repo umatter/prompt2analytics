@@ -714,7 +714,8 @@ fn conditional_affinities(
                 };
             }
         }
-        if !(h_diff.abs() < PERPLEXITY_TOL) {
+        // a NaN entropy (no finite bandwidth found) is a miss too
+        if h_diff.is_nan() || h_diff.abs() >= PERPLEXITY_TOL {
             calibration.missed += 1;
             calibration.worst = calibration.worst.max(h_diff.abs());
         }
