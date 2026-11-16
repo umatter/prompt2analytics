@@ -17,8 +17,8 @@
 //!    `(n - 1) r^2` (regression, 1 df) or `(n - 1) SSB / Sxx` (classification, df = classes in
 //!    the node - 1), with asymptotic chi-squared p-values; `maximum` (regression only): `|z|`
 //!    with a two-sided normal p-value.
-//! 2. **Untestable inputs.** An input whose statistic has variance below `sqrt(eps)` (constant
-//!    in the node) is not tested and does not count in the adjustment.
+//! 2. **Untestable inputs.** An input whose statistic has variance below `sqrt(eps)` (the input
+//!    or the response constant in the node) is not tested and does not count in the adjustment.
 //! 3. **P-values.** `bonferroni`: partykit's adjustment `1 - (1 - p)^m` over the `m` tested
 //!    inputs; `univariate`: none; `montecarlo`: the share of `nresample` permutations of the
 //!    response whose statistic reaches the observed one, unadjusted.
@@ -241,8 +241,8 @@ pub struct CtreeResult {
     /// Sum over the splits on the variable of 1 - (adjusted) p-value; not partykit's permutation
     /// `varimp`.
     pub variable_importance: Vec<f64>,
-    /// The test statistic of each input at the root (NaN: not tested, the input is constant
-    /// there). Computed also when the root is not split.
+    /// The test statistic of each input at the root (NaN: not tested, the input or the
+    /// response is constant there). Computed also when the root is not split.
     #[serde(default)]
     pub root_statistics: Vec<f64>,
     /// The unadjusted p-value of each input at the root (NaN: not tested).
@@ -345,7 +345,11 @@ impl std::fmt::Display for CtreeResult {
                 .copied()
                 .unwrap_or(f64::NAN);
             if p.is_nan() {
-                writeln!(f, "  {}: not tested (constant in the node)", name)?;
+                writeln!(
+                    f,
+                    "  {}: not tested (input or response constant in the node)",
+                    name
+                )?;
             } else {
                 writeln!(
                     f,
@@ -408,10 +412,13 @@ pub(crate) struct CentredInput {
 
 impl CentredInput {
     pub(crate) fn new(values: impl Iterator<Item = f64>) -> Self {
-        let xs: Vec<f64> = values.collect();
-        let mean = xs.iter().sum::<f64>() / xs.len().max(1) as f64;
-        let dx: Vec<f64> = xs.iter().map(|v| v - mean).collect();
-        let sxx = dx.iter().map(|d| d * d).sum();
+        let mut dx: Vec<f64> = values.collect();
+        let mean = dx.iter().sum::<f64>() / dx.len().max(1) as f64;
+        let mut sxx = 0.0;
+        for v in &mut dx {
+            *v -= mean;
+            sxx += *v * *v;
+        }
         CentredInput { dx, sxx }
     }
 }
@@ -473,13 +480,20 @@ impl LinearTest {
         }
     }
 
+    /// A zeroed per-class buffer for [`LinearTest::statistic`] (empty for regression), allocated once
+    /// per node and reused by every evaluation there.
+    fn scratch(&self) -> Vec<f64> {
+        vec![0.0; self.counts.len()]
+    }
+
     /// The statistic of `input` against the responses in the order `perm` gives (the node order when
-    /// `perm` is `None`). The caller has checked [`LinearTest::testable`].
-    fn statistic(&self, input: &CentredInput, perm: Option<&[usize]>) -> f64 {
+    /// `perm` is `None`). The caller has checked [`LinearTest::testable`]; `sums` is the buffer of
+    /// [`LinearTest::scratch`], overwritten here.
+    fn statistic(&self, input: &CentredInput, perm: Option<&[usize]>, sums: &mut [f64]) -> f64 {
         let nm1 = (self.n - 1) as f64;
         let at = |i: usize| perm.map_or(i, |p| p[i]);
         if self.is_classification() {
-            let mut sums = vec![0.0f64; self.counts.len()];
+            sums.fill(0.0);
             for (i, &d) in input.dx.iter().enumerate() {
                 sums[self.class[at(i)]] += d;
             }
@@ -569,10 +583,11 @@ fn node_tests(
     let mut p = vec![f64::NAN; p_inputs];
     let monte_carlo = options.testtype == CtreeTestType::MonteCarlo;
     let mut tested: Vec<(usize, CentredInput)> = Vec::new();
+    let mut sums = test.scratch();
     for j in 0..p_inputs {
         let input = CentredInput::new(indices.iter().map(|&i| x[[i, j]]));
         if test.testable(&input) {
-            let s = test.statistic(&input, None);
+            let s = test.statistic(&input, None, &mut sums);
             statistic[j] = s;
             p[j] = test.p_value(s);
             if monte_carlo {
@@ -593,7 +608,7 @@ fn node_tests(
             let mut rng = ChaCha8Rng::seed_from_u64(resample_seed(options.seed, node_id, b));
             perm.shuffle(&mut rng);
             for (j, input) in &tested {
-                if test.statistic(input, Some(&perm)) >= statistic[*j] {
+                if exceeds(test.statistic(input, Some(&perm), &mut sums), statistic[*j]) {
                     exceed[*j] += 1;
                 }
             }
@@ -612,6 +627,14 @@ fn node_tests(
         p,
         p_adjusted,
     })
+}
+
+/// Whether a permuted statistic counts as at least the observed one. A permutation whose statistic
+/// equals the observed one mathematically (a tied or discrete input, a within-group shuffle) can come
+/// out a few ulps lower, because its sums accumulate in another order; the comparison therefore allows
+/// a relative `sqrt(eps)`, as libcoin does.
+fn exceeds(permuted: f64, observed: f64) -> bool {
+    permuted >= observed - f64::EPSILON.sqrt() * observed.abs().max(1.0)
 }
 
 /// The seed of Monte Carlo resample `b` at node `node`: SplitMix64 finalisers over the three.
@@ -999,7 +1022,8 @@ pub fn ctree(
     let testtype: CtreeTestType = config.testtype.parse()?;
     if testtype == CtreeTestType::MonteCarlo && config.nresample == 0 {
         return Err(EconError::InvalidSpecification {
-            message: "ctree: testtype = montecarlo needs nresample of at least 1 permutation"
+            message: "ctree: testtype = montecarlo needs nresample (n_permutations in ml_ctree) of at least \
+                      1 permutation"
                 .to_string(),
         });
     }
@@ -1769,6 +1793,61 @@ mod tests {
         };
         assert_eq!(p(7), p(7));
         assert_ne!(p(7), p(8));
+    }
+
+    #[test]
+    fn test_ctree_montecarlo_counts_tied_permutations() {
+        // A binary input: shuffling the responses within each input group leaves the statistic
+        // mathematically unchanged, so the identity and every within-group shuffle must count as
+        // reaching the observed statistic, whatever order their sums accumulate in.
+        let x: Vec<f64> = (0..40).map(|i| f64::from(i % 2 == 0)).collect();
+        let yv: Vec<f64> = (0..40)
+            .map(|i| 0.1 * f64::from(i) + 0.37 * f64::from((i * 7) % 11) + 0.3 * x[i as usize])
+            .collect();
+        let y = Array1::from_vec(yv);
+        let classes: Vec<usize> = (0..40).map(|i| (i * 5 + i / 3) % 3).collect();
+        let indices: Vec<usize> = (0..40).collect();
+        let groups: [Vec<usize>; 2] = [
+            (0..40).filter(|&i| x[i] == 0.0).collect(),
+            (0..40).filter(|&i| x[i] == 1.0).collect(),
+        ];
+        let responses = [
+            Response::Regression(y.view()),
+            Response::Classes {
+                class: &classes,
+                k: 3,
+            },
+        ];
+        for response in &responses {
+            for teststat in [CtreeTestStat::Quadratic, CtreeTestStat::Maximum] {
+                let test = LinearTest::new(response, &indices, teststat);
+                let input = CentredInput::new(x.iter().copied());
+                assert!(test.testable(&input));
+                let mut sums = test.scratch();
+                let observed = test.statistic(&input, None, &mut sums);
+                let identity: Vec<usize> = (0..40).collect();
+                assert!(exceeds(
+                    test.statistic(&input, Some(&identity), &mut sums),
+                    observed
+                ));
+                for b in 0..200u64 {
+                    let mut rng = ChaCha8Rng::seed_from_u64(b);
+                    let mut perm = identity.clone();
+                    for group in &groups {
+                        let mut targets = group.clone();
+                        targets.shuffle(&mut rng);
+                        for (&from, &to) in group.iter().zip(&targets) {
+                            perm[from] = to;
+                        }
+                    }
+                    let permuted = test.statistic(&input, Some(&perm), &mut sums);
+                    assert!(
+                        exceeds(permuted, observed),
+                        "shuffle {b}: {permuted} vs {observed}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
