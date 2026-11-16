@@ -145,7 +145,7 @@ pub struct LocalMoranObs {
 pub struct LocalMoranResult {
     /// Local statistics for each observation
     pub local_stats: Vec<LocalMoranObs>,
-    /// Global Moran's I (sum of local I / n)
+    /// Global Moran's I, the sum of the local I over S0
     pub global_i: f64,
     /// Number of observations
     pub n: usize,
@@ -161,6 +161,9 @@ pub struct LocalMoranResult {
     pub n_low_high: usize,
     /// Count of not significant
     pub n_not_sig: usize,
+    /// Whether the moments are under conditional randomisation (spdep's default) or total
+    #[serde(default)]
+    pub conditional: bool,
 }
 
 /// Rao score (Lagrange multiplier) tests for spatial dependence in a linear regression
@@ -584,21 +587,33 @@ pub fn geary_test(x: &Array1<f64>, listw: &SpatialWeights) -> EconResult<GearyRe
     })
 }
 
-/// Local Moran's I (LISA) - Local Indicators of Spatial Association.
-///
-/// Decomposes global Moran's I into local contributions, allowing identification
-/// of local clusters (hot spots, cold spots) and spatial outliers.
-///
-/// # Arguments
-///
-/// * `x` - Variable to analyze
-/// * `listw` - Spatial weights
-/// * `alpha` - Significance level for cluster classification (default 0.05)
-/// * `permutations` - Number of permutations for inference (0 = analytical, >0 = simulation)
-///
-/// # Returns
-///
-/// Local Moran statistics for each observation with cluster classifications.
+/// Options of [`localmoran_with`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct LocalMoranConfig {
+    /// Significance level for the cluster classification (default 0.05)
+    pub alpha: f64,
+    /// Conditional permutations for the p-values; 0 (default) uses the normal approximation
+    pub permutations: usize,
+    /// Moments under conditional randomisation (spdep's default, `true`) or total
+    /// randomisation (`false`)
+    pub conditional: bool,
+    /// Seed of the permutations (default 42)
+    pub seed: u64,
+}
+
+impl Default for LocalMoranConfig {
+    fn default() -> Self {
+        Self {
+            alpha: 0.05,
+            permutations: 0,
+            conditional: true,
+            seed: 42,
+        }
+    }
+}
+
+/// Local Moran's I (LISA) with the default options of [`LocalMoranConfig`] (conditional
+/// moments, seed 42) and the given `alpha` and `permutations`; see [`localmoran_with`].
 ///
 /// # Example
 ///
@@ -622,99 +637,154 @@ pub fn geary_test(x: &Array1<f64>, listw: &SpatialWeights) -> EconResult<GearyRe
 /// # }
 /// ```
 ///
-/// # Reference
+/// # Errors
 ///
-/// Anselin, L. (1995). Local Indicators of Spatial Association—LISA.
-/// Geographical Analysis, 27(2), 93-115.
+/// As [`localmoran_with`].
 pub fn localmoran(
     x: &Array1<f64>,
     listw: &SpatialWeights,
     alpha: f64,
     permutations: usize,
 ) -> EconResult<LocalMoranResult> {
+    localmoran_with(
+        x,
+        listw,
+        &LocalMoranConfig {
+            alpha,
+            permutations,
+            ..LocalMoranConfig::default()
+        },
+    )
+}
+
+/// Local Moran's I (LISA) - Local Indicators of Spatial Association, as spdep's
+/// `localmoran(mlvar = TRUE, alternative = "two.sided")`.
+///
+/// I_i = (z_i / m2) Σ_j w_ij z_j with z = x - mean(x) and m2 = Σ z² / n. The moments follow
+/// spdep: under conditional randomisation (`conditional = true`, spdep's default), with
+/// W_i = Σ_j w_ij and W_i2 = Σ_j w_ij²,
+///
+/// ```text
+/// E[I_i] = -z_i² W_i / ((n - 1) m2)
+/// Var[I_i] = (z_i / m2)² n/(n - 2) (W_i2 - W_i²/(n - 1)) (m2 - z_i²/(n - 1))
+/// ```
+///
+/// and under total randomisation (`conditional = false`) E[I_i] = -W_i / (n - 1) with the
+/// Cliff-Ord variance through the kurtosis b2. The p-value is the two-sided normal one, or
+/// with `permutations > 0` the folded permutation p-value (spdep `localmoran_perm`'s
+/// "Pr(folded) Sim"), (min(r, nsim - r) + 1) / (nsim + 1) with r the permutations whose I_i is
+/// at least the observed one. Each permutation draws unit i's neighbour values without
+/// repeats from the other n - 1 values (Anselin's conditional permutation; spdep's
+/// `no_repeat_in_row = TRUE`, not its default). A zero variance (an island, or z_i = 0 under
+/// conditional moments) gives a NaN z-score and p-value and [`LisaCluster::NotSignificant`],
+/// where spdep gives NaN. `global_i` is Moran's I, Σ I_i / S0.
+///
+/// # Errors
+///
+/// - `InvalidSpecification`: `x` and the weights differ in length, `x` has a non-finite value
+///   or is constant, fewer than 3 units, or `alpha` is not in [0, 1].
+/// - `Cancelled`: the installed budget expired during the permutations.
+///
+/// # Reference
+///
+/// Anselin, L. (1995). Local Indicators of Spatial Association—LISA.
+/// Geographical Analysis, 27(2), 93-115.
+pub fn localmoran_with(
+    x: &Array1<f64>,
+    listw: &SpatialWeights,
+    config: &LocalMoranConfig,
+) -> EconResult<LocalMoranResult> {
     let n = x.len();
+    let alpha = config.alpha;
     if n != listw.n() {
         return Err(EconError::InvalidSpecification {
-            message: "Variable length must match weights matrix size".to_string(),
+            message: format!(
+                "localmoran: x has {n} values but the weights have {} units",
+                listw.n()
+            ),
         });
     }
     if n < 3 {
         return Err(EconError::InvalidSpecification {
-            message: "Need at least 3 observations for Local Moran's I".to_string(),
+            message: format!("localmoran: needs at least 3 observations, got {n}"),
+        });
+    }
+    if !(0.0..=1.0).contains(&alpha) {
+        return Err(EconError::InvalidSpecification {
+            message: format!("localmoran: alpha must lie in [0, 1], got {alpha}"),
+        });
+    }
+    let bad = x.iter().filter(|v| !v.is_finite()).count();
+    if bad > 0 {
+        return Err(EconError::InvalidSpecification {
+            message: format!("localmoran: x contains {bad} non-finite value(s)"),
+        });
+    }
+    if x.iter().all(|&v| v == x[0]) {
+        return Err(EconError::InvalidSpecification {
+            message: "localmoran: x is constant, so local autocorrelation is undefined".to_string(),
         });
     }
 
-    // Center and standardize the variable
-    let mean = x.mean().unwrap();
-    let z: Array1<f64> = x.mapv(|v| v - mean);
-    let m2: f64 = z.iter().map(|&zi| zi * zi).sum::<f64>() / n as f64;
-
-    // Compute local Moran's I for each observation
-    // I_i = (z_i / m2) * sum_j(w_ij * z_j)
-    let mut local_stats = Vec::with_capacity(n);
-    let mut sum_local_i = 0.0;
-
-    // Pre-compute the spatial lag of z
-    let wz = listw.lag(&z);
-
-    // Pre-compute kurtosis for variance calculation (avoid recomputing in loop)
-    let b2 = z.iter().map(|&zi| zi.powi(4)).sum::<f64>() / n as f64 / (m2 * m2);
     let n_f = n as f64;
-
-    // Compute observed local I values for all observations
-    let mut observed_local_i = Vec::with_capacity(n);
-    for i in 0..n {
-        let z_i = z[i];
-        let wz_i = wz[i];
-        let i_local = (z_i / m2) * wz_i;
-        observed_local_i.push(i_local);
-        sum_local_i += i_local;
+    let mean = x.sum() / n_f;
+    let z: Array1<f64> = x.mapv(|v| v - mean);
+    let m2: f64 = z.iter().map(|&zi| zi * zi).sum::<f64>() / n_f;
+    let b2 = z.iter().map(|&zi| zi.powi(4)).sum::<f64>() / n_f / (m2 * m2);
+    if !(m2.is_finite() && b2.is_finite()) {
+        return Err(EconError::InvalidSpecification {
+            message: "localmoran: the moments of x overflow; rescale x".to_string(),
+        });
     }
+    let wz = listw.lag(&z);
+    let observed: Vec<f64> = (0..n).map(|i| (z[i] / m2) * wz[i]).collect();
 
-    // Compute permutation p-values in batch if needed
-    let perm_pvalues = if permutations > 0 {
-        Some(compute_all_local_moran_pvalues_permutation(
+    let perm_pvalues = if config.permutations > 0 {
+        Some(local_moran_permutation_pvalues(
             &z,
-            &observed_local_i,
+            m2,
+            &observed,
             listw,
-            permutations,
+            config.permutations,
+            config.seed,
         )?)
     } else {
         None
     };
 
-    // Compute local statistics
+    let mut local_stats = Vec::with_capacity(n);
     for i in 0..n {
-        let z_i = z[i];
-        let wz_i = wz[i];
-        let i_local = observed_local_i[i];
-
-        // Expected value: E[I_i] = -w_i. / (n-1) where w_i. is row sum
+        let (z_i, wz_i, i_local) = (z[i], wz[i], observed[i]);
         let sw = listw.get_weights(i);
-        let w_i_sum: f64 = sw.weights.iter().sum();
-        let ei = -w_i_sum / (n_f - 1.0);
-
-        // Variance (conditional randomization)
-        let w_i_sq_sum: f64 = sw.weights.iter().map(|&w| w * w).sum();
-
-        // Simplified variance formula for local Moran
-        let vi = w_i_sq_sum * (n_f - b2) / (n_f - 1.0)
-            + (w_i_sum * w_i_sum - w_i_sq_sum) * (2.0 * b2 - n_f) / ((n_f - 1.0) * (n_f - 2.0))
-            - ei * ei;
-        let vi = vi.max(1e-10);
-
-        // Z-score and p-value
-        let z_score = (i_local - ei) / vi.sqrt();
-
-        let p_value = if let Some(ref pvals) = perm_pvalues {
+        let w_i: f64 = sw.weights.iter().sum();
+        let w_i2: f64 = sw.weights.iter().map(|&w| w * w).sum();
+        let (ei, vi) = if config.conditional {
+            let ei = -(z_i * z_i * w_i) / ((n_f - 1.0) * m2);
+            let vi = (z_i / m2).powi(2)
+                * (n_f / (n_f - 2.0))
+                * (w_i2 - w_i * w_i / (n_f - 1.0))
+                * (m2 - z_i * z_i / (n_f - 1.0));
+            (ei, vi)
+        } else {
+            let ei = -w_i / (n_f - 1.0);
+            let a = (n_f - b2) / (n_f - 1.0);
+            let b = (2.0 * b2 - n_f) / ((n_f - 1.0) * (n_f - 2.0));
+            (ei, a * w_i2 + b * (w_i * w_i - w_i2) - ei * ei)
+        };
+        // z = (I - E) / sqrt(V); NaN for a zero variance, as spdep
+        let z_score = if vi > 0.0 {
+            (i_local - ei) / vi.sqrt()
+        } else {
+            f64::NAN
+        };
+        let p_value = if z_score.is_nan() {
+            f64::NAN
+        } else if let Some(ref pvals) = perm_pvalues {
             pvals[i]
         } else {
-            // Analytical p-value (two-sided)
-            // once per unit, so the plain survival function rather than the extended-range tail
-            2.0 * Normal::standard().sf(z_score.abs())
+            normal_p_value_two_sided(z_score)
         };
 
-        // Determine cluster type
         let cluster = if p_value <= alpha {
             if z_i > 0.0 && wz_i > 0.0 {
                 LisaCluster::HighHigh
@@ -739,30 +809,17 @@ pub fn localmoran(
         });
     }
 
-    // Count clusters
-    let mut n_high_high = 0;
-    let mut n_low_low = 0;
-    let mut n_high_low = 0;
-    let mut n_low_high = 0;
-    let mut n_not_sig = 0;
-
-    for obs in &local_stats {
-        match obs.cluster {
-            LisaCluster::HighHigh => n_high_high += 1,
-            LisaCluster::LowLow => n_low_low += 1,
-            LisaCluster::HighLow => n_high_low += 1,
-            LisaCluster::LowHigh => n_low_high += 1,
-            LisaCluster::NotSignificant => n_not_sig += 1,
-        }
-    }
-
-    // Global Moran's I is sum of local I values divided by sum of weights
-    let s0 = listw.sum_weights();
-    let global_i = sum_local_i / s0 * n as f64;
-
+    let count = |c: LisaCluster| local_stats.iter().filter(|o| o.cluster == c).count();
+    let (n_high_high, n_low_low, n_high_low, n_low_high, n_not_sig) = (
+        count(LisaCluster::HighHigh),
+        count(LisaCluster::LowLow),
+        count(LisaCluster::HighLow),
+        count(LisaCluster::LowHigh),
+        count(LisaCluster::NotSignificant),
+    );
     Ok(LocalMoranResult {
+        global_i: observed.iter().sum::<f64>() / listw.sum_weights(),
         local_stats,
-        global_i,
         n,
         alpha,
         n_high_high,
@@ -770,58 +827,65 @@ pub fn localmoran(
         n_high_low,
         n_low_high,
         n_not_sig,
+        conditional: config.conditional,
     })
 }
 
-/// Compute all permutation p-values efficiently in a batch.
-///
-/// This is more efficient than calling compute_local_moran_pvalue_permutation
-/// for each observation because it:
-/// 1. Pre-computes m2 once
-/// 2. Reuses shuffled vectors across observations
-fn compute_all_local_moran_pvalues_permutation(
+/// Folded conditional-permutation p-values of local Moran's I (spdep `localmoran_perm`,
+/// "Pr(folded) Sim", with `no_repeat_in_row = TRUE`): in each of `nsim` permutations unit i's
+/// neighbours receive |N_i| values drawn without repeats from the other n - 1 values, and
+/// p_i = (min(r_i, nsim - r_i) + 1) / (nsim + 1) with r_i the count of I_perm >= I_i. The
+/// draws of permutation r come from a generator keyed by (seed, r). NaN for a unit without
+/// neighbours or with z_i = 0 (every permuted I_i is 0).
+fn local_moran_permutation_pvalues(
     z: &Array1<f64>,
-    observed_i: &[f64],
+    m2: f64,
+    observed: &[f64],
     listw: &SpatialWeights,
-    permutations: usize,
+    nsim: usize,
+    seed: u64,
 ) -> EconResult<Vec<f64>> {
-    use rand::SeedableRng;
-    use rand::seq::SliceRandom;
+    use rand::{Rng, SeedableRng};
     use rand_chacha::ChaCha8Rng;
 
     let n = z.len();
-    let m2: f64 = z.iter().map(|&zi| zi * zi).sum::<f64>() / n as f64;
-
-    // Count extreme values for each observation
-    let mut count_extreme = vec![0usize; n];
-
-    let mut rng = ChaCha8Rng::seed_from_u64(42);
-    let mut z_perm: Vec<f64> = z.iter().copied().collect();
-
-    for _ in 0..permutations {
+    let mut count = vec![0usize; n];
+    // A permutation of 0..n-1 (offsets among the other n - 1 units): a partial Fisher-Yates
+    // shuffle of any arrangement draws a uniform sample without repeats.
+    let mut pool: Vec<usize> = (0..n - 1).collect();
+    // I_perm >= I_obs up to rounding in the last digits, so that the observed neighbour set
+    // itself counts
+    let threshold: Vec<f64> = observed.iter().map(|&v| v - 1e-12 * v.abs()).collect();
+    for rep in 0..nsim {
         crate::resource::checkpoint()?;
-
-        // Shuffle z values (global permutation)
-        z_perm.shuffle(&mut rng);
-
-        // Compute spatial lag of permuted z
-        let wz_perm = listw.lag(&Array1::from_vec(z_perm.clone()));
-
-        // Compute local Moran's I for each observation under this permutation
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+        rng.set_stream(rep as u64);
         for i in 0..n {
-            let z_i = z[i]; // Keep original z_i (conditional permutation)
-            let i_perm = (z_i / m2) * wz_perm[i];
-
-            if i_perm.abs() >= observed_i[i].abs() {
-                count_extreme[i] += 1;
+            let sw = listw.get_weights(i);
+            if sw.indices.is_empty() {
+                continue;
+            }
+            let mut lag = 0.0;
+            for (t, &w) in sw.weights.iter().enumerate() {
+                let r = rng.gen_range(t..n - 1);
+                pool.swap(t, r);
+                let off = pool[t];
+                let j = if off >= i { off + 1 } else { off };
+                lag += w * z[j];
+            }
+            if (z[i] / m2) * lag >= threshold[i] {
+                count[i] += 1;
             }
         }
     }
-
-    // Convert counts to p-values
-    Ok(count_extreme
-        .iter()
-        .map(|&count| (count as f64 + 1.0) / (permutations as f64 + 1.0))
+    Ok((0..n)
+        .map(|i| {
+            if listw.get_weights(i).indices.is_empty() || z[i] == 0.0 {
+                return f64::NAN;
+            }
+            let r = count[i].min(nsim - count[i]);
+            (r as f64 + 1.0) / (nsim as f64 + 1.0)
+        })
         .collect())
 }
 
@@ -1690,6 +1754,158 @@ mod tests {
             sim_band(&coords, 0.2, WeightStyle::Binary),
         ] {
             assert_sarma_identities(&spatial_lm_tests(&y, &x, &w).unwrap());
+        }
+    }
+
+    fn local_columns(r: &LocalMoranResult) -> [Vec<f64>; 5] {
+        let col = |f: fn(&LocalMoranObs) -> f64| r.local_stats.iter().map(f).collect::<Vec<_>>();
+        [
+            col(|o| o.i_local),
+            col(|o| o.expectation),
+            col(|o| o.variance),
+            col(|o| o.z_score),
+            col(|o| o.p_value),
+        ]
+    }
+
+    fn check_localmoran(conditional: bool, tag: &str) {
+        use p2a_validation::Tol;
+        let (case, ds) = crate::test_support::load_case("spatial_localmoran_t4");
+        let (y, _, coords) = sim_design(&ds);
+        let cfg = LocalMoranConfig {
+            conditional,
+            ..LocalMoranConfig::default()
+        };
+        let r = localmoran_with(&y, &sim_knn4(&coords), &cfg).unwrap();
+        assert_eq!(r.conditional, conditional);
+        let n = y.len();
+        let [ii, e, v, z, p] = local_columns(&r);
+        let mut chk = p2a_validation::Check::new(&case);
+        for (key, vals) in [("Ii", &ii), ("E", &e), ("Var", &v), ("Z", &z)] {
+            chk.vector(&format!("{tag}_{key}"), vals, Tol::stat(n));
+        }
+        chk.vector(&format!("{tag}_p"), &p, Tol::p_value(n))
+            .scalar("global_I", r.global_i, Tol::stat(n))
+            .finish();
+    }
+
+    /// R: spdep::localmoran(y, nb2listw(knn 4), conditional = TRUE) (spdep's default; mlvar,
+    /// two-sided) (spatial_diag_t4.R, case spatial_localmoran_t4).
+    #[test]
+    fn test_validate_localmoran_conditional_spatial_sim() {
+        check_localmoran(true, "cond");
+    }
+
+    /// R: spdep::localmoran(..., conditional = FALSE): total randomisation moments.
+    #[test]
+    fn test_validate_localmoran_total_spatial_sim() {
+        check_localmoran(false, "total");
+    }
+
+    #[test]
+    fn localmoran_global_i_is_morans_i() {
+        let (_, ds) = crate::test_support::load_case("spatial_localmoran_t4");
+        let (y, _, coords) = sim_design(&ds);
+        for w in [
+            sim_knn4(&coords),
+            sim_band(&coords, 0.2, WeightStyle::RowStd),
+        ] {
+            let g = localmoran(&y, &w, 0.05, 0).unwrap().global_i;
+            let m = moran_test(&y, &w, MoranAlternative::Greater)
+                .unwrap()
+                .statistic;
+            assert!((g - m).abs() <= 1e-12 * m.abs(), "{g} vs {m}");
+        }
+    }
+
+    /// The conditional permutation (neighbours drawn without repeats from the other n - 1
+    /// values) converges to the enumerated limits of the 7-unit fixture.
+    #[test]
+    fn localmoran_conditional_permutation_converges_to_exact() {
+        let (case, ds) = crate::test_support::load_case("spatial_localmoran_t4");
+        let (_, _, coords) = sim_design(&ds);
+        let x7 = Array1::from(case.vector("perm7_x"));
+        let w7 = SpatialWeights::from_neighbors(
+            &Neighbors::try_from_knn(&coords[..7], 2).unwrap(),
+            WeightStyle::RowStd,
+        );
+        let nsim = 99_999;
+        let cfg = LocalMoranConfig {
+            permutations: nsim,
+            ..LocalMoranConfig::default()
+        };
+        let r = localmoran_with(&x7, &w7, &cfg).unwrap();
+        let ii = case.vector("perm7_Ii");
+        let limit = case.vector("perm7_folded_limit");
+        let nf = nsim as f64;
+        for i in 0..7 {
+            let o = &r.local_stats[i];
+            assert!((o.i_local - ii[i]).abs() <= 1e-12 * ii[i].abs().max(1.0));
+            let se = (limit[i] * (1.0 - limit[i]) / nf).sqrt();
+            assert!(
+                (o.p_value - limit[i]).abs() <= 4.0 * se + 2.0 / nf,
+                "unit {i}: folded p {} vs limit {} (4 SE = {})",
+                o.p_value,
+                limit[i],
+                4.0 * se
+            );
+        }
+    }
+
+    #[test]
+    fn localmoran_seed_changes_permutation_p_only() {
+        let (_, ds) = crate::test_support::load_case("spatial_localmoran_t4");
+        let (y, _, coords) = sim_design(&ds);
+        let w = sim_knn4(&coords);
+        let run = |seed| {
+            localmoran_with(
+                &y,
+                &w,
+                &LocalMoranConfig {
+                    permutations: 199,
+                    seed,
+                    ..LocalMoranConfig::default()
+                },
+            )
+            .unwrap()
+        };
+        let (a, a2, b) = (run(1), run(1), run(2));
+        let [ia, ea, va, za, pa] = local_columns(&a);
+        let [ib, eb, vb, zb, pb] = local_columns(&b);
+        assert_eq!(pa, local_columns(&a2)[4], "same seed, same p");
+        assert_eq!((ia, ea, va, za), (ib, eb, vb, zb));
+        assert_ne!(pa, pb);
+    }
+
+    #[test]
+    fn localmoran_zero_variance_is_nan_not_clamped() {
+        // unit 3 is an island; x[1] equals the mean (z_1 = 0)
+        let w = SpatialWeights::from_neighbors(
+            &Neighbors::from_indices(vec![vec![1, 2], vec![0, 2], vec![0, 1, 4], vec![], vec![2]]),
+            WeightStyle::RowStd,
+        );
+        let x = array![1.0, 2.0, 3.5, 0.5, 3.0];
+        for conditional in [true, false] {
+            for permutations in [0, 99] {
+                let cfg = LocalMoranConfig {
+                    conditional,
+                    permutations,
+                    alpha: 1.0,
+                    ..LocalMoranConfig::default()
+                };
+                let r = localmoran_with(&x, &w, &cfg).unwrap();
+                let island = &r.local_stats[3];
+                assert!(
+                    island.z_score.is_nan() && island.p_value.is_nan(),
+                    "{island:?}"
+                );
+                assert_eq!(island.cluster, LisaCluster::NotSignificant);
+                if conditional {
+                    let z0 = &r.local_stats[1];
+                    assert!(z0.z_score.is_nan() && z0.p_value.is_nan(), "{z0:?}");
+                    assert_eq!(z0.cluster, LisaCluster::NotSignificant);
+                }
+            }
         }
     }
 
