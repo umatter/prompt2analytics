@@ -112,3 +112,54 @@ AR(1) gives phi^k, a pure MA the closed form. The PACF is the Durbin-Levinson re
 - The result always has `lag_max + 1` values. R returns q + 1 values for a pure MA with `lag.max < q`
   (`acf_ma3_lag5` records it), two values for an AR model with `lag.max = 0`, and crashes on the latter with
   `pacf = TRUE`.
+
+## Timing against v0.5.0
+
+Release builds of a scratch harness against f80b0131 (v0.5.0) and against this change, `--no-default-features
+--features ci`; one core (`taskset -c 10`), `RAYON_NUM_THREADS=1`, cwd `/dev/shm`; per row nine processes per side,
+interleaved, each the median of its calls after ten warm-ups; cells are the median over the processes, the ratio of the
+minima in brackets. The machine was heavily loaded (1-minute load average 11-36 on 12 cores), so the absolute times are
+preliminary and ratios within about 5% are noise. Measured 2026-11-16.
+The AR(0.99) and AR(0.5) `arima_sim` rows are the median of 15 processes per side.
+
+| Method | n | f80b0131 (µs) | this change (µs) | ratio [min] |
+|---|---|---|---|---|
+| `diffinv`, lag 1, differences 2, with xi | 100 | 2.4 | 2.5 | 1.05 [1.05] |
+| `diffinv`, lag 1, differences 2, with xi | 1,000 | 22.0 | 22.2 | 1.01 [1.01] |
+| `diffinv`, lag 1, differences 2, with xi | 10,000 | 312.9 | 312.6 | 1.00 [1.00] |
+| `runmed`, k = 7, median end rule | 100 | 22.0 | 20.7 | 0.94 [0.93] |
+| `runmed`, k = 7, median end rule | 1,000 | 229.9 | 216.4 | 0.94 [0.94] |
+| `runmed`, k = 7, median end rule | 10,000 | 2,342.2 | 2,229.5 | 0.95 [0.95] |
+| `runmed`, k = 2 floor(n / 20) + 1, median end rule | 100 | 46.8 | 33.4 | 0.71 [0.72] |
+| `runmed`, k = 2 floor(n / 20) + 1, median end rule | 1,000 | 3,866.1 | 3,705.0 | 0.96 [0.96] |
+| `runmed`, k = 2 floor(n / 20) + 1, median end rule | 10,000 | 462,245 | 464,937 | 1.01 [0.95] |
+| `arima_sim`, AR(0.5) | 100 | 4.8 | 3.0 | 0.62 [0.62] |
+| `arima_sim`, AR(0.5) | 1,000 | 24.7 | 23.3 | 0.94 [0.94] |
+| `arima_sim`, AR(0.5) | 10,000 | 254.8 | 259.8 | 1.02 [1.02] |
+| `arima_sim`, AR(0.95) | 100 | 5.1 | 6.0 | 1.18 [1.17] |
+| `arima_sim`, AR(0.95) | 1,000 | 26.1 | 27.1 | 1.04 [1.02] |
+| `arima_sim`, AR(0.95) | 10,000 | 281.5 | 286.3 | 1.02 [1.01] |
+| `arima_sim`, AR(0.99) | 100 | 4.9 | 16.1 | 3.30 [3.35] |
+| `arima_sim`, AR(0.99) | 1,000 | 24.7 | 36.7 | 1.49 [1.49] |
+| `arima_sim`, AR(0.99) | 10,000 | 253.9 | 276.3 | 1.09 [1.09] |
+| `arima_sim`, ARMA(2, 1) (0.5, -0.3; 0.4) | 100 | 6.0 | 3.6 | 0.60 [0.60] |
+| `arima_sim`, ARMA(2, 1) (0.5, -0.3; 0.4) | 1,000 | 30.4 | 27.5 | 0.90 [0.90] |
+| `arima_sim`, ARMA(2, 1) (0.5, -0.3; 0.4) | 10,000 | 328.0 | 316.3 | 0.96 [0.95] |
+| `arima_sim`, MA(2) (0.4, 0.2) | 100 | 5.2 | 2.9 | 0.55 [0.55] |
+| `arima_sim`, MA(2) (0.4, 0.2) | 1,000 | 26.5 | 25.1 | 0.95 [0.94] |
+| `arima_sim`, MA(2) (0.4, 0.2) | 10,000 | 285.8 | 292.2 | 1.02 [1.03] |
+| `arma_acf`, AR(2) (0.5, -0.3), lag_max = n | 100 | 2.1 | 2.3 | 1.10 [1.09] |
+| `arma_acf`, AR(2) (0.5, -0.3), lag_max = n | 1,000 | 15.9 | 17.0 | 1.07 [1.06] |
+| `arma_acf`, AR(2) (0.5, -0.3), lag_max = n | 10,000 | 204.9 | 205.6 | 1.00 [0.99] |
+| `arma_acf`, ARMA(2, 1) (0.5, 0.3; 0.4), lag_max = n | 100 | 51.6 | 2.5 | 0.05 [0.05] |
+| `arma_acf`, ARMA(2, 1) (0.5, 0.3; 0.4), lag_max = n | 1,000 | 515.5 | 17.0 | 0.03 [0.03] |
+| `arma_acf`, ARMA(2, 1) (0.5, 0.3; 0.4), lag_max = n | 10,000 | 193,873 | 205.3 | 0.00 [0.00] |
+| `arma_acf` PACF, ARMA(1, 1) (0.5; 0.3), lag_max = n | 100 | 92.6 | 43.7 | 0.47 [0.47] |
+| `arma_acf` PACF, ARMA(1, 1) (0.5; 0.3), lag_max = n | 1,000 | 9,931.2 | 1,350.5 | 0.14 [0.14] |
+| `arma_acf` PACF, ARMA(1, 1) (0.5; 0.3), lag_max = n | 10,000 | 2,777,366 | 116,039 | 0.04 [0.04] |
+
+`arima_sim` follows its burn-in: R's p + q + ceiling(6 / log(min root modulus)) replaces a fixed 100 steps, so
+fast-decaying models run fewer steps and persistent ones more (AR(0.95): 118, AR(0.99): 598). The AR(0.99) rows
+were estimated from the step count at 3.49x / 1.45x / 1.05x; the measured 1.49x and 1.09x are about 3% above, the
+same per-step cost the AR(0.5) row shows at n = 10,000 (1.02x where the step count gives 0.99x). `arma_acf` solves
+R's linear system once instead of iterating, and its PACF no longer works on subnormal values.

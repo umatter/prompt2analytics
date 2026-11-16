@@ -39,6 +39,22 @@ and `test_stl_constant_series` hold the properties; `test_stl_recovers_dgp` is a
 
 **Not yet in the CLI.** `p2a ts stl` has no seasonal-window option; the MCP server has no STL tool.
 
+## Timing against v0.5.0
+
+Release builds of a scratch harness against f80b0131 (v0.5.0) and against this change, `--no-default-features
+--features ci`; one core (`taskset -c 10`), `RAYON_NUM_THREADS=1`, cwd `/dev/shm`; per row nine processes per side,
+interleaved, each the median of its calls after ten warm-ups; cells are the median over the processes, the ratio of the
+minima in brackets. The machine was heavily loaded (1-minute load average 11-36 on 12 cores), so the absolute times are
+preliminary and ratios within about 5% are noise. Measured 2026-11-16.
+
+| Method | n | f80b0131 (µs) | this change (µs) | ratio [min] |
+|---|---|---|---|---|
+| `stl`, period 12, default windows | 100 | 60.6 | 61.0 | 1.01 [1.01] |
+| `stl`, period 12, default windows | 1,000 | 559.3 | 565.9 | 1.01 [1.01] |
+| `stl`, period 12, default windows | 10,000 | 5,385.3 | 5,458.7 | 1.01 [1.01] |
+
+The centring and rescaling add three O(n) passes around the f32 fit.
+
 ## References
 
 - Cleveland, R. B., Cleveland, W. S., McRae, J. E., & Terpenning, I. (1990). "STL: A Seasonal-Trend Decomposition
