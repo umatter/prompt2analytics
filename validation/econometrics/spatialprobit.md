@@ -2,7 +2,7 @@
 
 ## Method Overview
 
-The `spatialprobit` module implements Bayesian spatial probit models for binary dependent variables with spatial dependence. They follow the model of R's `spatialprobit` package (Wilhelm & de Matos, 2013). They are **not R-pinned**: that package is not installed, and the validation is by the property tests below.
+The `spatialprobit` module implements Bayesian spatial probit models for binary dependent variables with spatial dependence, by the Gibbs sampler of LeSage & Pace (2009, ch. 10), the scheme of R's `spatialprobit` package (Wilhelm & de Matos, 2013). The **posterior is not R-pinned**: that package is not installed, and an MCMC run could not reproduce its draws anyway. The deterministic pieces of the sampler and of the summaries (the full conditionals, the marginal probabilities, the composite log-likelihood and the impacts at given parameters) are R-pinned against base R (registry entry `spatial_probit_pieces` in `validation/methods/spatial_diag_t4.json`, case `spatial_probit_pieces_t4` of `validation/r/cases/spatial_diag_t4.R`), and the posterior is checked by recovering simulated parameters.
 
 ### Models Implemented
 
@@ -33,19 +33,75 @@ The `spatialprobit` module implements Bayesian spatial probit models for binary 
 
 ## Estimation Method
 
-Uses Bayesian MCMC with data augmentation following LeSage & Pace (2009):
+Gibbs sampling with data augmentation (Albert & Chib 1993), A = I - rho W, one sweep of each step per
+iteration:
 
-1. **Data Augmentation**: Albert & Chib (1993) method for latent y*
-2. **Sampling Steps**:
-   - Sample y* from the exact one-sided truncated normal given (beta, rho) and observed y: normal rejection when the bound is on the near side of the mean, Robert's (1995) exponential rejection when it is on the far side, so both tails are exact
-   - Sample beta from conjugate multivariate normal posterior
-   - Sample rho using Griddy Gibbs (Ritter & Tanner, 1992)
-3. **Posterior Inference**: Means, standard deviations, and credible intervals (R type-7 quantiles of the retained draws) from MCMC draws
+1. **Latent outcomes**: one single-site sweep. z_i given the others is N(m_i, 1 / H_ii) with H = A'A,
+   m_i = z_i - (A'(A z - c))_i / H_ii (c = X beta for SAR, A X beta for SEM), truncated to (0, inf) where
+   y_i = 1 and (-inf, 0] where y_i = 0. Each draw is exact: normal rejection when the bound is on the near
+   side of the mean, Robert's (1995) exponential rejection on the far side. The residual A z - c is
+   updated along column i of A after each draw, so a sweep costs O(links) with no solve. spatialprobit
+   runs m = 10 inner sweeps of its truncated multivariate normal sampler per iteration; both are valid
+   Gibbs schemes for the same posterior.
+2. **beta | z, rho**: conjugate normal, prior N(beta0, I / 0.01).
+3. **rho | z, beta**: griddy Gibbs on 2,000 cells of the prior range intersected with the interval where
+   A is invertible, with the log kernel ln|A| - ||A z - c||^2 / 2 (ln|A| from the eigenvalues of W, once
+   per fit); the draw inverts the trapezoid CDF within its cell. There is no rejection step, so
+   `acceptance_rate` is 1.
+
+**Summaries at the posterior mean** use the marginal distribution of each latent outcome,
+z_i ~ N(mu_i, sigma_i^2) with mu = A^-1 X beta (SAR) or X beta (SEM) and sigma_i^2 = [(A'A)^-1]_ii, from one
+dense inverse: `fitted_prob` = Phi(mu_i / sigma_i); `log_likelihood` is the composite (marginal)
+log-likelihood sum_i ln Phi(+-mu_i / sigma_i); McFadden's pseudo R^2 against the intercept-only probit; the
+percent correctly predicted. The joint likelihood is an n-dimensional orthant probability and is not
+computed, so `dic` and `log_marginal_likelihood` are NaN (spatialprobit reports neither).
+
+**Impacts** (per draw, then posterior mean and SD; intercept excluded):
+
+- SAR, spatialprobit's and LeSage & Pace's convention: phi_i = dnorm(mu_i), direct_k =
+  beta_k mean_i(phi_i [A^-1]_ii), total_k = beta_k mean_i(phi_i [A^-1 1]_i), indirect = total - direct.
+- SEM: the derivative of the reported probability Phi(mu_i / sigma_i), mu = X beta: direct_k =
+  beta_k mean_i(phi(mu_i / sigma_i) / sigma_i); no spillover (indirect 0, total = direct). The MCP tool
+  `sem_probit_model` does not request them.
+
+A^-1 is exact, not a truncated Neumann series: dense inverses at Chebyshev points of the second kind over
+the range of the rho draws (9 nodes, doubled to 17 or 33 until nested interpolants agree to 1e-10),
+interpolated barycentrically to each draw. When 33 nodes miss the target (rho draws reaching close to
+1 / lambda_max, where the multiplier is singular), the interpolant is measured against the dense inverse
+in its end cells and a warning reports the attained accuracy (about 3e-7 for draws spanning -0.3 to 0.92
+on the test weights).
 
 ## Validation
 
-There is no R reference: `spatialprobit` is not installed, and the seeded chains could not be
-compared anyway (`StdRng` is ChaCha12). What is checked:
+**R-pinned pieces** (`spatial_probit_pieces_t4`: kNN-4 row-standardised W of `spatial_sim`, n = 80,
+X = [1, x1, x2], beta = (-0.3, 0.8, -0.5); closed-form quantities, 1e-8 relative):
+
+- `test_validate_probit_rho_kernel_spatial_sim`: ln|I - rho W| and the SAR and SEM log kernels of rho on
+  the grid -0.9, ..., 0.9;
+- `test_validate_probit_latent_conditional_spatial_sim`: the full-conditional means of z_i (SAR and SEM)
+  and variances 1 / H_ii at rho = 0.6;
+- `test_validate_probit_marginal_probabilities_spatial_sim`: sigma_i, Phi(mu_i / sigma_i) and the composite
+  log-likelihood, SAR at rho = 0.5 and 0.9 and SEM at lambda = 0.6;
+- `test_validate_probit_impacts_exact_spatial_sim`: SAR direct, indirect and total effects at rho = 0.5
+  and 0.9 from the exact inverse;
+- `test_validate_sem_probit_direct_effects_spatial_sim`: SEM direct effects at lambda = 0.6;
+- `test_validate_dense_inverse_parts_spatial_sim` (`spatial::weights`): diag(A^-1), [(A'A)^-1]_ii and
+  A^-1 X.
+
+| Quantity (rho = 0.5) | x1 | x2 |
+|---|---|---|
+| direct | 0.260576 | -0.162860 |
+| indirect | 0.227208 | -0.142005 |
+| total | 0.487784 | -0.304865 |
+
+At rho = 0.9 the total effect of x1 is 1.115893; the ten-term Neumann series the impacts used before
+gave 1.036181 (7% short).
+
+**The posterior**: `sar_probit_recovers_dgp` and `sem_probit_recovers_dgp` simulate a 20 x 20 rook grid
+(row-standardised), beta = (0, 1), SAR rho = 0.5 and 0.8 and SEM lambda = 0.6, three seeds each, 2,000
+draws after 500 burn-in: the posterior mean is within 0.15 of the truth and the 95% credible interval
+covers it. `probit_rho_step_draws_from_the_kernel` draws 20,000 values of rho at fixed z and beta and
+compares their mean and SD with the kernel's by quadrature (within 4 Monte Carlo SEs).
 
 **The latent draws**, against the exact distribution. `test_truncated_normal_sampler_ks` and
 `test_truncated_normal_sampler_tail_6_sigma` draw 20,000 values from N(mu, 1) truncated at 0 and
@@ -70,27 +126,62 @@ The means and SDs are computed in R from `lam = dnorm(a) / pnorm(a, lower.tail =
 inverse-CDF sampler this replaced failed in both tails: at mu = 7 every draw was above the bound,
 and at mu = -8 every draw was the constant 0.01.
 
-**The impacts of one draw**: `probit_draw_impacts_match_r_reference` pins direct and total effects
-against the Neumann series transcribed in R.
+**The impacts interpolation**: `probit_impacts_interpolation_matches_dense` compares interpolated impacts
+with those of the dense inverse at off-node rho (1e-9 relative); `probit_impacts_interpolation_warns_near_the_singular_rho`
+checks the warning; `sem_probit_impacts_have_no_spillover`.
 
 **Credible intervals**: `test_spatial_probit_credible_intervals_are_type7` checks R's
 `quantile(type = 7)` formula on the sorted draws, to 1e-12.
 
 **Seeded chains**: `seeded_probit_runs_are_unchanged` pins seeded posterior summaries as a
-regression test. These are this implementation's own values, not a reference.
+regression test. These are this implementation's own values at seed 42, not a reference.
 
 Exact replication of an R run would require the same random stream. Posterior summaries agree
 with another implementation only up to Monte Carlo error.
 
 ### Differences from R spatialprobit
 
-1. **Approximation method**: a truncated Neumann series for (I - rho*W)^{-1}.
-2. **Griddy Gibbs**: a 50-point grid for rho.
+1. **Latent sweeps**: one single-site Gibbs sweep per iteration; spatialprobit runs m = 10 sweeps of
+   its sparse truncated-multivariate-normal sampler. Both target the same posterior; mixing per
+   iteration differs.
+2. **Impacts**: the exact multiplier (interpolated in rho to 1e-10), where spatialprobit approximates it by
+   a power series in W; the SAR convention is the same. SEM impacts have no spillover.
+3. **Fit statistics**: the composite log-likelihood at the posterior mean; no DIC or marginal
+   likelihood.
+
+## Timing against the previous implementation (Tier 4)
+
+Release build, scratch harness at f80b0131 and with this change; `--no-default-features --features ci`;
+one core (`taskset -c 8`, `RAYON_NUM_THREADS=1`), cwd `/dev/shm`; the two builds interleaved, seven
+processes each, the order alternating per round, each process the median of its calls after a warm-up;
+cells are the median over the seven processes, the ratio of the minima in brackets; 1-minute load
+average 6-21 (the machine was shared). Data: a binary outcome on a jittered grid with 4-nearest-neighbour weights, two regressors,
+the default configuration (seed 1); one call per process at n = 1,000 and 2,000. The rows with impacts
+were measured at commit 9f2f058f, before the griddy draw skipped negligible cells (which only removes
+work); the others with this change.
+
+| Model | n | f80b0131 (ms) | this change (ms) | ratio [min] |
+|---|---|---|---|---|
+| SAR probit, impacts | 100 | 115.2 | 125.7 | 1.09 [1.09] |
+| SAR probit, impacts | 1,000 | 2,777 | 6,564 | 2.36 [2.46] |
+| SAR probit, impacts | 2,000 | 12,710 | 43,611 | 3.43 [3.70] |
+| SAR probit, no impacts | 100 | 92.1 | 83.7 | 0.91 [0.90] |
+| SAR probit, no impacts | 1,000 | 2,421 | 2,181 | 0.90 [0.90] |
+| SAR probit, no impacts | 2,000 | 11,292 | 12,433 | 1.10 [1.06] |
+| SEM probit, no impacts | 100 | 69.6 | 88.6 | 1.27 [1.26] |
+| SEM probit, no impacts | 1,000 | 2,204 | 2,184 | 0.99 [1.05] |
+| SEM probit, no impacts | 2,000 | 10,514 | 11,742 | 1.12 [1.12] |
+
+The impacts cost 17 to 19 dense LU inverses of I - rho W (17 interpolation nodes and two checks against
+the dense inverse in the end cells), O(n^3) each, where the old code summed a truncated power series in
+W; above about n = 1,000 they dominate the run. The sampler itself (no impacts) costs what the old one
+did within about 10% from n = 1,000; at n = 100 the 2,000-cell rho grid evaluated per iteration
+dominates the SEM run.
 
 ## MCMC Diagnostics
 
 The result includes:
-- `acceptance_rate`: Should be between 0.2-0.8 for good mixing
+- `acceptance_rate`: always 1 (the griddy-Gibbs step has no rejection)
 - `beta_draws`: Full chain for convergence diagnostics
 - `rho_draws`: Full chain for spatial parameter
 - `credible_interval_*`: 95% credible intervals
@@ -109,11 +200,12 @@ The result includes:
 ### Key Functions
 - `run_sar_probit()`: SAR probit estimation
 - `run_sem_probit()`: SEM probit estimation
-- `sample_latent_y()`: Truncated normal sampling for y*
+- `sample_latent_sweep()`: one single-site Gibbs sweep over the latent outcomes
 - `standard_normal_truncated_below()`: Exact draw from N(0, 1) truncated to [a, inf) (Robert 1995)
 - `sample_beta()`: Conjugate normal posterior for beta
-- `sample_rho_griddy_gibbs()`: Griddy Gibbs for spatial parameter
-- `compute_spatial_probit_impacts()`: Direct/indirect/total effects
+- `rho_log_kernel()`, `draw_from_grid()`: griddy Gibbs for the spatial parameter
+- `marginal_summary()`: marginal probabilities and composite log-likelihood at given parameters
+- `compute_spatial_probit_impacts()`, `InverseInterpolant`: Direct/indirect/total effects
 
 ### Dependencies
 - `ndarray`: Matrix operations
@@ -167,7 +259,16 @@ All in `econometrics::spatialprobit::tests`:
   `probit_rejects_draw_counts_that_overflow_or_cannot_be_stored`, `probit_sampler_honours_cancellation`.
 - Output: `test_spatial_probit_display_lists_every_impact_se`,
   `test_spatial_probit_credible_intervals_are_type7`, `test_spatial_probit_unseeded_runs_are_reproducible`.
-- Pins: `probit_draw_impacts_match_r_reference`, `seeded_probit_runs_are_unchanged`.
+- R-pinned pieces: `test_validate_probit_rho_kernel_spatial_sim`,
+  `test_validate_probit_latent_conditional_spatial_sim`,
+  `test_validate_probit_marginal_probabilities_spatial_sim`,
+  `test_validate_probit_impacts_exact_spatial_sim`, `test_validate_sem_probit_direct_effects_spatial_sim`.
+- Posterior and sampler: `sar_probit_recovers_dgp`, `sem_probit_recovers_dgp`,
+  `probit_rho_step_draws_from_the_kernel`, `truncated_normal_far_bound_returns_the_bound`,
+  `ln_normal_cdf_is_accurate_in_both_tails`.
+- Impacts: `probit_impacts_interpolation_matches_dense`,
+  `probit_impacts_interpolation_warns_near_the_singular_rho`, `sem_probit_impacts_have_no_spillover`.
+- Pins: `seeded_probit_runs_are_unchanged`.
 - Missing values: `test_na_spatial_probit_int64_and_boolean_outcome`,
   `test_na_spatial_probit_missing_outcome`.
 

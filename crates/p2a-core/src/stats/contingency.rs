@@ -10,7 +10,7 @@
 //!
 //! Each builder counts in one O(n) pass over the factor codes into a buffer whose size is
 //! checked and allocated through [`crate::resource`], calling
-//! [`resource::checkpoint`](crate::resource::checkpoint) every 65,536 rows. No polars lazy
+//! [`resource::checkpoint`] every 65,536 rows. No polars lazy
 //! query runs, so the tables can be built inside an async runtime.
 //!
 //! ```

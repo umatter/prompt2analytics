@@ -137,11 +137,10 @@ fn lm_tests_benchmark(c: &mut Criterion) {
         // Clone listw for benchmarking (spatial_lm_tests takes mutable reference)
         let listw_clone = listw.clone();
 
+        // spatial_lm_tests fits the OLS itself (y on x_mat)
+        let y_arr = Array1::from(y.clone());
         group.bench_with_input(BenchmarkId::new("lm_tests", n), &n, |b, _| {
-            b.iter(|| {
-                let mut lw = listw_clone.clone();
-                spatial_lm_tests(residuals, &x_mat, &mut lw)
-            })
+            b.iter(|| spatial_lm_tests(&y_arr, &x_mat, &listw_clone))
         });
     }
     group.finish();

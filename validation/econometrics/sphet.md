@@ -38,7 +38,9 @@ reaches its iteration limit is reported as not converged too.
   Epanechnikov, rectangular, bisquare, Parzen, Tukey-Hanning, quadratic spectral), distances from
   unit coordinates or a distance matrix, and a fixed bandwidth or each unit's farthest
   W-neighbour as its bandwidth. A kernel that is not positive semi-definite can give a negative
-  variance; the result then carries a warning.
+  variance; the result then carries a warning and that SE reads 0. A variance that is not finite
+  (moments that overflow, e.g. y near 1e77) gives a NaN SE with a warning. Distances fall back to
+  `hypot` when the squared differences overflow.
 - SE of rho: the GMM sandwich `(J'J)^-1 J' Psi J (J'J)^-1 / n` of the identity-weighted GM
   estimator, with `Psi` the variance of the moments of Kelejian-Prucha (2010, Theorem 2) and its
   homoskedastic analogue with the third and fourth moments for `het = false`. The first-step

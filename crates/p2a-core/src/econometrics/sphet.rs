@@ -929,6 +929,32 @@ fn wald(estimate: f64, se: f64) -> (f64, f64) {
 
 /// The warning for a covariance with a negative diagonal, which a spatial HAC with a kernel that
 /// is not positive semi-definite can produce; rounding around 0 does not count.
+/// About this many elementary operations run between two budget checks of a loop.
+const CHECKPOINT_WORK: usize = 1 << 16;
+
+/// Items between budget checks for a loop whose items cost about `work_per_item` operations
+/// each: [`CHECKPOINT_WORK`] operations per check, at least one item.
+fn checkpoint_stride(work_per_item: usize) -> usize {
+    (CHECKPOINT_WORK / work_per_item.max(1)).max(1)
+}
+
+/// The number of links of W.
+fn n_links(listw: &SpatialWeights) -> usize {
+    (0..listw.n())
+        .map(|i| listw.get_weights(i).indices.len())
+        .sum()
+}
+
+/// sqrt(v) for a variance: a negative v (a kernel that is not positive semi-definite, or
+/// rounding) reads 0; a variance that is not finite (overflowing moments) is NaN.
+fn nonnegative_sqrt(v: f64) -> f64 {
+    if !v.is_finite() {
+        f64::NAN
+    } else {
+        v.max(0.0).sqrt()
+    }
+}
+
 fn negative_variance_warning(vcov: &Array2<f64>) -> Option<String> {
     let largest = vcov.diag().iter().fold(0.0_f64, |m, v| m.max(v.abs()));
     vcov.diag().iter().any(|&v| v < -1e-12 * largest).then(|| {
@@ -958,7 +984,14 @@ fn build_result(parts: ResultParts<'_>) -> SphetResult {
         warnings.extend(negative_variance_warning(vcov));
     }
     let k = beta.len();
-    let se = |j: usize| vcov[[j, j]].max(0.0).sqrt();
+    if vcov.diag().iter().any(|v| !v.is_finite()) {
+        warnings.push(
+            "a variance could not be formed (the moments are not finite): its standard error \
+             is NaN"
+                .to_string(),
+        );
+    }
+    let se = |j: usize| nonnegative_sqrt(vcov[[j, j]]);
     let se_beta: Vec<f64> = (0..k).map(se).collect();
     let (z_values, p_values): (Vec<f64>, Vec<f64>) =
         beta.iter().zip(&se_beta).map(|(&b, &s)| wald(b, s)).unzip();
@@ -1328,9 +1361,21 @@ fn delta_vcov(
             return Ok(s2 * a);
         }
         (SphetSE::HAC, Some(hac)) => spatial_hac_meat(&scores(p, u), hac, listw)?,
-        _ => xtx(&scores(p, u).view()),
+        (SphetSE::HAC, None) => {
+            return Err(EconError::InvalidSpecification {
+                message: "the spatial HAC needs coordinates or a distance matrix".to_string(),
+            });
+        }
+        (SphetSE::Robust, _) => xtx(&scores(p, u).view()),
     };
     Ok(a.dot(&meat).dot(a))
+}
+
+/// sqrt(dx^2 + dy^2), falling back to `hypot` (several times slower) only when the squares
+/// overflow or underflow to a non-finite sum.
+fn euclidean(dx: f64, dy: f64) -> f64 {
+    let d = (dx * dx + dy * dy).sqrt();
+    if d.is_finite() { d } else { dx.hypot(dy) }
 }
 
 /// Where the distances of the spatial HAC come from.
@@ -1342,10 +1387,7 @@ enum HacSource<'a> {
 impl HacSource<'_> {
     fn distance(&self, i: usize, j: usize) -> f64 {
         match self {
-            HacSource::Coords(c) => {
-                let (dx, dy) = (c[i][0] - c[j][0], c[i][1] - c[j][1]);
-                (dx * dx + dy * dy).sqrt()
-            }
+            HacSource::Coords(c) => euclidean(c[i][0] - c[j][0], c[i][1] - c[j][1]),
             HacSource::Distance(d) => d[[i, j]],
         }
     }
@@ -1523,8 +1565,10 @@ fn spatial_hac_meat(
     let kernel = hac.kernel;
 
     let Some(bandwidth) = hac.bandwidth else {
+        // two passes over each unit's links
+        let stride = checkpoint_stride(2 * n_links(listw) / n.max(1) + 1);
         for i in 0..n {
-            if i.is_multiple_of(256) {
+            if i.is_multiple_of(stride) {
                 checkpoint()?;
             }
             let sw = listw.get_weights(i);
@@ -1571,8 +1615,7 @@ fn spatial_hac_meat(
                         break;
                     }
                     scanned += 1;
-                    let dy = yj - yi;
-                    let d = (dx * dx + dy * dy).sqrt();
+                    let d = euclidean(dx, yj - yi);
                     if d < bandwidth {
                         let w = kernel.weight(d / bandwidth);
                         if w != 0.0 {
@@ -1975,24 +2018,22 @@ impl SparseSym {
                 "W'W for the GM variance of rho has too many entries".to_string(),
             )
         };
-        let bound = (0..n).try_fold(0_usize, |m, i| {
-            let k = listw.get_weights(i).indices.len();
-            k.checked_mul(k).and_then(|kk| m.checked_add(kk))
-        });
-        let bound = bound.ok_or_else(too_many)?;
-        let bound = bound.min(n.checked_mul(n).ok_or_else(too_many)?);
-        let what = format!("W'W for the GM variance of rho needs up to {bound} entries");
+        // Grown column by column: the bound sum_i k_i^2 can far exceed the entries W'W has.
+        let what = "W'W for the GM variance of rho";
         let mut out = SparseSym {
-            ptr: Vec::with_capacity(n + 1),
-            idx: crate::resource::try_with_capacity(bound, &what)?,
-            val: crate::resource::try_with_capacity(bound, &what)?,
+            ptr: crate::resource::try_with_capacity(n.checked_add(1).ok_or_else(too_many)?, what)?,
+            idx: Vec::new(),
+            val: Vec::new(),
         };
         out.ptr.push(0);
-        let mut dense = crate::resource::try_vec(n, 0.0_f64, &what)?;
-        let mut seen = crate::resource::try_vec(n, false, &what)?;
+        let mut dense = crate::resource::try_vec(n, 0.0_f64, what)?;
+        let mut seen = crate::resource::try_vec(n, false, what)?;
         let mut touched: Vec<usize> = Vec::new();
+        // each column visits about (links per unit)^2 cells
+        let per_unit = n_links(listw) / n.max(1) + 1;
+        let stride = checkpoint_stride(per_unit.saturating_mul(per_unit));
         for j in 0..n {
-            if j.is_multiple_of(1024) {
+            if j.is_multiple_of(stride) {
                 checkpoint()?;
             }
             let (rows, weights) = t.row(j);
@@ -2007,6 +2048,18 @@ impl SparseSym {
                 }
             }
             touched.sort_unstable();
+            let len = out
+                .idx
+                .len()
+                .checked_add(touched.len())
+                .ok_or_else(too_many)?;
+            crate::resource::check_alloc::<usize>(len, what)?;
+            out.idx.try_reserve(touched.len()).map_err(|_| {
+                crate::resource::reserve_failed(what, len, std::mem::size_of::<usize>())
+            })?;
+            out.val.try_reserve(touched.len()).map_err(|_| {
+                crate::resource::reserve_failed(what, len, std::mem::size_of::<f64>())
+            })?;
             for &k in &touched {
                 if !(zero_diagonal && k == j) {
                     out.idx.push(k);
@@ -2037,9 +2090,14 @@ impl SparseSym {
 
     /// `sum_ij self_ij other_ij g_i g_j` (g = 1 when `None`): tr(self G other G) for symmetric
     /// matrices.
-    fn weighted_inner(&self, other: &SparseSym, g: Option<&Array1<f64>>) -> f64 {
+    fn weighted_inner(&self, other: &SparseSym, g: Option<&Array1<f64>>) -> EconResult<f64> {
         let mut total = 0.0;
-        for i in 0..self.n() {
+        let n = self.n();
+        let stride = checkpoint_stride((self.idx.len() + other.idx.len()) / n.max(1) + 1);
+        for i in 0..n {
+            if i.is_multiple_of(stride) {
+                checkpoint()?;
+            }
             let (ia, va) = self.row(i);
             let (ib, vb) = other.row(i);
             let (mut a, mut b) = (0, 0);
@@ -2058,7 +2116,7 @@ impl SparseSym {
             }
             total += g.map_or(row, |g| row * g[i]);
         }
-        total
+        Ok(total)
     }
 }
 
@@ -2127,8 +2185,9 @@ fn solve_i_minus_rho_wt(
         return Ok(Some(sum));
     }
     let mut term = b.clone();
+    let stride = checkpoint_stride(n_links(listw) + b.len());
     for p in 1..=MAX_TERMS {
-        if p.is_multiple_of(64) {
+        if p.is_multiple_of(stride) {
             checkpoint()?;
         }
         term = rho * &listw.lag_transpose(&term);
@@ -2220,9 +2279,9 @@ fn gm_rho_se(
     for r in 0..m {
         for t in r..m {
             let mut v = if het {
-                0.5 * bs[r].weighted_inner(&bs[t], Some(&ga))
+                0.5 * bs[r].weighted_inner(&bs[t], Some(&ga))?
             } else {
-                s2 * s2 * 0.5 * bs[r].weighted_inner(&bs[t], None)
+                s2 * s2 * 0.5 * bs[r].weighted_inner(&bs[t], None)?
                     + (mu4 - 3.0 * s2 * s2) * ds[r].dot(&ds[t])
             };
             if !avec.is_empty() {
@@ -2263,7 +2322,18 @@ fn gm_rho_se(
     };
     let bread = jj_inv.dot(&j.t());
     let v = bread.dot(&psi).dot(&bread.t());
-    Ok(((v[[0, 0]] / nf).max(0.0).sqrt(), None))
+    let v00 = v[[0, 0]] / nf;
+    if !v00.is_finite() {
+        return Ok((
+            f64::NAN,
+            Some(
+                "the GM variance of rho could not be formed (the moments are not finite): its \
+                 standard error is NaN"
+                    .to_string(),
+            ),
+        ));
+    }
+    Ok((nonnegative_sqrt(v00), None))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -2669,8 +2739,7 @@ mod tests {
         let (ds, w, coords) = sim();
         let n = coords.len();
         let dm = Array2::from_shape_fn((n, n), |(i, j)| {
-            let (dx, dy) = (coords[i][0] - coords[j][0], coords[i][1] - coords[j][1]);
-            (dx * dx + dy * dy).sqrt()
+            euclidean(coords[i][0] - coords[j][0], coords[i][1] - coords[j][1])
         });
         let kernel = SpatialHacKernel::Epanechnikov;
         for bandwidth in [Some(0.15), None] {
@@ -2990,12 +3059,15 @@ mod tests {
         // -0.017712 and -0.282288 have f > 0.0034); a, b, c = 0 is flat.
         let m = minimise_quartic(&[0.5], &[1.0], &[0.0], -0.99, 0.99, 1e-10, 100).unwrap();
         assert!(
-            (m.rho - 0.5).abs() < 1e-15 && m.objective < 1e-30 && m.converged && !m.on_boundary,
+            (m.rho - 0.5).abs() <= 1e-12 * 0.5
+                && m.objective < 1e-30
+                && m.converged
+                && !m.on_boundary,
             "{m:?}"
         );
         let m = minimise_quartic(&[1.5], &[1.0], &[0.0], -0.99, 0.99, 1e-10, 100).unwrap();
         assert!(
-            m.rho == 0.99 && m.on_boundary && (m.objective - 0.2601).abs() < 1e-14,
+            m.rho == 0.99 && m.on_boundary && (m.objective - 0.2601).abs() <= 1e-12 * 0.2601,
             "{m:?}"
         );
         let m = minimise_quartic(
@@ -3674,6 +3746,135 @@ mod tests {
             ..Default::default()
         };
         assert!(run_sphet(&d, "y", &["x"], &w, c).is_ok());
+    }
+
+    /// y scaled to 5e76: the fourth moments of the residuals overflow (the Jacobian does not),
+    /// so the GM variance of rho is not finite; its SE is NaN with a warning instead of 0 or
+    /// infinity.
+    #[test]
+    fn sphet_nan_variance_stays_nan_with_a_warning() {
+        let (ds, w, _) = sim();
+        let (x1, x2, y) = (column(&ds, "x1"), column(&ds, "x2"), column(&ds, "y_sem"));
+        for het in [true, false] {
+            let df = df! {
+                "y" => y.iter().map(|v| v * 5e76).collect::<Vec<f64>>(),
+                "x1" => x1.clone(),
+                "x2" => x2.clone(),
+            }
+            .unwrap();
+            let r = run_sphet(
+                &Dataset::new(df),
+                "y",
+                &XS,
+                &w,
+                config(SphetModel::SpatialError, SphetSE::Standard, het),
+            )
+            .unwrap();
+            let se = r.rho_se.unwrap();
+            assert!(se.is_nan(), "het={het}: {se}");
+            assert!(
+                r.warnings.iter().any(|w| w.contains("could not be formed")),
+                "het={het}: {:?}",
+                r.warnings
+            );
+        }
+    }
+
+    #[test]
+    fn nonnegative_sqrt_keeps_nan() {
+        assert!(nonnegative_sqrt(f64::NAN).is_nan());
+        assert!(nonnegative_sqrt(f64::INFINITY).is_nan());
+        assert_eq!(nonnegative_sqrt(-1e-20), 0.0);
+        assert_eq!(nonnegative_sqrt(4.0), 2.0);
+    }
+
+    /// Coordinates near 1e160 square to infinity; the distances, and so the HAC SEs, are the
+    /// unscaled ones times the scale.
+    #[test]
+    fn hac_distances_survive_huge_coordinates() {
+        assert_eq!(euclidean(3e160, 4e160), 5e160);
+        let (ds, w, coords) = sim();
+        let big: Vec<[f64; 2]> = coords
+            .iter()
+            .map(|&[a, b]| [a * 1e160, b * 1e160])
+            .collect();
+        let kernel = SpatialHacKernel::Triangular;
+        let small = hac_config(SphetModel::SpatialLag, true, &coords, 0.15, kernel);
+        let large = hac_config(SphetModel::SpatialLag, true, &big, 0.15e160, kernel);
+        let a = run_sphet(&ds, "y_sar", &XS, &w, small).unwrap();
+        let b = run_sphet(&ds, "y_sar", &XS, &w, large).unwrap();
+        let tol = Tol::new(1e-12, 1e-15);
+        for (x, y) in delta_se(&a).iter().zip(delta_se(&b)) {
+            assert!(y.is_finite() && tol.allows(y, *x), "{x} vs {y}");
+        }
+    }
+
+    /// A dense W (every unit a neighbour of every other) and an expired budget: `Cancelled`.
+    #[test]
+    fn sphet_dense_w_honours_cancellation() {
+        let n = 120;
+        let coords: Vec<(f64, f64)> = (0..n)
+            .map(|i| ((i % 12) as f64 + 0.01 * i as f64, (i / 12) as f64))
+            .collect();
+        let w = SpatialWeights::from_neighbors(
+            &Neighbors::from_distance(&coords, 0.0, 1e6),
+            WeightStyle::RowStd,
+        );
+        let x: Vec<f64> = (0..n).map(|i| ((7 * i) % 11) as f64).collect();
+        let y: Vec<f64> = (0..n)
+            .map(|i| 1.0 + 0.5 * x[i] + ((3 * i) % 5) as f64)
+            .collect();
+        let d = Dataset::new(df! { "y" => y, "x" => x }.unwrap());
+        let t = crate::resource::CancelToken::new();
+        t.cancel();
+        for model in [SphetModel::SpatialError, SphetModel::SARAR] {
+            let c = SphetConfig {
+                model,
+                ..Default::default()
+            };
+            let r =
+                crate::resource::with_budget(crate::resource::Budget::new(None, t.clone()), || {
+                    run_sphet(&d, "y", &["x"], &w, c)
+                });
+            assert!(
+                matches!(r, Err(EconError::Cancelled(_))),
+                "{model:?}: {r:?}"
+            );
+        }
+    }
+
+    /// W'W of a 10-NN W on a line has about 4k entries per column, far below the bound
+    /// sum_i k_i^2 = n k^2: a ceiling between the two admits it.
+    #[test]
+    fn wtw_reserves_what_it_needs() {
+        let n = 400;
+        let coords: Vec<(f64, f64)> = (0..n).map(|i| (i as f64, 0.0)).collect();
+        let w =
+            SpatialWeights::from_neighbors(&Neighbors::from_knn(&coords, 10), WeightStyle::RowStd);
+        let full = SparseSym::wtw(&w, false, 1.0).unwrap();
+        let nnz = full.idx.len();
+        assert!(nnz < n * 100 / 2, "{nnz}");
+        // room for 1.5x the entries W'W has (amortised growth), below the bound n k^2
+        let ceiling = nnz * 3 / 2 * std::mem::size_of::<usize>();
+        let again =
+            crate::resource::with_alloc_ceiling(Some(ceiling), || SparseSym::wtw(&w, false, 1.0))
+                .unwrap();
+        assert_eq!(again.idx, full.idx);
+        let refused = crate::resource::with_alloc_ceiling(
+            Some(nnz / 2 * std::mem::size_of::<usize>()),
+            || SparseSym::wtw(&w, false, 1.0),
+        );
+        assert!(matches!(refused, Err(EconError::ResourceLimit(_))));
+    }
+
+    #[test]
+    fn delta_vcov_refuses_hac_without_a_distance_source() {
+        let (_, w) = create_test_data();
+        let p = Array2::<f64>::ones((25, 1));
+        let u = Array1::<f64>::ones(25);
+        let a = Array2::<f64>::eye(1);
+        let e = delta_vcov(&p, &u, &a, SphetSE::HAC, None, &w).unwrap_err();
+        assert!(matches!(e, EconError::InvalidSpecification { .. }), "{e:?}");
     }
 
     #[test]

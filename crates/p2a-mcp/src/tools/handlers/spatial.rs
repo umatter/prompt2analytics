@@ -13,6 +13,7 @@ use crate::server::AnalyticsServer;
 use crate::tools::common::parse_choice;
 use crate::tools::common::{self, NaPolicy, error_text, parse_option};
 use crate::tools::requests::spatial::*;
+use p2a_core::data::columns::ColumnRequest;
 use p2a_core::econometrics::spatialprobit::SPATIAL_PROBIT_DEFAULT_SEED;
 use p2a_core::options::Choices;
 
@@ -40,8 +41,6 @@ use p2a_core::{
     econometrics::sphet::SpatialHacKernel,
     // Moran's I test
     moran_test,
-    // Regression
-    regression::{CovarianceType, run_ols},
     // Spatial regression models
     run_sar,
     // Spatial probit
@@ -103,12 +102,12 @@ fn style_label(style: WeightStyle) -> &'static str {
 }
 
 /// How to proceed after a missing value in a spatial test or model (appended by
-/// [`with_hint`]).
+/// [`model_error`]).
 const MISSING_HINT_MODELS: &str = "Spatial models use one row per unit of the weights, so \
     incomplete rows cannot be dropped silently: remove them (munge_drop_na), then rebuild the \
     weights with spatial_neighbors on the cleaned dataset.";
 
-/// How to proceed after a missing coordinate (appended by [`with_hint`]).
+/// How to proceed after a missing coordinate (appended by [`model_error`]).
 const MISSING_HINT_NEIGHBORS: &str = "Row i of the weights is row i of the dataset, so a row \
     cannot be skipped: remove the rows with missing coordinates (munge_drop_na) and rebuild \
     the dataset's weights with spatial_neighbors.";
@@ -127,16 +126,6 @@ fn model_error(prefix: &str, e: &EconError, hint: &str) -> String {
         format!("{prefix}{e}\n{hint}")
     } else {
         format!("{prefix}{e}")
-    }
-}
-
-/// `message`, followed by `hint` on its own line when the message reports a missing value
-/// (for the column readers, whose errors are already text).
-fn with_hint(message: String, hint: &str) -> String {
-    if message.contains("missing value") {
-        format!("{message}\n{hint}")
-    } else {
-        message
     }
 }
 
@@ -171,15 +160,16 @@ impl AnalyticsServer {
         };
 
         // Coordinates: integer or float, no missing value (row i is unit i of the weights)
-        let cols = match common::numeric_columns(
-            &dataset,
-            &[&request.x_coord, &request.y_coord],
-            NaPolicy::Fail,
-        ) {
+        let cols = match ColumnRequest::new(dataset.df())
+            .numerics(&[request.x_coord.as_str(), request.y_coord.as_str()])
+            .na(NaPolicy::Fail)
+            .extract()
+        {
             Ok(c) => c,
             Err(e) => {
-                return error_text(with_hint(
-                    format!("Could not read the coordinates: {e}"),
+                return error_text(model_error(
+                    "Could not read the coordinates: ",
+                    &e,
                     MISSING_HINT_NEIGHBORS,
                 ));
             }
@@ -342,16 +332,20 @@ impl AnalyticsServer {
         };
 
         // The variable: integer, float or boolean, no missing value
-        let x_vec = match common::numeric_column(&dataset, &request.variable, NaPolicy::Fail) {
-            Ok((values, _)) => values,
+        let x = match ColumnRequest::new(dataset.df())
+            .numeric(&request.variable)
+            .na(NaPolicy::Fail)
+            .extract()
+        {
+            Ok(cols) => cols.numeric_array(&request.variable),
             Err(e) => {
-                return error_text(with_hint(
-                    format!("Could not read the variable: {e}"),
+                return error_text(model_error(
+                    "Could not read the variable: ",
+                    &e,
                     MISSING_HINT_MODELS,
                 ));
             }
         };
-        let x = ndarray::Array1::from_vec(x_vec);
         let n = x.len();
 
         match moran_test(&x, &listw, alternative) {
@@ -402,7 +396,7 @@ impl AnalyticsServer {
 
     /// Run spatial LM tests to choose between SAR and SEM models.
     #[tool(
-        description = "Run Lagrange Multiplier tests for spatial dependence. Tests for spatial lag (SAR) vs spatial error (SEM) dependence in OLS residuals. Includes robust versions that account for the presence of the other form of spatial dependence. Use to decide between SAR and SEM models. Equivalent to R's spdep::lm.LMtests()."
+        description = "Run Rao score (Lagrange multiplier) tests for spatial dependence in an OLS regression of y on x (with intercept): RSlag (spatial lag, rho), RSerr (spatial error, lambda), their robust forms adjRSlag and adjRSerr (each robust to a local form of the other), and the joint SARMA test (df 2). Use to choose between SAR and SEM models. Equivalent to R's spdep::lm.RStests(test = 'all') (named lm.LMtests before spdep 1.3); the robust forms are adjRSlag and adjRSerr. The tests assume row-standardised weights (style W) and warn otherwise, as spdep does. y and x must have no missing values."
     )]
     pub async fn spatial_lm_tests_tool(
         &self,
@@ -413,7 +407,7 @@ impl AnalyticsServer {
             crate::get_dataset!(datasets, &request.dataset).clone()
         };
 
-        let mut listw = match self.weights_snapshot(&request.weights).await {
+        let listw = match self.weights_snapshot(&request.weights).await {
             Some(w) => w,
             None => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -425,73 +419,65 @@ impl AnalyticsServer {
 
         let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
 
-        // Run OLS to get residuals
-        let ols_result = match run_ols(
-            &dataset,
-            &request.y,
-            &x_refs,
-            true,
-            CovarianceType::Standard,
-        ) {
-            Ok(r) => r,
+        // y and the design [1, X]; no missing value (row i is unit i of the weights)
+        let data = ColumnRequest::new(dataset.df())
+            .numeric(&request.y)
+            .numerics(&x_refs)
+            .na(NaPolicy::Fail)
+            .extract()
+            .and_then(|cols| {
+                let x = cols.matrix(&x_refs, true)?.data;
+                Ok((cols.numeric_array(&request.y), x))
+            });
+        let (y, x_mat) = match data {
+            Ok(d) => d,
             Err(e) => {
                 return error_text(model_error(
-                    "OLS estimation failed: ",
+                    "Could not read the variables: ",
                     &e,
                     MISSING_HINT_MODELS,
                 ));
             }
         };
 
-        // Design matrix [1, X] (the regressors OLS used; no missing value)
-        let x_mat = match common::numeric_columns(&dataset, &x_refs, NaPolicy::Fail)
-            .and_then(|cols| cols.matrix(&x_refs, true).map_err(|e| e.to_string()))
-        {
-            Ok(m) => m.data,
-            Err(e) => return error_text(with_hint(e, MISSING_HINT_MODELS)),
-        };
-
-        let tests = spatial_lm_tests(ols_result.residuals(), &x_mat, &mut listw);
-        self.keep_weights_cache(&request.weights, listw).await;
-        match tests {
+        // spatial_lm_tests fits the OLS of y on [1, X] itself
+        match spatial_lm_tests(&y, &x_mat, &listw) {
             Ok(result) => {
-                let output = format!(
-                    "Spatial Lagrange Multiplier Tests\n\
-                     ==================================\n\
+                let line = |label: &str, t: &p2a_core::spatial::LmTestResult| {
+                    format!(
+                        "{label} statistic = {:.4}, df = {}, p-value = {:.6}\n",
+                        t.statistic, t.df, t.p_value
+                    )
+                };
+                let mut output = format!(
+                    "Rao Score (Lagrange Multiplier) Tests for Spatial Dependence\n\
+                     ============================================================\n\
                      Dependent variable: {}\n\n\
-                     LM tests for spatial dependence:\n\
-                     --------------------------------\n\
-                     LM-Lag (ρ):     statistic = {:.4}, df = {}, p-value = {:.6}\n\
-                     LM-Error (λ):   statistic = {:.4}, df = {}, p-value = {:.6}\n\n\
-                     Robust LM tests (controlling for the other):\n\
-                     --------------------------------------------\n\
-                     RLM-Lag:        statistic = {:.4}, df = {}, p-value = {:.6}\n\
-                     RLM-Error:      statistic = {:.4}, df = {}, p-value = {:.6}\n\n\
-                     Joint SARMA test:\n\
-                     -----------------\n\
-                     LM-SARMA:       statistic = {:.4}, df = {}, p-value = {:.6}\n\n\
-                     Decision Rule:\n\
+                     Tests for spatial dependence:\n\
+                     -----------------------------\n",
+                    request.y
+                );
+                output.push_str(&line("LM-Lag (ρ)    [RSlag]:   ", &result.lm_lag));
+                output.push_str(&line("LM-Error (λ)  [RSerr]:   ", &result.lm_error));
+                output.push_str(
+                    "\nRobust tests (each robust to a local form of the other):\n\
+                     --------------------------------------------------------\n",
+                );
+                output.push_str(&line("RLM-Lag       [adjRSlag]:", &result.rlm_lag));
+                output.push_str(&line("RLM-Error     [adjRSerr]:", &result.rlm_error));
+                output.push_str("\nJoint test:\n-----------\n");
+                output.push_str(&line("LM-SARMA      [SARMA]:   ", &result.lm_sarma));
+                output.push_str(
+                    "\nDecision Rule (Anselin et al. 1996):\n\
                      - Both LM tests significant: use robust versions\n\
                      - Only RLM-Lag significant: use SAR model (lagsarlm)\n\
                      - Only RLM-Error significant: use SEM model (errorsarlm)\n\
                      - Both robust tests significant: use SARAR model",
-                    request.y,
-                    result.lm_lag.statistic,
-                    result.lm_lag.df,
-                    result.lm_lag.p_value,
-                    result.lm_error.statistic,
-                    result.lm_error.df,
-                    result.lm_error.p_value,
-                    result.rlm_lag.statistic,
-                    result.rlm_lag.df,
-                    result.rlm_lag.p_value,
-                    result.rlm_error.statistic,
-                    result.rlm_error.df,
-                    result.rlm_error.p_value,
-                    result.lm_sarma.statistic,
-                    result.lm_sarma.df,
-                    result.lm_sarma.p_value
                 );
+                for w in &result.warnings {
+                    output.push_str("\nWarning: ");
+                    output.push_str(w);
+                }
                 Ok(CallToolResult::success(vec![Content::text(output)]))
             }
             Err(e) => error_text(model_error(
@@ -796,9 +782,19 @@ impl AnalyticsServer {
                         .to_string(),
                 );
             };
-            let cols = match common::numeric_columns(&dataset, &[cx, cy], NaPolicy::Fail) {
+            let cols = match ColumnRequest::new(dataset.df())
+                .numerics(&[cx, cy])
+                .na(NaPolicy::Fail)
+                .extract()
+            {
                 Ok(c) => c,
-                Err(e) => return error_text(with_hint(e, MISSING_HINT_MODELS)),
+                Err(e) => {
+                    return error_text(model_error(
+                        "Could not read the coordinates: ",
+                        &e,
+                        MISSING_HINT_MODELS,
+                    ));
+                }
             };
             coords = Some(
                 cols.numeric(cx)
@@ -841,7 +837,7 @@ impl AnalyticsServer {
 
     /// Run SAR Probit model (spatial lag probit for binary outcomes).
     #[tool(
-        description = "Run Spatial Autoregressive (SAR) Probit model for binary dependent variables: y* = rho*W*y* + X*beta + epsilon, y = 1(y* > 0). Estimates spatial lag parameter rho via Bayesian MCMC with data augmentation. Use when binary outcomes have substantive spatial interaction (e.g., neighbor's choices affect own choice). Returns posterior means and SDs, the rho credible interval and, per variable, the direct, indirect and total marginal effects on the probability scale with their posterior SDs. Equivalent to R's spatialprobit::sarprobit(). The outcome may be a 0/1 integer, float or boolean column; missing values are refused."
+        description = "Run Spatial Autoregressive (SAR) Probit model for binary dependent variables: y* = rho*W*y* + X*beta + epsilon, y = 1(y* > 0). Estimates rho and beta by the Bayesian Gibbs sampler of LeSage & Pace (2009, ch. 10), the scheme of R's spatialprobit::sarprobit (latent outcomes from their full conditional, griddy Gibbs for rho with the log-determinant); the posterior is not R-pinned (MCMC draws differ from spatialprobit's). Use when binary outcomes have substantive spatial interaction (e.g., neighbor's choices affect own choice). Returns posterior means and SDs, the rho credible interval, the composite (marginal) log-likelihood, pseudo R-squared and percent correctly predicted at the posterior mean, and, per variable, the direct, indirect and total marginal effects on the probability scale (exact spatial multiplier) with their posterior SDs. The outcome may be a 0/1 integer, float or boolean column; missing values are refused."
     )]
     pub async fn sar_probit_model(
         &self,
@@ -919,23 +915,18 @@ impl AnalyticsServer {
                 output.push_str(&format!(
                     "\nModel Statistics:\n\
                      -----------------\n\
-                     Log-Likelihood: {:.4}\n\
-                     Log Marginal Likelihood (approx): {:.4}\n\
-                     DIC: {:.4}\n\
+                     Composite log-likelihood (marginal probabilities): {:.4}\n\
                      Pseudo R-squared: {:.4}\n\
                      Percent Correctly Predicted: {:.2}%\n\
                      N: {} (Y=1: {})\n\
-                     MCMC Draws: {}, Acceptance Rate: {:.2}%\n\
+                     MCMC Draws: {}\n\
                      Seed: {} ({})\n",
                     result.log_likelihood,
-                    result.log_marginal_likelihood,
-                    result.dic,
                     result.pseudo_r_squared,
                     result.pcp,
                     result.n_obs,
                     result.n_positive,
                     result.n_draws,
-                    result.acceptance_rate * 100.0,
                     seed,
                     seed_source
                 ));
@@ -958,7 +949,7 @@ impl AnalyticsServer {
 
     /// Run SEM Probit model (spatial error probit for binary outcomes).
     #[tool(
-        description = "Run Spatial Error (SEM) Probit model for binary dependent variables: y* = X*beta + u, u = lambda*W*u + epsilon, y = 1(y* > 0). Estimates spatial error parameter lambda via Bayesian MCMC. Use when binary outcomes have spatially correlated unobserved factors (nuisance spatial dependence). Equivalent to R's spatialprobit::semprobit(). The outcome may be a 0/1 integer, float or boolean column; missing values are refused."
+        description = "Run Spatial Error (SEM) Probit model for binary dependent variables: y* = X*beta + u, u = lambda*W*u + epsilon, y = 1(y* > 0). Estimates lambda and beta by the Bayesian Gibbs sampler of LeSage & Pace (2009, ch. 10), the scheme of R's spatialprobit::semprobit (latent outcomes from their full conditional, griddy Gibbs for lambda with the log-determinant); the posterior is not R-pinned (MCMC draws differ from spatialprobit's). Use when binary outcomes have spatially correlated unobserved factors (nuisance spatial dependence). Returns posterior means and SDs, the lambda credible interval, and the composite (marginal) log-likelihood, pseudo R-squared and percent correctly predicted at the posterior mean. The outcome may be a 0/1 integer, float or boolean column; missing values are refused."
     )]
     pub async fn sem_probit_model(
         &self,
@@ -1035,25 +1026,21 @@ impl AnalyticsServer {
                 output.push_str(&format!(
                     "\nModel Statistics:\n\
                      -----------------\n\
-                     Log-Likelihood: {:.4}\n\
-                     Log Marginal Likelihood (approx): {:.4}\n\
-                     DIC: {:.4}\n\
+                     Composite log-likelihood (marginal probabilities): {:.4}\n\
                      Pseudo R-squared: {:.4}\n\
                      Percent Correctly Predicted: {:.2}%\n\
                      N: {} (Y=1: {})\n\
-                     MCMC Draws: {}, Acceptance Rate: {:.2}%\n\
+                     MCMC Draws: {}\n\
                      Seed: {} ({})\n\n\
-                     Note: SEM Probit coefficients have their usual interpretation\n\
-                     (marginal effect = beta * phi(X'beta) at mean, no spatial multiplier)",
+                     Note: SEM Probit has no spatial multiplier: a regressor moves only its own\n\
+                     unit's probability Phi(x_i'beta / sigma_i), sigma_i the marginal SD of the\n\
+                     latent error",
                     result.log_likelihood,
-                    result.log_marginal_likelihood,
-                    result.dic,
                     result.pseudo_r_squared,
                     result.pcp,
                     result.n_obs,
                     result.n_positive,
                     result.n_draws,
-                    result.acceptance_rate * 100.0,
                     seed,
                     seed_source
                 ));
@@ -1977,6 +1964,92 @@ mod tests {
         .collect()
     }
 
+    /// The probit tools name the sampler they run and claim no equivalence to spatialprobit.
+    #[test]
+    fn test_mcp_probit_descriptions_name_the_sampler() {
+        let tools = AnalyticsServer::spatial_router().list_all();
+        for name in ["sar_probit_model", "sem_probit_model"] {
+            let d = tools
+                .iter()
+                .find(|t| t.name == name)
+                .unwrap_or_else(|| panic!("{name} is advertised"))
+                .description
+                .as_deref()
+                .unwrap_or_default()
+                .to_string();
+            assert!(
+                d.contains("LeSage & Pace (2009") && d.contains("not R-pinned"),
+                "{name}: {d}"
+            );
+            assert!(!d.contains("Equivalent to"), "{name}: {d}");
+        }
+    }
+
+    /// The probit outputs report the composite log-likelihood, with no acceptance rate,
+    /// DIC or harmonic-mean marginal likelihood.
+    #[test]
+    fn test_mcp_probit_output_has_no_acceptance_rate() {
+        let (rt, s) = server_with(vec![("pts", points_df(false))]);
+        let r = call(&s, Limits::off(), knn4("pts", "w"));
+        assert_ne!(r.is_error, Some(true), "{}", text(&r));
+        let texts = cross_section_texts(&rt, &s, "pts");
+        for (err, t) in &texts[5..] {
+            assert_ne!(*err, Some(true), "{t}");
+            assert!(t.contains("Composite log-likelihood"), "{t}");
+            for gone in ["Acceptance", "DIC", "Marginal Likelihood"] {
+                assert!(!t.contains(gone), "{gone}: {t}");
+            }
+        }
+    }
+
+    /// A missing value gets the hint of its tool: the coordinates of spatial_neighbors and
+    /// sphet's HAC, the variable of moran_test, and the probit outcome.
+    #[test]
+    fn test_mcp_spatial_missing_value_hint_by_variant() {
+        let mut na = points_df(false);
+        for col in ["gx", "v", "b"] {
+            let v: Vec<Option<i64>> = na
+                .column(col)
+                .unwrap()
+                .i64()
+                .unwrap()
+                .into_iter()
+                .enumerate()
+                .map(|(i, v)| if i == 4 { None } else { v })
+                .collect();
+            na.with_column(Column::new(col.into(), v)).unwrap();
+        }
+        let (rt, s) = server_with(vec![("pts", points_df(false)), ("na", na)]);
+        let r = call(&s, Limits::off(), knn4("pts", "w"));
+        assert_ne!(r.is_error, Some(true), "{}", text(&r));
+        let neighbors = call(&s, Limits::off(), knn4("na", "w2"));
+        let moran = rt.block_on(s.moran_test(Parameters(req(serde_json::json!({
+            "dataset": "na", "variable": "v", "weights": "w"
+        })))));
+        let sphet = rt.block_on(s.sphet_model(Parameters(req(serde_json::json!({
+            "dataset": "na", "y": "gy", "x": ["gy"], "weights": "w", "model": "lag",
+            "se_type": "hac", "coord_x": "gx", "coord_y": "gy",
+        })))));
+        let probit = rt.block_on(s.sar_probit_model(Parameters(req(serde_json::json!({
+            "dataset": "na", "y": "b", "x": ["gy"], "weights": "w",
+            "n_draws": 10, "burn_in": 5, "seed": 7,
+        })))));
+        for (what, r, column, hint) in [
+            ("neighbors", neighbors, "gx", MISSING_HINT_NEIGHBORS),
+            ("moran", moran.unwrap(), "v", MISSING_HINT_MODELS),
+            ("sphet", sphet.unwrap(), "gx", MISSING_HINT_MODELS),
+            ("probit", probit.unwrap(), "b", MISSING_HINT_MODELS),
+        ] {
+            let t = text(&r);
+            assert_eq!(r.is_error, Some(true), "{what}: {t}");
+            assert!(
+                t.contains(&format!("Column '{column}' contains 1 missing value(s)"))
+                    && t.ends_with(hint),
+                "{what}: {t}"
+            );
+        }
+    }
+
     #[test]
     fn test_mcp_spatial_models_int64_equal_float64() {
         let mut with_bool = points_df(false);
@@ -2133,6 +2206,72 @@ mod tests {
             assert!(
                 !t.contains("rebuild the weights with spatial_neighbors on the cleaned"),
                 "{t}"
+            );
+        }
+    }
+
+    /// The statistic and p-value printed on the line tagged `[name]`.
+    fn rs_line(t: &str, name: &str) -> (f64, f64) {
+        let tag = format!("[{name}]");
+        let line = t
+            .lines()
+            .find(|l| l.contains(&tag))
+            .unwrap_or_else(|| panic!("{tag} missing in {t}"));
+        let after = |key: &str| -> f64 {
+            let rest =
+                &line[line.find(key).unwrap_or_else(|| panic!("{key} in {line}")) + key.len()..];
+            rest.split(',').next().unwrap().trim().parse().unwrap()
+        };
+        (after("statistic = "), after("p-value = "))
+    }
+
+    /// R: spdep::lm.RStests(lm(y ~ x1 + x2), nb2listw(knn 4), test = "all") through the tool
+    /// text (spatial_diag_t4.R, case spatial_lm_diag_t4): statistics to 4 and p-values to 6
+    /// printed decimals.
+    #[test]
+    fn test_validate_mcp_lm_rstests_knn_spatial_sim() {
+        let case = p2a_validation::Case::load("spatial_lm_diag_t4");
+        let df = p2a_core::data::DataLoader::load_csv(case.dataset_path()).unwrap();
+        let (rt, s) = server_with(vec![("sim", df)]);
+        let r = call(
+            &s,
+            Limits::off(),
+            req(serde_json::json!({
+                "dataset": "sim", "x_coord": "cx", "y_coord": "cy",
+                "method": "knn", "k": 4, "weights_name": "w",
+            })),
+        );
+        assert_ne!(r.is_error, Some(true), "{}", text(&r));
+        let r = rt
+            .block_on(s.spatial_lm_tests_tool(Parameters(req(serde_json::json!({
+                "dataset": "sim", "y": "y", "x": ["x1", "x2"], "weights": "w"
+            })))))
+            .unwrap();
+        let t = text(&r);
+        assert_ne!(r.is_error, Some(true), "{t}");
+        assert!(!t.contains("Warning"), "{t}");
+        let stat = case.by_names(
+            "rstests_knn_stat",
+            &["RSerr", "RSlag", "adjRSerr", "adjRSlag", "SARMA"],
+        );
+        let p = case.by_names(
+            "rstests_knn_p",
+            &["RSerr", "RSlag", "adjRSerr", "adjRSlag", "SARMA"],
+        );
+        for (i, name) in ["RSerr", "RSlag", "adjRSerr", "adjRSlag", "SARMA"]
+            .iter()
+            .enumerate()
+        {
+            let (st, pv) = rs_line(&t, name);
+            assert!(
+                Tol::printed(4).allows(st, stat[i]),
+                "{name} {st} vs R {}",
+                stat[i]
+            );
+            assert!(
+                Tol::printed(6).allows(pv, p[i]),
+                "{name} p {pv} vs R {}",
+                p[i]
             );
         }
     }

@@ -63,7 +63,9 @@ pub struct MoranResult {
     pub alternative: MoranAlternative,
     /// Number of observations
     pub n: usize,
-    /// Units without neighbours; the statistic uses n - n_islands (spdep adjust.n = TRUE)
+    /// Units without neighbours. `moran_test` and `geary_test` use n - n_islands in the
+    /// statistic and its moments (spdep `adjust.n = TRUE`); `moran_test_residuals` uses the
+    /// linked units (spdep `lm.morantest(zero.policy = TRUE)`). `n` stays the row count.
     #[serde(default)]
     pub n_islands: usize,
 }
@@ -143,7 +145,7 @@ pub struct LocalMoranObs {
 pub struct LocalMoranResult {
     /// Local statistics for each observation
     pub local_stats: Vec<LocalMoranObs>,
-    /// Global Moran's I (sum of local I / n)
+    /// Global Moran's I, the sum of the local I over S0
     pub global_i: f64,
     /// Number of observations
     pub n: usize,
@@ -159,21 +161,28 @@ pub struct LocalMoranResult {
     pub n_low_high: usize,
     /// Count of not significant
     pub n_not_sig: usize,
+    /// Whether the moments are under conditional randomisation (spdep's default) or total
+    #[serde(default)]
+    pub conditional: bool,
 }
 
-/// Lagrange Multiplier tests for spatial dependence in regression residuals.
+/// Rao score (Lagrange multiplier) tests for spatial dependence in a linear regression
+/// (spdep `lm.RStests`; spdep's names in brackets).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpatialLmTests {
-    /// LM test for spatial lag (H0: ρ = 0)
+    /// Score test for a spatial lag, H0: ρ = 0 (RSlag)
     pub lm_lag: LmTestResult,
-    /// LM test for spatial error (H0: λ = 0)
+    /// Score test for a spatial error, H0: λ = 0 (RSerr)
     pub lm_error: LmTestResult,
-    /// Robust LM test for spatial lag (controlling for error)
+    /// Lag test robust to a local spatial error (adjRSlag)
     pub rlm_lag: LmTestResult,
-    /// Robust LM test for spatial error (controlling for lag)
+    /// Error test robust to a local spatial lag (adjRSerr)
     pub rlm_error: LmTestResult,
-    /// SARMA test (H0: ρ = λ = 0)
+    /// Joint test, H0: ρ = λ = 0 (SARMA, df 2)
     pub lm_sarma: LmTestResult,
+    /// Warnings (spdep's "Spatial weights matrix not row standardized")
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 /// What the global tests share: the moments of the centred variable and spdep's weight constants.
@@ -286,6 +295,14 @@ fn weight_constants(
 ///
 /// Test result with statistic, p-value, etc.
 ///
+/// # Errors
+///
+/// - `InvalidSpecification`: `x` and the weights differ in length, `x` has a non-finite value
+///   or is constant, its moments overflow, or the weights have no links (S0 = 0).
+/// - `InsufficientData`: fewer than 4 units with a neighbour.
+/// - `Computation`: the randomisation variance is not positive (a degenerate permutation
+///   distribution of `x`).
+///
 /// # Example
 ///
 /// ```
@@ -341,12 +358,7 @@ pub fn moran_test(
 
     // Z-score and p-value
     let z_score = (i_stat - ei) / vi.sqrt();
-    let normal = Normal::standard();
-    let p_value = match alternative {
-        MoranAlternative::TwoSided => normal_p_value_two_sided(z_score),
-        MoranAlternative::Greater => normal.sf(z_score),
-        MoranAlternative::Less => normal.cdf(z_score),
-    };
+    let p_value = normal_p_value(z_score, alternative);
 
     Ok(MoranResult {
         statistic: i_stat,
@@ -360,59 +372,81 @@ pub fn moran_test(
     })
 }
 
-/// Moran's I test for regression residuals.
+/// The p-value of a standard normal z under `alternative`.
+fn normal_p_value(z: f64, alternative: MoranAlternative) -> f64 {
+    let normal = Normal::standard();
+    match alternative {
+        MoranAlternative::TwoSided => normal_p_value_two_sided(z),
+        MoranAlternative::Greater => normal.sf(z),
+        MoranAlternative::Less => normal.cdf(z),
+    }
+}
+
+/// Moran's I test for regression residuals, as spdep's `lm.morantest(zero.policy = TRUE)`.
 ///
-/// Tests for spatial autocorrelation in OLS residuals, which indicates
-/// potential spatial dependence not captured by the model.
+/// Tests for spatial autocorrelation in OLS residuals, which indicates potential spatial
+/// dependence not captured by the model. W enters through its symmetric part
+/// U = (W + W')/2 (spdep `listw2U`), which leaves u'Wu, S0 and S1 unchanged; the moments
+/// account for the estimated coefficients (Cliff & Ord 1981, under normal errors):
+///
+/// ```text
+/// I = N/S0 u'Wu / u'u,   Z = U X,   C1 = X'Z,   C3 = (X'X)^-1 C1,   tr A = tr C3
+/// E[I] = -N tr A / ((N - p) S0)
+/// Var[I] = N^2 / (S0^2 (N - p)(N - p + 2)) (S1 + 2 tr C3^2 - 4 tr((X'X)^-1 Z'Z) - 2 (tr A)^2 / (N - p))
+/// ```
+///
+/// N is the number of units with at least one neighbour (spdep `zero.policy = TRUE`), p the
+/// rank of X: aliased columns are dropped as `lm` drops them (pivoted QR, tolerance 1e-7).
+/// spdep's default alternative is [`MoranAlternative::Greater`].
 ///
 /// # Arguments
 ///
-/// * `residuals` - OLS residuals
-/// * `x` - Design matrix (including intercept if applicable)
+/// * `residuals` - OLS residuals of y on `x`
+/// * `x` - Design matrix (including the intercept column if the model has one)
 /// * `listw` - Spatial weights
+/// * `alternative` - Alternative hypothesis
 ///
-/// # Returns
+/// # Errors
 ///
-/// Test result with statistic, p-value, etc.
+/// - `InvalidSpecification`: lengths differ, the weights have no links, the residuals are all
+///   zero or not finite, or `x` has a non-finite entry.
+/// - `InsufficientData`: N - p < 1.
+/// - `Computation`: the variance is not positive (a degenerate design).
 pub fn moran_test_residuals(
     residuals: &Array1<f64>,
     x: &Array2<f64>,
     listw: &SpatialWeights,
+    alternative: MoranAlternative,
 ) -> EconResult<MoranResult> {
-    // For residuals, we use a slightly different variance formula
-    // that accounts for the estimation of regression parameters
+    use crate::linalg::solve::{LM_QR_TOL, Qr};
+    use ndarray::Axis;
 
     let n = residuals.len();
     if n != listw.n() || n != x.nrows() {
         return Err(EconError::InvalidSpecification {
-            message: "Dimensions must match".to_string(),
+            message: format!(
+                "moran_test_residuals: the residuals ({n}), the rows of x ({}) and the weights \
+                 ({}) must have the same length",
+                x.nrows(),
+                listw.n()
+            ),
         });
     }
 
-    let k = x.ncols();
-    let df = n
-        .checked_sub(k)
-        .filter(|&d| d >= 1)
-        .ok_or_else(|| EconError::InsufficientData {
-            required: k + 1,
-            provided: n,
-            context: "moran_test_residuals: residual degrees of freedom n - k must be at least 1"
-                .to_string(),
-        })?;
-
-    // Compute Moran's I for residuals
+    // u'Wu = u'Uu, S0 and the islands in one pass over the links
     let mut numerator = 0.0;
     let mut s0 = 0.0;
-
+    let mut n_islands = 0;
     for i in 0..n {
         let sw = listw.get_weights(i);
-        for (idx, &j) in sw.indices.iter().enumerate() {
-            let w_ij = sw.weights[idx];
+        if sw.indices.is_empty() {
+            n_islands += 1;
+        }
+        for (&j, &w_ij) in sw.indices.iter().zip(sw.weights.iter()) {
             numerator += w_ij * residuals[i] * residuals[j];
             s0 += w_ij;
         }
     }
-
     if !(s0 > 0.0 && s0.is_finite()) {
         return Err(EconError::InvalidSpecification {
             message: "moran_test_residuals: the spatial weights have no links (S0 = 0): every \
@@ -428,34 +462,74 @@ pub fn moran_test_residuals(
                 .to_string(),
         });
     }
-    let i_stat = (n as f64 / s0) * (numerator / denominator);
 
-    // Expected value for residuals
-    let ei = -1.0 / (df as f64);
+    // The kept columns of X (lm drops aliased ones) and (X'X)^-1 on them
+    let qr = Qr::decompose(x.view(), LM_QR_TOL)?;
+    let p = qr.rank();
+    let n_linked = n - n_islands;
+    let df =
+        n_linked
+            .checked_sub(p)
+            .filter(|&d| d >= 1)
+            .ok_or_else(|| EconError::InsufficientData {
+                required: p + 1,
+                provided: n_linked,
+                context:
+                    "moran_test_residuals: units with a neighbour minus the rank of x must be at \
+                      least 1"
+                        .to_string(),
+            })?;
+    let aliased = qr.aliased();
+    let keep: Vec<usize> = (0..x.ncols()).filter(|j| !aliased.contains(j)).collect();
+    let cov = qr.unscaled_covariance()?;
+    let xtx_inv = cov.select(Axis(0), &keep).select(Axis(1), &keep);
+    let xk = x.select(Axis(1), &keep);
 
-    // Simplified variance (can be refined with more complex formula)
+    // Z = U X = (W X + W'X) / 2
+    let mut z = crate::resource::try_zeros2(n, p, "moran_test_residuals: U X")?;
+    for (c, col) in xk.columns().into_iter().enumerate() {
+        let col = col.to_owned();
+        let zc = 0.5 * (&listw.lag(&col) + &listw.lag_transpose(&col));
+        z.column_mut(c).assign(&zc);
+    }
+    let c1 = xk.t().dot(&z);
+    let c2 = z.t().dot(&z);
+    let c3 = xtx_inv.dot(&c1);
+    let tr_a: f64 = c3.diag().sum();
+    let tr_a2: f64 = (0..p)
+        .flat_map(|i| (0..p).map(move |j| (i, j)))
+        .map(|(i, j)| c3[[i, j]] * c3[[j, i]])
+        .sum();
+    let tr_b: f64 = 4.0
+        * (0..p)
+            .flat_map(|i| (0..p).map(move |j| (i, j)))
+            .map(|(i, j)| xtx_inv[[i, j]] * c2[[j, i]])
+            .sum::<f64>();
     let (s1, _s2) = compute_s1_s2(listw);
-    let n_f = n as f64;
-    let s0_sq = s0 * s0;
 
-    // Use simpler variance formula for residuals
-    let vi = (n_f * s1 - s0_sq) / ((n_f - 1.0) * s0_sq) - ei * ei;
-    let vi = vi.max(1e-10); // Ensure positive
+    let nn = n_linked as f64;
+    let dfp = df as f64;
+    let i_stat = (nn / s0) * (numerator / denominator);
+    let ei = -(nn * tr_a) / (dfp * s0);
+    let vi = (nn * nn) / (s0 * s0 * dfp * (dfp + 2.0))
+        * (s1 + 2.0 * tr_a2 - tr_b - 2.0 * tr_a * tr_a / dfp);
+    if !(vi > 0.0 && vi.is_finite()) {
+        return Err(EconError::Computation(format!(
+            "moran_test_residuals: the variance of I is not positive ({vi:e}); the design leaves \
+             no spatial variation in the residuals"
+        )));
+    }
 
     let z_score = (i_stat - ei) / vi.sqrt();
-    let p_value = normal_p_value_two_sided(z_score);
-
     Ok(MoranResult {
         statistic: i_stat,
         expectation: ei,
         variance: vi,
         z_score,
-        p_value,
-        alternative: MoranAlternative::TwoSided,
+        p_value: normal_p_value(z_score, alternative),
+        alternative,
         n,
-        n_islands: (0..n)
-            .filter(|&i| listw.get_weights(i).indices.is_empty())
-            .count(),
+        n_islands,
     })
 }
 
@@ -472,6 +546,14 @@ pub fn moran_test_residuals(
 /// # Returns
 ///
 /// Test result with statistic, p-value, etc.
+///
+/// # Errors
+///
+/// - `InvalidSpecification`: `x` and the weights differ in length, `x` has a non-finite value
+///   or is constant, its moments overflow, or the weights have no links (S0 = 0).
+/// - `InsufficientData`: fewer than 4 units with a neighbour.
+/// - `Computation`: the randomisation variance is not above 1e-8 S1/S0² (its scale): a
+///   degenerate permutation distribution of `x`.
 pub fn geary_test(x: &Array1<f64>, listw: &SpatialWeights) -> EconResult<GearyResult> {
     let n = x.len();
     let WeightConstants {
@@ -499,7 +581,7 @@ pub fn geary_test(x: &Array1<f64>, listw: &SpatialWeights) -> EconResult<GearyRe
         - 0.25 * (nn - 1.0) * s2 * (nn * nn + 3.0 * nn - 6.0 - b2 * (nn * nn - nn + 2.0))
         + s0_sq * (nn * nn - 3.0 - b2 * (nn - 1.0) * (nn - 1.0)))
         / (nn * (nn - 2.0) * (nn - 3.0) * s0_sq);
-    if vc.is_nan() || vc <= 1e-8 {
+    if geary_variance_degenerate(vc, s0, s1) {
         return Err(EconError::Computation(format!(
             "Geary's C randomisation variance is not positive ({vc:e}): the permutation \
              distribution of x is degenerate"
@@ -521,21 +603,41 @@ pub fn geary_test(x: &Array1<f64>, listw: &SpatialWeights) -> EconResult<GearyRe
     })
 }
 
-/// Local Moran's I (LISA) - Local Indicators of Spatial Association.
-///
-/// Decomposes global Moran's I into local contributions, allowing identification
-/// of local clusters (hot spots, cold spots) and spatial outliers.
-///
-/// # Arguments
-///
-/// * `x` - Variable to analyze
-/// * `listw` - Spatial weights
-/// * `alpha` - Significance level for cluster classification (default 0.05)
-/// * `permutations` - Number of permutations for inference (0 = analytical, >0 = simulation)
-///
-/// # Returns
-///
-/// Local Moran statistics for each observation with cluster classifications.
+/// Options of [`localmoran_with`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct LocalMoranConfig {
+    /// Significance level for the cluster classification (default 0.05)
+    pub alpha: f64,
+    /// Conditional permutations for the p-values; 0 (default) uses the normal approximation
+    pub permutations: usize,
+    /// Moments under conditional randomisation (spdep's default, `true`) or total
+    /// randomisation (`false`)
+    pub conditional: bool,
+    /// Seed of the permutations (default 42)
+    pub seed: u64,
+}
+
+impl Default for LocalMoranConfig {
+    fn default() -> Self {
+        Self {
+            alpha: 0.05,
+            permutations: 0,
+            conditional: true,
+            seed: 42,
+        }
+    }
+}
+
+/// Whether Geary's randomisation variance is degenerate: NaN, or not above 1e-8 of the scale
+/// S1/S0^2 that Var(C) has (about 2/(n k) for a k-regular binary W).
+fn geary_variance_degenerate(vc: f64, s0: f64, s1: f64) -> bool {
+    let floor = 1e-8 * s1 / (s0 * s0);
+    // NaN on either side counts as degenerate
+    vc.partial_cmp(&floor) != Some(std::cmp::Ordering::Greater)
+}
+
+/// Local Moran's I (LISA) with the default options of [`LocalMoranConfig`] (conditional
+/// moments, seed 42) and the given `alpha` and `permutations`; see [`localmoran_with`].
 ///
 /// # Example
 ///
@@ -559,99 +661,156 @@ pub fn geary_test(x: &Array1<f64>, listw: &SpatialWeights) -> EconResult<GearyRe
 /// # }
 /// ```
 ///
-/// # Reference
+/// # Errors
 ///
-/// Anselin, L. (1995). Local Indicators of Spatial Association—LISA.
-/// Geographical Analysis, 27(2), 93-115.
+/// As [`localmoran_with`].
 pub fn localmoran(
     x: &Array1<f64>,
     listw: &SpatialWeights,
     alpha: f64,
     permutations: usize,
 ) -> EconResult<LocalMoranResult> {
+    localmoran_with(
+        x,
+        listw,
+        &LocalMoranConfig {
+            alpha,
+            permutations,
+            ..LocalMoranConfig::default()
+        },
+    )
+}
+
+/// Local Moran's I (LISA) - Local Indicators of Spatial Association, as spdep's
+/// `localmoran(mlvar = TRUE, alternative = "two.sided")`.
+///
+/// I_i = (z_i / m2) Σ_j w_ij z_j with z = x - mean(x) and m2 = Σ z² / n. The moments follow
+/// spdep: under conditional randomisation (`conditional = true`, spdep's default), with
+/// W_i = Σ_j w_ij and W_i2 = Σ_j w_ij²,
+///
+/// ```text
+/// E[I_i] = -z_i² W_i / ((n - 1) m2)
+/// Var[I_i] = (z_i / m2)² n/(n - 2) (W_i2 - W_i²/(n - 1)) (m2 - z_i²/(n - 1))
+/// ```
+///
+/// and under total randomisation (`conditional = false`) E[I_i] = -W_i / (n - 1) with the
+/// Cliff-Ord variance through the kurtosis b2. The p-value is the two-sided normal one, or
+/// with `permutations > 0` the folded permutation p-value (spdep `localmoran_perm`'s
+/// "Pr(folded) Sim"), (min(r, nsim - r) + 1) / (nsim + 1) with r the permutations whose I_i is
+/// at least the observed one. Each permutation draws unit i's neighbour values without
+/// repeats from the other n - 1 values (Anselin's conditional permutation; spdep's
+/// `no_repeat_in_row = TRUE`, not its default). A zero variance (an island, or z_i = 0 under
+/// conditional moments) gives a NaN z-score and p-value and [`LisaCluster::NotSignificant`],
+/// where spdep gives NaN. `global_i` is Moran's I, Σ I_i / S0.
+///
+/// # Errors
+///
+/// - `InvalidSpecification`: `x` and the weights differ in length, `x` has a non-finite value
+///   or is constant, fewer than 3 units, or `alpha` is not in [0, 1].
+/// - `Cancelled`: the installed budget expired during the permutations.
+///
+/// # Reference
+///
+/// Anselin, L. (1995). Local Indicators of Spatial Association—LISA.
+/// Geographical Analysis, 27(2), 93-115.
+pub fn localmoran_with(
+    x: &Array1<f64>,
+    listw: &SpatialWeights,
+    config: &LocalMoranConfig,
+) -> EconResult<LocalMoranResult> {
     let n = x.len();
+    let alpha = config.alpha;
     if n != listw.n() {
         return Err(EconError::InvalidSpecification {
-            message: "Variable length must match weights matrix size".to_string(),
+            message: format!(
+                "localmoran: x has {n} values but the weights have {} units",
+                listw.n()
+            ),
         });
     }
     if n < 3 {
         return Err(EconError::InvalidSpecification {
-            message: "Need at least 3 observations for Local Moran's I".to_string(),
+            message: format!("localmoran: needs at least 3 observations, got {n}"),
+        });
+    }
+    if !(0.0..=1.0).contains(&alpha) {
+        return Err(EconError::InvalidSpecification {
+            message: format!("localmoran: alpha must lie in [0, 1], got {alpha}"),
+        });
+    }
+    let bad = x.iter().filter(|v| !v.is_finite()).count();
+    if bad > 0 {
+        return Err(EconError::InvalidSpecification {
+            message: format!("localmoran: x contains {bad} non-finite value(s)"),
+        });
+    }
+    if x.iter().all(|&v| v == x[0]) {
+        return Err(EconError::InvalidSpecification {
+            message: "localmoran: x is constant, so local autocorrelation is undefined".to_string(),
         });
     }
 
-    // Center and standardize the variable
-    let mean = x.mean().unwrap();
-    let z: Array1<f64> = x.mapv(|v| v - mean);
-    let m2: f64 = z.iter().map(|&zi| zi * zi).sum::<f64>() / n as f64;
-
-    // Compute local Moran's I for each observation
-    // I_i = (z_i / m2) * sum_j(w_ij * z_j)
-    let mut local_stats = Vec::with_capacity(n);
-    let mut sum_local_i = 0.0;
-
-    // Pre-compute the spatial lag of z
-    let wz = listw.lag(&z);
-
-    // Pre-compute kurtosis for variance calculation (avoid recomputing in loop)
-    let b2 = z.iter().map(|&zi| zi.powi(4)).sum::<f64>() / n as f64 / (m2 * m2);
     let n_f = n as f64;
-
-    // Compute observed local I values for all observations
-    let mut observed_local_i = Vec::with_capacity(n);
-    for i in 0..n {
-        let z_i = z[i];
-        let wz_i = wz[i];
-        let i_local = (z_i / m2) * wz_i;
-        observed_local_i.push(i_local);
-        sum_local_i += i_local;
+    let mean = x.sum() / n_f;
+    let z: Array1<f64> = x.mapv(|v| v - mean);
+    let m2: f64 = z.iter().map(|&zi| zi * zi).sum::<f64>() / n_f;
+    let b2 = z.iter().map(|&zi| zi.powi(4)).sum::<f64>() / n_f / (m2 * m2);
+    if !(m2.is_finite() && b2.is_finite()) {
+        return Err(EconError::InvalidSpecification {
+            message: "localmoran: the moments of x overflow; rescale x".to_string(),
+        });
     }
+    let wz = listw.lag(&z);
+    let observed: Vec<f64> = (0..n).map(|i| (z[i] / m2) * wz[i]).collect();
 
-    // Compute permutation p-values in batch if needed
-    let perm_pvalues = if permutations > 0 {
-        Some(compute_all_local_moran_pvalues_permutation(
+    let perm_pvalues = if config.permutations > 0 {
+        Some(local_moran_permutation_pvalues(
             &z,
-            &observed_local_i,
+            m2,
+            &observed,
             listw,
-            permutations,
+            config.permutations,
+            config.seed,
         )?)
     } else {
         None
     };
 
-    // Compute local statistics
+    let mut local_stats = Vec::with_capacity(n);
     for i in 0..n {
-        let z_i = z[i];
-        let wz_i = wz[i];
-        let i_local = observed_local_i[i];
-
-        // Expected value: E[I_i] = -w_i. / (n-1) where w_i. is row sum
+        let (z_i, wz_i, i_local) = (z[i], wz[i], observed[i]);
         let sw = listw.get_weights(i);
-        let w_i_sum: f64 = sw.weights.iter().sum();
-        let ei = -w_i_sum / (n_f - 1.0);
-
-        // Variance (conditional randomization)
-        let w_i_sq_sum: f64 = sw.weights.iter().map(|&w| w * w).sum();
-
-        // Simplified variance formula for local Moran
-        let vi = w_i_sq_sum * (n_f - b2) / (n_f - 1.0)
-            + (w_i_sum * w_i_sum - w_i_sq_sum) * (2.0 * b2 - n_f) / ((n_f - 1.0) * (n_f - 2.0))
-            - ei * ei;
-        let vi = vi.max(1e-10);
-
-        // Z-score and p-value
-        let z_score = (i_local - ei) / vi.sqrt();
-
-        let p_value = if let Some(ref pvals) = perm_pvalues {
+        let w_i: f64 = sw.weights.iter().sum();
+        let w_i2: f64 = sw.weights.iter().map(|&w| w * w).sum();
+        let (ei, vi) = if config.conditional {
+            let ei = -(z_i * z_i * w_i) / ((n_f - 1.0) * m2);
+            let vi = (z_i / m2).powi(2)
+                * (n_f / (n_f - 2.0))
+                * (w_i2 - w_i * w_i / (n_f - 1.0))
+                * (m2 - z_i * z_i / (n_f - 1.0));
+            (ei, vi)
+        } else {
+            let ei = -w_i / (n_f - 1.0);
+            let a = (n_f - b2) / (n_f - 1.0);
+            let b = (2.0 * b2 - n_f) / ((n_f - 1.0) * (n_f - 2.0));
+            (ei, a * w_i2 + b * (w_i * w_i - w_i2) - ei * ei)
+        };
+        // z = (I - E) / sqrt(V); NaN for a zero variance, as spdep
+        let z_score = if vi > 0.0 {
+            (i_local - ei) / vi.sqrt()
+        } else {
+            f64::NAN
+        };
+        let p_value = if z_score.is_nan() {
+            f64::NAN
+        } else if let Some(ref pvals) = perm_pvalues {
             pvals[i]
         } else {
-            // Analytical p-value (two-sided)
-            // once per unit, so the plain survival function rather than the extended-range tail
-            2.0 * Normal::standard().sf(z_score.abs())
+            // once per unit: the erfc lower tail 2 Phi(-|z|), accurate far out and several
+            // times cheaper than the chi-square route of `normal_p_value_two_sided`
+            2.0 * Normal::standard().cdf(-z_score.abs())
         };
 
-        // Determine cluster type
         let cluster = if p_value <= alpha {
             if z_i > 0.0 && wz_i > 0.0 {
                 LisaCluster::HighHigh
@@ -676,30 +835,17 @@ pub fn localmoran(
         });
     }
 
-    // Count clusters
-    let mut n_high_high = 0;
-    let mut n_low_low = 0;
-    let mut n_high_low = 0;
-    let mut n_low_high = 0;
-    let mut n_not_sig = 0;
-
-    for obs in &local_stats {
-        match obs.cluster {
-            LisaCluster::HighHigh => n_high_high += 1,
-            LisaCluster::LowLow => n_low_low += 1,
-            LisaCluster::HighLow => n_high_low += 1,
-            LisaCluster::LowHigh => n_low_high += 1,
-            LisaCluster::NotSignificant => n_not_sig += 1,
-        }
-    }
-
-    // Global Moran's I is sum of local I values divided by sum of weights
-    let s0 = listw.sum_weights();
-    let global_i = sum_local_i / s0 * n as f64;
-
+    let count = |c: LisaCluster| local_stats.iter().filter(|o| o.cluster == c).count();
+    let (n_high_high, n_low_low, n_high_low, n_low_high, n_not_sig) = (
+        count(LisaCluster::HighHigh),
+        count(LisaCluster::LowLow),
+        count(LisaCluster::HighLow),
+        count(LisaCluster::LowHigh),
+        count(LisaCluster::NotSignificant),
+    );
     Ok(LocalMoranResult {
+        global_i: observed.iter().sum::<f64>() / listw.sum_weights(),
         local_stats,
-        global_i,
         n,
         alpha,
         n_high_high,
@@ -707,75 +853,98 @@ pub fn localmoran(
         n_high_low,
         n_low_high,
         n_not_sig,
+        conditional: config.conditional,
     })
 }
 
-/// Compute all permutation p-values efficiently in a batch.
-///
-/// This is more efficient than calling compute_local_moran_pvalue_permutation
-/// for each observation because it:
-/// 1. Pre-computes m2 once
-/// 2. Reuses shuffled vectors across observations
-fn compute_all_local_moran_pvalues_permutation(
+/// Folded conditional-permutation p-values of local Moran's I (spdep `localmoran_perm`,
+/// "Pr(folded) Sim", with `no_repeat_in_row = TRUE`): in each of `nsim` permutations unit i's
+/// neighbours receive |N_i| values drawn without repeats from the other n - 1 values, and
+/// p_i = (min(r_i, nsim - r_i) + 1) / (nsim + 1) with r_i the count of I_perm >= I_i. The
+/// draws of permutation r come from a generator keyed by (seed, r). NaN for a unit without
+/// neighbours or with z_i = 0 (every permuted I_i is 0).
+fn local_moran_permutation_pvalues(
     z: &Array1<f64>,
-    observed_i: &[f64],
+    m2: f64,
+    observed: &[f64],
     listw: &SpatialWeights,
-    permutations: usize,
+    nsim: usize,
+    seed: u64,
 ) -> EconResult<Vec<f64>> {
-    use rand::SeedableRng;
-    use rand::seq::SliceRandom;
+    use rand::{Rng, SeedableRng};
     use rand_chacha::ChaCha8Rng;
 
     let n = z.len();
-    let m2: f64 = z.iter().map(|&zi| zi * zi).sum::<f64>() / n as f64;
-
-    // Count extreme values for each observation
-    let mut count_extreme = vec![0usize; n];
-
-    let mut rng = ChaCha8Rng::seed_from_u64(42);
-    let mut z_perm: Vec<f64> = z.iter().copied().collect();
-
-    for _ in 0..permutations {
+    let mut count = vec![0usize; n];
+    // A permutation of 0..n-1 (offsets among the other n - 1 units): a partial Fisher-Yates
+    // shuffle of any arrangement draws a uniform sample without repeats.
+    let mut pool: Vec<usize> = (0..n - 1).collect();
+    // I_perm >= I_obs up to rounding in the last digits, so that the observed neighbour set
+    // itself counts
+    let threshold: Vec<f64> = observed.iter().map(|&v| v - 1e-12 * v.abs()).collect();
+    for rep in 0..nsim {
         crate::resource::checkpoint()?;
-
-        // Shuffle z values (global permutation)
-        z_perm.shuffle(&mut rng);
-
-        // Compute spatial lag of permuted z
-        let wz_perm = listw.lag(&Array1::from_vec(z_perm.clone()));
-
-        // Compute local Moran's I for each observation under this permutation
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+        rng.set_stream(rep as u64);
         for i in 0..n {
-            let z_i = z[i]; // Keep original z_i (conditional permutation)
-            let i_perm = (z_i / m2) * wz_perm[i];
-
-            if i_perm.abs() >= observed_i[i].abs() {
-                count_extreme[i] += 1;
+            let sw = listw.get_weights(i);
+            if sw.indices.is_empty() {
+                continue;
+            }
+            let mut lag = 0.0;
+            for (t, &w) in sw.weights.iter().enumerate() {
+                let r = rng.gen_range(t..n - 1);
+                pool.swap(t, r);
+                let off = pool[t];
+                let j = if off >= i { off + 1 } else { off };
+                lag += w * z[j];
+            }
+            if (z[i] / m2) * lag >= threshold[i] {
+                count[i] += 1;
             }
         }
     }
-
-    // Convert counts to p-values
-    Ok(count_extreme
-        .iter()
-        .map(|&count| (count as f64 + 1.0) / (permutations as f64 + 1.0))
+    Ok((0..n)
+        .map(|i| {
+            if listw.get_weights(i).indices.is_empty() || z[i] == 0.0 {
+                return f64::NAN;
+            }
+            let r = count[i].min(nsim - count[i]);
+            (r as f64 + 1.0) / (nsim as f64 + 1.0)
+        })
         .collect())
 }
 
-/// Lagrange Multiplier tests for spatial dependence in regression residuals.
+/// Rao score (Lagrange multiplier) tests for spatial dependence in a linear regression, as
+/// spdep's `lm.RStests(test = "all")` (named `lm.LMtests` before spdep 1.3).
 ///
-/// Tests whether OLS residuals exhibit spatial lag or spatial error dependence.
-/// Includes both standard and robust versions of the tests.
+/// Fits OLS of `y` on `x` (pivoted QR; aliased columns are dropped as `lm` drops them), then
+/// with u the residuals, ŷ the fitted values, s² = u'u / n and T = tr(W'W + W²):
+///
+/// ```text
+/// RSerr    = (u'Wu / s²)² / T
+/// RSlag    = (u'Wy / s²)² / nJ,   nJ = (||M Wŷ||² + T s²) / s²   (M the residual maker of x)
+/// adjRSerr = (u'Wu/s² - T/nJ u'Wy/s²)² / (T (1 - T/nJ))
+/// adjRSlag = (u'Wy/s² - u'Wu/s²)² / (nJ - T)
+/// SARMA    = adjRSlag + RSerr                                     (df 2)
+/// ```
+///
+/// (Anselin 1988; Anselin, Bera, Florax & Yoon 1996). The fields carry spdep's tests:
+/// `lm_error` = RSerr, `lm_lag` = RSlag, `rlm_error` = adjRSerr, `rlm_lag` = adjRSlag,
+/// `lm_sarma` = SARMA. As spdep, the tests assume a row-standardised W and warn otherwise.
 ///
 /// # Arguments
 ///
-/// * `residuals` - OLS residuals
-/// * `x` - Design matrix (including intercept)
+/// * `y` - Dependent variable
+/// * `x` - Design matrix (including the intercept column if the model has one)
 /// * `listw` - Spatial weights
 ///
-/// # Returns
+/// # Errors
 ///
-/// Suite of LM test results
+/// - `InvalidSpecification`: lengths differ, or `y` or `x` has a non-finite value.
+/// - `InsufficientData`: no rows.
+/// - `Computation`: the residuals are all zero, the weights have no links (T = 0), or a
+///   denominator of a test is not positive; the message names the test.
 ///
 /// # Reference
 ///
@@ -783,140 +952,92 @@ fn compute_all_local_moran_pvalues_permutation(
 /// Anselin, L., Bera, A.K., Florax, R., Yoon, M.J. (1996). Simple diagnostic tests
 /// for spatial dependence. Regional Science and Urban Economics.
 pub fn spatial_lm_tests(
-    residuals: &Array1<f64>,
+    y: &Array1<f64>,
     x: &Array2<f64>,
-    listw: &mut SpatialWeights,
+    listw: &SpatialWeights,
 ) -> EconResult<SpatialLmTests> {
-    let n = residuals.len();
+    use crate::linalg::solve::least_squares;
+
+    let n = y.len();
     if n != listw.n() || n != x.nrows() {
         return Err(EconError::InvalidSpecification {
-            message: "Dimensions must match".to_string(),
+            message: format!(
+                "spatial_lm_tests: y ({n}), the rows of x ({}) and the weights ({}) must have \
+                 the same length",
+                x.nrows(),
+                listw.n()
+            ),
         });
     }
-
-    let k = x.ncols();
+    let fit = least_squares(x.view(), y.view())?;
+    let u = &fit.residuals;
+    let yhat = &fit.fitted;
     let n_f = n as f64;
 
-    // Compute sigma^2 = e'e / n
-    let sigma2: f64 = residuals.iter().map(|&r| r * r).sum::<f64>() / n_f;
-
-    // Compute We (spatially lagged residuals)
-    let we = listw.lag(residuals);
-
-    // Compute e'We / sigma^2
-    let ewe: f64 = residuals
-        .iter()
-        .zip(we.iter())
-        .map(|(&e, &we)| e * we)
-        .sum();
-    let ewe_scaled = ewe / sigma2;
-
-    // Compute trace terms: tr(WW + W'W), from the sparse rows in O(links)
-    let tr_t: f64 = listw.trace_w2() + listw.trace_wtw();
-
-    // Compute (WX)'(WX) related terms
-    // J = (1/sigma^2) * [tr(WW + W'W) + (WXb)'(WXb)/sigma^2]
-    // For residuals test, we use tr(T) directly
-
-    // LM-Lag test
-    // LM_lag = (e'We/sigma^2)^2 / [n * T22]
-    // where T22 involves tr(T) and other terms
-
-    // Compute M = I - X(X'X)^{-1}X' projection matrix trace
-    // For large problems, we approximate
-
-    // Compute X'X inverse
-    let xtx = x.t().dot(x);
-    let xtx_inv = crate::linalg::matrix_ops::matrix_inverse(&xtx.view())?;
-
-    // Compute WX
-    let mut wx = Array2::zeros((n, k));
-    for col in 0..k {
-        let x_col = x.column(col).to_owned();
-        let wx_col = listw.lag(&x_col);
-        for i in 0..n {
-            wx[[i, col]] = wx_col[i];
-        }
+    let sigma2 = u.dot(u) / n_f;
+    if !(sigma2 > 0.0 && sigma2.is_finite()) {
+        return Err(EconError::Computation(
+            "spatial_lm_tests: the OLS residuals are all zero (or overflow), so the score tests \
+             are undefined"
+                .to_string(),
+        ));
+    }
+    let tr_w = listw.trace_w2() + listw.trace_wtw();
+    if !(tr_w > 0.0 && tr_w.is_finite()) {
+        return Err(EconError::Computation(format!(
+            "spatial_lm_tests: tr(W'W + W^2) = {tr_w:e} is not positive: the weights have no links"
+        )));
     }
 
-    // Compute (WX)'M(WX) where M = I - X(X'X)^{-1}X'
-    // This equals WX'WX - WX'X(X'X)^{-1}X'WX
-    let wxtx = wx.t().dot(x);
-    let wxtwx = wx.t().dot(&wx);
+    let du_wu = u.dot(&listw.lag(u)) / sigma2;
+    let du_wy = u.dot(&listw.lag(y)) / sigma2;
+    // ||M W yhat||^2 = (WXb)'M(WXb), from the residuals of W yhat on x
+    let wyhat = listw.lag(yhat);
+    let m_wyhat = least_squares(x.view(), wyhat.view())?.residuals;
+    let nj = (m_wyhat.dot(&m_wyhat) + tr_w * sigma2) / sigma2;
 
-    let term = wxtx.dot(&xtx_inv).dot(&wxtx.t());
-    let j22 = (&wxtwx - &term).diag().sum() / sigma2 + tr_t;
+    let positive = |v: f64, what: &str| -> EconResult<f64> {
+        if v > 0.0 && v.is_finite() {
+            Ok(v)
+        } else {
+            Err(EconError::Computation(format!(
+                "spatial_lm_tests: the denominator of {what} is not positive ({v:e})"
+            )))
+        }
+    };
+    let rs_err = du_wu * du_wu / tr_w;
+    let rs_lag = du_wy * du_wy / positive(nj, "RSlag")?;
+    let adj_err_den = positive(tr_w * (1.0 - tr_w / nj), "adjRSerr")?;
+    let adj_rs_err = (du_wu - tr_w / nj * du_wy).powi(2) / adj_err_den;
+    let adj_rs_lag = (du_wy - du_wu).powi(2) / positive(nj - tr_w, "adjRSlag")?;
+    let sarma = adj_rs_lag + rs_err;
 
-    // LM-Error test
-    // LM_error = (e'We/sigma^2)^2 / tr(T)
-    let lm_error_stat = ewe_scaled.powi(2) / tr_t;
-
-    // LM-Lag test
-    // LM_lag = (e'Wy/sigma^2)^2 / (WXMWX/sigma^2 + tr(T))
-    // where y = Xb + e, so Wy = WXb + We
-    // We approximate: e'Wy ≈ e'We since e'WXb = 0 in expectation
-    let lm_lag_stat = ewe_scaled.powi(2) / j22;
-
-    // Robust LM tests (controlling for the other spatial effect)
-    // RLM_lag = (e'We/sigma^2 - e'We/sigma^2 * tr(T)/J22)^2 / (J22 - tr(T)^2/J22)
-    // Simplified formulation:
-
-    let t_j = tr_t / j22;
-
-    // RLM-Lag
-    let rlm_lag_numer = (ewe_scaled - ewe_scaled * t_j).powi(2);
-    let rlm_lag_denom = j22 - tr_t * t_j;
-    let rlm_lag_stat = if rlm_lag_denom > 1e-10 {
-        rlm_lag_numer / rlm_lag_denom
-    } else {
-        0.0
+    let test = |statistic: f64, df: usize| LmTestResult {
+        statistic,
+        df,
+        p_value: chi_squared_p_value(statistic, df as f64),
     };
 
-    // RLM-Error
-    let rlm_error_numer = (ewe_scaled - lm_lag_stat.sqrt()).powi(2);
-    let rlm_error_denom = tr_t - j22.recip() * tr_t.powi(2);
-    let rlm_error_stat = if rlm_error_denom > 1e-10 {
-        rlm_error_numer / rlm_error_denom
-    } else {
-        0.0
-    };
-
-    // SARMA test (joint test for both lag and error)
-    let lm_sarma_stat = lm_lag_stat + rlm_error_stat;
-
-    // Compute p-values (chi-squared distribution)
-    let p_lm_lag = chi_squared_p_value(lm_lag_stat.max(0.0), 1.0);
-    let p_lm_error = chi_squared_p_value(lm_error_stat.max(0.0), 1.0);
-    let p_rlm_lag = chi_squared_p_value(rlm_lag_stat.max(0.0), 1.0);
-    let p_rlm_error = chi_squared_p_value(rlm_error_stat.max(0.0), 1.0);
-    let p_lm_sarma = chi_squared_p_value(lm_sarma_stat.max(0.0), 2.0);
+    let mut warnings = Vec::new();
+    let off = (0..n)
+        .map(|i| listw.get_weights(i))
+        .filter(|sw| !sw.weights.is_empty())
+        .any(|sw| (sw.weights.iter().sum::<f64>() - 1.0).abs() > 1e-10);
+    if off {
+        warnings.push(
+            "W is not row-standardised (spdep: \"Spatial weights matrix not row standardized\"); \
+             the score tests assume row sums of 1"
+                .to_string(),
+        );
+    }
 
     Ok(SpatialLmTests {
-        lm_lag: LmTestResult {
-            statistic: lm_lag_stat,
-            df: 1,
-            p_value: p_lm_lag,
-        },
-        lm_error: LmTestResult {
-            statistic: lm_error_stat,
-            df: 1,
-            p_value: p_lm_error,
-        },
-        rlm_lag: LmTestResult {
-            statistic: rlm_lag_stat,
-            df: 1,
-            p_value: p_rlm_lag,
-        },
-        rlm_error: LmTestResult {
-            statistic: rlm_error_stat,
-            df: 1,
-            p_value: p_rlm_error,
-        },
-        lm_sarma: LmTestResult {
-            statistic: lm_sarma_stat,
-            df: 2,
-            p_value: p_lm_sarma,
-        },
+        lm_lag: test(rs_lag, 1),
+        lm_error: test(rs_err, 1),
+        rlm_lag: test(adj_rs_lag, 1),
+        rlm_error: test(adj_rs_err, 1),
+        lm_sarma: test(sarma, 2),
+        warnings,
     })
 }
 
@@ -1110,6 +1231,31 @@ mod tests {
     }
 
     #[test]
+    fn geary_refuses_a_degenerate_permutation_distribution() {
+        let ring4 = SpatialWeights::from_neighbors(
+            &Neighbors::from_indices((0..4).map(|i| vec![(i + 1) % 4, (i + 3) % 4]).collect()),
+            crate::spatial::WeightStyle::RowStd,
+        );
+        match geary_test(&array![0.0, 0.0, 0.0, 1.0], &ring4) {
+            Err(EconError::Computation(m)) => assert!(m.contains("variance"), "{m}"),
+            other => panic!("expected Computation, got {other:?}"),
+        }
+    }
+
+    /// Var(C) scales as S1/S0^2 (about 2/(n k) for a k-regular binary W), so the guard is
+    /// relative to it: a large sparse W has a small but valid variance.
+    #[test]
+    fn geary_variance_guard_is_relative_to_s1_over_s0_squared() {
+        // n k = 1e9: S0 = 1e9, S1 = 2e9, S1/S0^2 = 2e-9
+        let (s0, s1) = (1e9, 2e9);
+        assert!(!geary_variance_degenerate(1e-9, s0, s1));
+        assert!(geary_variance_degenerate(1e-18, s0, s1));
+        assert!(geary_variance_degenerate(0.0, s0, s1));
+        assert!(geary_variance_degenerate(-1e-9, s0, s1));
+        assert!(geary_variance_degenerate(f64::NAN, s0, s1));
+    }
+
+    #[test]
     fn test_moran_alternative_parses_aliases_and_rejects_unknown() {
         MoranAlternative::choices().validate().unwrap();
         for (s, v) in [
@@ -1144,13 +1290,19 @@ mod tests {
             crate::spatial::WeightStyle::RowStd,
         );
         let e = Array1::from_vec(vec![0.1, -0.2, 0.1]);
-        match moran_test_residuals(&e, &Array2::ones((3, 4)), &ring3) {
+        // rank 3: N - p = 0 (the rank counts, not the columns: lm drops aliased ones)
+        let x = Array2::from_shape_vec(
+            (3, 4),
+            vec![1.0, 0.2, 0.5, 1.1, 1.0, 1.3, -0.4, 0.7, 1.0, -0.8, 0.9, 2.0],
+        )
+        .unwrap();
+        match moran_test_residuals(&e, &x, &ring3, MoranAlternative::Greater) {
             Err(EconError::InsufficientData {
-                required: 5,
+                required: 4,
                 provided: 3,
                 ..
             }) => {}
-            other => panic!("expected InsufficientData {{ 5, 3 }}, got {other:?}"),
+            other => panic!("expected InsufficientData {{ 4, 3 }}, got {other:?}"),
         }
     }
 
@@ -1191,26 +1343,6 @@ mod tests {
 
         // For positive autocorrelation, C should be < 1
         assert!(result.statistic < result.expectation);
-    }
-
-    #[test]
-    fn test_lm_tests() {
-        let mut listw = test_weights();
-
-        // Simple residuals
-        let residuals = Array1::from_vec(vec![0.1, -0.2, 0.15, -0.05]);
-        let x =
-            Array2::from_shape_vec((4, 2), vec![1.0, 1.0, 1.0, 2.0, 1.0, 3.0, 1.0, 4.0]).unwrap();
-
-        let result = spatial_lm_tests(&residuals, &x, &mut listw).unwrap();
-
-        // All statistics should be non-negative
-        assert!(result.lm_lag.statistic >= 0.0);
-        assert!(result.lm_error.statistic >= 0.0);
-
-        // p-values should be in [0, 1]
-        assert!(result.lm_lag.p_value >= 0.0 && result.lm_lag.p_value <= 1.0);
-        assert!(result.lm_error.p_value >= 0.0 && result.lm_error.p_value <= 1.0);
     }
 
     #[test]
@@ -1315,17 +1447,13 @@ mod tests {
         t.diag().sum()
     }
 
-    /// OLS residuals of y ~ x1 on the fixture and the design [1, x1].
+    /// y and the design [1, x1] of the fixture.
     fn fixture_ols() -> (Array1<f64>, Array2<f64>) {
-        use crate::LinearEstimator;
-        use crate::regression::{CovarianceType, run_ols};
-        let ols = run_ols(&dataset(), "y", &["x1"], true, CovarianceType::Standard).unwrap();
-        let e = ols.residuals().to_owned();
         let mut x = Array2::ones((30, 2));
         for (i, &v) in crate::spatial::test_fixtures::X1.iter().enumerate() {
             x[[i, 1]] = v;
         }
-        (e, x)
+        (Array1::from(Y.to_vec()), x)
     }
 
     // R 4.3.3 (fixture), W row-standardised knn3, B binary knn3, Wd row-standardised band (0, 2]:
@@ -1379,54 +1507,456 @@ mod tests {
         }
     }
 
+    /// spatial_sim (n = 80) of a T4 case: y, X = [1, x1, x2] and the coordinates.
+    fn sim_design(ds: &crate::data::Dataset) -> (Array1<f64>, Array2<f64>, Vec<(f64, f64)>) {
+        let (x1, x2) = (col(ds, "x1"), col(ds, "x2"));
+        let mut x = Array2::ones((x1.len(), 3));
+        for i in 0..x1.len() {
+            x[[i, 1]] = x1[i];
+            x[[i, 2]] = x2[i];
+        }
+        (Array1::from(col(ds, "y")), x, coords_of(ds))
+    }
+
+    /// Residuals of lm(y ~ X).
+    fn ols_residuals(y: &Array1<f64>, x: &Array2<f64>) -> Array1<f64> {
+        crate::linalg::solve::least_squares(x.view(), y.view())
+            .unwrap()
+            .residuals
+    }
+
+    fn sim_knn4(coords: &[(f64, f64)]) -> SpatialWeights {
+        SpatialWeights::from_neighbors(
+            &Neighbors::try_from_knn(coords, 4).unwrap(),
+            WeightStyle::RowStd,
+        )
+    }
+
+    fn sim_band(coords: &[(f64, f64)], d: f64, style: WeightStyle) -> SpatialWeights {
+        SpatialWeights::from_neighbors(
+            &Neighbors::try_from_distance(coords, 0.0, d, None).unwrap(),
+            style,
+        )
+    }
+
+    const MORAN_KEYS: [&str; 4] = ["I", "E", "V", "z"];
+
+    fn check_lm_moran(chk: &mut p2a_validation::Check<'_>, key: &str, r: &MoranResult, n: usize) {
+        use p2a_validation::Tol;
+        let names = ["I", "E", "V", "z", "p"];
+        let vals = [r.statistic, r.expectation, r.variance, r.z_score, r.p_value];
+        chk.named_subset(key, &MORAN_KEYS, &names, &vals, Tol::stat(n))
+            .named_subset(key, &["p"], &names, &vals, Tol::p_value(n));
+    }
+
+    /// R: spdep::lm.morantest(lm(y ~ x1 + x2), nb2listw(knn 4), alternative, zero.policy = TRUE)
+    /// (spatial_diag_t4.R, case spatial_lm_diag_t4).
+    #[test]
+    fn test_validate_lm_morantest_knn_spatial_sim() {
+        let (case, ds) = crate::test_support::load_case("spatial_lm_diag_t4");
+        let (y, x, coords) = sim_design(&ds);
+        let u = ols_residuals(&y, &x);
+        let w = sim_knn4(&coords);
+        let n = y.len();
+        let mut chk = p2a_validation::Check::new(&case);
+        chk.vector(
+            "residuals",
+            u.as_slice().unwrap(),
+            p2a_validation::Tol::coef(n),
+        );
+        for (key, alt) in [
+            ("lmmoran_knn_greater", MoranAlternative::Greater),
+            ("lmmoran_knn_two_sided", MoranAlternative::TwoSided),
+            ("lmmoran_knn_less", MoranAlternative::Less),
+        ] {
+            let r = moran_test_residuals(&u, &x, &w, alt).unwrap();
+            assert_eq!(r.alternative, alt);
+            check_lm_moran(&mut chk, key, &r, n);
+        }
+        chk.finish();
+    }
+
+    /// R: lm.morantest on a distance band (0, 0.2] whose row sums vary, style W (asymmetric
+    /// after standardisation, so listw2U matters) and B.
+    #[test]
+    fn test_validate_lm_morantest_band_styles_spatial_sim() {
+        let (case, ds) = crate::test_support::load_case("spatial_lm_diag_t4");
+        let (y, x, coords) = sim_design(&ds);
+        let u = ols_residuals(&y, &x);
+        let mut chk = p2a_validation::Check::new(&case);
+        for (key, style) in [
+            ("lmmoran_band_W", WeightStyle::RowStd),
+            ("lmmoran_band_B", WeightStyle::Binary),
+        ] {
+            let w = sim_band(&coords, 0.2, style);
+            let r = moran_test_residuals(&u, &x, &w, MoranAlternative::Greater).unwrap();
+            check_lm_moran(&mut chk, key, &r, y.len());
+        }
+        chk.finish();
+    }
+
+    /// R: lm.morantest(zero.policy = TRUE) on the band (0, 0.12] with four islands: N counts
+    /// the 76 linked units.
+    #[test]
+    fn test_validate_lm_morantest_islands_spatial_sim() {
+        let (case, ds) = crate::test_support::load_case("spatial_lm_diag_t4");
+        let (y, x, coords) = sim_design(&ds);
+        let u = ols_residuals(&y, &x);
+        let w = sim_band(&coords, 0.12, WeightStyle::RowStd);
+        let r = moran_test_residuals(&u, &x, &w, MoranAlternative::Greater).unwrap();
+        assert_eq!((r.n, r.n_islands), (80, 4));
+        let mut chk = p2a_validation::Check::new(&case);
+        check_lm_moran(&mut chk, "lmmoran_islands_W", &r, y.len());
+        chk.finish();
+    }
+
+    /// A 12 x 12 rook grid, row-standardised.
+    fn rook_grid(side: usize) -> SpatialWeights {
+        let lists = (0..side * side)
+            .map(|i| {
+                let (r, c) = (i / side, i % side);
+                let mut v = Vec::new();
+                if r > 0 {
+                    v.push(i - side);
+                }
+                if c > 0 {
+                    v.push(i - 1);
+                }
+                if c + 1 < side {
+                    v.push(i + 1);
+                }
+                if r + 1 < side {
+                    v.push(i + side);
+                }
+                v
+            })
+            .collect();
+        SpatialWeights::from_neighbors(&Neighbors::from_indices(lists), WeightStyle::RowStd)
+    }
+
+    /// Under H0 (independent normal errors) the lm.morantest z-score has mean 0 and variance 1
+    /// and the 5% two-sided test rejects about 5% of the time.
+    #[test]
+    fn lm_morantest_under_h0_has_unit_variance_z() {
+        use rand::SeedableRng;
+        use rand_distr::{Distribution, StandardNormal};
+        let w = rook_grid(12);
+        let n = w.n();
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(7);
+        let mut x = Array2::ones((n, 2));
+        for i in 0..n {
+            x[[i, 1]] = StandardNormal.sample(&mut rng);
+        }
+        let reps = 2000;
+        let mut zs = Vec::with_capacity(reps);
+        for rep in 0..reps {
+            let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(1000 + rep as u64);
+            let y = Array1::from_iter((0..n).map(|i| {
+                let e: f64 = StandardNormal.sample(&mut rng);
+                1.0 + 0.5 * x[[i, 1]] + e
+            }));
+            let u = ols_residuals(&y, &x);
+            zs.push(
+                moran_test_residuals(&u, &x, &w, MoranAlternative::TwoSided)
+                    .unwrap()
+                    .z_score,
+            );
+        }
+        let mean = zs.iter().sum::<f64>() / reps as f64;
+        let var = zs.iter().map(|z| (z - mean).powi(2)).sum::<f64>() / (reps - 1) as f64;
+        let reject = zs
+            .iter()
+            .filter(|&&z| normal_p_value_two_sided(z) <= 0.05)
+            .count() as f64
+            / reps as f64;
+        assert!(mean.abs() < 0.1, "mean {mean}");
+        assert!((0.85..=1.15).contains(&var), "variance {var}");
+        assert!(reject < 0.08, "rejection rate {reject}");
+    }
+
     #[test]
     fn lm_tests_match_r_lm_error_and_dense_traces() {
-        let (e, x) = fixture_ols();
-        // The other four statistics, [lm_lag, rlm_lag, rlm_error, lm_sarma], are pinned at the
-        // values the dense-trace code printed before the sparse rewrite.
-        for (mut w, tr_t, lm_err, others) in [
+        let (y, x) = fixture_ols();
+        for (w, tr_t, lm_err) in [
             (
                 knn3(WeightStyle::RowStd),
                 17.333333333333332,
                 16.996459496295262,
-                [
-                    11.330802171877023,
-                    2.2662424299472073,
-                    32.94995643165066,
-                    44.28075860352769,
-                ],
             ),
-            (
-                knn3(WeightStyle::Binary),
-                156.0,
-                16.996459496295262,
-                [
-                    11.330802171877014,
-                    2.266242429947206,
-                    44.53942593643209,
-                    55.87022810830911,
-                ],
-            ),
+            (knn3(WeightStyle::Binary), 156.0, 16.996459496295262),
             (
                 band2(WeightStyle::RowStd),
                 15.712222222222223,
                 13.374603292722762,
-                [
-                    8.09353518719907,
-                    1.99097423272287,
-                    21.881743492574774,
-                    29.975278679773844,
-                ],
             ),
         ] {
             assert_close(w.trace_w2() + w.trace_wtw(), tr_t, 1e-12);
             assert_close(dense_tr_t(&w), tr_t, 1e-12);
-            let r = spatial_lm_tests(&e, &x, &mut w).unwrap();
+            let r = spatial_lm_tests(&y, &x, &w).unwrap();
             assert_close(r.lm_error.statistic, lm_err, 1e-9);
-            assert_close(r.lm_lag.statistic, others[0], 1e-10);
-            assert_close(r.rlm_lag.statistic, others[1], 1e-10);
-            assert_close(r.rlm_error.statistic, others[2], 1e-10);
-            assert_close(r.lm_sarma.statistic, others[3], 1e-10);
+            assert_sarma_identities(&r);
+        }
+    }
+
+    /// SARMA = RSerr + adjRSlag = RSlag + adjRSerr (Anselin et al. 1996).
+    fn assert_sarma_identities(r: &SpatialLmTests) {
+        let s = r.lm_sarma.statistic;
+        let tol = 1e-10 * s.abs();
+        assert!(
+            (s - r.lm_error.statistic - r.rlm_lag.statistic).abs() <= tol,
+            "SARMA {s} vs RSerr + adjRSlag {}",
+            r.lm_error.statistic + r.rlm_lag.statistic
+        );
+        assert!(
+            (s - r.lm_lag.statistic - r.rlm_error.statistic).abs() <= tol,
+            "SARMA {s} vs RSlag + adjRSerr {}",
+            r.lm_lag.statistic + r.rlm_error.statistic
+        );
+    }
+
+    /// The five statistics and p-values in spdep's order: RSerr, RSlag, adjRSerr, adjRSlag,
+    /// SARMA.
+    fn rs_values(r: &SpatialLmTests) -> ([f64; 5], [f64; 5]) {
+        let t = [
+            &r.lm_error,
+            &r.lm_lag,
+            &r.rlm_error,
+            &r.rlm_lag,
+            &r.lm_sarma,
+        ];
+        (t.map(|t| t.statistic), t.map(|t| t.p_value))
+    }
+
+    const RS_NAMES: [&str; 5] = ["RSerr", "RSlag", "adjRSerr", "adjRSlag", "SARMA"];
+
+    /// R: spdep::lm.RStests(lm(y ~ x1 + x2), nb2listw(knn 4), test = "all").
+    #[test]
+    fn test_validate_lm_rstests_knn_spatial_sim() {
+        use p2a_validation::Tol;
+        let (case, ds) = crate::test_support::load_case("spatial_lm_diag_t4");
+        let (y, x, coords) = sim_design(&ds);
+        let r = spatial_lm_tests(&y, &x, &sim_knn4(&coords)).unwrap();
+        assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+        assert_eq!(
+            [
+                r.lm_error.df,
+                r.lm_lag.df,
+                r.rlm_error.df,
+                r.rlm_lag.df,
+                r.lm_sarma.df
+            ],
+            [1, 1, 1, 1, 2]
+        );
+        let (stat, p) = rs_values(&r);
+        let n = y.len();
+        p2a_validation::Check::new(&case)
+            .named("rstests_knn_stat", &RS_NAMES, &stat, Tol::stat(n))
+            .named("rstests_knn_p", &RS_NAMES, &p, Tol::p_value(n))
+            .finish();
+    }
+
+    /// R: lm.RStests on the distance band (0, 0.2], style B (spdep warns that W is not row
+    /// standardised).
+    #[test]
+    fn test_validate_lm_rstests_band_binary_spatial_sim() {
+        use p2a_validation::Tol;
+        let (case, ds) = crate::test_support::load_case("spatial_lm_diag_t4");
+        let (y, x, coords) = sim_design(&ds);
+        let r = spatial_lm_tests(&y, &x, &sim_band(&coords, 0.2, WeightStyle::Binary)).unwrap();
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.contains("not row-standardised")),
+            "{:?}",
+            r.warnings
+        );
+        let (stat, p) = rs_values(&r);
+        let n = y.len();
+        p2a_validation::Check::new(&case)
+            .named("rstests_band_B_stat", &RS_NAMES, &stat, Tol::stat(n))
+            .named("rstests_band_B_p", &RS_NAMES, &p, Tol::p_value(n))
+            .finish();
+    }
+
+    /// The score tests do not depend on the units of a regressor.
+    #[test]
+    fn lm_rstests_are_invariant_to_regressor_scale() {
+        let (_, ds) = crate::test_support::load_case("spatial_lm_diag_t4");
+        let (y, x, coords) = sim_design(&ds);
+        let w = sim_knn4(&coords);
+        let (base, _) = rs_values(&spatial_lm_tests(&y, &x, &w).unwrap());
+        for scale in [1000.0, 1e-3] {
+            let mut xs = x.clone();
+            xs.column_mut(1).mapv_inplace(|v| v * scale);
+            let (stat, _) = rs_values(&spatial_lm_tests(&y, &xs, &w).unwrap());
+            for (a, b) in stat.iter().zip(&base) {
+                assert!((a - b).abs() <= 1e-9 * b.abs(), "scale {scale}: {a} vs {b}");
+            }
+        }
+    }
+
+    #[test]
+    fn lm_rstests_sarma_identities() {
+        let (_, ds) = crate::test_support::load_case("spatial_lm_diag_t4");
+        let (y, x, coords) = sim_design(&ds);
+        for w in [
+            sim_knn4(&coords),
+            sim_band(&coords, 0.2, WeightStyle::RowStd),
+            sim_band(&coords, 0.2, WeightStyle::Binary),
+        ] {
+            assert_sarma_identities(&spatial_lm_tests(&y, &x, &w).unwrap());
+        }
+    }
+
+    fn local_columns(r: &LocalMoranResult) -> [Vec<f64>; 5] {
+        let col = |f: fn(&LocalMoranObs) -> f64| r.local_stats.iter().map(f).collect::<Vec<_>>();
+        [
+            col(|o| o.i_local),
+            col(|o| o.expectation),
+            col(|o| o.variance),
+            col(|o| o.z_score),
+            col(|o| o.p_value),
+        ]
+    }
+
+    fn check_localmoran(id: &str, conditional: bool, tag: &str) {
+        use p2a_validation::Tol;
+        let (case, ds) = crate::test_support::load_case(id);
+        let (y, _, coords) = sim_design(&ds);
+        let cfg = LocalMoranConfig {
+            conditional,
+            ..LocalMoranConfig::default()
+        };
+        let r = localmoran_with(&y, &sim_knn4(&coords), &cfg).unwrap();
+        assert_eq!(r.conditional, conditional);
+        let n = y.len();
+        let [ii, e, v, z, p] = local_columns(&r);
+        let mut chk = p2a_validation::Check::new(&case);
+        for (key, vals) in [("Ii", &ii), ("E", &e), ("Var", &v), ("Z", &z)] {
+            chk.vector(&format!("{tag}_{key}"), vals, Tol::stat(n));
+        }
+        chk.vector(&format!("{tag}_p"), &p, Tol::p_value(n))
+            .scalar("global_I", r.global_i, Tol::stat(n))
+            .finish();
+    }
+
+    /// R: spdep::localmoran(y, nb2listw(knn 4), conditional = TRUE) (spdep's default; mlvar,
+    /// two-sided) (spatial_diag_t4.R, case spatial_localmoran_t4).
+    #[test]
+    fn test_validate_localmoran_conditional_spatial_sim() {
+        check_localmoran("spatial_localmoran_t4", true, "cond");
+    }
+
+    /// R: spdep::localmoran(..., conditional = FALSE): total randomisation moments.
+    #[test]
+    fn test_validate_localmoran_total_spatial_sim() {
+        check_localmoran("spatial_localmoran_t4", false, "total");
+    }
+
+    #[test]
+    fn localmoran_global_i_is_morans_i() {
+        let (_, ds) = crate::test_support::load_case("spatial_localmoran_t4");
+        let (y, _, coords) = sim_design(&ds);
+        for w in [
+            sim_knn4(&coords),
+            sim_band(&coords, 0.2, WeightStyle::RowStd),
+        ] {
+            let g = localmoran(&y, &w, 0.05, 0).unwrap().global_i;
+            let m = moran_test(&y, &w, MoranAlternative::Greater)
+                .unwrap()
+                .statistic;
+            assert!((g - m).abs() <= 1e-12 * m.abs(), "{g} vs {m}");
+        }
+    }
+
+    /// The conditional permutation (neighbours drawn without repeats from the other n - 1
+    /// values) converges to the enumerated limits of the 7-unit fixture.
+    #[test]
+    fn localmoran_conditional_permutation_converges_to_exact() {
+        let (case, ds) = crate::test_support::load_case("spatial_localmoran_t4");
+        let (_, _, coords) = sim_design(&ds);
+        let x7 = Array1::from(case.vector("perm7_x"));
+        let w7 = SpatialWeights::from_neighbors(
+            &Neighbors::try_from_knn(&coords[..7], 2).unwrap(),
+            WeightStyle::RowStd,
+        );
+        let nsim = 99_999;
+        let cfg = LocalMoranConfig {
+            permutations: nsim,
+            ..LocalMoranConfig::default()
+        };
+        let r = localmoran_with(&x7, &w7, &cfg).unwrap();
+        let ii = case.vector("perm7_Ii");
+        let limit = case.vector("perm7_folded_limit");
+        let nf = nsim as f64;
+        for i in 0..7 {
+            let o = &r.local_stats[i];
+            assert!((o.i_local - ii[i]).abs() <= 1e-12 * ii[i].abs().max(1.0));
+            let se = (limit[i] * (1.0 - limit[i]) / nf).sqrt();
+            assert!(
+                (o.p_value - limit[i]).abs() <= 4.0 * se + 2.0 / nf,
+                "unit {i}: folded p {} vs limit {} (4 SE = {})",
+                o.p_value,
+                limit[i],
+                4.0 * se
+            );
+        }
+    }
+
+    #[test]
+    fn localmoran_seed_changes_permutation_p_only() {
+        let (_, ds) = crate::test_support::load_case("spatial_localmoran_t4");
+        let (y, _, coords) = sim_design(&ds);
+        let w = sim_knn4(&coords);
+        let run = |seed| {
+            localmoran_with(
+                &y,
+                &w,
+                &LocalMoranConfig {
+                    permutations: 199,
+                    seed,
+                    ..LocalMoranConfig::default()
+                },
+            )
+            .unwrap()
+        };
+        let (a, a2, b) = (run(1), run(1), run(2));
+        let [ia, ea, va, za, pa] = local_columns(&a);
+        let [ib, eb, vb, zb, pb] = local_columns(&b);
+        assert_eq!(pa, local_columns(&a2)[4], "same seed, same p");
+        assert_eq!((ia, ea, va, za), (ib, eb, vb, zb));
+        assert_ne!(pa, pb);
+    }
+
+    #[test]
+    fn localmoran_zero_variance_is_nan_not_clamped() {
+        // unit 3 is an island; x[1] equals the mean (z_1 = 0)
+        let w = SpatialWeights::from_neighbors(
+            &Neighbors::from_indices(vec![vec![1, 2], vec![0, 2], vec![0, 1, 4], vec![], vec![2]]),
+            WeightStyle::RowStd,
+        );
+        let x = array![1.0, 2.0, 3.5, 0.5, 3.0];
+        for conditional in [true, false] {
+            for permutations in [0, 99] {
+                let cfg = LocalMoranConfig {
+                    conditional,
+                    permutations,
+                    alpha: 1.0,
+                    ..LocalMoranConfig::default()
+                };
+                let r = localmoran_with(&x, &w, &cfg).unwrap();
+                let island = &r.local_stats[3];
+                assert!(
+                    island.z_score.is_nan() && island.p_value.is_nan(),
+                    "{island:?}"
+                );
+                assert_eq!(island.cluster, LisaCluster::NotSignificant);
+                if conditional {
+                    let z0 = &r.local_stats[1];
+                    assert!(z0.z_score.is_nan() && z0.p_value.is_nan(), "{z0:?}");
+                    assert_eq!(z0.cluster, LisaCluster::NotSignificant);
+                }
+            }
         }
     }
 
