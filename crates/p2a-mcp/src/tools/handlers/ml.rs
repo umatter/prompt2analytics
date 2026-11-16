@@ -791,7 +791,7 @@ impl AnalyticsServer {
 
     /// Run Classical Multidimensional Scaling (cmdscale).
     #[tool(
-        description = "Classical Multidimensional Scaling (cmdscale) for embedding distances into Euclidean space. Takes a data matrix and computes a low-dimensional configuration that preserves pairwise Euclidean distances. Returns point coordinates and goodness-of-fit measures. Useful for visualizing similarity/dissimilarity data."
+        description = "Classical Multidimensional Scaling (cmdscale) for embedding distances into Euclidean space. Takes a data matrix and computes a low-dimensional configuration that preserves pairwise Euclidean distances. Returns point coordinates and R's two goodness-of-fit measures (GOF). Useful for visualizing similarity/dissimilarity data."
     )]
     pub async fn ml_cmdscale(
         &self,
@@ -833,8 +833,9 @@ impl AnalyticsServer {
                     "n_points": r.n,
                     "k_dimensions": r.k,
                     "gof": {
-                        "gof1_positive_eigenvalues": r.gof[0],
-                        "gof2_k_eigenvalues": r.gof[1]
+                        "gof1": r.gof[0],
+                        "gof2": r.gof[1],
+                        "definition": "R's cmdscale GOF: sum of the k eigenvalues over sum |eigenvalues|, and over the sum of the positive ones"
                     },
                     "eigenvalues": first(&r.eig, r.k.min(10)),
                     "configuration": first(&r.points, 20),

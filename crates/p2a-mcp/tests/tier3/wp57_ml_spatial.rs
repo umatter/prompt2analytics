@@ -1636,6 +1636,41 @@ async fn test_validate_mcp_pca_output_column() {
     assert_eq!(json_block(&t2)["output_columns"], json!(["Q1", "Q2"]));
 }
 
+/// ML-98: ml_cmdscale on a distance matrix reports R's GOF pair (it reported the share of the
+/// positive eigenvalues and the k-eigenvalue share over sum |eigenvalues| before).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_cmdscale_gof() {
+    let (s, server) = session_with("cmdscale_gof_add");
+    let (case, df) = case_df("cmdscale_gof_add");
+    let cities: Vec<String> = df
+        .get_column_names()
+        .iter()
+        .map(|c| c.to_string())
+        .collect();
+    assert_eq!(cities.len(), 21);
+    let t = ok(&call(
+        &server,
+        &s,
+        "ml_cmdscale",
+        json!({"dataset": "eurodist_matrix", "columns": cities, "is_distance_matrix": true, "k": 2}),
+    )
+    .await);
+    let j: Value = serde_json::from_str(&t).unwrap_or_else(|e| panic!("{e}:\n{t}"));
+    let want = case.vector("euro_k2_gof");
+    close(
+        j["gof"]["gof1"].as_f64().unwrap(),
+        want[0],
+        Tol::coef(21),
+        "gof1",
+    );
+    close(
+        j["gof"]["gof2"].as_f64().unwrap(),
+        want[1],
+        Tol::coef(21),
+        "gof2",
+    );
+}
+
 /// No R value for the regression forest (RNG): the column equals the core's in-sample
 /// predictions for the same call.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

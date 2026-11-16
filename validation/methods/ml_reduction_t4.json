@@ -22,6 +22,30 @@
       "tolerance": "sdev, proportion and total Tol::stat(n) (n = 20, 6); rotation Tol::coef(20); the roundoff sixth sdev of the 6 x 10 data abs 1e-12",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "ml_cmdscale_gof_add",
+      "name": "Classical MDS: R's GOF pair and add = TRUE (Cailliez's additive constant)",
+      "category": "ml",
+      "reference": "stats::cmdscale(d, k, eig = TRUE, add = FALSE | TRUE)",
+      "doc": "validation/ml/cmdscale.md",
+      "cases": [
+        "cmdscale_gof_add"
+      ],
+      "tests": [
+        "p2a-core::ml::reduction::tests::test_validate_cmdscale_gof_add",
+        "p2a-mcp::tier3::wp57_ml_spatial::test_validate_mcp_cmdscale_gof"
+      ],
+      "quantities": [
+        "GOF (both measures)",
+        "ac",
+        "|points|",
+        "eig",
+        "MCP ml_cmdscale gof.gof1 and gof.gof2"
+      ],
+      "tolerance": "GOF, ac and points Tol::coef(n) (n = 21, 8); eig rel 1e-9 with abs 1e-6 (eurodist), abs 1e-5 (eurodist with add: the null eigenvalue moves with the roundoff of ac), abs 1e-9 (Manhattan)",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

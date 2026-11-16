@@ -751,9 +751,10 @@ pub struct CmdscaleResult {
     /// algebraic order as `stats::cmdscale` returns them (negative
     /// eigenvalues, from non-Euclidean input, come last).
     pub eig: Vec<f64>,
-    /// Goodness of fit (GOF) measures.
-    /// First value: sum of positive eigenvalues / sum of absolute eigenvalues.
-    /// Second value: sum of k largest eigenvalues / sum of absolute eigenvalues.
+    /// Goodness of fit, R's `GOF`: the sum of the positive eigenvalues among
+    /// the first `k` over the sum of the absolute eigenvalues, and over the sum
+    /// of the positive eigenvalues (`[1, 1]` when a denominator is 0, all
+    /// distances 0).
     pub gof: [f64; 2],
     /// Number of dimensions in the output.
     pub k: usize,
@@ -761,6 +762,10 @@ pub struct CmdscaleResult {
     pub n: usize,
     /// Whether the input was a distance matrix or data matrix.
     pub is_distance_matrix: bool,
+    /// Cailliez's additive constant (R's `ac`): added to every off-diagonal
+    /// distance with `add = Some(true)`; 0 otherwise.
+    #[serde(default)]
+    pub ac: f64,
 }
 
 impl std::fmt::Display for CmdscaleResult {
@@ -773,10 +778,17 @@ impl std::fmt::Display for CmdscaleResult {
         writeln!(f, "Goodness of fit:")?;
         writeln!(
             f,
-            "  GOF1 (positive eigenvalues / |all|): {:.4}",
+            "  GOF (k eigenvalues / sum |eigenvalues|): {:.4}",
             self.gof[0]
         )?;
-        writeln!(f, "  GOF2 (k eigenvalues / |all|): {:.4}", self.gof[1])?;
+        writeln!(
+            f,
+            "  GOF (k eigenvalues / sum of positive eigenvalues): {:.4}",
+            self.gof[1]
+        )?;
+        if self.ac != 0.0 {
+            writeln!(f, "Additive constant (Cailliez): {}", self.ac)?;
+        }
         writeln!(f)?;
 
         // Show eigenvalues
@@ -812,9 +824,14 @@ impl std::fmt::Display for CmdscaleResult {
 ///
 /// # Arguments
 /// * `d` - Square symmetric distance matrix (n x n) as nested vectors
-/// * `k` - Number of output dimensions (default: 2)
-/// * `eig` - Return all eigenvalues if true (default: false)
-/// * `add` - Add a constant to non-diagonal distances for approximate Euclidean embedding
+/// * `k` - Number of output dimensions (default: 2), clamped to `n - 1`
+///   (R stops instead)
+/// * `eig` - accepted for R compatibility; all `n` eigenvalues are always
+///   returned
+/// * `add` - `Some(true)` is R's `add = TRUE`: Cailliez's additive constant
+///   `ac` (the largest real eigenvalue of R's `2n x 2n` matrix
+///   `[[0, -DC(D^2)], [-I, DC(2D)]]`, `DC` the double centring) is added to
+///   every off-diagonal distance before the embedding
 ///
 /// # Returns
 /// * `CmdscaleResult` containing the configuration and diagnostics
@@ -824,7 +841,9 @@ impl std::fmt::Display for CmdscaleResult {
 /// - Fewer than 2 points; a non-square, non-symmetric or non-finite `d`, a
 ///   non-zero diagonal or a negative distance; `k = 0`.
 /// - `"Resource limit: ..."` when the `n x n` matrix or the eigensolver's
-///   workspace (about `3 n^2` `f64`) exceeds the per-allocation ceiling.
+///   workspace (about `3 n^2` `f64`) exceeds the per-allocation ceiling, and
+///   with `add`, when the `2n x 2n` matrix of the additive constant or its
+///   eigensolver's workspace does.
 /// - `"Computation stopped: ..."` when the budget is cancelled or expires.
 /// - A failed eigendecomposition.
 ///
@@ -898,12 +917,116 @@ pub fn cmdscale(
     }
 
     let k = cmdscale_dims(k, n)?;
-    // All n eigenvalues are always returned; `eig` and `add` are kept for
-    // API compatibility (ML-98 revisits them).
-    let _ = (eig, add);
+    // All n eigenvalues are always returned: `eig` is accepted for R compatibility
+    let _ = eig;
 
+    if add == Some(true) {
+        let ac = cailliez_constant(d)?;
+        let shifted = |i: usize, j: usize| if i == j { 0.0 } else { d[i][j] + ac };
+        let (points, eig_vec) = cmdscale_core(n, shifted, k)?;
+        let mut result = cmdscale_result(points, eig_vec, k, n, true);
+        result.ac = ac;
+        return Ok(result);
+    }
     let (points, eig_vec) = cmdscale_core(n, |i, j| d[i][j], k)?;
     Ok(cmdscale_result(points, eig_vec, k, n, true))
+}
+
+/// Writes `sign * DC(f)` into the `n x n` block of `z` at `(r0, c0)`, where `DC`
+/// is R's `C_DoubleCentre`: the row means are subtracted, then the column means.
+fn double_centre_into(
+    z: &mut Mat<f64>,
+    (r0, c0): (usize, usize),
+    n: usize,
+    f: impl Fn(usize, usize) -> f64,
+    sign: f64,
+) -> EconResult<()> {
+    for i in 0..n {
+        checkpoint()?;
+        let mut sum = 0.0;
+        for j in 0..n {
+            let v = f(i, j);
+            z[(r0 + i, c0 + j)] = v;
+            sum += v;
+        }
+        let mean = sum / n as f64;
+        for j in 0..n {
+            z[(r0 + i, c0 + j)] -= mean;
+        }
+    }
+    for j in 0..n {
+        checkpoint()?;
+        let mut sum = 0.0;
+        for i in 0..n {
+            sum += z[(r0 + i, c0 + j)];
+        }
+        let mean = sum / n as f64;
+        for i in 0..n {
+            let v = z[(r0 + i, c0 + j)] - mean;
+            z[(r0 + i, c0 + j)] = sign * v;
+        }
+    }
+    Ok(())
+}
+
+/// Cailliez's additive constant, as `stats::cmdscale(add = TRUE)`: the largest
+/// real part among the eigenvalues of the `2n x 2n` matrix
+/// `[[0, -DC(D^2)], [-I, DC(2D)]]`. The matrix and the general eigensolver's
+/// workspace are pre-flighted against the allocation ceiling.
+fn cailliez_constant(d: &[Vec<f64>]) -> Result<f64, String> {
+    use faer::dyn_stack::{MemBuffer, MemStack};
+    use faer::linalg::evd::{ComputeEigenvectors, evd_real, evd_scratch};
+
+    let to_string = |e: EconError| e.to_string();
+    let n = d.len();
+    let what = "cmdscale additive constant matrix";
+    let m = n
+        .checked_mul(2)
+        .ok_or_else(|| crate::resource::overflow(what).to_string())?;
+    checkpoint().map_err(to_string)?;
+    check_alloc::<f64>(checked_len(&[m, m], what).map_err(to_string)?, what).map_err(to_string)?;
+    let ws = "cmdscale additive constant eigensolver workspace";
+    let par = faer::get_global_parallelism();
+    let scratch = evd_scratch::<f64>(
+        m,
+        ComputeEigenvectors::No,
+        ComputeEigenvectors::No,
+        par,
+        Default::default(),
+    );
+    if scratch.layout().is_err() {
+        return Err(crate::resource::overflow(ws).to_string());
+    }
+    check_alloc::<u8>(scratch.size_bytes(), ws).map_err(to_string)?;
+
+    let mut z = Mat::<f64>::zeros(m, m);
+    double_centre_into(&mut z, (0, n), n, |i, j| d[i][j] * d[i][j], -1.0).map_err(to_string)?;
+    double_centre_into(&mut z, (n, n), n, |i, j| 2.0 * d[i][j], 1.0).map_err(to_string)?;
+    for i in 0..n {
+        z[(n + i, i)] = -1.0;
+    }
+
+    checkpoint().map_err(to_string)?;
+    let mut buf = MemBuffer::try_new(scratch)
+        .map_err(|_| crate::resource::reserve_failed(ws, scratch.size_bytes(), 1).to_string())?;
+    let mut re = faer::diag::Diag::<f64>::zeros(m);
+    let mut im = faer::diag::Diag::<f64>::zeros(m);
+    evd_real(
+        z.as_ref(),
+        re.as_mut(),
+        im.as_mut(),
+        None,
+        None,
+        par,
+        MemStack::new(&mut buf),
+        Default::default(),
+    )
+    .map_err(|_| "cmdscale additive constant: eigendecomposition failed".to_string())?;
+    Ok(re
+        .column_vector()
+        .iter()
+        .copied()
+        .fold(f64::NEG_INFINITY, f64::max))
 }
 
 /// The output dimension: `k` (default 2) clamped to `n - 1`; `k = 0` is refused.
@@ -1035,16 +1158,13 @@ fn cmdscale_result(
     n: usize,
     is_distance_matrix: bool,
 ) -> CmdscaleResult {
-    // Compute GOF measures
+    // R's GOF: the positive eigenvalues among the first k (R drops the others)
+    // over sum |eig| and over sum max(eig, 0)
     let sum_abs: f64 = eig_vec.iter().map(|&x| x.abs()).sum();
     let sum_pos: f64 = eig_vec.iter().filter(|&&x| x > 0.0).sum();
     let sum_k: f64 = eig_vec.iter().take(k).filter(|&&x| x > 0.0).sum();
-
-    let gof = if sum_abs > 1e-10 {
-        [sum_pos / sum_abs, sum_k / sum_abs]
-    } else {
-        [1.0, 1.0]
-    };
+    let share = |den: f64| if den > 0.0 { sum_k / den } else { 1.0 };
+    let gof = [share(sum_abs), share(sum_pos)];
 
     CmdscaleResult {
         points,
@@ -1053,6 +1173,7 @@ fn cmdscale_result(
         k,
         n,
         is_distance_matrix,
+        ac: 0.0,
     }
 }
 
@@ -1754,8 +1875,47 @@ mod tests {
         assert!(result.gof[0] >= 0.0 && result.gof[0] <= 1.0);
         assert!(result.gof[1] >= 0.0 && result.gof[1] <= 1.0);
 
-        // GOF2 <= GOF1 (since k eigenvalues <= positive eigenvalues)
-        assert!(result.gof[1] <= result.gof[0] + 0.01);
+        // R's pair shares a numerator; sum |eig| >= sum max(eig, 0), so GOF[0] <= GOF[1]
+        assert!(result.gof[0] <= result.gof[1] + 1e-12);
+
+        // ML-98: the text names R's two measures, and the additive constant when add was used
+        let text = result.to_string();
+        assert!(
+            text.contains("GOF (k eigenvalues / sum |eigenvalues|)")
+                && text.contains("GOF (k eigenvalues / sum of positive eigenvalues)")
+                && !text.contains("Additive constant"),
+            "{text}"
+        );
+        let added = cmdscale(&dist, Some(2), None, Some(true)).unwrap();
+        assert!(added.ac > 0.0, "{}", added.ac);
+        assert!(
+            added.to_string().contains("Additive constant (Cailliez): "),
+            "{added}"
+        );
+    }
+
+    /// The 2n x 2n eigenproblem of add = TRUE is pre-flighted; without add it is never built.
+    #[test]
+    fn test_cmdscale_add_preflights_its_matrix() {
+        let data = blobs(30, 3, 4);
+        let n = data.nrows();
+        let d: Vec<Vec<f64>> = (0..n)
+            .map(|i| {
+                (0..n)
+                    .map(|j| (0..3).map(|c| (data[[i, c]] - data[[j, c]]).abs()).sum())
+                    .collect()
+            })
+            .collect();
+        let ceiling = Some(4 * n * n * 8 - 8);
+        let e =
+            with_alloc_ceiling(ceiling, || cmdscale(&d, Some(2), None, Some(true))).unwrap_err();
+        assert!(
+            e.starts_with("Resource limit") && e.contains("cmdscale additive constant"),
+            "{e}"
+        );
+        assert!(with_alloc_ceiling(ceiling, || cmdscale(&d, Some(2), None, None)).is_ok());
+        let e = with_budget(cancelled(), || cmdscale(&d, Some(2), None, Some(true))).unwrap_err();
+        assert!(e.contains("cancelled"), "{e}");
     }
 
     #[test]
@@ -2122,40 +2282,80 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_validate_cmdscale_eurodist() {
-        // ML-36: before (power iteration) eig = 19538377, 11856555, -2251844, 1528844, ...; R
-        // sorts algebraically. GOF is ML-98 (Tier 4): deviation, not pinned.
-        let (case, _) = crate::test_support::load_case("kmeans_lloyd_pca_mds");
-        let df = case_frame(&case, "eurodist_matrix.csv");
+    /// The 21 x 21 eurodist matrix of a case, as rows.
+    fn eurodist(case: &p2a_validation::Case) -> Vec<Vec<f64>> {
+        let df = case_frame(case, "eurodist_matrix.csv");
         let names: Vec<String> = df
             .get_column_names()
             .iter()
             .map(|s| s.to_string())
             .collect();
-        let cols: Vec<Vec<f64>> = names
-            .iter()
-            .map(|n| {
-                crate::data::columns::numeric_column(&df, n, crate::data::columns::NaPolicy::Fail)
-                    .unwrap()
-                    .0
-            })
-            .collect();
-        let d: Vec<Vec<f64>> = (0..21)
-            .map(|i| (0..21).map(|j| cols[j][i]).collect())
-            .collect();
-        let r = cmdscale(&d, Some(2), Some(true), None).unwrap();
-        let pts: Vec<f64> = (0..2)
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        let m = matrix(&df, &names);
+        m.rows().into_iter().map(|r| r.to_vec()).collect()
+    }
+
+    /// `|points|` in R's column-major order.
+    fn points_abs(r: &CmdscaleResult) -> Vec<f64> {
+        (0..r.k)
             .flat_map(|j| r.points.iter().map(move |p| p[j].abs()))
-            .collect();
-        // deviation ML-98: r.gof is [sum_pos/sum_abs, sum_k/sum_abs], R GOF 0.7537543155079838
-        // 0.8679134296478231
+            .collect()
+    }
+
+    #[test]
+    fn test_validate_cmdscale_eurodist() {
+        // ML-36: before (power iteration) eig = 19538377, 11856555, -2251844, 1528844, ...; R
+        // sorts algebraically. ML-98: GOF was [sum_pos/sum_abs, sum_k/sum_abs] = 0.8685, 0.7538.
+        let (case, _) = crate::test_support::load_case("kmeans_lloyd_pca_mds");
+        let r = cmdscale(&eurodist(&case), Some(2), Some(true), None).unwrap();
         Check::new(&case)
-            .vector("mds_points_abs", &pts, Tol::coef(21))
+            .vector("mds_points_abs", &points_abs(&r), Tol::coef(21))
             // the null eigenvalue is roundoff (R -3.7e-09; |lambda| <~ 21 eps lambda_max ~ 1e-7):
             // abs 1e-6
             .vector("mds_eig", &r.eig, Tol::new(1e-9, 1e-6))
+            .vector("mds_gof", &r.gof, Tol::coef(21))
             .finish();
+    }
+
+    /// ML-98: R's GOF pair, and add = TRUE (Cailliez's additive constant), on eurodist and on
+    /// Manhattan distances (negative eigenvalues: the two GOF measures differ). Before, add was
+    /// ignored.
+    #[test]
+    fn test_validate_cmdscale_gof_add() {
+        let (case, _) = crate::test_support::load_case("cmdscale_gof_add");
+        let x = matrix(&case_frame(&case, "mds_points8.csv"), &["a", "b", "c"]);
+        let manh: Vec<Vec<f64>> = (0..8)
+            .map(|i| {
+                (0..8)
+                    .map(|j| (0..3).map(|c| (x[[i, c]] - x[[j, c]]).abs()).sum())
+                    .collect()
+            })
+            .collect();
+        let euro = eurodist(&case);
+        let mut c = Check::new(&case);
+        for (tag, d, k, add) in [
+            ("euro_k2", &euro, 2, None),
+            ("euro_k2_add", &euro, 2, Some(true)),
+            ("manh_k2", &manh, 2, None),
+            ("manh_k3_add", &manh, 3, Some(true)),
+        ] {
+            let n = d.len();
+            let r = cmdscale(d, Some(k), Some(true), add).unwrap();
+            // eurodist: null eigenvalues are roundoff of a 4e7 spectrum (abs 1e-6). With add,
+            // the null eigenvalue moves with ac to first order: ac agrees with R's dgeev to about
+            // 3e-13 relative (6.7e-10), which moves it by about 1e-6, so abs 1e-5 (2.4e-13 of
+            // the largest eigenvalue)
+            let eig_tol = match (n, add) {
+                (21, None) => Tol::new(1e-9, 1e-6),
+                (21, _) => Tol::new(1e-9, 1e-5),
+                _ => Tol::new(1e-9, 1e-9),
+            };
+            c.vector(&format!("{tag}_gof"), &r.gof, Tol::coef(n))
+                .scalar(&format!("{tag}_ac"), r.ac, Tol::coef(n))
+                .vector(&format!("{tag}_points_abs"), &points_abs(&r), Tol::coef(n))
+                .vector(&format!("{tag}_eig"), &r.eig, eig_tol);
+        }
+        c.finish();
     }
 
     #[test]

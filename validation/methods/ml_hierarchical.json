@@ -264,16 +264,11 @@
       ],
       "quantities": [
         "|points|",
-        "eig"
+        "eig",
+        "mds_gof"
       ],
-      "tolerance": "points Tol::coef(21); eig rel 1e-9 abs 1e-6 (null eigenvalue is roundoff)",
-      "deviations": [
-        {
-          "finding": "ML-98",
-          "quantity": "GOF",
-          "note": "p2a gof = [sum_pos/sum_abs, sum_k/sum_abs]; R GOF = sum_k / c(sum|ev|, sum(pmax(ev, 0))) = 0.7537543155079838, 0.8679134296478231 (Tier 4)"
-        }
-      ],
+      "tolerance": "points and GOF Tol::coef(21); eig rel 1e-9 abs 1e-6 (null eigenvalue is roundoff)",
+      "deviations": [],
       "supersedes_legacy": []
     },
     {
