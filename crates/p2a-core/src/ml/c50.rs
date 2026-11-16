@@ -50,6 +50,7 @@ use std::collections::HashMap;
 use super::extract::class_labels_line;
 use crate::Dataset;
 use crate::errors::{EconError, EconResult};
+use crate::traits::estimator::normal_quantile;
 
 /// Configuration for C5.0.
 ///
@@ -396,26 +397,50 @@ fn gain_ratio(parent_counts: &[f64], left_counts: &[f64], right_counts: &[f64]) 
     (gain, gain / split)
 }
 
-/// Pessimistic error estimate for pruning (Quinlan 1993).
-/// Uses a continuity correction based on the confidence factor.
-fn pessimistic_error(n: f64, errors: f64, cf: f64) -> f64 {
+/// The confidence level of C4.5's pessimistic error: `cf` and the squared normal deviate
+/// `z^2` with `z = Phi^-1(1 - cf)`, computed once per fit.
+#[derive(Debug, Clone, Copy)]
+struct PruneLevel {
+    cf: f64,
+    coeff: f64,
+}
+
+impl PruneLevel {
+    /// `cf` must lie in (0, 1), which [`c50`] checks before any tree is grown.
+    fn new(cf: f64) -> EconResult<Self> {
+        let z = normal_quantile(1.0 - cf)?;
+        Ok(PruneLevel { cf, coeff: z * z })
+    }
+}
+
+/// C4.5's added errors (`AddErrs`, Quinlan 1993, ch. 4; Release 8 `stats.c`): the errors to
+/// add to `e` observed errors among `n` cases so that the total is the upper limit of the
+/// binomial error at confidence `cf`.
+///
+/// - `e < 1e-6`: `n (1 - cf^(1/n))`, the exact limit for no errors;
+/// - `e < 0.9999`: interpolated linearly between that and the value at `e = 1`;
+/// - `e + 0.5 >= n`: `0.67 (n - e)`;
+/// - otherwise the normal upper limit with continuity correction,
+///   `n Pr - e` with `Pr = (e + 0.5 + z^2/2 + sqrt(z^2 ((e + 0.5)(1 - (e + 0.5)/n) + z^2/4))) / (n + z^2)`.
+///
+/// `n` and `e` are case weights.
+fn added_errors(n: f64, e: f64, level: PruneLevel) -> f64 {
     if n <= 0.0 {
         return 0.0;
     }
-
-    // Use normal approximation for large samples
-    // z value for confidence level (cf = 0.25 corresponds to z ~ 0.69)
-    let z = 0.69 * (1.0 - cf) / cf;
-
-    let f = errors / n;
-    let n_f = n;
-
-    // Wilson score interval upper bound
-    let numerator =
-        f + z * z / (2.0 * n_f) + z * ((f * (1.0 - f) / n_f + z * z / (4.0 * n_f * n_f)).sqrt());
-    let denominator = 1.0 + z * z / n_f;
-
-    (numerator / denominator) * n_f
+    if e < 1e-6 {
+        n * (1.0 - (level.cf.ln() / n).exp())
+    } else if e < 0.9999 {
+        let v0 = n * (1.0 - (level.cf.ln() / n).exp());
+        v0 + e * (added_errors(n, 1.0, level) - v0)
+    } else if e + 0.5 >= n {
+        0.67 * (n - e)
+    } else {
+        let c = level.coeff;
+        let pr = (e + 0.5 + c / 2.0 + (c * ((e + 0.5) * (1.0 - (e + 0.5) / n) + c / 4.0)).sqrt())
+            / (n + c);
+        n * pr - e
+    }
 }
 
 /// The largest number of distinct class codes C5.0 accepts for `n_samples`
@@ -610,7 +635,7 @@ fn c50_node_stats(
     weights: &Array1<f64>,
     indices: &[usize],
     n_classes: usize,
-    cf: f64,
+    level: PruneLevel,
 ) -> C50NodeStats {
     let mut class_counts = vec![0usize; n_classes];
     let mut class_weights = vec![0.0f64; n_classes];
@@ -634,7 +659,7 @@ fn c50_node_stats(
         class_weights,
         predicted_class,
         entropy: node_entropy,
-        error_estimate: pessimistic_error(total, errors, cf),
+        error_estimate: errors + added_errors(total, errors, level),
     }
 }
 
@@ -656,8 +681,11 @@ fn c50_leaf(id: usize, n: usize, stats: C50NodeStats) -> Box<C50Node> {
 }
 
 /// The internal node for `split` over its grown children, or a leaf when
-/// pruning prefers one (subtree error at least leaf error + 0.5, unless
-/// global pruning is off).
+/// pruning prefers one, unless global pruning is off.
+///
+/// C4.5's replace-if-no-worse test (Release 8 `prune.c`): the node becomes a leaf when its
+/// estimated errors as a leaf are at most the sum of its children's estimates plus 0.1. Subtree
+/// raising (replacing the node by its largest branch) is not implemented.
 #[inline(never)]
 fn c50_join(
     id: usize,
@@ -670,7 +698,7 @@ fn c50_join(
 ) -> Box<C50Node> {
     // Pruning decision: compare subtree error vs leaf error
     let subtree_error = left.error_estimate + right.error_estimate;
-    if !no_global_pruning && subtree_error >= stats.error_estimate + 0.5 {
+    if !no_global_pruning && stats.error_estimate <= subtree_error + 0.1 {
         return c50_leaf(id, n, stats);
     }
     let (feature, threshold, gain, gain_ratio) = split;
@@ -717,7 +745,7 @@ fn build_c50_tree(
     *node_id += 1;
 
     let n = indices.len();
-    let stats = c50_node_stats(y, weights, indices, n_classes, config.cf);
+    let stats = c50_node_stats(y, weights, indices, n_classes, PruneLevel::new(config.cf)?);
     let node_weight: f64 = stats.class_weights.iter().sum();
 
     // Check stopping conditions (the node weight against 2 * min_cases, as C4.5), then find
@@ -1015,7 +1043,7 @@ fn extract_rules(
 /// # Errors
 ///
 /// `InvalidSpecification` for invalid codes, too many classes, non-finite
-/// features or `trials` outside 1..=100; `Cancelled` once the installed
+/// features, `trials` outside 1..=100 or `cf` outside (0, 1); `Cancelled` once the installed
 /// computation budget expires (checked per node and per trial).
 ///
 /// # References
@@ -1044,6 +1072,14 @@ pub fn c50(x: ArrayView2<f64>, y: ArrayView1<f64>, config: &C50Config) -> EconRe
     if n_features == 0 {
         return Err(EconError::InvalidSpecification {
             message: "C5.0 needs at least one feature column".to_string(),
+        });
+    }
+    if !(config.cf > 0.0 && config.cf < 1.0) {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "the pruning confidence cf must satisfy 0 < cf < 1, got {}",
+                config.cf
+            ),
         });
     }
     if !(1..=100).contains(&config.trials) {
@@ -1604,6 +1640,133 @@ mod tests {
                     (a, b) => assert_eq!(a.is_none(), b.is_none(), "seed {seed}: {a:?} {b:?}"),
                 }
             }
+        }
+    }
+
+    #[test]
+    fn test_c50_cf_must_be_inside_the_unit_interval() {
+        // ML-68. cf = 0 made the old coefficient infinite and turned pruning off silently.
+        let x = two_cluster_x(20);
+        let y = Array1::from_shape_fn(20, |i| if i < 10 { 0.0 } else { 1.0 });
+        for cf in [0.0, 1.0, -0.1, f64::NAN, f64::INFINITY] {
+            let cfg = C50Config {
+                cf,
+                min_cases: 1,
+                ..Default::default()
+            };
+            let err = c50(x.view(), y.view(), &cfg).unwrap_err();
+            assert!(
+                matches!(err, EconError::InvalidSpecification { .. })
+                    && err.to_string().contains("0 < cf < 1"),
+                "{cf}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_c50_added_errors_match_c45() {
+        // C4.5 Release 8's AddErrs (stats.c), evaluated in C for these (cf, N, E).
+        let cases: [(f64, [f64; 6]); 3] = [
+            (
+                0.25,
+                [
+                    1.3393401692638518,
+                    1.4182126240518167,
+                    1.7870684052862202,
+                    1.3035065579682557,
+                    2.9019070285606272,
+                    0.26800000000000024,
+                ],
+            ),
+            (
+                0.1,
+                [
+                    2.1749812373250887,
+                    2.4540410409088818,
+                    3.1440288945007175,
+                    2.0691566129356174,
+                    5.3533344745619615,
+                    0.26800000000000024,
+                ],
+            ),
+            (
+                0.5,
+                [
+                    0.68127342150308801,
+                    0.590636710751544,
+                    0.5,
+                    0.5,
+                    0.5,
+                    0.26800000000000024,
+                ],
+            ),
+        ];
+        let ne = [
+            (20.0, 0.0),
+            (20.0, 0.5),
+            (20.0, 3.0),
+            (6.0, 1.0),
+            (100.0, 12.0),
+            (10.0, 9.6),
+        ];
+        for (cf, expected) in cases {
+            let level = PruneLevel::new(cf).unwrap();
+            for (&(n, e), &want) in ne.iter().zip(expected.iter()) {
+                let got = added_errors(n, e, level);
+                assert!(
+                    (got - want).abs() <= 1e-12 * want.abs(),
+                    "cf {cf} N {n} E {e}: {got} vs {want}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_c50_prunes_when_the_leaf_is_no_worse() {
+        // A node whose children's estimates sum to 3.0: as a leaf it estimates 2.7 (pruned), 3.05
+        // (pruned, within C4.5's 0.1) or 3.3 (kept).
+        let leaf = |id: usize, estimate: f64| {
+            Box::new(C50Node {
+                id,
+                n: 5,
+                class_counts: vec![4, 1],
+                class_weights: vec![4.0, 1.0],
+                predicted_class: 0,
+                entropy: 0.5,
+                split: None,
+                left: None,
+                right: None,
+                error_estimate: estimate,
+            })
+        };
+        let stats = |estimate: f64| C50NodeStats {
+            class_counts: vec![8, 2],
+            class_weights: vec![8.0, 2.0],
+            predicted_class: 0,
+            entropy: 0.5,
+            error_estimate: estimate,
+        };
+        for (estimate, pruned) in [(2.7, true), (3.05, true), (3.3, false)] {
+            let node = c50_join(
+                0,
+                10,
+                stats(estimate),
+                (0, 1.5, 0.1, 0.2),
+                leaf(1, 1.5),
+                leaf(2, 1.5),
+                false,
+            );
+            assert_eq!(node.split.is_none(), pruned, "leaf estimate {estimate}");
+            let kept = c50_join(
+                0,
+                10,
+                stats(estimate),
+                (0, 1.5, 0.1, 0.2),
+                leaf(1, 1.5),
+                leaf(2, 1.5),
+                true,
+            );
+            assert!(kept.split.is_some(), "no_global_pruning keeps the split");
         }
     }
 
