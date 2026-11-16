@@ -51,7 +51,8 @@ gave shares 0.95513-0.95883 / 0.01079-0.01199 / 0.03037-0.03299 for the random f
 
 - **Forest importances are not R-pinned (band of five randomForest seeds).** The bootstrap and feature draws use
   p2a's RNG, so a forest cannot be matched draw by draw.
-- gbm's Bernoulli and Laplace leaves (ML-94, WT-1) are not pinned; only the Gaussian stump path is.
+- gbm's Bernoulli and Laplace terminal nodes are R-pinned in `gbm.md` (`ml_boosting_t4.json`); this file pins
+  the Gaussian stump path.
 
 ## Wall-clock
 
@@ -92,6 +93,22 @@ confirmed by the minima (1.03).
 cargo test -p p2a-core --lib --no-default-features --features ci -- tree_importance_rpart importance_band gbm_stump_influence
 ```
 
-The target-scale check (one pass over the target) against v0.5.0, same protocol as the quantile forest's rows in
-[`quantile_rf.md`](quantile_rf.md) (preliminary, loaded machine): `random_forest` defaults at n = 10,000, 6,065 ms base
-and 6,199 ms this tree (1.02); `gbm` defaults at n = 10,000, 1,855 and 1,929 ms (1.04).
+### Node-local split search and leaf estimates (T4)
+
+`release`, `ci` features, the T4 boosting/forest fixes against the code before them (`34a4186a`), nine processes per
+side interleaved, one core (`taskset`), one rayon thread, 2026-11-16, load average 22-42 on 12 cores (a loaded
+machine: read ratios near 1 as within noise). Cells are the median of the process medians; "min ratio" is the ratio
+of the minima. Design: n rows, 5 features uniform on [0, 10], `y = 2 x0 - x4 + (x1 - 5)^2 / 5` plus noise.
+
+| Row | n | base (ms) | this tree (ms) | ratio | min ratio |
+|---|---:|---:|---:|---:|---:|
+| `random_forest`, 100 trees, depth 10, sqrt | 100 | 18.18 | 16.81 | 0.92 | 0.94 |
+|  | 1,000 | 300.2 | 176.1 | 0.59 | 0.58 |
+|  | 10,000 | 5,469 | 1,884 | 0.34 | 0.37 |
+| `random_forest_with_trees`, same | 10,000 | 6,220 | 2,494 | 0.40 | 0.38 |
+| `gbm()` defaults, Gaussian | 1,000 | 136.3 | 137.8 | 1.01 | 0.99 |
+|  | 10,000 | 1,681 | 1,662 | 0.99 | 0.99 |
+
+The forests are identical to the base's (`test_random_forest_identical_to_full_scan_reference`); the split search
+reads only the node's rows. Peak RSS of the forest at n = 10,000: 5.8-6.0 MB base, 5.6-5.7 MB this tree. This
+replaces the earlier target-scale check, which was taken on a loaded machine and marked preliminary.

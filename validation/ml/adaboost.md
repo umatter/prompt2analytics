@@ -84,6 +84,17 @@ that name) and depth 3 (the base ignored `max_depth` and fitted stumps; this tre
 
 The like-for-like rows are faster than the base.
 
+T4 (Drucker's stopping rule): `release`, `ci` features, the T4 boosting/forest fixes against the code before them
+(`34a4186a`), nine processes per side interleaved, one core (`taskset`), one rayon thread, 2026-11-16, load average
+22-42 on 12 cores (a loaded machine: read ratios near 1 as within noise). Cells are the median of the process
+medians; "min ratio" is the ratio of the minima. Design: n rows, 5 features uniform on [0, 10], `y = 2 x0 - x4 +
+(x1 - 5)^2 / 5` plus noise. AdaBoost.R2, stumps, n = 1,000: base 52.01 ms, this tree 50.74 ms (0.98; minima 0.97).
+
 ## Not pinned
 
-The R2 loop beyond its first learner: Drucker's loop deviations are the open finding ML-110.
+The R2 loop beyond its first learner. Its rules follow Drucker (1997): a learner whose weighted average loss
+reaches 0.5 stops the loop and is not kept (a warning names it; a first learner that bad is an error), and a learner
+that fits the training data exactly becomes the whole model (beta -> 0 gives it the whole weighted median), with a
+note. Before T4 the loss was clamped at 0.999, so learners worse than chance were kept with negative weight, and a
+perfect learner was added with beta 1 to the others (ML-110). `test_adaboost_r2_stops_at_average_loss_half`,
+`test_adaboost_r2_refuses_a_first_learner_at_half`, `test_adaboost_r2_perfect_fit_is_the_model`.

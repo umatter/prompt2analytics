@@ -79,7 +79,8 @@ pub enum FastMboostFamily {
     Gaussian,
     /// Binomial (logistic)
     Binomial,
-    /// Huber (robust)
+    /// Huber (robust), with mboost's adaptive threshold `d = median(|y - f|)` of the current fit,
+    /// recomputed every iteration (scale-equivariant)
     Huber,
 }
 
@@ -386,12 +387,14 @@ fn boost_rows(
     let mut val_risk: Vec<f64> = Vec::new();
     let mut best = 0usize; // 1-based; 0 before the first iteration
     let mut best_risk = f64::INFINITY;
+    // Huber threshold of the current fit (mboost's Huber(d = NULL)); unread by the other families
+    let mut delta = huber_d(&predictions, y, config.family);
 
     for m in 0..config.m_stop {
         checkpoint()?;
 
         // Compute negative gradient (pseudo-residuals)
-        let residuals = compute_negative_gradient(&predictions, y, config.family);
+        let residuals = compute_negative_gradient(&predictions, y, config.family, delta);
 
         // Fit base learner and get update
         let (learner, update) = match &config.base_learner {
@@ -407,13 +410,15 @@ fn boost_rows(
             predictions[i] += config.nu * update[i];
         }
 
-        // Compute training risk
-        let train_risk = compute_risk(&predictions, y, config.family);
+        // Compute training risk (Huber: at the threshold of the updated fit, which the next
+        // iteration's gradient uses too)
+        delta = huber_d(&predictions, y, config.family);
+        let train_risk = compute_risk(&predictions, y, config.family, delta);
         risk.push(train_risk);
 
         if let (Some((x_val, y_val)), Some(val_pred)) = (validation, val_predictions.as_mut()) {
             apply_learner(&learner, config.nu, &x_means, x_val, val_pred);
-            let current = compute_risk(val_pred, y_val, config.family);
+            let current = compute_risk(val_pred, y_val, config.family, delta);
             val_risk.push(current);
             if current < best_risk {
                 best_risk = current;
@@ -524,8 +529,37 @@ fn compute_initial_offset(y: &[f64], family: FastMboostFamily) -> f64 {
     }
 }
 
-/// Compute negative gradient (pseudo-residuals)
-fn compute_negative_gradient(predictions: &[f64], y: &[f64], family: FastMboostFamily) -> Vec<f64> {
+/// The Huber threshold of mboost's `Huber(d = NULL)`: `median(|y - f|)` of the fit `f` (R's
+/// median), recomputed every iteration. mboost takes it from the previous call's fit (one
+/// iteration behind); this uses the current fit. 0 for the other families (unread).
+fn huber_d(predictions: &[f64], y: &[f64], family: FastMboostFamily) -> f64 {
+    if family != FastMboostFamily::Huber || y.is_empty() {
+        return 0.0;
+    }
+    let mut abs_r: Vec<f64> = predictions
+        .iter()
+        .zip(y)
+        .map(|(&p, &yi)| (yi - p).abs())
+        .collect();
+    let n = abs_r.len();
+    let mid = n / 2;
+    let (lower, upper, _) = abs_r.select_nth_unstable_by(mid, f64::total_cmp);
+    let upper = *upper;
+    if n.is_multiple_of(2) {
+        let lower_max = lower.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        (lower_max + upper) / 2.0
+    } else {
+        upper
+    }
+}
+
+/// Compute negative gradient (pseudo-residuals); `delta` is the Huber threshold
+fn compute_negative_gradient(
+    predictions: &[f64],
+    y: &[f64],
+    family: FastMboostFamily,
+    delta: f64,
+) -> Vec<f64> {
     match family {
         FastMboostFamily::Gaussian => {
             // Negative gradient of L2 loss: y - f(x)
@@ -547,8 +581,7 @@ fn compute_negative_gradient(predictions: &[f64], y: &[f64], family: FastMboostF
                 .collect()
         }
         FastMboostFamily::Huber => {
-            // Huber loss with delta = 1.345 (for 95% efficiency)
-            let delta = 1.345;
+            // Huber loss at the adaptive threshold
             predictions
                 .par_iter()
                 .zip(y.par_iter())
@@ -893,8 +926,8 @@ fn fit_tree(x: ArrayView2<f64>, residuals: &[f64], max_depth: usize) -> (FittedL
     (FittedLearner::Tree { nodes }, update)
 }
 
-/// Compute risk (loss) on predictions
-fn compute_risk(predictions: &[f64], y: &[f64], family: FastMboostFamily) -> f64 {
+/// Compute risk (loss) on predictions; `delta` is the Huber threshold
+fn compute_risk(predictions: &[f64], y: &[f64], family: FastMboostFamily, delta: f64) -> f64 {
     let n = predictions.len() as f64;
     match family {
         FastMboostFamily::Gaussian => {
@@ -917,7 +950,6 @@ fn compute_risk(predictions: &[f64], y: &[f64], family: FastMboostFamily) -> f64
                 / n
         }
         FastMboostFamily::Huber => {
-            let delta = 1.345;
             predictions
                 .iter()
                 .zip(y.iter())
@@ -1412,5 +1444,38 @@ mod tests {
         println!("  R²: {:.4}", r2);
 
         assert!(r2 > 0.80, "R² too low: {:.4}", r2);
+    }
+
+    #[test]
+    fn test_fast_mboost_huber_is_scale_equivariant() {
+        // WT-1. mboost's Huber(d = NULL) takes d = median(|y - f|): a fit on 1000 y is 1000 times
+        // the fit on y. Before: d = 1.345 in the units of y, so the large-scale fit was close to
+        // least absolute deviation (WT-1: MAE/scale 0.044 against 7.49).
+        let mut rng = StdRng::seed_from_u64(31);
+        let normal = Normal::new(0.0, 2.0).unwrap();
+        let n = 150;
+        let x = Array2::from_shape_fn((n, 3), |_| rng.r#gen::<f64>() * 10.0);
+        let y = Array1::from_shape_fn(n, |i| {
+            30.0 * x[[i, 0]] - 8.0 * x[[i, 2]] + normal.sample(&mut rng)
+        });
+        let big = y.mapv(|v| 1000.0 * v);
+        for learner in [
+            FastMboostLearner::ComponentwiseLinear,
+            FastMboostLearner::Stump,
+        ] {
+            let mut c = FastMboostConfig::default();
+            c.m_stop = 100;
+            c.family = FastMboostFamily::Huber;
+            c.base_learner = learner.clone();
+            let a = fast_mboost(x.view(), y.view(), &c).unwrap();
+            let b = fast_mboost(x.view(), big.view(), &c).unwrap();
+            for (p, q) in a.predictions.iter().zip(&b.predictions) {
+                assert!(
+                    (1000.0 * p - q).abs() <= 1e-9 * q.abs().max(1.0),
+                    "{learner:?}: {} vs {q}",
+                    1000.0 * p
+                );
+            }
+        }
     }
 }

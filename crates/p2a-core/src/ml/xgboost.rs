@@ -40,12 +40,14 @@
 //!   Proceedings of the 22nd ACM SIGKDD, 785-794. <https://doi.org/10.1145/2939672.2939785>
 //! - XGBoost Documentation: <https://xgboost.readthedocs.io/en/stable/tutorials/model.html>
 
-use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use super::trees::MAX_TREE_DEPTH;
 use crate::Dataset;
 use crate::errors::{EconError, EconResult};
+use crate::resource;
 
 /// Objective function for XGBoost.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -100,7 +102,7 @@ pub struct XGBoostConfig {
     pub n_estimators: usize,
     /// Learning rate (shrinkage factor, eta in original paper)
     pub learning_rate: f64,
-    /// Maximum depth of trees (0 = no limit, but NOT recommended)
+    /// Maximum depth of trees (0 = no limit, but NOT recommended); every tree stops at depth 512
     pub max_depth: usize,
     /// L2 regularization on leaf weights (reg_lambda in sklearn API)
     pub lambda: f64,
@@ -124,8 +126,15 @@ pub struct XGBoostConfig {
     pub base_score: Option<f64>,
     /// Random seed
     pub seed: Option<u64>,
-    /// Early stopping rounds (0 = disabled)
+    /// Early stopping rounds (0 = disabled): with `k > 0`, `validation_fraction` of the rows are
+    /// held out (a seeded draw), the trees are grown on the rest, and boosting stops after `k`
+    /// rounds without an improvement of the held-out loss; the model keeps the trees up to the
+    /// best round
     pub early_stopping_rounds: usize,
+    /// Share of rows held out for early stopping, in (0, 1): `ceil(n * validation_fraction)`
+    /// rows, leaving at least 2 to train on. Read only when `early_stopping_rounds > 0`
+    #[serde(default = "default_validation_fraction")]
+    pub validation_fraction: f64,
     /// Verbosity (0 = silent, 1 = print metrics)
     pub verbosity: usize,
 }
@@ -147,9 +156,15 @@ impl Default for XGBoostConfig {
             base_score: None,
             seed: None,
             early_stopping_rounds: 0,
+            validation_fraction: default_validation_fraction(),
             verbosity: 0,
         }
     }
+}
+
+/// Default of [`XGBoostConfig::validation_fraction`].
+fn default_validation_fraction() -> f64 {
+    0.1
 }
 
 /// A node in an XGBoost tree.
@@ -250,8 +265,15 @@ pub struct XGBoostResult {
     pub config: XGBoostConfig,
     /// Feature names (if provided)
     pub feature_names: Option<Vec<String>>,
-    /// Iteration where early stopping triggered (if any)
+    /// With early stopping: the number of trees kept, the round (1-based, as R xgboost) with the
+    /// lowest held-out loss; `None` without early stopping
     pub best_iteration: Option<usize>,
+    /// Rows (ascending) held out for early stopping
+    #[serde(default)]
+    pub validation_rows: Option<Vec<usize>>,
+    /// Held-out loss after each round that ran (early stopping only; empty otherwise)
+    #[serde(default)]
+    pub validation_loss: Vec<f64>,
     /// Internal: trees (not serialized for large models)
     #[serde(skip)]
     pub(crate) trees: Vec<XGBoostTree>,
@@ -294,7 +316,12 @@ impl std::fmt::Display for XGBoostResult {
         }
 
         if let Some(best_iter) = self.best_iteration {
-            writeln!(f, "Best iteration (early stopping): {}", best_iter)?;
+            let held_out = self.validation_rows.as_ref().map_or(0, Vec::len);
+            writeln!(
+                f,
+                "Best iteration (early stopping on {held_out} held-out rows): {best_iter} of {} rounds",
+                self.validation_loss.len()
+            )?;
         }
 
         if self.train_loss.len() > 1 {
@@ -558,9 +585,9 @@ fn build_tree(
 
     // Check stopping conditions
     let max_depth = if config.max_depth == 0 {
-        usize::MAX
+        MAX_TREE_DEPTH
     } else {
-        config.max_depth
+        config.max_depth.min(MAX_TREE_DEPTH)
     };
 
     if depth >= max_depth || n <= 1 || h_sum < config.min_child_weight {
@@ -834,6 +861,153 @@ pub fn xgboost(
         }
     }
 
+    if config.early_stopping_rounds > 0 {
+        return xgboost_early_stopping(x, y, config);
+    }
+
+    let fit = boost(x, y, config, None)?;
+    let importances = normalized_gains(fit.feature_gains, n_features);
+
+    // Convert predictions to probabilities for classification
+    let final_predictions = match config.objective {
+        XGBoostObjective::BinaryLogistic | XGBoostObjective::RegLogistic => {
+            fit.predictions.mapv(sigmoid).to_vec()
+        }
+        XGBoostObjective::RegSquaredError => fit.predictions.to_vec(),
+    };
+
+    Ok(XGBoostResult {
+        n_estimators: fit.trees.len(),
+        feature_importances: importances,
+        final_train_rmse: *fit.train_loss.last().unwrap_or(&0.0),
+        train_loss: fit.train_loss,
+        base_score: fit.base_score,
+        predictions: final_predictions,
+        config: config.clone(),
+        feature_names: None,
+        best_iteration: None,
+        validation_rows: None,
+        validation_loss: Vec::new(),
+        trees: fit.trees,
+    })
+}
+
+/// Mixed into the seed of the held-out draw, so that the training rounds draw exactly what a fit
+/// on the training rows alone would draw.
+const VALIDATION_STREAM: u64 = 0x9E37_79B9_7F4A_7C15;
+
+/// [`xgboost`] with early stopping: hold out `ceil(n * validation_fraction)` rows (a seeded
+/// Fisher-Yates draw), boost on the rest while watching the held-out loss, and keep the trees up
+/// to the best round. The training predictions cover every row.
+fn xgboost_early_stopping(
+    x: ArrayView2<f64>,
+    y: ArrayView1<f64>,
+    config: &XGBoostConfig,
+) -> EconResult<XGBoostResult> {
+    let n = x.nrows();
+    let f = config.validation_fraction;
+    if !(f > 0.0 && f < 1.0) {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "validation_fraction must be in (0, 1) when early_stopping_rounds > 0 (got {f})"
+            ),
+        });
+    }
+    let n_val = (f * n as f64).ceil() as usize;
+    if n_val < 1 || n_val + 2 > n {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "validation_fraction {f} holds out {n_val} of {n} rows; early stopping needs at \
+                 least 1 held-out row and 2 training rows"
+            ),
+        });
+    }
+    let mut rows: Vec<usize> = (0..n).collect();
+    let mut state = config.seed.unwrap_or(42) ^ VALIDATION_STREAM;
+    for i in (1..n).rev() {
+        let j = lcg_random(&mut state) % (i + 1);
+        rows.swap(i, j);
+    }
+    let mut validation = rows[..n_val].to_vec();
+    let mut train = rows[n_val..].to_vec();
+    validation.sort_unstable();
+    train.sort_unstable();
+
+    let x_train = x.select(Axis(0), &train);
+    let y_train = y.select(Axis(0), &train);
+    let x_val = x.select(Axis(0), &validation);
+    let y_val = y.select(Axis(0), &validation);
+    let mut fit = boost(
+        x_train.view(),
+        y_train.view(),
+        config,
+        Some((x_val.view(), y_val.view())),
+    )?;
+
+    let best = fit.best_round;
+    fit.trees.truncate(best);
+    fit.train_loss.truncate(best + 1);
+    let mut gains: HashMap<usize, f64> = HashMap::new();
+    for tree in &fit.trees {
+        tree.feature_importances(&mut gains);
+    }
+    let importances = normalized_gains(gains, x.ncols());
+
+    let mut result = XGBoostResult {
+        n_estimators: fit.trees.len(),
+        feature_importances: importances,
+        final_train_rmse: *fit.train_loss.last().unwrap_or(&0.0),
+        train_loss: fit.train_loss,
+        base_score: fit.base_score,
+        predictions: Vec::new(),
+        config: config.clone(),
+        feature_names: None,
+        best_iteration: Some(best),
+        validation_rows: Some(validation),
+        validation_loss: fit.validation_loss,
+        trees: fit.trees,
+    };
+    result.predictions = xgboost_predict(&result, x)?;
+    Ok(result)
+}
+
+/// Gain shares per feature (zeros if no tree split).
+fn normalized_gains(feature_gains: HashMap<usize, f64>, n_features: usize) -> Vec<f64> {
+    let mut importances = vec![0.0; n_features];
+    let total_gain: f64 = feature_gains.values().sum();
+    if total_gain > 0.0 {
+        for (feature, gain) in feature_gains {
+            importances[feature] = gain / total_gain;
+        }
+    }
+    importances
+}
+
+/// The boosting rounds of one fit.
+struct Boosted {
+    trees: Vec<XGBoostTree>,
+    /// Loss of the base score, then one entry per round
+    train_loss: Vec<f64>,
+    base_score: f64,
+    /// Raw scores of the training rows
+    predictions: Array1<f64>,
+    feature_gains: HashMap<usize, f64>,
+    /// Held-out loss after each round (early stopping only)
+    validation_loss: Vec<f64>,
+    /// 1-based round with the lowest held-out loss (early stopping only)
+    best_round: usize,
+}
+
+/// Grow the trees on `x` and `y`. With `validation`, record the held-out loss after each round
+/// and stop after `early_stopping_rounds` rounds without an improvement greater than 1e-10.
+fn boost(
+    x: ArrayView2<f64>,
+    y: ArrayView1<f64>,
+    config: &XGBoostConfig,
+    validation: Option<(ArrayView2<f64>, ArrayView1<f64>)>,
+) -> EconResult<Boosted> {
+    let n_samples = x.nrows();
+    let n_features = x.ncols();
     let mut rng_state = config.seed.unwrap_or(42);
 
     // Initialize predictions with base score
@@ -842,19 +1016,25 @@ pub fn xgboost(
         .unwrap_or_else(|| compute_base_score(&y, config.objective));
     let mut predictions = Array1::from_elem(n_samples, base_score);
 
-    let mut trees = Vec::with_capacity(config.n_estimators);
-    let mut train_loss = Vec::with_capacity(config.n_estimators + 1);
+    let mut trees = resource::try_with_capacity(config.n_estimators, "XGBoost trees")?;
+    let mut train_loss = resource::try_with_capacity(
+        config.n_estimators.saturating_add(1),
+        "XGBoost training loss",
+    )?;
     let mut feature_gains: HashMap<usize, f64> = HashMap::new();
 
     // Initial loss
     train_loss.push(compute_loss(&y, &predictions, config.objective));
 
+    let mut val_predictions = validation.map(|(xv, _)| Array1::from_elem(xv.nrows(), base_score));
+    let mut validation_loss = Vec::new();
     let mut best_loss = f64::INFINITY;
-    let mut best_iteration = None;
+    let mut best_round = 0usize;
     let mut rounds_without_improvement = 0;
 
     // Boosting iterations
     for iter in 0..config.n_estimators {
+        resource::checkpoint()?;
         // Compute gradients and hessians
         let (g, h) = compute_gradients(&y, &predictions, config.objective);
 
@@ -888,8 +1068,6 @@ pub fn xgboost(
         // Accumulate feature importance
         tree.feature_importances(&mut feature_gains);
 
-        trees.push(tree);
-
         // Track loss
         let loss = compute_loss(&y, &predictions, config.objective);
         train_loss.push(loss);
@@ -898,56 +1076,43 @@ pub fn xgboost(
             eprintln!("[{}]\ttrain-loss:{:.6}", iter + 1, loss);
         }
 
-        // Early stopping
-        if config.early_stopping_rounds > 0 {
-            if loss < best_loss - 1e-10 {
-                best_loss = loss;
-                best_iteration = Some(iter);
+        // Early stopping on the held-out rows
+        if let (Some((xv, yv)), Some(vp)) = (validation, val_predictions.as_mut()) {
+            for i in 0..xv.nrows() {
+                vp[i] += config.learning_rate * tree.predict_one(&xv.row(i));
+            }
+            let val_loss = compute_loss(&yv, vp, config.objective);
+            validation_loss.push(val_loss);
+            trees.push(tree);
+            if val_loss < best_loss - 1e-10 {
+                best_loss = val_loss;
+                best_round = iter + 1;
                 rounds_without_improvement = 0;
             } else {
                 rounds_without_improvement += 1;
                 if rounds_without_improvement >= config.early_stopping_rounds {
                     if config.verbosity > 0 {
                         eprintln!(
-                            "Early stopping at iteration {} (best: {})",
-                            iter + 1,
-                            best_iteration.unwrap_or(0) + 1
+                            "Early stopping at iteration {} (best: {best_round})",
+                            iter + 1
                         );
                     }
                     break;
                 }
             }
+        } else {
+            trees.push(tree);
         }
     }
 
-    // Normalize feature importances
-    let mut importances = vec![0.0; n_features];
-    let total_gain: f64 = feature_gains.values().sum();
-    if total_gain > 0.0 {
-        for (feature, gain) in feature_gains {
-            importances[feature] = gain / total_gain;
-        }
-    }
-
-    // Convert predictions to probabilities for classification
-    let final_predictions = match config.objective {
-        XGBoostObjective::BinaryLogistic | XGBoostObjective::RegLogistic => {
-            predictions.mapv(sigmoid).to_vec()
-        }
-        XGBoostObjective::RegSquaredError => predictions.to_vec(),
-    };
-
-    Ok(XGBoostResult {
-        n_estimators: trees.len(),
-        feature_importances: importances,
-        train_loss: train_loss.clone(),
-        final_train_rmse: *train_loss.last().unwrap_or(&0.0),
-        base_score,
-        predictions: final_predictions,
-        config: config.clone(),
-        feature_names: None,
-        best_iteration,
+    Ok(Boosted {
         trees,
+        train_loss,
+        base_score,
+        predictions,
+        feature_gains,
+        validation_loss,
+        best_round,
     })
 }
 
@@ -1573,5 +1738,159 @@ mod tests {
         assert!(display.contains("XGBoost Results"));
         assert!(display.contains("Number of estimators: 10"));
         assert!(display.contains("Lambda (L2)"));
+    }
+
+    /// n rows, `y = x0 + N(0, 1)`-like noise from an LCG, three features.
+    fn early_stop_data(n: usize) -> (Array2<f64>, Array1<f64>) {
+        let mut s = 20_261_115u64;
+        let mut u = || (crate::ml::lcg_random(&mut s) % 1_000_000) as f64 / 1_000_000.0;
+        let x = Array2::from_shape_fn((n, 3), |_| u() * 4.0);
+        let y = Array1::from_shape_fn(n, |i| {
+            // sum of four uniforms: mean 2, variance 1/3; scaled to unit variance
+            let e = (u() + u() + u() + u() - 2.0) * 3f64.sqrt();
+            x[[i, 0]] + e
+        });
+        (x, y)
+    }
+
+    #[test]
+    fn test_xgboost_early_stopping_keeps_the_best_trees() {
+        // ML-143. The model is cut back to the best round, and best_iteration is the number of
+        // trees kept (1-based, as R xgboost). Before: every tree stayed, and best_iteration was the
+        // 0-based round of the lowest training loss.
+        let (x, y) = early_stop_data(200);
+        let mut c = XGBoostConfig::default();
+        c.n_estimators = 1000;
+        c.early_stopping_rounds = 10;
+        c.subsample = 0.8;
+        c.seed = Some(3);
+        let r = xgboost(x.view(), y.view(), &c).unwrap();
+        let best = r.best_iteration.expect("early stopping ran");
+        assert_eq!(r.n_estimators, best);
+        assert_eq!(r.trees.len(), best);
+        let again = xgboost_predict(&r, x.view()).unwrap();
+        assert_eq!(again, r.predictions);
+    }
+
+    #[test]
+    fn test_xgboost_early_stopping_watches_held_out_rows() {
+        // ML-143. Early stopping watches held-out rows, and the model is the plain fit on the
+        // training rows cut at the best round. Before: it watched the training loss.
+        let (x, y) = early_stop_data(200);
+        let mut c = XGBoostConfig::default();
+        c.n_estimators = 1000;
+        c.early_stopping_rounds = 10;
+        c.validation_fraction = 0.2;
+        c.subsample = 0.8;
+        c.seed = Some(3);
+        let r = xgboost(x.view(), y.view(), &c).unwrap();
+        let rows = r.validation_rows.clone().unwrap();
+        assert_eq!(rows.len(), 40);
+        assert!(rows.windows(2).all(|w| w[0] < w[1]));
+        let best = r.best_iteration.unwrap();
+        let ran = r.validation_loss.len();
+        assert!(ran > best && ran < 1000, "ran {ran}, best {best}");
+        let min = r
+            .validation_loss
+            .iter()
+            .copied()
+            .fold(f64::INFINITY, f64::min);
+        assert_eq!(r.validation_loss[best - 1], min);
+        assert_eq!(r.n_estimators, best);
+        assert_eq!(r.train_loss.len(), best + 1);
+        assert_eq!(r.final_train_rmse, r.train_loss[best]);
+
+        // The same trees as a fit on the training rows alone with `best` rounds.
+        let train: Vec<usize> = (0..200).filter(|i| !rows.contains(i)).collect();
+        let mut plain = c.clone();
+        plain.early_stopping_rounds = 0;
+        plain.n_estimators = best;
+        let p = xgboost(
+            x.select(Axis(0), &train).view(),
+            y.select(Axis(0), &train).view(),
+            &plain,
+        )
+        .unwrap();
+        assert_eq!(xgboost_predict(&p, x.view()).unwrap(), r.predictions);
+        assert!(
+            r.to_string().contains(&format!(
+                "early stopping on 40 held-out rows): {best} of {ran} rounds"
+            )),
+            "{r}"
+        );
+    }
+
+    #[test]
+    fn test_xgboost_early_stopping_refuses_bad_validation_fraction() {
+        let (x, y) = early_stop_data(20);
+        for f in [0.0, 1.0, f64::NAN, 0.95] {
+            let mut c = XGBoostConfig::default();
+            c.n_estimators = 5;
+            c.early_stopping_rounds = 2;
+            c.validation_fraction = f;
+            let e = xgboost(x.view(), y.view(), &c).unwrap_err();
+            assert!(
+                matches!(&e, EconError::InvalidSpecification { message } if message.contains("validation_fraction")),
+                "{f}: {e}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_xgboost_best_iteration_only_with_early_stopping() {
+        let (x, y) = early_stop_data(100);
+        let mut c = XGBoostConfig::default();
+        c.n_estimators = 20;
+        c.validation_fraction = f64::NAN; // not read without early stopping
+        let r = xgboost(x.view(), y.view(), &c).unwrap();
+        assert_eq!(r.best_iteration, None);
+        assert_eq!(r.validation_rows, None);
+        assert!(r.validation_loss.is_empty());
+        assert_eq!(r.n_estimators, 20);
+        assert_eq!(xgboost_predict(&r, x.view()).unwrap(), r.predictions);
+    }
+
+    /// x = i in one column, y = i % 2: every split isolates one row, so an uncapped tree is a
+    /// chain as deep as the rows.
+    fn chain_data(n: usize) -> (Array2<f64>, Array1<f64>) {
+        (
+            Array2::from_shape_fn((n, 1), |(i, _)| i as f64),
+            Array1::from_shape_fn(n, |i| (i % 2) as f64),
+        )
+    }
+
+    /// Runs `f` on a thread with a 2 MiB stack, the size of tokio's blocking threads and rayon's workers.
+    fn on_small_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+        std::thread::Builder::new()
+            .stack_size(2 << 20)
+            .spawn(f)
+            .unwrap()
+            .join()
+            .unwrap()
+    }
+
+    #[test]
+    fn test_xgboost_tree_depth_is_capped() {
+        // max_depth 0 (no limit) stops at depth 512. Before: a chain as deep as the rows.
+        let depth = on_small_stack(|| {
+            let (x, y) = chain_data(2_000);
+            let mut c = XGBoostConfig::default();
+            c.n_estimators = 1;
+            c.max_depth = 0;
+            c.lambda = 0.0;
+            c.min_child_weight = 0.0;
+            c.gamma = 0.0;
+            let r = xgboost(x.view(), y.view(), &c).unwrap();
+            let (mut max, mut stack) = (0, vec![(&r.trees[0].root, 0usize)]);
+            while let Some((node, d)) = stack.pop() {
+                max = max.max(d);
+                if let XGBoostNode::Split { left, right, .. } = node {
+                    stack.push((left, d + 1));
+                    stack.push((right, d + 1));
+                }
+            }
+            max
+        });
+        assert_eq!(depth, MAX_TREE_DEPTH);
     }
 }

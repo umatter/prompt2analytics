@@ -24,7 +24,7 @@ pub const FAST_XGB_MAX_JOBS: usize = 1024;
 pub struct FastXgbConfig {
     /// Number of boosting rounds
     pub n_estimators: usize,
-    /// Maximum tree depth
+    /// Maximum tree depth (trees stop at depth 512 whatever it says)
     pub max_depth: usize,
     /// Learning rate (eta)
     pub learning_rate: f64,
@@ -459,8 +459,18 @@ fn fast_xgboost_inner(
 
     // Sample indices for subsampling
     let all_samples: Vec<usize> = (0..n).collect();
+    let all_features: Vec<usize> = (0..p).collect();
+    // One generator for the whole fit, so every round draws new rows and columns
+    let mut rng = {
+        use rand::prelude::*;
+        match config.seed {
+            Some(s) => StdRng::seed_from_u64(s),
+            None => StdRng::from_entropy(),
+        }
+    };
 
     for _round in 0..config.n_estimators {
+        crate::resource::checkpoint()?;
         // Compute gradients and hessians
         compute_gradients_fast(
             &predictions,
@@ -472,20 +482,16 @@ fn fast_xgboost_inner(
 
         // Row subsampling
         let samples = if config.subsample < 1.0 {
-            subsample_indices(&all_samples, config.subsample, config.seed)
+            subsample_indices(&all_samples, config.subsample, &mut rng)
         } else {
             all_samples.clone()
         };
 
         // Column subsampling
         let features: Vec<usize> = if config.colsample_bytree < 1.0 {
-            subsample_indices(
-                &(0..p).collect::<Vec<_>>(),
-                config.colsample_bytree,
-                config.seed,
-            )
+            subsample_indices(&all_features, config.colsample_bytree, &mut rng)
         } else {
-            (0..p).collect()
+            all_features.clone()
         };
 
         // Build tree with parallel histogram construction
@@ -613,6 +619,11 @@ struct PendingNode {
     histograms: Option<Vec<GradientHistogram>>,
 }
 
+/// The depth a tree stops at: `max_depth`, at most 512 (as the other tree builders).
+fn effective_depth(max_depth: usize) -> usize {
+    max_depth.min(super::trees::MAX_TREE_DEPTH)
+}
+
 /// Build tree using histogram-based splitting with parallel construction
 fn build_tree_histogram(
     binned_data: &BinnedData,
@@ -671,7 +682,10 @@ fn build_tree_histogram(
         };
 
         // Check stopping conditions
-        if depth >= config.max_depth || n_samples < 2 || hess_sum < config.min_child_weight {
+        if depth >= effective_depth(config.max_depth)
+            || n_samples < 2
+            || hess_sum < config.min_child_weight
+        {
             tree.nodes.push(leaf);
             continue;
         }
@@ -731,7 +745,7 @@ fn build_tree_histogram(
         // A child gets histograms only if it can still split: build the smaller one, subtract for
         // the larger when both can
         let can_split = |rows: &[usize]| {
-            depth + 1 < config.max_depth
+            depth + 1 < effective_depth(config.max_depth)
                 && rows.len() >= 2
                 && rows.iter().map(|&i| hessians[i]).sum::<f64>() >= config.min_child_weight
         };
@@ -793,18 +807,13 @@ fn build_tree_histogram(
     (tree, stats)
 }
 
-fn subsample_indices(indices: &[usize], ratio: f64, seed: Option<u64>) -> Vec<usize> {
-    use rand::prelude::*;
+/// A random `ceil(ratio * len)` of `indices`, drawn from the fit's generator.
+fn subsample_indices(indices: &[usize], ratio: f64, rng: &mut rand::rngs::StdRng) -> Vec<usize> {
     use rand::seq::SliceRandom;
-
-    let mut rng = match seed {
-        Some(s) => StdRng::seed_from_u64(s),
-        None => StdRng::from_entropy(),
-    };
 
     let n_sample = ((indices.len() as f64) * ratio).ceil() as usize;
     let mut sampled = indices.to_vec();
-    sampled.shuffle(&mut rng);
+    sampled.shuffle(rng);
     sampled.truncate(n_sample);
     sampled
 }
@@ -1202,5 +1211,81 @@ mod tests {
             result.feature_importances[0] > result.feature_importances[2],
             "x1 should be more important than x3"
         );
+    }
+
+    #[test]
+    fn test_fast_xgboost_seeded_subsample_reaches_every_row() {
+        // ML-42. A seeded fit draws new rows every round. Before: every round reused the same
+        // half of the rows, so only those 100 rows were ever fitted.
+        let n = 200;
+        let mut rng = StdRng::seed_from_u64(17);
+        let x = Array2::from_shape_fn((n, 1), |(i, _)| i as f64);
+        let y = Array1::from_shape_fn(n, |_| rng.r#gen::<f64>() * 2.0 - 1.0);
+        let mut cfg = FastXgbConfig::default();
+        cfg.n_estimators = 200;
+        cfg.max_depth = 8;
+        cfg.lambda = 0.0;
+        cfg.subsample = 0.5;
+        cfg.seed = Some(3);
+        let r = fast_xgboost(x.view(), y.view(), &cfg).unwrap();
+        let fitted = (0..n)
+            .filter(|&i| (r.predictions[i] - y[i]).abs() < 1e-3)
+            .count();
+        assert!(fitted >= 190, "{fitted} of {n} rows fitted");
+    }
+
+    #[test]
+    fn test_fast_xgboost_seeded_colsample_uses_every_feature() {
+        // ML-42. A seeded fit draws new columns every round. Before: the same three of six
+        // columns every round, so the other three had importance exactly 0.
+        let n = 300;
+        let mut rng = StdRng::seed_from_u64(29);
+        let normal = Normal::new(0.0, 0.3).unwrap();
+        let x = Array2::from_shape_fn((n, 6), |_| rng.r#gen::<f64>());
+        let y = Array1::from_shape_fn(n, |i| {
+            (0..6).map(|j| x[[i, j]]).sum::<f64>() + normal.sample(&mut rng)
+        });
+        let mut cfg = FastXgbConfig::default();
+        cfg.n_estimators = 50;
+        cfg.colsample_bytree = 0.5;
+        cfg.subsample = 0.8;
+        cfg.seed = Some(3);
+        let a = fast_xgboost(x.view(), y.view(), &cfg).unwrap();
+        assert!(
+            a.feature_importances.iter().all(|&v| v > 0.0),
+            "{:?}",
+            a.feature_importances
+        );
+        let b = fast_xgboost(x.view(), y.view(), &cfg).unwrap();
+        assert_eq!(a.predictions, b.predictions);
+        cfg.seed = Some(4);
+        let c = fast_xgboost(x.view(), y.view(), &cfg).unwrap();
+        assert_ne!(a.predictions, c.predictions);
+    }
+
+    #[test]
+    fn test_fast_xgboost_tree_depth_is_capped() {
+        // A guard: one feature has at most 256 bins, so a tree cannot pass depth 255 here; the
+        // cap of the other builders applies all the same.
+        assert_eq!(effective_depth(10_000), crate::ml::trees::MAX_TREE_DEPTH);
+        assert_eq!(effective_depth(6), 6);
+        let n = 2_000;
+        let x = Array2::from_shape_fn((n, 1), |(i, _)| i as f64);
+        let y = Array1::from_shape_fn(n, |i| (i % 2) as f64);
+        let mut c = FastXgbConfig::default();
+        c.n_estimators = 1;
+        c.max_depth = 10_000;
+        c.lambda = 0.0;
+        c.min_child_weight = 0.0;
+        let r = fast_xgboost(x.view(), y.view(), &c).unwrap();
+        let nodes = &r.trees[0].nodes;
+        let (mut max, mut stack) = (0, vec![(0usize, 0usize)]);
+        while let Some((i, d)) = stack.pop() {
+            max = max.max(d);
+            for child in [nodes[i].left, nodes[i].right].into_iter().flatten() {
+                stack.push((child, d + 1));
+            }
+        }
+        assert!(max <= crate::ml::trees::MAX_TREE_DEPTH, "depth {max}");
     }
 }

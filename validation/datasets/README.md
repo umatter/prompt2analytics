@@ -89,6 +89,7 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/density_t4.csv` | 284 × 2 (set, x) | `stat_density_t4` | `r/cases/stats_descriptive_t4.R` | seed 1; `x9`, `ties`, `iqr0`, `const`, `zero`, `dx` literal values |
 | `generated/describe_t4.csv` | 12 × 5 (id, e, o, ni, g; ni Int64, o missing in one row, ni in two, g text) | `stat_describe_t4` | `r/cases/stats_descriptive_t4.R` | seed 20261115 |
 | `generated/flexmix_lines.csv` | 200 × 3 (y, x, start) | `flexmix_minprior` | `r/cases/ml_mixtures.R` | seed 20261112; `start` is the fixed 3-cluster start |
+| `generated/gbm_leaf_t4.csv` | 200 × 5 (y_lad, y_bin, x0, x1, x2) | `gbm_laplace_stumps`, `gbm_bernoulli_stumps` | `r/cases/ml_boosting_t4.R` | seed 20261115 |
 | `generated/gmm_iv.csv` | 500 × 7 (y, x1, x2, w, z1, z2, z3) | `gmm_linear_iv` | `r/cases/econ_gmm.R` | seed 20261115 |
 | `generated/hac_truncated_indefinite.csv` | 40 × 2 (y, x) | `hac_truncated_indefinite` | `r/cases/reg_vcov_t4.R` | seed 5, errors AR(-0.7) |
 | `generated/hettx_frt_sim.csv` | 40 × 5 (y_het, y_homo, treat, x1, x2) | `hettx_dfm_t4` | `r/cases/causal_hettx_t4.R` | seed 20261113; 20 treated (fixed design), `y_het` with effect 1 + 1.5 x1, `y_homo` with the constant effect 2; DFM randomization test of a constant effect |

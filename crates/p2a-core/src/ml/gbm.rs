@@ -54,10 +54,11 @@
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, s};
 use serde::{Deserialize, Serialize};
 
-use super::trees::add_split_gain;
+use super::trees::{MAX_TREE_DEPTH, add_split_gain};
 use crate::Dataset;
 use crate::errors::{EconError, EconResult};
 use crate::resource;
+use crate::stats::robust::{QuantileType, quantile_sorted};
 
 /// Loss function family for GBM.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -93,7 +94,7 @@ pub struct GbmConfig {
     pub n_trees: usize,
     /// Learning rate (shrinkage factor)
     pub learning_rate: f64,
-    /// Maximum depth of individual trees
+    /// Maximum depth of individual trees (at least 1; trees stop at depth 512 whatever it says)
     pub max_depth: usize,
     /// Minimum samples required to split a node
     pub min_samples_split: usize,
@@ -103,8 +104,14 @@ pub struct GbmConfig {
     pub colsample_bytree: f64,
     /// Loss function family
     pub family: GbmFamily,
-    /// Huber delta parameter (for Huber loss)
+    /// The fixed Huber threshold, used only when `huber_alpha` is `None`; must be finite and above
+    /// 0 for the Huber family, ignored by the others
     pub huber_delta: f64,
+    /// Huber family: each iteration's threshold is the type-7 `huber_alpha`-quantile of
+    /// `|y - F|` over that iteration's in-bag rows (Friedman 2001, Algorithm 4; default 0.9), so
+    /// the fit is scale-equivariant. In (0, 1); `None` uses the fixed `huber_delta`.
+    #[serde(default = "default_huber_alpha")]
+    pub huber_alpha: Option<f64>,
     /// Random seed
     pub seed: Option<u64>,
 }
@@ -120,9 +127,15 @@ impl Default for GbmConfig {
             colsample_bytree: 1.0,
             family: GbmFamily::Gaussian,
             huber_delta: 1.0,
+            huber_alpha: default_huber_alpha(),
             seed: None,
         }
     }
+}
+
+/// Default of [`GbmConfig::huber_alpha`]: the 0.9-quantile of the absolute residuals.
+fn default_huber_alpha() -> Option<f64> {
+    Some(0.9)
 }
 
 /// Result from GBM fitting.
@@ -255,6 +268,7 @@ impl GbmTree {
         min_samples_split: usize,
         feature_indices: &[usize],
         rng_state: &mut u64,
+        leaf: &Leaf<'_>,
     ) {
         self.n_features = x.ncols();
         let indices: Vec<usize> = (0..x.nrows()).collect();
@@ -269,6 +283,7 @@ impl GbmTree {
             feature_indices,
             rng_state,
             &mut gain,
+            leaf,
         ));
         self.gain = gain;
     }
@@ -284,12 +299,14 @@ impl GbmTree {
         feature_indices: &[usize],
         rng_state: &mut u64,
         gain: &mut [f64],
+        leaf: &Leaf<'_>,
     ) -> GbmNode {
         let n_samples = indices.len();
 
         // Check stopping conditions
-        if depth >= max_depth || n_samples < min_samples_split || n_samples <= 1 {
-            return self.create_leaf(residuals, indices);
+        if depth >= max_depth.min(MAX_TREE_DEPTH) || n_samples < min_samples_split || n_samples <= 1
+        {
+            return self.create_leaf(residuals, indices, leaf);
         }
 
         // Check if all residuals are the same
@@ -298,7 +315,7 @@ impl GbmTree {
             .iter()
             .all(|&i| (residuals[i] - first_val).abs() < 1e-10)
         {
-            return self.create_leaf(residuals, indices);
+            return self.create_leaf(residuals, indices, leaf);
         }
 
         // Find best split
@@ -306,7 +323,7 @@ impl GbmTree {
             self.find_best_split(x, residuals, indices, feature_indices)
         {
             if left_indices.is_empty() || right_indices.is_empty() {
-                return self.create_leaf(residuals, indices);
+                return self.create_leaf(residuals, indices, leaf);
             }
             add_split_gain(gain, best_feature, residuals, &left_indices, &right_indices);
 
@@ -321,6 +338,7 @@ impl GbmTree {
                 feature_indices,
                 &mut new_rng,
                 gain,
+                leaf,
             );
             let right = self.build_tree(
                 x,
@@ -332,6 +350,7 @@ impl GbmTree {
                 feature_indices,
                 rng_state,
                 gain,
+                leaf,
             );
 
             GbmNode::Split {
@@ -341,13 +360,49 @@ impl GbmTree {
                 right: Box::new(right),
             }
         } else {
-            self.create_leaf(residuals, indices)
+            self.create_leaf(residuals, indices, leaf)
         }
     }
 
-    fn create_leaf(&self, residuals: &ArrayView1<f64>, indices: &[usize]) -> GbmNode {
-        let sum: f64 = indices.iter().map(|&i| residuals[i]).sum();
-        let value = sum / indices.len() as f64;
+    fn create_leaf(
+        &self,
+        residuals: &ArrayView1<f64>,
+        indices: &[usize],
+        leaf: &Leaf<'_>,
+    ) -> GbmNode {
+        let value = match leaf {
+            Leaf::Mean => {
+                let sum: f64 = indices.iter().map(|&i| residuals[i]).sum();
+                sum / indices.len() as f64
+            }
+            Leaf::Median { r } => {
+                let mut scratch: Vec<f64> = indices.iter().map(|&i| r[i]).collect();
+                median_in_place(&mut scratch)
+            }
+            Leaf::Newton { p } => {
+                // gbm's CBernoulli::FitBestConstant: sum(y - p) / sum(p (1 - p)), 0 when the
+                // denominator vanishes. The pseudo-residuals are y - p.
+                let num: f64 = indices.iter().map(|&i| residuals[i]).sum();
+                let den: f64 = indices.iter().map(|&i| p[i] * (1.0 - p[i])).sum();
+                if den == 0.0 { 0.0 } else { num / den }
+            }
+            Leaf::Huber { r, delta } => {
+                let mut scratch: Vec<f64> = indices.iter().map(|&i| r[i]).collect();
+                let med = median_in_place(&mut scratch);
+                let step: f64 = indices
+                    .iter()
+                    .map(|&i| {
+                        let d = r[i] - med;
+                        if d == 0.0 {
+                            0.0
+                        } else {
+                            d.signum() * delta.min(d.abs())
+                        }
+                    })
+                    .sum();
+                med + step / indices.len() as f64
+            }
+        };
         GbmNode::Leaf {
             value,
             n_samples: indices.len(),
@@ -454,6 +509,36 @@ impl GbmTree {
                 }
             }
         }
+    }
+}
+
+/// Terminal-node estimate of a family (Friedman 2001, Algorithms 2, 3 and 5; R gbm's
+/// `FitBestConstant`), over the rows the tree was grown on. Slices are indexed by those rows'
+/// positions in the tree's sample.
+pub(crate) enum Leaf<'a> {
+    /// Mean pseudo-residual (Gaussian: the least-squares step).
+    Mean,
+    /// Median of the residuals `y - F` (Laplace).
+    Median { r: &'a [f64] },
+    /// One Newton step of the binomial deviance, from the fitted probabilities `p` (Bernoulli).
+    Newton { p: &'a [f64] },
+    /// The median of the residuals `r = y - F` plus the mean of their deviations from it, clipped
+    /// at `delta` (Huber).
+    Huber { r: &'a [f64], delta: f64 },
+}
+
+/// Median of `v` (the mean of the two middle values for an even count, as R's `median`).
+/// Reorders `v`; `v` must not be empty.
+fn median_in_place(v: &mut [f64]) -> f64 {
+    let n = v.len();
+    let mid = n / 2;
+    let (lower, upper, _) = v.select_nth_unstable_by(mid, f64::total_cmp);
+    let upper = *upper;
+    if !n.is_multiple_of(2) {
+        upper
+    } else {
+        let lower_max = lower.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        (lower_max + upper) / 2.0
     }
 }
 
@@ -593,7 +678,7 @@ fn sigmoid(x: f64) -> f64 {
 /// Compute initial prediction (F0).
 fn compute_init_prediction(y: &ArrayView1<f64>, family: GbmFamily) -> f64 {
     match family {
-        GbmFamily::Gaussian | GbmFamily::Huber => {
+        GbmFamily::Gaussian => {
             // Mean of y
             y.iter().sum::<f64>() / y.len() as f64
         }
@@ -603,7 +688,7 @@ fn compute_init_prediction(y: &ArrayView1<f64>, family: GbmFamily) -> f64 {
             let p = p.clamp(1e-10, 1.0 - 1e-10);
             (p / (1.0 - p)).ln()
         }
-        GbmFamily::Laplace => {
+        GbmFamily::Laplace | GbmFamily::Huber => {
             // Median of y
             let mut sorted: Vec<f64> = y.iter().copied().collect();
             sorted.sort_by(f64::total_cmp);
@@ -627,7 +712,21 @@ fn compute_init_prediction(y: &ArrayView1<f64>, family: GbmFamily) -> f64 {
 ///
 /// # Returns
 ///
-/// GbmResult containing fitted model and diagnostics.
+/// GbmResult containing fitted model and diagnostics. Each terminal node is the family's own
+/// estimate over the leaf's in-bag rows (see [`GbmFamily`] and `validation/ml/gbm.md`). For the
+/// Huber family, `train_loss` uses each iteration's threshold.
+///
+/// # Errors
+///
+/// - [`EconError::InvalidSpecification`] for the settings `validate_config` refuses (`n_trees`
+///   or `max_depth` 0, a `learning_rate` that is not finite and positive, `subsample` or
+///   `colsample_bytree` outside (0, 1], a `huber_alpha` outside (0, 1) or, with `huber_alpha =
+///   None`, a `huber_delta` that is not finite and positive), non-finite features or target, and a
+///   target whose sum of squares overflows.
+/// - [`EconError::Computation`] for fewer than 2 rows, `x` and `y` of different lengths, and a
+///   Binomial target that is not 0/1.
+/// - [`EconError::ResourceLimit`] when the tree or loss buffers exceed the allocation ceiling.
+/// - [`EconError::Cancelled`] when the computation budget is cancelled or expires.
 pub fn gbm(x: ArrayView2<f64>, y: ArrayView1<f64>, config: &GbmConfig) -> EconResult<GbmResult> {
     let n_samples = x.nrows();
     let n_features = x.ncols();
@@ -687,23 +786,16 @@ pub fn gbm(x: ArrayView2<f64>, y: ArrayView1<f64>, config: &GbmConfig) -> EconRe
         resource::try_with_capacity(config.n_trees.saturating_add(1), "GBM training loss")?;
     let mut relative_influence = vec![0.0f64; n_features];
 
-    // Initial loss
-    train_loss.push(compute_loss(
-        &y,
-        &predictions,
-        config.family,
-        config.huber_delta,
-    ));
+    // Initial loss (Huber: at the threshold of the residuals of F0 over all rows)
+    let all_rows: Vec<usize> = (0..n_samples).collect();
+    let delta0 = huber_threshold(&y, &predictions, &all_rows, config);
+    train_loss.push(compute_loss(&y, &predictions, config.family, delta0));
 
     // Boosting iterations
     for _ in 0..config.n_trees {
         resource::checkpoint()?;
-        // Compute negative gradient (pseudo-residuals)
-        let residuals =
-            compute_negative_gradient(&y, &predictions, config.family, config.huber_delta);
-
-        // Subsample rows if needed
-        let (sample_indices, sample_x, sample_residuals) = if config.subsample < 1.0 {
+        // Subsample rows if needed (drawn first: the Huber threshold is taken over them)
+        let sample_indices: Vec<usize> = if config.subsample < 1.0 {
             let n_subsample = ((n_samples as f64) * config.subsample).ceil() as usize;
             let mut indices: Vec<usize> = (0..n_samples).collect();
 
@@ -713,14 +805,19 @@ pub fn gbm(x: ArrayView2<f64>, y: ArrayView1<f64>, config: &GbmConfig) -> EconRe
                 indices.swap(i, j);
             }
             indices.truncate(n_subsample);
-
-            let sub_x = select_rows(&x, &indices);
-            let sub_r: Array1<f64> = indices.iter().map(|&i| residuals[i]).collect();
-
-            (indices, sub_x, sub_r)
+            indices
         } else {
-            let indices: Vec<usize> = (0..n_samples).collect();
-            (indices, x.to_owned(), residuals.clone())
+            all_rows.clone()
+        };
+
+        // Compute negative gradient (pseudo-residuals)
+        let delta = huber_threshold(&y, &predictions, &sample_indices, config);
+        let residuals = compute_negative_gradient(&y, &predictions, config.family, delta);
+        let (sample_x, sample_residuals) = if config.subsample < 1.0 {
+            let sub_r: Array1<f64> = sample_indices.iter().map(|&i| residuals[i]).collect();
+            (select_rows(&x, &sample_indices), sub_r)
+        } else {
+            (x.to_owned(), residuals)
         };
 
         // Subsample features if needed
@@ -737,6 +834,28 @@ pub fn gbm(x: ArrayView2<f64>, y: ArrayView1<f64>, config: &GbmConfig) -> EconRe
             (0..n_features).collect()
         };
 
+        // The family's terminal-node inputs over the sampled rows
+        let leaf_input: Vec<f64> = match config.family {
+            GbmFamily::Gaussian => Vec::new(),
+            GbmFamily::Laplace | GbmFamily::Huber => sample_indices
+                .iter()
+                .map(|&i| y[i] - predictions[i])
+                .collect(),
+            GbmFamily::Binomial => sample_indices
+                .iter()
+                .map(|&i| sigmoid(predictions[i]))
+                .collect(),
+        };
+        let leaf = match config.family {
+            GbmFamily::Gaussian => Leaf::Mean,
+            GbmFamily::Laplace => Leaf::Median { r: &leaf_input },
+            GbmFamily::Huber => Leaf::Huber {
+                r: &leaf_input,
+                delta,
+            },
+            GbmFamily::Binomial => Leaf::Newton { p: &leaf_input },
+        };
+
         // Fit tree to pseudo-residuals
         let mut tree = GbmTree::new();
         tree.fit(
@@ -746,6 +865,7 @@ pub fn gbm(x: ArrayView2<f64>, y: ArrayView1<f64>, config: &GbmConfig) -> EconRe
             config.min_samples_split,
             &feature_indices,
             &mut rng_state,
+            &leaf,
         );
 
         // Update predictions for all samples
@@ -761,13 +881,8 @@ pub fn gbm(x: ArrayView2<f64>, y: ArrayView1<f64>, config: &GbmConfig) -> EconRe
 
         trees.push(tree);
 
-        // Track loss
-        train_loss.push(compute_loss(
-            &y,
-            &predictions,
-            config.family,
-            config.huber_delta,
-        ));
+        // Track loss (Huber: at this iteration's threshold)
+        train_loss.push(compute_loss(&y, &predictions, config.family, delta));
     }
 
     // Shares of the relative influence
@@ -798,6 +913,27 @@ pub fn gbm(x: ArrayView2<f64>, y: ArrayView1<f64>, config: &GbmConfig) -> EconRe
     })
 }
 
+/// The Huber threshold of an iteration: the type-7 `huber_alpha`-quantile of `|y - F|` over
+/// `rows`, or the fixed `huber_delta` (also returned, unread, for the other families).
+fn huber_threshold(
+    y: &ArrayView1<f64>,
+    predictions: &Array1<f64>,
+    rows: &[usize],
+    config: &GbmConfig,
+) -> f64 {
+    match (config.family, config.huber_alpha) {
+        (GbmFamily::Huber, Some(alpha)) => {
+            let mut abs_r: Vec<f64> = rows
+                .iter()
+                .map(|&i| (y[i] - predictions[i]).abs())
+                .collect();
+            abs_r.sort_unstable_by(f64::total_cmp);
+            quantile_sorted(&abs_r, alpha, QuantileType::T7)
+        }
+        _ => config.huber_delta,
+    }
+}
+
 /// Refuse settings no fit can honour.
 fn validate_config(config: &GbmConfig) -> EconResult<()> {
     let invalid = |message: String| Err(EconError::InvalidSpecification { message });
@@ -825,13 +961,21 @@ fn validate_config(config: &GbmConfig) -> EconResult<()> {
             config.colsample_bytree
         ));
     }
-    if config.family == GbmFamily::Huber
-        && (!config.huber_delta.is_finite() || config.huber_delta <= 0.0)
-    {
-        return invalid(format!(
-            "GBM: huber_delta must be finite and above 0, got {}",
-            config.huber_delta
-        ));
+    if config.family == GbmFamily::Huber {
+        match config.huber_alpha {
+            Some(a) if !(a > 0.0 && a < 1.0) => {
+                return invalid(format!(
+                    "GBM: huber_alpha must be in (0, 1), got {a}; None uses the fixed huber_delta"
+                ));
+            }
+            None if !config.huber_delta.is_finite() || config.huber_delta <= 0.0 => {
+                return invalid(format!(
+                    "GBM: huber_delta must be finite and above 0, got {}",
+                    config.huber_delta
+                ));
+            }
+            _ => {}
+        }
     }
     Ok(())
 }
@@ -1246,10 +1390,28 @@ mod tests {
         bad(
             &|c| {
                 c.family = GbmFamily::Huber;
+                c.huber_alpha = None;
                 c.huber_delta = -1.0;
             },
             "huber_delta",
         );
+        for a in [0.0, 1.0, f64::NAN] {
+            bad(
+                &|c| {
+                    c.family = GbmFamily::Huber;
+                    c.huber_alpha = Some(a);
+                },
+                "huber_alpha",
+            );
+        }
+        // With the adaptive threshold, huber_delta is not read.
+        let adaptive = GbmConfig {
+            family: GbmFamily::Huber,
+            huber_delta: -1.0,
+            n_trees: 2,
+            ..GbmConfig::default()
+        };
+        assert!(gbm(x.view(), y.view(), &adaptive).is_ok());
         // Only the Huber family reads huber_delta.
         let unread = GbmConfig {
             huber_delta: 0.0,
@@ -1310,5 +1472,306 @@ mod tests {
                 .to_string()
                 .contains("gaussian")
         );
+    }
+
+    /// 50 stumps on the `gbm_leaf_t4` design with gbm's `n.minobsinnode = 1, bag.fraction = 1`.
+    fn leaf_t4_stumps(
+        y_col: &str,
+        family: GbmFamily,
+    ) -> (p2a_validation::Case, Array1<f64>, GbmResult) {
+        use crate::data::columns::NaPolicy;
+        let (case, ds) = crate::test_support::load_case(match family {
+            GbmFamily::Binomial => "gbm_bernoulli_stumps",
+            _ => "gbm_laplace_stumps",
+        });
+        let (x, y, _) =
+            crate::ml::extract_xy(&ds, y_col, &["x0", "x1", "x2"], NaPolicy::Fail).unwrap();
+        let mut config = GbmConfig::default();
+        config.n_trees = 50;
+        config.learning_rate = 0.1;
+        config.max_depth = 1;
+        config.min_samples_split = 2;
+        config.subsample = 1.0;
+        config.colsample_bytree = 1.0;
+        config.family = family;
+        let r = gbm(x.view(), y.view(), &config).unwrap();
+        (case, y, r)
+    }
+
+    fn root_features(r: &GbmResult) -> Vec<f64> {
+        r.trees
+            .iter()
+            .map(|t| match &t.root {
+                Some(GbmNode::Split { feature_index, .. }) => *feature_index as f64,
+                _ => -1.0,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_validate_gbm_laplace_stumps() {
+        // ML-94/WT-1. Each Laplace leaf is the median of y - F over its rows (gbm's terminal-node
+        // estimate). Before: the leaves were the mean sign of the residuals, so 50 trees at rate
+        // 0.1 could not move the fit more than 5 from F0 = 704.88: fitted range [700.17, 707.14],
+        // MAE 276.94 (R: [198.18, 1139.49], MAE 52.97).
+        use p2a_validation::{Check, Tol};
+        let (case, y, r) = leaf_t4_stumps("y_lad", GbmFamily::Laplace);
+        let mae = y
+            .iter()
+            .zip(&r.predictions)
+            .map(|(a, b)| (a - b).abs())
+            .sum::<f64>()
+            / y.len() as f64;
+        let tol = Tol::coef(200);
+        Check::new(&case)
+            .scalar("init_f", r.init_prediction, tol)
+            .vector("fitted", &r.predictions, tol)
+            .vector("split_var", &root_features(&r), Tol::exact())
+            .named("influence", &["x0", "x1", "x2"], &r.relative_influence, tol)
+            .scalar("mae", mae, tol)
+            .finish();
+    }
+
+    #[test]
+    fn test_validate_gbm_bernoulli_stumps() {
+        // ML-94. Each Bernoulli leaf is the Newton step sum(y - p) / sum(p (1 - p)) over its rows.
+        // Before: the mean of y - p, a gradient step: probability range [0.442, 0.789]
+        // (R: [0.190, 0.911]).
+        use p2a_validation::{Check, Tol};
+        let (case, _, r) = leaf_t4_stumps("y_bin", GbmFamily::Binomial);
+        let tol = Tol::coef(200);
+        Check::new(&case)
+            .scalar("init_f", r.init_prediction, tol)
+            .vector("fitted_prob", &r.predictions, tol)
+            .vector("split_var", &root_features(&r), Tol::exact())
+            .named("influence", &["x0", "x1", "x2"], &r.relative_influence, tol)
+            .finish();
+    }
+
+    #[test]
+    fn test_gbm_predict_matches_training_fit_every_family() {
+        // The leaves are estimated on the in-bag rows; gbm_predict routes every row through the
+        // same trees, so it reproduces the training predictions exactly.
+        let n = 120;
+        let x = Array2::from_shape_fn((n, 3), |(i, j)| {
+            ((i * (2 * j + 5) + 3 * j) % 37) as f64 / 7.0 + 0.01 * j as f64
+        });
+        let y_reg = Array1::from_shape_fn(n, |i| {
+            3.0 * x[[i, 0]] - x[[i, 1]] + ((i * 29) % 13) as f64 / 4.0 - 1.5
+        });
+        let y_bin = Array1::from_shape_fn(n, |i| {
+            if x[[i, 0]] + ((i * 17) % 11) as f64 / 3.0 > 4.5 {
+                1.0
+            } else {
+                0.0
+            }
+        });
+        for family in [
+            GbmFamily::Gaussian,
+            GbmFamily::Binomial,
+            GbmFamily::Laplace,
+            GbmFamily::Huber,
+        ] {
+            let y = if family == GbmFamily::Binomial {
+                &y_bin
+            } else {
+                &y_reg
+            };
+            let mut config = GbmConfig::default();
+            config.n_trees = 30;
+            config.max_depth = 3;
+            config.subsample = 0.7;
+            config.family = family;
+            config.seed = Some(11);
+            let r = gbm(x.view(), y.view(), &config).unwrap();
+            let p = gbm_predict(&r, x.view()).unwrap();
+            assert_eq!(p, r.predictions, "{family}");
+        }
+    }
+
+    /// The `gbm_leaf_t4` design: x (200 x 3) and the large-scale target `y_lad`.
+    fn leaf_t4_design() -> (Array2<f64>, Array1<f64>) {
+        use crate::data::columns::NaPolicy;
+        let (_, ds) = crate::test_support::load_case("gbm_laplace_stumps");
+        let (x, y, _) =
+            crate::ml::extract_xy(&ds, "y_lad", &["x0", "x1", "x2"], NaPolicy::Fail).unwrap();
+        (x, y)
+    }
+
+    fn stumps(family: GbmFamily) -> GbmConfig {
+        let mut c = GbmConfig::default();
+        c.n_trees = 50;
+        c.learning_rate = 0.1;
+        c.max_depth = 1;
+        c.family = family;
+        c
+    }
+
+    /// Bits of the left/right path that leads `row` to its leaf.
+    fn leaf_path(node: &GbmNode, row: ArrayView1<f64>) -> u64 {
+        let mut path = 1u64;
+        let mut n = node;
+        while let GbmNode::Split {
+            feature_index,
+            threshold,
+            left,
+            right,
+        } = n
+        {
+            let go_left = row[*feature_index] <= *threshold;
+            path = path * 2 + u64::from(!go_left);
+            n = if go_left { left } else { right };
+        }
+        path
+    }
+
+    #[test]
+    fn test_gbm_huber_leaf_is_friedman_algorithm_4() {
+        // WT-1. Friedman (2001), Algorithm 4: F0 = median(y), delta = the 0.9-quantile of
+        // |y - F0|, and each leaf is median(r) + mean(sign(r - med) min(delta, |r - med|)) over
+        // its rows, r = y - F0. Before: F0 = mean(y) and the leaf was the mean clipped residual.
+        let n = 150;
+        let x = Array2::from_shape_fn((n, 2), |(i, j)| {
+            ((i * (3 * j + 7) + 5 * j) % 41) as f64 / 4.0 + 0.003 * i as f64
+        });
+        let y = Array1::from_shape_fn(n, |i| {
+            let noise = ((i * 37) % 23) as f64 - 11.0;
+            let outlier = if i % 17 == 0 { 300.0 } else { 0.0 };
+            20.0 * x[[i, 0]] - 5.0 * x[[i, 1]] + noise + outlier
+        });
+        let mut config = GbmConfig::default();
+        config.n_trees = 1;
+        config.learning_rate = 1.0;
+        config.max_depth = 2;
+        config.family = GbmFamily::Huber;
+        let r = gbm(x.view(), y.view(), &config).unwrap();
+
+        let median = |v: &mut Vec<f64>| {
+            v.sort_by(f64::total_cmp);
+            let m = v.len();
+            if m % 2 == 1 {
+                v[m / 2]
+            } else {
+                (v[m / 2 - 1] + v[m / 2]) / 2.0
+            }
+        };
+        let f0 = median(&mut y.to_vec());
+        assert_eq!(r.init_prediction, f0);
+        let resid: Vec<f64> = y.iter().map(|v| v - f0).collect();
+        // Type-7 0.9-quantile of |r|, by its definition.
+        let mut abs_r: Vec<f64> = resid.iter().map(|v| v.abs()).collect();
+        abs_r.sort_by(f64::total_cmp);
+        let h = (n - 1) as f64 * 0.9;
+        let lo = h.floor() as usize;
+        let delta = abs_r[lo] + (h - lo as f64) * (abs_r[(lo + 1).min(n - 1)] - abs_r[lo]);
+
+        let root = r.trees[0].root.as_ref().unwrap();
+        let paths: Vec<u64> = (0..n).map(|i| leaf_path(root, x.row(i))).collect();
+        let mut leaves: Vec<u64> = paths.clone();
+        leaves.sort_unstable();
+        leaves.dedup();
+        assert!(leaves.len() >= 3, "{} leaves", leaves.len());
+        for leaf in leaves {
+            let rows: Vec<usize> = (0..n).filter(|&i| paths[i] == leaf).collect();
+            let mut rl: Vec<f64> = rows.iter().map(|&i| resid[i]).collect();
+            let med = median(&mut rl.clone());
+            let step = rl
+                .iter_mut()
+                .map(|v| (*v - med).signum() * delta.min((*v - med).abs()))
+                .sum::<f64>()
+                / rows.len() as f64;
+            let want = f0 + med + step;
+            for &i in &rows {
+                let got = r.predictions[i];
+                assert!(
+                    (got - want).abs() <= 1e-12 * want.abs().max(1.0),
+                    "row {i}: {got} vs {want}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_gbm_huber_and_laplace_are_scale_equivariant() {
+        // WT-1. A fit on 1000 y is 1000 times the fit on y. Before: Huber clipped at a fixed
+        // delta of 1 in the units of y, and Laplace leaves were mean signs.
+        let (x, y) = leaf_t4_design();
+        let big = y.mapv(|v| 1000.0 * v);
+        for family in [GbmFamily::Huber, GbmFamily::Laplace] {
+            let c = stumps(family);
+            let a = gbm(x.view(), y.view(), &c).unwrap();
+            let b = gbm(x.view(), big.view(), &c).unwrap();
+            for (p, q) in a.predictions.iter().zip(&b.predictions) {
+                assert!(
+                    (1000.0 * p - q).abs() <= 1e-9 * q.abs(),
+                    "{family}: {} vs {q}",
+                    1000.0 * p
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_gbm_huber_fits_a_large_scale_target() {
+        // WT-1. Friedman's Huber M-TreeBoost (emulated in R: MAE 42.0, range [176.9, 1217.5]).
+        // Before: the fit stayed within 5 of F0 (MAE about 277).
+        let (x, y) = leaf_t4_design();
+        let r = gbm(x.view(), y.view(), &stumps(GbmFamily::Huber)).unwrap();
+        let mae = y
+            .iter()
+            .zip(&r.predictions)
+            .map(|(a, b)| (a - b).abs())
+            .sum::<f64>()
+            / y.len() as f64;
+        assert!(mae <= 50.0, "MAE {mae}");
+        let lo = r.predictions.iter().copied().fold(f64::INFINITY, f64::min);
+        let hi = r
+            .predictions
+            .iter()
+            .copied()
+            .fold(f64::NEG_INFINITY, f64::max);
+        assert!(lo <= 200.0 && hi >= 1100.0, "range [{lo}, {hi}]");
+    }
+
+    /// x = i in one column, y = i % 2: every split isolates one row, so an uncapped tree is a
+    /// chain as deep as the rows.
+    fn chain_data(n: usize) -> (Array2<f64>, Array1<f64>) {
+        (
+            Array2::from_shape_fn((n, 1), |(i, _)| i as f64),
+            Array1::from_shape_fn(n, |i| (i % 2) as f64),
+        )
+    }
+
+    /// Runs `f` on a thread with a 2 MiB stack, the size of tokio's blocking threads and rayon's workers.
+    fn on_small_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+        std::thread::Builder::new()
+            .stack_size(2 << 20)
+            .spawn(f)
+            .unwrap()
+            .join()
+            .unwrap()
+    }
+
+    #[test]
+    fn test_gbm_tree_depth_is_capped() {
+        // Trees stop at depth 512 whatever max_depth says. Before: a chain as deep as the rows.
+        let depth = on_small_stack(|| {
+            let (x, y) = chain_data(2_000);
+            let mut c = GbmConfig::default();
+            c.n_trees = 1;
+            c.max_depth = 10_000;
+            c.min_samples_split = 2;
+            let r = gbm(x.view(), y.view(), &c).unwrap();
+            let (mut max, mut stack) = (0, vec![(r.trees[0].root.clone().unwrap(), 0usize)]);
+            while let Some((node, d)) = stack.pop() {
+                max = max.max(d);
+                if let GbmNode::Split { left, right, .. } = node {
+                    stack.push((*left, d + 1));
+                    stack.push((*right, d + 1));
+                }
+            }
+            max
+        });
+        assert_eq!(depth, MAX_TREE_DEPTH);
     }
 }

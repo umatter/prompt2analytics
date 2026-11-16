@@ -35,7 +35,7 @@ error, `debiased.error + excess.error`).
 | `mtry` | `ceil(sqrt(p))` | mean of the Poisson number of candidate covariates per node, clamped to [1, p] (grf: `min(ceil(sqrt(p) + 20), p)`; see Differences) |
 | `honesty` | true | honest trees (estimation units repopulate the leaves) |
 | `honesty_fraction` | 0.5 | share of each subsample that **estimates** the leaves |
-| `sample_fraction` | 0.5 | subsample per tree; at most 0.5 when `ci_group_size > 1` (grf's rule) |
+| `sample_fraction` | 0.5 | subsample per tree; at most 0.5 when `ci_group_size > 1` (grf's rule); with `ci_group_size = 1`, `ceil(n sample_fraction)` must be below `n`, so every unit can be out of bag |
 | `ci_group_size` | 2 | trees per little bag; 1 gives no variance estimates (NaN, with a warning) |
 | `nuisance_trees` | `max(50, n_trees / 4)` | trees of each nuisance forest |
 | `max_depth` | 10 | depth cap of the causal trees (p2a extension; the nuisance forests are not capped) |
@@ -68,7 +68,8 @@ The forest outputs (ATE, CATEs, variances) are **not R-pinned**. The tests hold 
 properties of R values: the oracle AIPW with the true nuisances, naive differences, and Welch SEs. The
 thresholds were calibrated on an R emulation of the algorithm (R's RNG, so the emulation is not
 bit-comparable) and are at least twice the emulated deviations. The Rust column below is the seeded fit at the
-time of writing.
+time of writing. These tests are registered with their cases and listed as `registered-property` in
+`validation/tools/validate_property_tests.txt`, so they do not count as R-pinned.
 
 | Case | Test (seed, trees) | Threshold | Emulation | Rust |
 |---|---|---|---|---|
@@ -159,6 +160,15 @@ coverage 0.952.
 - **Overlap warnings** follow grf's three warnings (`min(W.hat) <= 0.05` and/or `max(W.hat) >= 0.95`). The
   `target.sample` advice is replaced by a pointer to Crump, Hotz, Imbens and Mitnik (2009).
 - **`n_trees` below `ci_group_size`** (fewer trees than one group) is an error.
+
+## Wall-clock (T4)
+
+`release`, `ci` features, the T4 boosting/forest fixes against the code before them (`34a4186a`), nine processes per
+side interleaved, one core (`taskset`), one rayon thread, 2026-11-16, load average 22-42 on 12 cores (a loaded
+machine: read ratios near 1 as within noise). Cells are the median of the process medians; "min ratio" is the ratio
+of the minima. Design: n rows, 5 features uniform on [0, 10], `y = 2 x0 - x4 + (x1 - 5)^2 / 5` plus noise.
+`causal_forest_arrays` defaults, n = 1,000, treatment alternating: base 1,964 ms, this tree 1,976 ms (1.01; minima
+0.98).
 
 ## Findings closed
 

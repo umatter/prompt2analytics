@@ -92,7 +92,7 @@ pub struct QuantileRfConfig {
     /// Number of trees in the forest, at least 1 (default: 500)
     pub n_trees: usize,
 
-    /// Number of features to consider at each split.
+    /// Number of features to consider at each split, between 1 and the number of features.
     /// If None, uses floor(n_features / 3) for regression (Breiman's default).
     pub mtry: Option<usize>,
 
@@ -909,6 +909,13 @@ pub fn quantile_rf_with_names(
     }
     if config.sample_size == Some(0) {
         return Err("sample_size must be at least 1".to_string());
+    }
+    if let Some(m) = config.mtry
+        && !(1..=n_features).contains(&m)
+    {
+        return Err(format!(
+            "mtry must be between 1 and the number of features ({n_features} features; got {m})"
+        ));
     }
     for (j, column) in x.axis_iter(Axis(1)).enumerate() {
         let k = column.iter().filter(|v| !v.is_finite()).count();
@@ -2395,5 +2402,33 @@ mod tests {
         );
         let f = &r.variable_importance;
         assert!(f[0] > f[2] && f[2] > f[1], "{f:?}");
+    }
+
+    #[test]
+    fn test_quantile_rf_refuses_an_mtry_outside_one_to_p() {
+        // ML-104. mtry = 0 grew stumps (no feature tried at any split).
+        let n = 60;
+        let x = Array2::from_shape_fn((n, 3), |(i, j)| {
+            ((i * (j + 3)) % 17) as f64 + 0.1 * j as f64
+        });
+        let y = Array1::from_shape_fn(n, |i| x[[i, 0]] + ((i * 7) % 5) as f64 / 3.0);
+        for mtry in [0usize, 4] {
+            let mut c = QuantileRfConfig::default();
+            c.n_trees = 5;
+            c.mtry = Some(mtry);
+            let e = quantile_rf(x.view(), y.view(), &c).unwrap_err();
+            assert!(
+                e.contains("mtry")
+                    && e.contains(&format!("got {mtry}"))
+                    && e.contains("3 features"),
+                "{mtry}: {e}"
+            );
+        }
+        for mtry in [1usize, 3] {
+            let mut c = QuantileRfConfig::default();
+            c.n_trees = 5;
+            c.mtry = Some(mtry);
+            assert!(quantile_rf(x.view(), y.view(), &c).is_ok());
+        }
     }
 }
