@@ -1,6 +1,7 @@
-//! Dimensionality reduction: PCA and t-SNE.
+//! Dimensionality reduction: PCA, t-SNE and classical MDS.
 //!
-//! Pure Rust implementations using ndarray.
+//! Pure Rust implementations using ndarray. t-SNE is bhtsne's exact-gradient
+//! path with `Rtsne()`'s optimiser defaults (see [`tsne`]).
 //!
 //! PCA uses SVD via faer for O(nm²) complexity instead of power iteration.
 
@@ -369,15 +370,42 @@ impl std::fmt::Display for TsneResult {
     }
 }
 
+/// Early exaggeration of `P` (Rtsne's `exaggeration_factor`).
+const EXAGGERATION: f64 = 12.0;
+/// Iterations with exaggeration (Rtsne's `stop_lying_iter`).
+const STOP_LYING_ITER: usize = 250;
+/// Iterations with momentum 0.5; 0.8 after (Rtsne's `mom_switch_iter`).
+const MOMENTUM_SWITCH_ITER: usize = 250;
+
 /// Run t-SNE (t-distributed Stochastic Neighbor Embedding).
+///
+/// The exact-gradient t-SNE of bhtsne with `Rtsne()`'s optimiser defaults:
+/// - the start is N(0, 1e-4) per coordinate (standard deviation 1e-4), drawn from
+///   `StdRng::seed_from_u64(seed.unwrap_or(42))`, as Rtsne's random start;
+/// - early exaggeration 12 for iterations 0-249, momentum 0.5 for iterations
+///   0-249 and 0.8 after;
+/// - `learning_rate` is Rtsne's `eta` (default 200): the update is
+///   `-eta * gains * dY` with the gradient `dY` of bhtsne, which has no factor 4
+///   (sklearn's `learning_rate` is 4 times this);
+/// - gains +0.2 when the sign of the gradient differs from that of the update,
+///   else x0.8, floor 0.01; the embedding is centred after every step;
+/// - each point's bandwidth is calibrated as bhtsne's (see
+///   [`conditional_affinities`]); points whose search misses the tolerance are
+///   reported in `warnings`.
+///
+/// The remaining differences from `Rtsne()`'s own defaults: the gradient is exact
+/// (Rtsne's `theta = 0`; its default is Barnes-Hut with 0.5); the data are used as
+/// given (no initial PCA to 50 dimensions, `pca = TRUE`, and no centring and
+/// scaling, `normalize = TRUE`); the perplexity must be below `n / 3` (Rtsne:
+/// `3 * perplexity <= n - 1`).
 ///
 /// # Arguments
 /// * `data` - Input data matrix (n_samples x n_features)
 /// * `n_components` - Number of output dimensions (default: 2)
 /// * `perplexity` - Perplexity parameter (default: 30.0)
 /// * `max_iterations` - Maximum number of iterations (default: 1000)
-/// * `learning_rate` - Learning rate (default: 200.0)
-/// * `seed` - Random seed for reproducibility
+/// * `learning_rate` - Rtsne's `eta` (default: 200.0)
+/// * `seed` - Seed of the random start (default 42)
 pub fn tsne(
     data: ArrayView2<f64>,
     n_components: Option<usize>,
@@ -386,12 +414,34 @@ pub fn tsne(
     learning_rate: Option<f64>,
     seed: Option<u64>,
 ) -> Result<TsneResult, String> {
-    let n_samples = data.nrows();
+    use rand::SeedableRng;
+    use rand_distr::{Distribution, Normal};
+
     let n_comp = n_components.unwrap_or(2);
     let perp = perplexity.unwrap_or(30.0);
     let max_iter = max_iterations.unwrap_or(1000);
     let lr = learning_rate.unwrap_or(200.0);
+    check_tsne_inputs(&data, n_comp, perp, max_iter, lr)?;
 
+    let mut y0 =
+        try_zeros2(data.nrows(), n_comp, "t-SNE initial embedding").map_err(|e| e.to_string())?;
+    let mut rng = rand::rngs::StdRng::seed_from_u64(seed.unwrap_or(42));
+    let normal = Normal::new(0.0, 1e-4).map_err(|e| e.to_string())?;
+    for v in y0.iter_mut() {
+        *v = normal.sample(&mut rng);
+    }
+    tsne_from_init(data, y0, perp, max_iter, lr)
+}
+
+/// The parameter and data checks of [`tsne`] and [`tsne_from_init`].
+fn check_tsne_inputs(
+    data: &ArrayView2<f64>,
+    n_comp: usize,
+    perp: f64,
+    max_iter: usize,
+    lr: f64,
+) -> Result<(), String> {
+    let n_samples = data.nrows();
     if n_samples < 4 {
         return Err("Need at least 4 samples for t-SNE".to_string());
     }
@@ -423,6 +473,32 @@ pub fn tsne(
             n_samples / 3
         ));
     }
+    Ok(())
+}
+
+/// t-SNE from the given start `y0` (`n x n_components`), with the optimiser of
+/// [`tsne`]: Rtsne's exact path with `Y_init = y0`, `eta = learning_rate`,
+/// `exaggeration_factor = 12`, `stop_lying_iter = 250`, `mom_switch_iter = 250`.
+pub(crate) fn tsne_from_init(
+    data: ArrayView2<f64>,
+    y0: Array2<f64>,
+    perplexity: f64,
+    max_iter: usize,
+    learning_rate: f64,
+) -> Result<TsneResult, String> {
+    let n_samples = data.nrows();
+    let n_comp = y0.ncols();
+    check_tsne_inputs(&data, n_comp, perplexity, max_iter, learning_rate)?;
+    if y0.nrows() != n_samples {
+        return Err(format!(
+            "the start has {} rows, but the data have {n_samples}",
+            y0.nrows()
+        ));
+    }
+    if y0.iter().any(|v| !v.is_finite()) {
+        return Err("the start must contain only finite values".to_string());
+    }
+    let (perp, lr) = (perplexity, learning_rate);
 
     let to_string = |e: EconError| e.to_string();
 
@@ -430,15 +506,7 @@ pub fn tsne(
     // distance matrix is kept)
     let (p, calibration) = compute_joint_probabilities(&data, perp)?;
 
-    // Initialize low-dimensional embedding using PCA or random
-    let mut y = initialize_embedding(data.view(), n_comp, seed)?;
-
-    // Gradient descent parameters
-    let momentum = 0.5;
-    let final_momentum = 0.8;
-    let momentum_switch_iter = 250;
-    let early_exaggeration = 4.0;
-    let early_exaggeration_iter = 100;
+    let mut y = y0;
 
     let mut y_velocity = try_zeros2(n_samples, n_comp, "t-SNE velocity").map_err(to_string)?;
     let mut gains = try_zeros2(n_samples, n_comp, "t-SNE gains").map_err(to_string)?;
@@ -451,17 +519,17 @@ pub fn tsne(
         checkpoint().map_err(to_string)?;
 
         // Early exaggeration multiplies P for the first iterations
-        let exaggeration = if iter < early_exaggeration_iter {
-            early_exaggeration
+        let exaggeration = if iter < STOP_LYING_ITER {
+            EXAGGERATION
         } else {
             1.0
         };
 
         // Switch to final momentum
-        let current_momentum = if iter < momentum_switch_iter {
-            momentum
+        let current_momentum = if iter < MOMENTUM_SWITCH_ITER {
+            0.5
         } else {
-            final_momentum
+            0.8
         };
 
         // Compute Q distribution (Student-t with 1 DOF)
@@ -655,38 +723,6 @@ fn conditional_affinities(
     Ok((p, calibration))
 }
 
-/// Initialize low-dimensional embedding.
-fn initialize_embedding(
-    data: ArrayView2<f64>,
-    n_components: usize,
-    seed: Option<u64>,
-) -> Result<Array2<f64>, String> {
-    let n_samples = data.nrows();
-
-    // Try PCA initialization first
-    if let Ok(pca_result) = pca(data, Some(n_components), true) {
-        if let Some(transformed) = pca_result.transformed {
-            // Scale down for better optimization
-            return Ok(transformed * 0.0001);
-        }
-    }
-
-    // Fallback to pseudo-random initialization using seed
-    let mut embedding = try_zeros2(n_samples, n_components, "t-SNE initial embedding")
-        .map_err(|e| e.to_string())?;
-    let seed = seed.unwrap_or(42);
-
-    for i in 0..n_samples {
-        for j in 0..n_components {
-            // Simple pseudo-random based on position and seed
-            let hash = ((i * 31 + j * 17 + seed as usize) as f64).sin();
-            embedding[[i, j]] = hash * 0.0001;
-        }
-    }
-
-    Ok(embedding)
-}
-
 /// Compute Q distribution (Student-t with 1 degree of freedom).
 /// Overwrites every off-diagonal cell of `q` (the diagonal is left as is)
 /// and returns the sum of all Q values.
@@ -714,7 +750,10 @@ fn fill_q_distribution(y: &ArrayView2<f64>, q: &mut Array2<f64>) -> f64 {
     sum_q
 }
 
-/// Compute gradient of KL divergence for `P * exaggeration`.
+/// Gradient of KL(P * exaggeration || Q) as bhtsne's exact gradient:
+/// `dY_i = sum_j (P_ij * exaggeration - Q_ij / sum_Q) * Q_ij * (y_i - y_j)`, with
+/// `Q_ij = 1 / (1 + |y_i - y_j|^2)` unnormalised. It has no factor 4, so the
+/// learning rate is Rtsne's `eta` (sklearn's `learning_rate` = 4 x `eta`).
 fn compute_gradient(
     p: &ArrayView2<f64>,
     exaggeration: f64,
@@ -730,8 +769,8 @@ fn compute_gradient(
         for j in 0..n {
             if i != j {
                 let q_ij = q[[i, j]] / sum_q;
-                // Factor: 4 * (p_ij - q_ij) * (1 + ||y_i - y_j||^2)^(-1)
-                let factor = 4.0 * (p[[i, j]] * exaggeration - q_ij) * q[[i, j]];
+                // (p_ij - q_ij) * (1 + ||y_i - y_j||^2)^(-1)
+                let factor = (p[[i, j]] * exaggeration - q_ij) * q[[i, j]];
 
                 for k in 0..n_comp {
                     gradient[[i, k]] += factor * (y[[i, k]] - y[[j, k]]);
@@ -1496,16 +1535,32 @@ mod tests {
 
     /// ML-145: one iteration is bhtsne's first step. Velocity starts at 0 and sign(0) = 0, so
     /// every gain becomes 1.2 (gains + 0.2) wherever the gradient is non-zero; momentum times 0
-    /// vanishes; then Y is centred.
+    /// vanishes; then Y is centred. ML-97: exaggeration 12 on iteration 0, and the gradient of
+    /// bhtsne (no factor 4) times eta.
     #[test]
     fn test_tsne_first_step_matches_bhtsne_update() {
         let data = tsne_fixture();
         let (p, _) = compute_joint_probabilities(&data.view(), 4.0).unwrap();
-        let y0 = initialize_embedding(data.view(), 2, Some(42)).unwrap();
+        let y0 = Array2::from_shape_fn((15, 2), |(i, j)| 1e-4 * ((2 * i + j) as f64 * 0.7).sin());
         let mut q = Array2::zeros((15, 15));
         let sq = fill_q_distribution(&y0.view(), &mut q);
-        // exaggeration 4 on iteration 0
-        let g = compute_gradient(&p.view(), 4.0, &q.view(), &y0.view(), sq);
+        let g = compute_gradient(&p.view(), 12.0, &q.view(), &y0.view(), sq);
+        // the same gradient written out: sum_j (12 p_ij - q_ij / sum_q) q_ij (y_i - y_j)
+        for i in 0..15 {
+            for k in 0..2 {
+                let direct: f64 = (0..15)
+                    .filter(|&j| j != i)
+                    .map(|j| {
+                        (12.0 * p[[i, j]] - q[[i, j]] / sq) * q[[i, j]] * (y0[[i, k]] - y0[[j, k]])
+                    })
+                    .sum();
+                assert!(
+                    (g[[i, k]] - direct).abs() <= 1e-12 * direct.abs().max(1e-300),
+                    "{} vs {direct}",
+                    g[[i, k]]
+                );
+            }
+        }
         assert!(
             g.iter().any(|&v| v < 0.0),
             "the fixture must have a negative gradient entry"
@@ -1516,19 +1571,82 @@ mod tests {
         for mut row in want.rows_mut() {
             row -= &mean;
         }
-        let r = tsne(
-            data.view(),
-            Some(2),
-            Some(4.0),
-            Some(1),
-            Some(200.0),
-            Some(42),
-        )
-        .unwrap();
+        let r = tsne_from_init(data.view(), y0.clone(), 4.0, 1, 200.0).unwrap();
         for (a, b) in r.embedding.iter().zip(want.iter()) {
             // before: entries with g < 0 used gain 0.8
             assert!((a - b).abs() <= 1e-12 * (1.0 + b.abs()), "{a} vs {b}");
         }
+    }
+
+    /// ML-97: Rtsne's exact path from a given start (R 4.3.3, Rtsne 0.17, theta 0, no PCA, no
+    /// normalisation, eta 200, exaggeration 12 to iteration 250). Later iterations are chaotic
+    /// in the summation order, so 1 and 10 iterations are pinned.
+    #[test]
+    fn test_validate_tsne_rtsne_exact() {
+        let (case, ds) = crate::test_support::load_case("tsne_rtsne_exact");
+        let colmajor = |y: &Array2<f64>| -> Vec<f64> { y.t().iter().copied().collect() };
+        let blobs = matrix(ds.df(), &["x1", "x2", "x3", "x4", "x5"]);
+        let blobs_y0 = matrix(ds.df(), &["y0_1", "y0_2"]);
+        let unit_df = case_frame(&case, "tsne_unit.csv");
+        let u: Vec<String> = (1..=20).map(|i| format!("u{i}")).collect();
+        let u: Vec<&str> = u.iter().map(String::as_str).collect();
+        let unit = matrix(&unit_df, &u);
+        let unit_y0 = matrix(&unit_df, &["y0_1", "y0_2"]);
+        let run = |x: &Array2<f64>, y0: &Array2<f64>, perp: f64, iters: usize| {
+            let r = tsne_from_init(x.view(), y0.clone(), perp, iters, 200.0).unwrap();
+            assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+            colmajor(&r.embedding)
+        };
+        Check::new(&case)
+            .vector(
+                "blobs_y_iter1",
+                &run(&blobs, &blobs_y0, 10.0, 1),
+                Tol::new(1e-10, 1e-15),
+            )
+            // the summation order separates the two paths at about 1e-13 after 10 steps
+            .vector(
+                "blobs_y_iter10",
+                &run(&blobs, &blobs_y0, 10.0, 10),
+                Tol::new(1e-9, 1e-9),
+            )
+            .vector(
+                "unit_y_iter1",
+                &run(&unit, &unit_y0, 30.0, 1),
+                Tol::new(1e-10, 1e-15),
+            )
+            .finish();
+    }
+
+    /// ML-97: the seed sets the start (it was used only by an unreachable fallback).
+    #[test]
+    fn test_tsne_seed_changes_the_embedding() {
+        let data = tsne_fixture();
+        let run = |seed| {
+            tsne(data.view(), Some(2), Some(4.0), Some(20), None, seed)
+                .unwrap()
+                .embedding
+        };
+        assert_ne!(run(Some(1)), run(Some(999)));
+        assert_eq!(run(Some(7)), run(Some(7)));
+        assert_eq!(run(None), run(Some(42)));
+    }
+
+    /// ML-97: the start is N(0, 1e-4), Rtsne's random start (it was the PCA scores x 1e-4).
+    #[test]
+    fn test_tsne_start_is_rtsne_scale() {
+        let data = blobs(500, 3, 9);
+        use rand::SeedableRng;
+        use rand_distr::{Distribution, Normal};
+        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+        let normal = Normal::new(0.0, 1e-4).unwrap();
+        let draws: Vec<f64> = (0..1000).map(|_| normal.sample(&mut rng)).collect();
+        let sd = (draws.iter().map(|v| v * v).sum::<f64>() / draws.len() as f64).sqrt();
+        assert!((sd / 1e-4 - 1.0).abs() < 0.1, "{sd}");
+        // tsne's start is these draws, row by row: one step from them is tsne's first step
+        let y0 = Array2::from_shape_vec((500, 2), draws).unwrap();
+        let a = tsne(data.view(), Some(2), Some(5.0), Some(1), None, Some(42)).unwrap();
+        let b = tsne_from_init(data.view(), y0, 5.0, 1, 200.0).unwrap();
+        assert_eq!(a.embedding, b.embedding);
     }
 
     /// ML-146 (and ML-97's KL part): the reported KL is KL(P || Q(Y)) of the returned Y, with
@@ -1560,22 +1678,23 @@ mod tests {
     }
 
     /// Re-captured at T3-WP42 (ML-145 changes the path from step 1, ML-146 the reported KL), and
-    /// for ML-37 (bhtsne's bandwidth search, no floor on P, Rtsne's KL form).
+    /// for ML-37 (bhtsne's bandwidth search, no floor on P, Rtsne's KL form) and ML-97 (seeded
+    /// N(0, 1e-4) start, exaggeration 12 to iteration 250, the gradient without the factor 4).
     #[test]
     fn tsne_memory_refactor_is_bit_identical() {
         const GOLDEN: [u64; 4] = [
-            13849809419206569802,
-            13871516010347534690,
-            13867331416230125663,
-            4610700378489271804,
+            13850688072866429329,
+            4637588052825448399,
+            4618886929027901594,
+            4611220452119951649,
         ];
         let data = tsne_fixture();
-        // 120 iterations cross the early-exaggeration switch at 100
+        // 260 iterations cross the exaggeration and momentum switches at 250
         let r = tsne(
             data.view(),
             Some(2),
             Some(4.0),
-            Some(120),
+            Some(260),
             Some(200.0),
             Some(42),
         )

@@ -46,6 +46,25 @@
       "tolerance": "GOF, ac and points Tol::coef(n) (n = 21, 8); eig rel 1e-9 with abs 1e-6 (eurodist), abs 1e-5 (eurodist with add: the null eigenvalue moves with the roundoff of ac), abs 1e-9 (Manhattan)",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "ml_tsne_exact",
+      "name": "t-SNE: bhtsne's exact path with Rtsne's optimiser (exaggeration 12 to iteration 250, eta 200)",
+      "category": "ml",
+      "reference": "Rtsne::Rtsne(theta = 0, pca = FALSE, normalize = FALSE, Y_init, eta = 200, exaggeration_factor = 12, stop_lying_iter = 250, mom_switch_iter = 250)",
+      "doc": "validation/ml/tsne.md",
+      "cases": [
+        "tsne_rtsne_exact"
+      ],
+      "tests": [
+        "p2a-core::ml::reduction::tests::test_validate_tsne_rtsne_exact"
+      ],
+      "quantities": [
+        "embedding after 1 and 10 iterations from a given start"
+      ],
+      "tolerance": "1 iteration rel 1e-10; 10 iterations rel 1e-9 and abs 1e-9 (the summation order separates the paths at about 1e-13)",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

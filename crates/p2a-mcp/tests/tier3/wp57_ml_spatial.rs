@@ -1326,6 +1326,8 @@ fn test_mcp_ml_descriptions_state_defaults() {
     let d = tool_description("ml_tsne");
     assert!(d.ends_with("Seed: seed, else set_seed, else 42."), "{d}");
     assert!(field_description("ml_tsne", "seed").contains("42"));
+    assert!(d.contains("exaggeration 12") && d.contains("Rtsne"), "{d}");
+    assert!(field_description("ml_tsne", "learning_rate").contains("eta"));
     let d = tool_description("ml_causal_forest");
     assert!(d.contains("ceil(sqrt(p))"), "{d}");
     assert!(d.contains("min(ceil(sqrt(p) + 20), p)"), "{d}");

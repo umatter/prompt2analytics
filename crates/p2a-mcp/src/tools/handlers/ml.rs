@@ -753,7 +753,7 @@ impl AnalyticsServer {
 
     /// Run t-SNE dimensionality reduction.
     #[tool(
-        description = "Run t-SNE (t-distributed Stochastic Neighbor Embedding) for visualizing high-dimensional data in 2D or 3D. Preserves local structure while revealing clusters. Good for exploratory visualization. Returns the final KL divergence and the first 5 embedded points (no per-row output). Seed: seed, else set_seed, else 42."
+        description = "Run t-SNE (t-distributed Stochastic Neighbor Embedding) for visualizing high-dimensional data in 2D or 3D. Preserves local structure while revealing clusters. Follows Rtsne's defaults with the exact gradient (Rtsne theta = 0): exaggeration 12 for 250 iterations, momentum 0.5 then 0.8, eta (learning_rate) 200, a random N(0, 1e-4) start from the seed; the columns are used as given (no initial PCA, no normalisation). Returns the final KL divergence and the first 5 embedded points (no per-row output). Seed: seed, else set_seed, else 42."
     )]
     pub async fn ml_tsne(
         &self,

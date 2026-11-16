@@ -154,8 +154,10 @@ pub struct TsneRequest {
     #[schemars(description = "Maximum number of iterations. Default is 1000.")]
     pub max_iterations: Option<usize>,
 
-    /// Learning rate (default: 200.0)
-    #[schemars(description = "Learning rate for optimization. Default is 200.")]
+    /// Learning rate: Rtsne's eta (default: 200.0)
+    #[schemars(
+        description = "Learning rate: Rtsne's eta, the step on bhtsne's gradient (sklearn's learning_rate is 4 x eta). Default is 200."
+    )]
     pub learning_rate: Option<f64>,
 
     /// Random seed for reproducibility
