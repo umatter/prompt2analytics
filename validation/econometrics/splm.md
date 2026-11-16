@@ -280,7 +280,7 @@ for (p in 1:2) { r <- which(t3 == p); o <- r[order(lab3[r])]; wy3[o] <- W3 %*% y
 ```
 
 `A` begins `1 2001 2.313251294567376881 1.009297426825681798`; the Rust fixture solves
-the same system by 200 Neumann iterations and reproduces it to about 1e-15.
+the same system by 200 Neumann iterations and reproduces it to 1e-13 (y) and 1e-15 (x).
 
 ## Known Limitations
 

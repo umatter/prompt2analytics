@@ -651,6 +651,8 @@ pub struct SpgmResult {
 
     /// Variance components
     pub sigma2: f64,
+    /// Variance of the individual effects, (sigma_1^2 - sigma_nu^2) / T, for the
+    /// error-components estimators (ec2sls, g2sls); `None` otherwise
     pub sigma2_mu: Option<f64>,
 
     /// Number of observations
@@ -687,6 +689,8 @@ pub struct SpgmResult {
     /// Root search of the GM first-order condition (spatial-error models).
     #[serde(default)]
     pub convergence: Option<Convergence>,
+    /// Notes on the fit (a boundary or non-converged GM step, an unavailable variance),
+    /// printed after the table
     #[serde(default)]
     pub warnings: Vec<String>,
 }
@@ -924,6 +928,17 @@ struct SpatialPanelData {
     rows: Vec<usize>,
 }
 
+/// YYYY-MM-DD of a day count since 1970-01-01 (as polars stores a `Date`); the count itself
+/// when it is out of chrono's range.
+fn date_label(days: i64) -> String {
+    // 1970-01-01 is day 719 163 counted from 0001-01-01 (day 1).
+    i32::try_from(days)
+        .ok()
+        .and_then(|d| d.checked_add(719_163))
+        .and_then(chrono::NaiveDate::from_num_days_from_ce_opt)
+        .map_or_else(|| days.to_string(), |d| d.format("%Y-%m-%d").to_string())
+}
+
 /// Read a spatial panel (y, `[1, X]`, entity, time) and put it in canonical layout.
 ///
 /// Every column goes through one `ColumnRequest` with `NaPolicy::Fail`: a missing value in
@@ -972,7 +987,24 @@ fn extract_panel_data(
     perm.extend(0..n);
     perm.sort_unstable_by_key(|&r| key(r));
 
-    let cell = |(t, e): (usize, usize)| format!("entity '{}', time {}", entity.levels[e], times[t]);
+    // A Date time column is a day count since 1970-01-01: label it as a date.
+    let is_date = df
+        .column(time_col)
+        .is_ok_and(|c| matches!(c.dtype(), polars::prelude::DataType::Date));
+    let time_label = |v: i64| {
+        if is_date {
+            date_label(v)
+        } else {
+            v.to_string()
+        }
+    };
+    let cell = |(t, e): (usize, usize)| {
+        format!(
+            "entity '{}', time {}",
+            entity.levels[e],
+            time_label(times[t])
+        )
+    };
 
     // Each (entity, time) pair at most once.
     let mut duplicates = 0usize;
@@ -1405,6 +1437,10 @@ impl PanelSpectrum {
     }
 
     fn compute(listw: &SpatialWeights) -> EconResult<Self> {
+        // the dense W and the eigen solver's n x n Schur form
+        let n = listw.n();
+        let what = "the eigenvalues of the spatial panel weights";
+        crate::resource::check_alloc::<f64>(crate::resource::checked_len(&[2, n, n], what)?, what)?;
         let w = listw.try_to_dense()?;
         let evs = ndarray_to_faer(&w.view()).eigenvalues().map_err(|_| {
             EconError::Computation(
@@ -1562,7 +1598,9 @@ where
     let mut cur = profile(&psi)?;
     if !cur.ll.is_finite() || cur.grad.iter().any(|g| !g.is_finite()) {
         return Err(EconError::Computation(
-            "the spatial panel log-likelihood is not finite at rho = lambda = 0, phi = 1".into(),
+            "the spatial panel log-likelihood is not finite at the starting values (rho = \
+             lambda = 0, and phi = 1 for the random-effects model)"
+                .into(),
         ));
     }
     let (mut converged, mut iterations, mut change) = (false, 0usize, f64::NAN);
@@ -2199,6 +2237,12 @@ impl ReData<'_> {
         }
         checkpoint()?;
         let n = self.n;
+        // K, its eigenvector matrix and the cached decompositions: (cache + 1) n x n matrices
+        let what = "the eigendecompositions of the spatial panel K = B'B";
+        crate::resource::check_alloc::<f64>(
+            crate::resource::checked_len(&[BALTAGI_CACHE + 1, n, n], what)?,
+            what,
+        )?;
         let mut kmat = try_zeros2(n, n, "spatial panel K = B'B")?;
         for i in 0..n {
             kmat[[i, i]] = 1.0;
@@ -2649,6 +2693,15 @@ fn fit_spml_random(
                 .into(),
         );
     }
+    // the upper bound of log phi: the search stopped there, not at a maximum
+    let phi_at_upper = psi[i_phi] >= LOG_PHI_BOUND - 1e-9;
+    if phi_at_upper {
+        warnings.push(
+            "phi at the upper bound: the individual effects dominate (phi = sigma_mu^2 / sigma^2 \
+             reached exp(30)); phi has no standard error"
+                .into(),
+        );
+    }
 
     let mut kinds: Vec<ParamKind> = (0..k).map(ParamKind::Coef).collect();
     let mut names = coef_names.clone();
@@ -2664,7 +2717,11 @@ fn fit_spml_random(
     }
     kinds.push(ParamKind::Scale);
     names.push("sigma2".into());
-    let (steps, active) = information_steps(&prof, &kinds, Some((lo, hi)), &names, &mut warnings);
+    let (steps, mut active) =
+        information_steps(&prof, &kinds, Some((lo, hi)), &names, &mut warnings);
+    if phi_at_upper {
+        active[k + usize::from(lag)] = false;
+    }
     let hess = fd_hessian(|th| re_score(&data, th), &prof.theta, &steps, &active)?;
     let se = ml_standard_errors(&hess, &active, &mut warnings)?;
 
@@ -2763,13 +2820,20 @@ fn project(qr: &Qr, v: ArrayView1<f64>) -> EconResult<Array1<f64>> {
 /// of Q, P = P_H Z = Q1 C with C = Q1'Z (r x p), so P'P = C'C and P'y = C'(Q1'y): the
 /// coefficients and (P'P)^-1 come from least squares of Q1'y on the small C, and P is never
 /// formed. The residuals are y - Z d. The first `n_exog` columns of Z lie in the span of H
-/// (checked in tests).
-fn tsls(y: ArrayView1<f64>, z: ArrayView2<f64>, n_exog: usize, qr: &Qr) -> EconResult<Tsls> {
+/// (checked in tests); `n_endogenous` is the number of endogenous regressors the error
+/// reports (W y), which is not `p - n_exog` when filtered exogenous columns are projected too.
+fn tsls(
+    y: ArrayView1<f64>,
+    z: ArrayView2<f64>,
+    n_exog: usize,
+    n_endogenous: usize,
+    qr: &Qr,
+) -> EconResult<Tsls> {
     let p = z.ncols();
     let r = qr.rank();
     let under = || EconError::UnderIdentified {
-        n_endogenous: p - n_exog,
-        n_instruments: r.saturating_sub(n_exog),
+        n_endogenous,
+        n_instruments: r.saturating_sub(p - n_endogenous),
     };
     if r < p {
         return Err(under());
@@ -2965,8 +3029,8 @@ fn coef_table(coef: &Array1<f64>, unscaled_cov: &Array2<f64>, se_scale: f64) -> 
     let se: Vec<f64> = (0..coef.len())
         .map(|j| (se_scale * unscaled_cov[[j, j]]).sqrt())
         .collect();
-    let z: Vec<f64> = coef.iter().zip(&se).map(|(b, s)| b / s).collect();
-    let p = z.iter().map(|&v| normal_p_value_two_sided(v)).collect();
+    // z and p through `wald`: NaN unless the SE is finite and positive
+    let (z, p): (Vec<f64>, Vec<f64>) = coef.iter().zip(&se).map(|(&b, &s)| wald(b, s)).unzip();
     CoefTable {
         coef: coef.to_vec(),
         se,
@@ -3128,7 +3192,7 @@ fn spgm_w2sls(
     let m = n * (t - 1);
     let p = d.k + 1;
     let df = residual_df(m, 0, p)?;
-    let fit = tsls(d.y.view(), d.z.view(), d.k, &d.qr)?;
+    let fit = tsls(d.y.view(), d.z.view(), d.k, 1, &d.qr)?;
     let uu = fit.residuals.dot(&fit.residuals);
     let sigma2 = uu / m as f64;
     Ok(SpgmFit {
@@ -3171,7 +3235,7 @@ fn spgm_b2sls(
     let lagged = spatial_instruments(&xb.slice(s![.., 1..]).to_owned(), n, 1, listw)?;
     let h = hstack(&[xb.slice(s![.., ..1]), lagged.view()], "spgm instruments")?;
     let qr = Qr::decompose(h.view(), LM_QR_TOL)?;
-    let fit = tsls(yb.view(), z.view(), k, &qr)?;
+    let fit = tsls(yb.view(), z.view(), k, 1, &qr)?;
     let uu = fit.residuals.dot(&fit.residuals);
     let sigma2 = uu / n as f64;
     let mut names = vec!["(Intercept)".to_string()];
@@ -3206,9 +3270,22 @@ fn spgm_error_components(
 ) -> EconResult<SpgmFit> {
     let (n, t) = (panel.n_entities, panel.n_time);
     let s2nu = spgm_w2sls(panel, listw, x_cols)?.sigma2;
-    let s21 = spgm_b2sls(panel, listw, x_cols)?
-        .sigma2_1
-        .unwrap_or(f64::NAN);
+    let s21 = spgm_b2sls(panel, listw, x_cols)?.sigma2_1.ok_or_else(|| {
+        EconError::Computation("spgm: the between 2SLS gave no sigma_1^2".to_string())
+    })?;
+    // a variance at the rounding level of y (an SD of 1e3 machine epsilons of |y|) is zero
+    let rounding = (1e3 * f64::EPSILON).powi(2) * panel.y.dot(&panel.y) / panel.y.len() as f64;
+    for (name, v) in [
+        ("sigma_nu^2 (within 2SLS)", s2nu),
+        ("sigma_1^2 (between 2SLS)", s21),
+    ] {
+        if !(v.is_finite() && v > rounding) {
+            return Err(EconError::Computation(format!(
+                "spgm {method}: {name} is {v:e}, not finite and positive (above rounding), so \
+                 the error-components transformation is undefined"
+            )));
+        }
+    }
     let (snu, s1) = (s2nu.sqrt(), s21.sqrt());
     let p0 = |v: ArrayView1<f64>| {
         let m = unit_means(v, n, t);
@@ -3260,7 +3337,7 @@ fn spgm_error_components(
         ),
     };
     let qr = Qr::decompose(h.view(), LM_QR_TOL)?;
-    let fit = tsls(ys.view(), zs.view(), k, &qr)?;
+    let fit = tsls(ys.view(), zs.view(), k, 1, &qr)?;
     let s2mu = (s21 - s2nu) / t as f64;
     let mut warnings = Vec::new();
     if s2mu < 0.0 {
@@ -3350,13 +3427,14 @@ fn spgm_within_gs2sls(
     let m = n * (t - 1);
     let p = d.k + 1;
     let df = residual_df(m, 0, p)?;
-    let first = tsls(d.y.view(), d.z.view(), d.k, &d.qr)?;
+    let first = tsls(d.y.view(), d.z.view(), d.k, 1, &d.qr)?;
     let (lambda, s2, conv) =
         kkp_within_gm(&first.residuals, n, t, listw, config.tol, config.max_iter)?;
     let yf = &d.y - &(lambda * &spatial_lag_panel(&d.y, n, t, listw));
     let zf = &d.z - &(lambda * &lag_columns(&d.z, n, t, listw)?);
-    // the filtered X~ is not in the span of H: every column is projected
-    let fit = tsls(yf.view(), zf.view(), 0, &d.qr)?;
+    // the filtered X~ is not in the span of H: every column is projected; W y is the one
+    // endogenous regressor
+    let fit = tsls(yf.view(), zf.view(), 0, 1, &d.qr)?;
     let uu = fit.residuals.dot(&fit.residuals);
     Ok(SpgmFit {
         estimator: "within GS2SLS: w2sls, KKP within GM for lambda, 2SLS of the spatially \
@@ -3717,6 +3795,160 @@ mod tests {
         let wy = to_row_order(&spatial_lag_panel(&panel.y, 3, 2, &w), &panel.rows);
         // R (spml_entity_order.R, 3-entity example): 101 10 10 20 202 20
         assert_eq!(wy.to_vec(), vec![101.0, 10.0, 10.0, 20.0, 202.0, 20.0]);
+    }
+
+    /// H of rank 2 for Z = [1, x, W y]: under-identified, with the one endogenous regressor
+    /// counted (not every projected column).
+    #[test]
+    fn tsls_counts_the_endogenous_regressor() {
+        let n = 10;
+        let x: Vec<f64> = (0..n).map(|i| (i as f64 * 0.7).sin()).collect();
+        let z = Array2::from_shape_fn((n, 3), |(i, j)| match j {
+            0 => 1.0,
+            1 => x[i],
+            _ => (i as f64 * 1.3).cos(),
+        });
+        let h = z.slice(s![.., ..2]).to_owned();
+        let y = Array1::from_iter((0..n).map(|i| 1.0 + x[i] + 0.1 * (i as f64).sin()));
+        let qr = Qr::decompose(h.view(), LM_QR_TOL).unwrap();
+        for n_exog in [0, 2] {
+            let e = tsls(y.view(), z.view(), n_exog, 1, &qr).err().unwrap();
+            assert!(
+                matches!(
+                    e,
+                    EconError::UnderIdentified {
+                        n_endogenous: 1,
+                        n_instruments: 0
+                    }
+                ),
+                "{e:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn coef_table_zero_se_gives_nan_z_and_p() {
+        let t = coef_table(
+            &ndarray::array![1.0, 2.0],
+            &ndarray::array![[0.0, 0.0], [0.0, 4.0]],
+            1.0,
+        );
+        assert!(t.z[0].is_nan() && t.p[0].is_nan(), "{:?} {:?}", t.z, t.p);
+        assert_eq!(t.z[1], 1.0);
+    }
+
+    /// Entity effects of SD 1000 and noise of SD 1e-6: phi reaches the upper bound of its
+    /// search, with a warning and no standard error.
+    #[test]
+    fn spml_random_phi_at_the_upper_bound_is_flagged() {
+        let (mut id, mut time, mut x, mut y) = (vec![], vec![], vec![], vec![]);
+        for i in 1..=20i64 {
+            let fi = i as f64;
+            let a = 1000.0 * (1.7 * fi).sin();
+            for t in 1..=5i64 {
+                let xv = (fi + 1.7 * t as f64).sin() + 0.1 * fi;
+                id.push(i);
+                time.push(t);
+                x.push(xv);
+                y.push(1.0 + 2.0 * xv + a + 1e-6 * (2.3 * fi * t as f64 + 0.4).cos());
+            }
+        }
+        let ds = Dataset::new(df! { "id" => id, "time" => time, "x" => x, "y" => y }.unwrap());
+        let coords: Vec<(f64, f64)> = (0..20).map(|i| (i as f64, 0.0)).collect();
+        let mut w =
+            SpatialWeights::from_neighbors(&Neighbors::from_knn(&coords, 2), WeightStyle::RowStd);
+        let r = run_spml(
+            &ds,
+            "y",
+            &["x"],
+            "id",
+            "time",
+            &mut w,
+            random_cfg(false, SpatialErrorType::None),
+        )
+        .unwrap();
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.contains("phi at the upper bound")),
+            "{:?}",
+            r.warnings
+        );
+        let j = r.parameter_names.iter().position(|n| n == "phi").unwrap();
+        assert!(r.parameter_se[j].is_nan(), "{r:?}");
+    }
+
+    /// y within-perfectly explained by x (no noise): the within 2SLS variance is 0 and the
+    /// error-components estimators refuse with an error naming it.
+    #[test]
+    fn spgm_error_components_refuse_a_zero_variance() {
+        let (a, w) = grid_panel();
+        let x = f64_values(&a, "x");
+        let entity = a.column("entity").unwrap().i64().unwrap().clone();
+        let y: Vec<f64> = x
+            .iter()
+            .zip(entity.into_no_null_iter())
+            .map(|(&v, e)| 1.0 + 2.0 * v + (e as f64).sin())
+            .collect();
+        let mut df = a.clone();
+        df.with_column(Column::new("y".into(), y)).unwrap();
+        for method in [SpgmMethod::Ec2sls, SpgmMethod::G2sls] {
+            let mut c = SpgmConfig::default();
+            c.method = method;
+            c.lag = true;
+            c.spatial_error = false;
+            let e = spgm(&df, &w, c).unwrap_err();
+            let m = e.to_string();
+            assert!(
+                matches!(e, EconError::Computation(_)) && m.contains("not finite and positive"),
+                "{method}: {m}"
+            );
+        }
+    }
+
+    /// The Baltagi random-effects kernel keeps (cache + 1) n x n matrices: a ceiling between
+    /// one and four of them is a `ResourceLimit`, not an abort.
+    #[test]
+    fn spml_baltagi_eigen_respects_the_ceiling() {
+        let (ds, w) = splm_sim();
+        let n = w.n();
+        let ceiling = 5 * n * n * std::mem::size_of::<f64>() / 2;
+        let r = crate::resource::with_alloc_ceiling(Some(ceiling), || {
+            run_spml(
+                &ds,
+                "y_re",
+                &["x1", "x2"],
+                "id",
+                "time",
+                &mut w.clone(),
+                random_cfg(false, SpatialErrorType::Baltagi),
+            )
+        });
+        assert!(matches!(r, Err(EconError::ResourceLimit(_))), "{r:?}");
+    }
+
+    /// A duplicated cell of a Date time column is named by its date.
+    #[test]
+    fn spatial_panel_duplicate_names_a_date_cell() {
+        let (a, w) = grid_panel();
+        let days: Vec<i32> = a
+            .column("time")
+            .unwrap()
+            .i64()
+            .unwrap()
+            .into_no_null_iter()
+            .map(|t| 18_262 + (t as i32 - 2001)) // 2020-01-01 + (t - 2001) days
+            .collect();
+        let mut df = a.clone();
+        df.with_column(
+            Column::new("time".into(), days)
+                .cast(&DataType::Date)
+                .unwrap(),
+        )
+        .unwrap();
+        let dup = df.vstack(&df.slice(0, 1)).unwrap();
+        let m = spml(&dup, &w, lag_cfg()).unwrap_err().to_string();
+        assert!(m.contains("entity '1', time 2020-01-01"), "{m}");
     }
 
     #[test]
