@@ -923,10 +923,10 @@ mod tests {
     }
 
     /// e1071's linear C-SVC on `svm_sim` `cls_lin` (labels 1 and 2), at e1071's tolerance 1e-10.
-    fn check_linear_svm_libsvm(tag: &str, c: f64) {
+    fn check_linear_svm_libsvm(case_id: &str, tag: &str, c: f64) {
         use crate::data::columns::{NaPolicy, numeric_column};
         use p2a_validation::{Check, Tol};
-        let (case, ds) = crate::test_support::load_case("svm_libsvm");
+        let (case, ds) = crate::test_support::load_case(case_id);
         let col = |n: &str| numeric_column(ds.df(), n, NaPolicy::Fail).unwrap().0;
         let (x1, x2) = (col("x1"), col("x2"));
         let x = Array2::from_shape_fn((x1.len(), 2), |(i, j)| if j == 0 { x1[i] } else { x2[i] });
@@ -960,12 +960,12 @@ mod tests {
     /// one sweep without a change, so it stopped short of the optimum at C != 1.
     #[test]
     fn test_validate_linear_svm_libsvm_c01() {
-        check_linear_svm_libsvm("linear_c01", 0.1);
+        check_linear_svm_libsvm("svm_libsvm", "linear_c01", 0.1);
     }
 
     #[test]
     fn test_validate_linear_svm_libsvm_c10() {
-        check_linear_svm_libsvm("linear_c10", 10.0);
+        check_linear_svm_libsvm("svm_libsvm", "linear_c10", 10.0);
     }
 
     fn fast_linear(c: f64, max_iter: usize) -> FastSvmConfig {
