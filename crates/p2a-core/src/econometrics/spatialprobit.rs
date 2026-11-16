@@ -998,10 +998,12 @@ fn chebyshev_nodes(a: f64, b: f64, m: usize) -> Vec<f64> {
 
 /// The parts of (I - ρW)^-1 the impacts need, interpolated in ρ: barycentric interpolation on
 /// Chebyshev points of the second kind over the range of the ρ draws, from one dense inverse
-/// per node ([`SpatialWeights::dense_inverse_parts`]). The nodes double (9, 17, 33) until the
-/// current interpolant agrees with the dense inverse to [`IMPACT_INTERPOLATION_TOL`] in its two
-/// end cells, where its error peaks, or two nested interpolants agree to that tolerance at
-/// the midpoints of the finer one (the finer one is kept). When 33 nodes miss the target a warning reports the
+/// per node ([`SpatialWeights::dense_inverse_parts`]). The nodes double (9, 17, 33) until two
+/// nested interpolants agree to [`IMPACT_INTERPOLATION_TOL`] at the midpoints of the finer
+/// one, or the finer one agrees with the dense inverse to that tolerance in its two end
+/// cells, where its error peaks; the finer one is kept. (A check of the 9 nodes against the
+/// dense inverse costs two more inverses and fails for the posterior ranges of n up to a few
+/// thousand, so it is not made.) When 33 nodes miss the target a warning reports the
 /// accuracy measured in the end cells.
 struct InverseInterpolant {
     nodes: Vec<f64>,
@@ -1042,10 +1044,6 @@ impl InverseInterpolant {
             it.push_node(listw, x, r)?;
         }
         it.set_weights();
-        // a narrow posterior range often needs no more than the 9 nodes
-        if it.end_cell_error(listw, x)? <= IMPACT_INTERPOLATION_TOL {
-            return Ok(it);
-        }
         let mut m = 8;
         loop {
             let finer = chebyshev_nodes(lo, hi, 2 * m);
@@ -1557,12 +1555,12 @@ mod tests {
         let p = pieces("spatial_probit_pieces_t4");
         let interp = InverseInterpolant::build(&p.w, &p.x, -0.2, 0.85).unwrap();
         assert!(interp.warning.is_none());
-        // a narrower range stops at 17 nodes and a very narrow one at 9, each accepted by the
-        // dense check in its end cells
+        // a narrower range stops at 17 nodes, accepted by the dense check in its end cells, and
+        // a very narrow one at 17 too, by the nested comparison
         let narrow = InverseInterpolant::build(&p.w, &p.x, 0.4, 0.7).unwrap();
         assert!(narrow.nodes.len() == 17 && narrow.warning.is_none());
         let narrower = InverseInterpolant::build(&p.w, &p.x, 0.30, 0.34).unwrap();
-        assert!(narrower.nodes.len() == 9 && narrower.warning.is_none());
+        assert!(narrower.nodes.len() == 17 && narrower.warning.is_none());
         for r in [0.30, 0.3123, 0.34] {
             let mut exact = InverseInterpolant::empty();
             exact.push_node(&p.w, &p.x, r).unwrap();
