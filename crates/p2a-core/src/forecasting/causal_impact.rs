@@ -1,34 +1,38 @@
-//! Bayesian Structural Time Series for Causal Inference (CausalImpact).
+//! Structural time-series models for causal inference (the CausalImpact method).
 //!
-//! Implements the CausalImpact methodology for estimating the causal effect
-//! of an intervention using Bayesian structural time series models.
+//! Estimates the effect of an intervention as the difference between the observed series
+//! and a counterfactual: the forecast of a structural time-series model fitted to the
+//! pre-intervention period, optionally with control series as regression terms.
 //!
-//! The key idea is to use a state-space model trained on pre-intervention data
-//! (possibly with control series) to predict what the response would have been
-//! in the absence of the intervention. The difference between observed and
-//! predicted values in the post-intervention period gives the causal effect.
-//!
-//! Model fitting is the StructTS engine (diffuse prior, R's objective, projected
-//! Newton); the intervals are the plug-in Gaussian forecast of that model, not a
-//! posterior. The `CausalImpact` package (bsts) is the method's source, not its
-//! numerical reference: `validation/forecasting/causal_impact.md`.
+//! What is computed. The model (local level, optional local linear trend, optional
+//! seasonal) is fitted by maximum likelihood with the StructTS engine (diffuse prior,
+//! R's objective, projected Newton). The counterfactual is the model's Gaussian forecast
+//! with the fitted variances plugged in. Pointwise intervals come from the forecast
+//! variances; the intervals of the cumulative and average effects from the variance of the
+//! **sum** of the post-period forecast errors, which correlate through the state (the joint
+//! forecast-error covariance, Durbin and Koopman 2012, sec. 4.13). Control series enter as
+//! diffuse regression states: their coefficients are the GLS regression of the response's
+//! filter innovations on theirs, and their uncertainty is carried into every interval. The
+//! p-value is two-sided under the normal approximation. There is no prior and no
+//! posterior: the `CausalImpact` package (bsts, a Bayesian sampler) is the method's source,
+//! not its algorithm, and its numbers are not reproduced
+//! (`validation/forecasting/causal_impact.md`). The intervals do not include the
+//! uncertainty of the estimated variances.
 //!
 //! # Algorithm
 //!
-//! 1. **Pre-period Model Fitting**: Fit a structural time series model to
-//!    pre-intervention data. The model includes:
-//!    - Local level component (random walk)
-//!    - Optional local linear trend
-//!    - Optional seasonality
-//!    - Optional regression component with control series
-//!
-//! 2. **Counterfactual Prediction**: Use the fitted model to predict what
-//!    would have happened in the post-intervention period.
-//!
-//! 3. **Causal Effect Estimation**: Compute the difference between observed
-//!    and predicted values, along with credible intervals.
+//! 1. **Pre-period model fitting**: fit the structural model to the pre-intervention data
+//!    (with controls: to the residuals of an OLS regression on them).
+//! 2. **Counterfactual**: filter the pre-period and forecast the gap and the
+//!    post-intervention period.
+//! 3. **Effects**: observed minus counterfactual, pointwise, cumulative, average and
+//!    relative, with confidence intervals and a p-value.
 //!
 //! # References
+//!
+//! - Durbin, J., & Koopman, S. J. (2012). *Time Series Analysis by State Space Methods*
+//!   (2nd ed.), sec. 4.13 (forecasting) and sec. 6.2 (regression effects as diffuse states).
+//!   Oxford University Press.
 //!
 //! - Brodersen, K. H., Gallusser, F., Koehler, J., Remy, N., & Scott, S. L. (2015).
 //!   "Inferring causal impact using Bayesian structural time series models".
@@ -49,11 +53,11 @@ use crate::forecasting::kalman::{
     admit_filter_history_and_forecast, kalman_filter, kalman_forecast,
 };
 use crate::forecasting::structts::{SpecNaming, StructuralFit, StructuralSpec, fit_structural};
-use crate::linalg::solve::aliasing_message;
+use crate::linalg::solve::{aliasing_message, least_squares};
 use crate::regression::ols::solve_ols;
-use crate::resource::{try_zeros2, with_remedy};
+use crate::resource::{checked_len, checkpoint, try_vec, try_zeros2, with_remedy};
 use crate::traits::convergence::{Convergence, ResultNotes};
-use crate::traits::estimator::{validate_level, z_critical};
+use crate::traits::estimator::{normal_p_value_two_sided, validate_level, z_critical};
 
 /// Configuration for CausalImpact analysis.
 #[derive(Debug, Clone)]
@@ -64,7 +68,7 @@ pub struct CausalImpactConfig {
     pub post_period: (i64, i64),
     /// Names of control series columns (if any).
     pub control_series: Option<Vec<String>>,
-    /// Significance level for credible intervals (default 0.05 for 95% CI).
+    /// Significance level: 1 - alpha confidence intervals (default 0.05 for 95%).
     pub alpha: f64,
     /// Seasonal period (if the data has seasonality): at least 2, and at most
     /// the number of pre-period observations, so that the pre-period holds a
@@ -76,9 +80,6 @@ pub struct CausalImpactConfig {
     pub max_iter: usize,
     /// Convergence tolerance.
     pub tolerance: f64,
-    /// Prior standard deviation for regression coefficients.
-    /// Larger values = more diffuse prior.
-    pub prior_level_sd: Option<f64>,
 }
 
 impl Default for CausalImpactConfig {
@@ -92,7 +93,6 @@ impl Default for CausalImpactConfig {
             include_trend: false,
             max_iter: 100,
             tolerance: 1e-8,
-            prior_level_sd: None,
         }
     }
 }
@@ -102,26 +102,29 @@ impl Default for CausalImpactConfig {
 pub struct CausalImpactSummary {
     /// Average causal effect per time point in post-period.
     pub average_effect: f64,
-    /// Lower bound of credible interval for average effect.
+    /// Lower bound of the confidence interval for the average effect.
     pub average_effect_lower: f64,
-    /// Upper bound of credible interval for average effect.
+    /// Upper bound of the confidence interval for the average effect.
     pub average_effect_upper: f64,
     /// Cumulative (total) causal effect over post-period.
     pub cumulative_effect: f64,
-    /// Lower bound of credible interval for cumulative effect.
+    /// Lower bound of the confidence interval for the cumulative effect: from the variance
+    /// of the sum of the post-period forecast errors.
     pub cumulative_effect_lower: f64,
-    /// Upper bound of credible interval for cumulative effect.
+    /// Upper bound of the confidence interval for the cumulative effect.
     pub cumulative_effect_upper: f64,
-    /// Relative effect (cumulative effect / sum of predicted).
+    /// Relative effect (cumulative effect / sum of predicted); NaN, with a warning, when the
+    /// counterfactual sums to 0.
     pub relative_effect: f64,
-    /// Lower bound of relative effect.
+    /// Lower bound of the relative effect (delta method, observed sum fixed).
     pub relative_effect_lower: f64,
     /// Upper bound of relative effect.
     pub relative_effect_upper: f64,
-    /// Bayesian tail-area probability (one-sided p-value).
-    /// P(effect > 0) if effect is positive, P(effect < 0) if negative.
+    /// Two-sided p-value of the cumulative effect, 2 Phi(-|z|) with z its estimate over its
+    /// standard error (normal approximation, fitted parameters plugged in).
     pub p_value: f64,
-    /// Whether the effect is statistically significant at alpha level.
+    /// Whether `p_value < alpha`, that is, whether the 1 - alpha interval of the cumulative
+    /// effect excludes 0.
     pub significant: bool,
     /// Significance level used.
     pub alpha: f64,
@@ -136,7 +139,7 @@ pub struct CausalImpactSeries {
     pub observed: Vec<f64>,
     /// Predicted (counterfactual) values.
     pub predicted: Vec<f64>,
-    /// Lower bound of prediction interval.
+    /// Lower bound of the pointwise prediction interval.
     pub predicted_lower: Vec<f64>,
     /// Upper bound of prediction interval.
     pub predicted_upper: Vec<f64>,
@@ -148,7 +151,7 @@ pub struct CausalImpactSeries {
     pub point_effect_upper: Vec<f64>,
     /// Cumulative causal effect over time.
     pub cumulative_effect: Vec<f64>,
-    /// Lower bound of cumulative effect interval.
+    /// Lower bound of the cumulative effect's interval (variance of the running sum).
     pub cumulative_effect_lower: Vec<f64>,
     /// Upper bound of cumulative effect interval.
     pub cumulative_effect_upper: Vec<f64>,
@@ -165,8 +168,13 @@ pub struct CausalImpactModel {
     pub seasonal_variance: Option<f64>,
     /// Estimated observation variance.
     pub observation_variance: f64,
-    /// Regression coefficients for control series.
+    /// Regression coefficients of the control series, one per control in `control_names`
+    /// (no intercept: the level absorbs it): GLS on the filter innovations, NaN for an
+    /// aliased control.
     pub regression_coefficients: Option<Vec<f64>>,
+    /// Standard errors of `regression_coefficients`, NaN for an aliased control.
+    #[serde(default)]
+    pub regression_std_errors: Option<Vec<f64>>,
     /// Names of control variables.
     pub control_names: Option<Vec<String>>,
     /// Log-likelihood at optimum.
@@ -181,18 +189,18 @@ pub struct CausalImpactModel {
     pub n_post: usize,
 }
 
-/// Causal inference statistics.
+/// Normal-approximation probabilities of the cumulative effect under the fitted model.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CausalInference {
-    /// Posterior probability that the effect is positive.
+    /// Phi(z), z the cumulative effect over its standard error.
     pub prob_positive: f64,
-    /// Posterior probability that the effect is negative.
+    /// Phi(-z).
     pub prob_negative: f64,
-    /// Expected causal effect under the posterior.
+    /// The cumulative effect.
     pub expected_effect: f64,
-    /// Standard deviation of the posterior effect distribution.
+    /// Standard error of the cumulative effect.
     pub effect_sd: f64,
-    /// Whether the null (no effect) can be rejected.
+    /// Whether the two-sided p-value is below alpha.
     pub null_rejected: bool,
 }
 
@@ -517,30 +525,33 @@ fn run_causal_impact_core(
     admit_filter_history_and_forecast(n_pre, m, horizon)
         .map_err(|e| with_remedy(e, &history_remedy(&spec, m)))?;
 
-    // Step 1: The control regression on the pre-period; what it leaves is what
-    // the model is fitted to.
+    // Step 1: with controls, the variances are fitted to what an OLS regression on the
+    // controls leaves of the pre-period; the coefficients themselves come from the
+    // state-space model (step 3).
     let y_pre = &y[pre_start..=pre_end];
-    let regression = match controls {
-        Some(controls) => Some(regress_out_controls(
-            y,
-            controls,
-            periods,
-            config.control_series.as_deref().unwrap_or_default(),
-            &mut warnings,
-        )?),
+    let residuals = match controls {
+        Some(controls) => Some(ols_residuals(y, controls, periods)?),
         None => None,
     };
-    let y_for_model = regression
-        .as_ref()
-        .map_or(y_pre, |r| r.residuals.as_slice());
+    let y_for_model = residuals.as_deref().unwrap_or(y_pre);
 
     // Step 2: The structural model on the pre-period.
     let fit = fit_structural(y_for_model, spec, None, config.max_iter, config.tolerance)?;
     warnings.extend(fit.warnings.iter().cloned());
 
-    // Step 3: The filter over the pre-period, the forecast beyond it.
-    let (predicted, predicted_var) =
-        predict_counterfactual(y_for_model, y.len(), regression.as_ref(), &fit, periods)?;
+    // Step 3: The filter over the pre-period, the forecast beyond it, the variance of the
+    // running sum of the post-period forecast errors.
+    let control_names = config.control_series.as_deref().unwrap_or_default();
+    let cf = predict_counterfactual(
+        y,
+        controls.map(Vec::as_slice),
+        control_names,
+        &fit,
+        periods,
+        &mut warnings,
+    )?;
+    let predicted = cf.predicted;
+    let predicted_var = cf.predicted_var;
 
     // Step 4: Compute causal effects
     let z_alpha = z_critical(1.0 - config.alpha)?;
@@ -578,7 +589,8 @@ fn run_causal_impact_core(
 
         if i >= post_start && i <= post_end {
             cumulative += effect;
-            cumulative_var += predicted_var[i];
+            // The variance of the sum so far, not the sum of the variances.
+            cumulative_var = cf.cumulative_var[i - post_start];
         }
 
         let cum_se = cumulative_var.sqrt();
@@ -592,47 +604,30 @@ fn run_causal_impact_core(
     }
 
     // Step 5: Compute summary statistics
-    let post_effects: Vec<f64> = series.point_effect[post_start..=post_end].to_vec();
-    let post_predicted: Vec<f64> = predicted[post_start..=post_end].to_vec();
-    let post_variances: Vec<f64> = predicted_var[post_start..=post_end].to_vec();
-
-    let cumulative_effect = post_effects.iter().sum::<f64>();
-    let cumulative_variance: f64 = post_variances.iter().sum();
-    let cumulative_se = cumulative_variance.sqrt();
+    let observed_sum: f64 = y[post_start..=post_end].iter().sum();
+    let predicted_sum: f64 = predicted[post_start..=post_end].iter().sum();
+    let cumulative_effect: f64 = series.point_effect[post_start..=post_end].iter().sum();
+    let cumulative_se = cf.cumulative_var[n_post - 1].sqrt();
 
     let average_effect = cumulative_effect / n_post as f64;
-    let average_variance = cumulative_variance / (n_post * n_post) as f64;
-    let average_se = average_variance.sqrt();
+    let average_se = cumulative_se / n_post as f64;
 
-    let sum_predicted: f64 = post_predicted.iter().sum();
-    let relative_effect = if sum_predicted.abs() > 1e-10 {
-        cumulative_effect / sum_predicted
-    } else {
-        0.0
-    };
+    let (relative_effect, relative_effect_lower, relative_effect_upper, relative_warning) =
+        relative_effect(observed_sum, predicted_sum, cumulative_se, z_alpha);
+    warnings.extend(relative_warning);
 
-    // For relative effect CI, use delta method approximation
-    let relative_se = if sum_predicted.abs() > 1e-10 {
-        cumulative_se / sum_predicted.abs()
-    } else {
-        0.0
-    };
-
-    // Tail probabilities of the plug-in normal: the upper tail through sf, since
-    // 1 - cdf is exactly 0 from about 8.3 standard deviations.
-    let normal = Normal::standard();
+    // The normal approximation under the fitted model: Phi(z) and Phi(-z) for the sign of
+    // the effect, the two-sided p-value 2 Phi(-|z|), which is below alpha exactly when the
+    // 1 - alpha interval excludes 0.
     let z_cumulative = if cumulative_se > 0.0 {
         cumulative_effect / cumulative_se
     } else {
         0.0
     };
-    let prob_positive = normal.sf(-z_cumulative);
+    let normal = Normal::standard();
+    let prob_positive = normal.cdf(z_cumulative);
     let prob_negative = normal.cdf(-z_cumulative);
-    let p_value = if cumulative_effect >= 0.0 {
-        prob_negative
-    } else {
-        prob_positive
-    };
+    let p_value = normal_p_value_two_sided(z_cumulative);
 
     let summary = CausalImpactSummary {
         average_effect,
@@ -642,8 +637,8 @@ fn run_causal_impact_core(
         cumulative_effect_lower: cumulative_effect - z_alpha * cumulative_se,
         cumulative_effect_upper: cumulative_effect + z_alpha * cumulative_se,
         relative_effect,
-        relative_effect_lower: relative_effect - z_alpha * relative_se,
-        relative_effect_upper: relative_effect + z_alpha * relative_se,
+        relative_effect_lower,
+        relative_effect_upper,
         p_value,
         significant: p_value < config.alpha,
         alpha: config.alpha,
@@ -653,12 +648,17 @@ fn run_causal_impact_core(
     let n_params = count_params(config, controls.is_some());
     let coef = spec.coefficients(&fit.variances);
     let log_lik = fit.log_likelihood;
+    let (regression_coefficients, regression_std_errors) = match cf.regression {
+        Some((b, se)) => (Some(b), Some(se)),
+        None => (None, None),
+    };
     let model = CausalImpactModel {
         level_variance: coef.level,
         slope_variance: coef.slope,
         seasonal_variance: coef.seasonal,
         observation_variance: coef.epsilon,
-        regression_coefficients: regression.map(|r| r.coefficients),
+        regression_coefficients,
+        regression_std_errors,
         control_names: config.control_series.clone(),
         log_likelihood: log_lik,
         aic: -2.0 * log_lik + 2.0 * n_params as f64,
@@ -686,26 +686,41 @@ fn run_causal_impact_core(
     })
 }
 
-/// What the control regression gives the fit and the counterfactual.
-struct ControlRegression {
-    /// Intercept, then one per control; NaN for an aliased control.
-    coefficients: Vec<f64>,
-    /// The pre-period residuals, which the model is fitted to.
-    residuals: Vec<f64>,
-    /// The regression's value at every row of the series, from the identified
-    /// coefficients only, as R's `predict.lm` on a rank-deficient fit.
-    adjustment: Vec<f64>,
+/// The relative effect (Y - P) / P of an observed post-period sum Y against the
+/// counterfactual sum P, and its interval by the delta method with Y fixed: the standard
+/// error of P is `cumulative_se`, so that of Y / P - 1 is |Y| / P^2 times it. Not defined
+/// (NaN, with a warning) when P is 0 or not finite. Written as (|Y| / |P|) (SE / |P|), so
+/// that no square of P can underflow.
+fn relative_effect(
+    observed_sum: f64,
+    predicted_sum: f64,
+    cumulative_se: f64,
+    z: f64,
+) -> (f64, f64, f64, Option<String>) {
+    if predicted_sum == 0.0 || !predicted_sum.is_finite() {
+        return (
+            f64::NAN,
+            f64::NAN,
+            f64::NAN,
+            Some(format!(
+                "the counterfactual sums to {predicted_sum} over the post-period: the relative \
+                 effect is not defined"
+            )),
+        );
+    }
+    let rel = (observed_sum - predicted_sum) / predicted_sum;
+    let se = (observed_sum.abs() / predicted_sum.abs()) * (cumulative_se / predicted_sum.abs());
+    (rel, rel - z * se, rel + z * se, None)
 }
 
-/// Regress the pre-period of `y` on an intercept and the controls by OLS, aliased
-/// controls reported in `warnings`.
-fn regress_out_controls(
+/// The pre-period residuals of `y` on an intercept and the controls (OLS): the series the
+/// model's variances are fitted to when there are controls. An exact fit is refused: the
+/// model would have no variance to estimate.
+fn ols_residuals(
     y: &[f64],
     controls: &[Vec<f64>],
     periods: &PeriodIndices,
-    control_names: &[String],
-    warnings: &mut Vec<String>,
-) -> EconResult<ControlRegression> {
+) -> EconResult<Vec<f64>> {
     let (from, to) = (periods.pre_start, periods.pre_end);
     let k = controls.len() + 1; // a Vec's length is below usize::MAX
     let mut x = try_zeros2(periods.n_pre, k, "the control regression's design")?;
@@ -716,69 +731,176 @@ fn regress_out_controls(
     }
     let y_pre = ndarray::ArrayView1::from(&y[from..=to]);
     let solved = solve_ols(x.view(), y_pre)?;
-
-    let mut names = Vec::with_capacity(k);
-    names.push("(Intercept)".to_string());
-    names.extend(control_names.iter().cloned());
-    if let Some(message) = aliasing_message(&solved.aliased, &names) {
-        warnings.push(message);
-        warnings.push(
-            "the control regression is rank deficient: the counterfactual uses the identified \
-             coefficients only"
+    // Residuals at the rounding level of y are an exact fit.
+    let rss: f64 = solved.residuals.iter().map(|r| r * r).sum();
+    let yss: f64 = y_pre.iter().map(|v| v * v).sum();
+    let eps_n = periods.n_pre as f64 * f64::EPSILON;
+    if rss <= eps_n * eps_n * yss {
+        return Err(EconError::InvalidSpecification {
+            message: "the control regression leaves no residual variance in the pre-period; \
+                      drop controls that reproduce the response"
                 .to_string(),
-        );
+        });
     }
-
-    let coefficients = solved.beta.to_vec();
-    let identified = |j: usize| {
-        let b = coefficients[j];
-        if b.is_nan() { 0.0 } else { b }
-    };
-    let adjustment = (0..y.len())
-        .map(|i| {
-            identified(0)
-                + controls
-                    .iter()
-                    .enumerate()
-                    .map(|(j, control)| identified(j + 1) * control[i])
-                    .sum::<f64>()
-        })
-        .collect();
-    Ok(ControlRegression {
-        residuals: solved.residuals.to_vec(),
-        coefficients,
-        adjustment,
-    })
+    Ok(solved.residuals.to_vec())
 }
 
-/// The counterfactual and its variance at all `n` rows: in the pre-period the
-/// filtered fit of `y_for_model`, in the gap and the post-period the forecast of the
-/// fitted model, outside the two periods the nearest value.
+/// What the filter and the forecast give the effects.
+struct Counterfactual {
+    /// The counterfactual at every row.
+    predicted: Vec<f64>,
+    /// Its pointwise variance.
+    predicted_var: Vec<f64>,
+    /// The variance of the running sum of the post-period forecast errors, one entry per
+    /// post-period step.
+    cumulative_var: Vec<f64>,
+    /// The controls' coefficients and standard errors, NaN for an aliased control.
+    regression: Option<(Vec<f64>, Vec<f64>)>,
+}
+
+/// The nonzero entries of a matrix, for the O(nnz m) products of the structural models.
+fn nonzeros(a: &ndarray::Array2<f64>) -> Vec<(usize, usize, f64)> {
+    a.indexed_iter()
+        .filter(|(_, v)| **v != 0.0)
+        .map(|((i, j), &v)| (i, j, v))
+        .collect()
+}
+
+/// out = T x for a vector `x`.
+fn t_times(t: &[(usize, usize, f64)], x: &[f64], out: &mut [f64]) {
+    out.fill(0.0);
+    for &(i, j, v) in t {
+        out[i] += v * x[j];
+    }
+}
+
+/// The variance of the running sum of the forecast errors over the post-period, one entry
+/// per post-period step, under the model whose filtered state covariance at the end of the
+/// pre-period is `p_final` (row-major m x m), for a forecast over `horizon` steps of which
+/// the first `post_from` are the gap between the periods.
+///
+/// Cov(e_i, e_j) = Z' T^(j-i) P_i Z for j > i, plus H on the diagonal, so the variance of the
+/// sum is 1' Sigma 1, not the sum of the marginal variances. With P_h = T P_{h-1} T' + R Q R',
+/// g_h = T g_{h-1} + 1{h in post} P_h Z and V_h = V_{h-1} + 1{h in post} (2 Z'g_h - Z'P_h Z + H)
+/// one pass computes it: O(m^2) memory, the cost of the forecast's own covariance step.
+pub(crate) fn cumulative_forecast_variance(
+    model: &crate::forecasting::kalman::StateSpaceModel,
+    p_final: &[f64],
+    horizon: usize,
+    post_from: usize,
+) -> EconResult<Vec<f64>> {
+    const WHAT: &str = "the cumulative forecast variance";
+    let m = model.state_dim();
+    let mm = checked_len(&[m, m], WHAT)?;
+    if p_final.len() != mm || post_from > horizon {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "{WHAT}: a {m} x {m} covariance and a gap within the horizon are required"
+            ),
+        });
+    }
+    let t = nonzeros(&model.transition);
+    let rqr = nonzeros(&model.state_disturbance_cov());
+    let z: Vec<f64> = model.observation.iter().copied().collect();
+    let h = model.obs_var;
+
+    let mut p = try_vec(mm, 0.0, WHAT)?;
+    p.copy_from_slice(p_final);
+    let mut tp = try_vec(mm, 0.0, WHAT)?;
+    let mut g = try_vec(m, 0.0, WHAT)?;
+    let mut g_next = try_vec(m, 0.0, WHAT)?;
+    let mut pz = try_vec(m, 0.0, WHAT)?;
+    let mut out = try_vec(horizon - post_from, 0.0, WHAT)?;
+    let mut v = 0.0;
+    for step in 1..=horizon {
+        checkpoint()?;
+        // tp = T P
+        tp.fill(0.0);
+        for &(i, j, a) in &t {
+            for c in 0..m {
+                tp[i * m + c] += a * p[j * m + c];
+            }
+        }
+        // P = (T P) T' + R Q R'
+        p.fill(0.0);
+        for &(i, j, a) in &t {
+            for r in 0..m {
+                p[r * m + i] += tp[r * m + j] * a;
+            }
+        }
+        for &(i, j, a) in &rqr {
+            p[i * m + j] += a;
+        }
+        if step > post_from {
+            for r in 0..m {
+                pz[r] = (0..m).map(|c| p[r * m + c] * z[c]).sum();
+            }
+            t_times(&t, &g, &mut g_next);
+            for (gn, pzr) in g_next.iter_mut().zip(&pz) {
+                *gn += pzr;
+            }
+            std::mem::swap(&mut g, &mut g_next);
+            let zg: f64 = z.iter().zip(&g).map(|(a, b)| a * b).sum();
+            let zpz: f64 = z.iter().zip(&pz).map(|(a, b)| a * b).sum();
+            v += 2.0 * zg - zpz + h;
+            out[step - post_from - 1] = v;
+        }
+    }
+    Ok(out)
+}
+
+/// The counterfactual and its variance at all `n` rows: in the pre-period the filtered
+/// fit, in the gap and the post-period the forecast of the fitted model, outside the two
+/// periods the nearest value; and the variance of the running post-period sum.
+///
+/// Without controls the filter runs on the pre-period of `y`. With controls, the
+/// regression is carried as diffuse static states (de Jong's augmented filter): `y` is
+/// filtered from the fit's prior with its first value as the initial level, each control
+/// runs a mean-only pass with `y`'s gains (the gains do not depend on the data), and the
+/// coefficients are the GLS regression of `y`'s innovations on the controls' with weights
+/// 1 / F_t, no intercept (the level absorbs it). Their covariance (sum v_t v_t' / F_t)^-1
+/// enters every forecast step as d' Var(beta) d, d the controls' forecast errors, and the
+/// running sum as D' Var(beta) D. Pre-period bands treat the coefficients as known.
 fn predict_counterfactual(
-    y_for_model: &[f64],
-    n: usize,
-    regression: Option<&ControlRegression>,
+    y: &[f64],
+    controls: Option<&[Vec<f64>]>,
+    control_names: &[String],
     fit: &StructuralFit,
     periods: &PeriodIndices,
-) -> EconResult<(Vec<f64>, Vec<f64>)> {
+    warnings: &mut Vec<String>,
+) -> EconResult<Counterfactual> {
     let PeriodIndices {
         pre_start,
         pre_end,
+        post_start,
         post_end,
+        n_pre,
+        n_gap,
         ..
     } = *periods;
+    let n = y.len();
+    let horizon = periods.horizon()?;
     let ssm = &fit.model;
-    let filter_result =
-        kalman_filter(y_for_model, ssm, fit.init_state.view(), fit.init_cov.view())?;
-    let forecast_result = kalman_forecast(&filter_result, ssm, periods.horizon()?)?;
-    let adjustment = |i: usize| regression.map_or(0.0, |r| r.adjustment[i]);
+    let m = ssm.state_dim();
+    let y_pre = &y[pre_start..=pre_end];
+    let mut init_state = fit.init_state.clone();
+    init_state[0] = y_pre[0];
+    let filter_result = kalman_filter(y_pre, ssm, init_state.view(), fit.init_cov.view())?;
+    let forecast_result = kalman_forecast(&filter_result, ssm, horizon)?;
+    let p_final: Vec<f64> = filter_result.filtered_covs[n_pre - 1]
+        .iter()
+        .flatten()
+        .copied()
+        .collect();
+    let mut cumulative_var = cumulative_forecast_variance(ssm, &p_final, horizon, n_gap)?;
 
-    let mut predicted = vec![0.0; n];
-    let mut predicted_var = vec![0.0; n];
+    const WHAT: &str = "the counterfactual";
+    let mut predicted = try_vec(n, 0.0, WHAT)?;
+    let mut predicted_var = try_vec(n, 0.0, WHAT)?;
+    let z: Vec<f64> = ssm.observation.iter().copied().collect();
+    let z_dot = |a: &[f64]| -> f64 { z.iter().zip(a).map(|(p, q)| p * q).sum() };
 
     // Pre-period: Z' a_t|t and Z' P_t|t Z + H.
-    let z = ssm.observation.as_slice_memory_order();
-    let z = z.ok_or_else(|| EconError::Computation("the observation vector".to_string()))?;
     for (i, (state, cov)) in filter_result
         .filtered_states
         .iter()
@@ -786,14 +908,13 @@ fn predict_counterfactual(
         .enumerate()
     {
         let idx = pre_start + i;
-        let level: f64 = z.iter().zip(state).map(|(a, b)| a * b).sum();
         let quadratic: f64 = z
             .iter()
             .zip(cov)
             .filter(|(zj, _)| **zj != 0.0)
-            .map(|(zj, row)| zj * z.iter().zip(row).map(|(a, b)| a * b).sum::<f64>())
+            .map(|(zj, row)| zj * z_dot(row))
             .sum();
-        predicted[idx] = level + adjustment(idx);
+        predicted[idx] = z_dot(state);
         predicted_var[idx] = quadratic + ssm.obs_var;
     }
 
@@ -805,9 +926,70 @@ fn predict_counterfactual(
         .enumerate()
     {
         let idx = pre_end + 1 + h;
-        predicted[idx] = forecast + adjustment(idx);
+        predicted[idx] = *forecast;
         predicted_var[idx] = *variance;
     }
+
+    let regression = match controls {
+        Some(controls) => {
+            let reg = control_states(
+                controls,
+                control_names,
+                &filter_result,
+                ssm,
+                &init_state,
+                periods,
+                warnings,
+            )?;
+            let k = controls.len();
+            let identified = |j: usize| {
+                let b = reg.beta[j];
+                if b.is_nan() { 0.0 } else { b }
+            };
+            let vb = |i: usize, j: usize| {
+                let v = reg.cov[[i, j]];
+                if v.is_nan() { 0.0 } else { v }
+            };
+            // Pre-period: Z'a(y) - beta' Z'a(X) + beta' x_t.
+            for t in 0..n_pre {
+                let idx = pre_start + t;
+                predicted[idx] += (0..k)
+                    .map(|j| identified(j) * (controls[j][idx] - reg.filtered_means[[t, j]]))
+                    .sum::<f64>();
+            }
+            // Forecast rows: the controls' state forecasts T^h a_T(x).
+            let t_nz = nonzeros(&ssm.transition);
+            let mut states = reg.final_states;
+            let mut next = try_vec(m, 0.0, WHAT)?;
+            let mut d = try_vec(k, 0.0, WHAT)?;
+            let mut big_d = try_vec(k, 0.0, WHAT)?;
+            for h in 0..horizon {
+                checkpoint()?;
+                let idx = pre_end + 1 + h;
+                for (j, state) in states.iter_mut().enumerate() {
+                    t_times(&t_nz, state, &mut next);
+                    state.copy_from_slice(&next);
+                    d[j] = controls[j][idx] - z_dot(state);
+                }
+                let quad = |u: &[f64]| -> f64 {
+                    (0..k)
+                        .map(|i| (0..k).map(|j| u[i] * vb(i, j) * u[j]).sum::<f64>())
+                        .sum()
+                };
+                predicted[idx] += (0..k).map(|j| identified(j) * d[j]).sum::<f64>();
+                predicted_var[idx] += quad(&d);
+                if idx >= post_start {
+                    for (bd, dj) in big_d.iter_mut().zip(&d) {
+                        *bd += dj;
+                    }
+                    cumulative_var[idx - post_start] += quad(&big_d);
+                }
+            }
+            let se: Vec<f64> = (0..k).map(|j| reg.cov[[j, j]].sqrt()).collect();
+            Some((reg.beta, se))
+        }
+        None => None,
+    };
 
     // Outside the two periods, the nearest value.
     for i in 0..pre_start {
@@ -819,7 +1001,106 @@ fn predict_counterfactual(
         predicted_var[i] = predicted_var[post_end];
     }
 
-    Ok((predicted, predicted_var))
+    Ok(Counterfactual {
+        predicted,
+        predicted_var,
+        cumulative_var,
+        regression,
+    })
+}
+
+/// The controls as diffuse regression states: what [`predict_counterfactual`] needs.
+struct ControlStates {
+    /// GLS coefficients, NaN for an aliased control.
+    beta: Vec<f64>,
+    /// Their covariance, NaN rows and columns for an aliased control.
+    cov: ndarray::Array2<f64>,
+    /// The innovations of each control's mean-only pass over the pre-period (n_pre x k).
+    innovations: ndarray::Array2<f64>,
+    /// Z' a_t|t of each control's mean-only pass over the pre-period (n_pre x k).
+    filtered_means: ndarray::Array2<f64>,
+    /// Each control's filtered state at the end of the pre-period.
+    final_states: Vec<Vec<f64>>,
+}
+
+/// One mean-only filter pass per control with `y`'s gains M_t = P_t|t-1 Z and innovation
+/// variances F_t, then the GLS regression of `y`'s innovations on the controls'.
+fn control_states(
+    controls: &[Vec<f64>],
+    control_names: &[String],
+    filter_result: &crate::forecasting::kalman::KalmanFilterResult,
+    ssm: &crate::forecasting::kalman::StateSpaceModel,
+    init_state: &ndarray::Array1<f64>,
+    periods: &PeriodIndices,
+    warnings: &mut Vec<String>,
+) -> EconResult<ControlStates> {
+    const WHAT: &str = "the control series' filter passes";
+    let PeriodIndices {
+        pre_start, n_pre, ..
+    } = *periods;
+    let k = controls.len();
+    let m = ssm.state_dim();
+    let t_nz = nonzeros(&ssm.transition);
+    let z: Vec<f64> = ssm.observation.iter().copied().collect();
+    let z_dot = |a: &[f64]| -> f64 { z.iter().zip(a).map(|(p, q)| p * q).sum() };
+
+    let mut innovations = try_zeros2(n_pre, k, WHAT)?;
+    let mut filtered_means = try_zeros2(n_pre, k, WHAT)?;
+    let mut states: Vec<Vec<f64>> = Vec::new();
+    for control in controls {
+        let mut a = try_vec(m, 0.0, WHAT)?;
+        for (s, v) in a.iter_mut().zip(init_state.iter()) {
+            *s = *v;
+        }
+        a[0] = control[pre_start];
+        states.push(a);
+    }
+    let mut predicted = try_vec(m, 0.0, WHAT)?;
+    let mut gain = try_vec(m, 0.0, WHAT)?;
+    for t in 0..n_pre {
+        checkpoint()?;
+        let f = filter_result.innovation_vars[t];
+        let p_pred = &filter_result.predicted_covs[t];
+        for (r, row) in p_pred.iter().enumerate() {
+            gain[r] = z_dot(row);
+        }
+        for (j, state) in states.iter_mut().enumerate() {
+            t_times(&t_nz, state, &mut predicted);
+            let v = controls[j][pre_start + t] - z_dot(&predicted);
+            for (s, (pr, g)) in state.iter_mut().zip(predicted.iter().zip(&gain)) {
+                *s = pr + g * v / f;
+            }
+            innovations[[t, j]] = v;
+            filtered_means[[t, j]] = z_dot(state);
+        }
+    }
+
+    // GLS on the innovations: rows scaled by 1 / sqrt(F_t), no intercept.
+    let mut xw = try_zeros2(n_pre, k, WHAT)?;
+    let mut yw = crate::resource::try_zeros1(n_pre, WHAT)?;
+    for t in 0..n_pre {
+        let w = filter_result.innovation_vars[t].sqrt().recip();
+        yw[t] = filter_result.innovations[t] * w;
+        for j in 0..k {
+            xw[[t, j]] = innovations[[t, j]] * w;
+        }
+    }
+    let ls = least_squares(xw.view(), yw.view())?;
+    if let Some(message) = aliasing_message(&ls.aliased, control_names) {
+        warnings.push(message);
+        warnings.push(
+            "the control regression (GLS on the filter innovations) is rank deficient: the \
+             counterfactual uses the identified coefficients only"
+                .to_string(),
+        );
+    }
+    Ok(ControlStates {
+        beta: ls.coefficients.to_vec(),
+        cov: ls.unscaled_cov,
+        innovations,
+        filtered_means,
+        final_states: states,
+    })
 }
 
 /// CausalImpact's level, optional trend and optional seasonal as an engine model.
@@ -916,7 +1197,7 @@ fn count_params(config: &CausalImpactConfig, has_controls: bool) -> usize {
     // Regression coefficients (if controls present)
     if has_controls {
         if let Some(ref controls) = config.control_series {
-            n += controls.len() + 1; // Intercept + coefficients
+            n += controls.len(); // one coefficient per control; the level absorbs an intercept
         }
     }
 
@@ -1107,10 +1388,411 @@ mod tests {
         assert!(r.convergence.converged);
     }
 
+    /// structts_series.csv (Nile 1871-1970 with 8 NA rows, log10 UKgas 1960-1986).
+    fn structts_series() -> Dataset {
+        crate::test_support::load_case("structts_nile_ukgas").1
+    }
+
+    /// Pins the intervals of one fit of case causal_impact_intervals_t4 (prefix `p`): the
+    /// cumulative SE, bounds, average bounds, relative effect and bounds, Phi(z), the
+    /// two-sided p-value and the running cumulative band on the post rows.
+    fn check_intervals(
+        chk: &mut Check,
+        p: &str,
+        r: &CausalImpactResult,
+        post: std::ops::Range<usize>,
+    ) {
+        let tol = Tol::iterative(1e-6);
+        let (s, i) = (&r.summary, &r.inference);
+        let k = |name: &str| format!("{p}_{name}");
+        chk.vector(&k("cum_effect"), &[s.cumulative_effect], tol)
+            .vector(&k("cum_se"), &[i.effect_sd], tol)
+            .vector(&k("cum_lower"), &[s.cumulative_effect_lower], tol)
+            .vector(&k("cum_upper"), &[s.cumulative_effect_upper], tol)
+            .vector(&k("avg_lower"), &[s.average_effect_lower], tol)
+            .vector(&k("avg_upper"), &[s.average_effect_upper], tol)
+            .vector(&k("rel"), &[s.relative_effect], tol)
+            .vector(&k("rel_lower"), &[s.relative_effect_lower], tol)
+            .vector(&k("rel_upper"), &[s.relative_effect_upper], tol)
+            .vector(&k("prob_positive"), &[i.prob_positive], tol)
+            .vector(&k("p_two_sided"), &[s.p_value], tol)
+            .vector(
+                &k("cum_series_lower"),
+                &r.series.cumulative_effect_lower[post.clone()],
+                tol,
+            )
+            .vector(
+                &k("cum_series_upper"),
+                &r.series.cumulative_effect_upper[post],
+                tol,
+            );
+    }
+
+    /// The variance of the cumulative effect is that of the sum of the post-period forecast
+    /// errors (case causal_impact_intervals_t4: StructTS level on Nile 1-90, forecast 91-100;
+    /// R's marginal sum 263,532 against the joint 1,027,927).
+    #[test]
+    fn test_validate_causal_impact_intervals_nile_level() {
+        let case = p2a_validation::Case::load("causal_impact_intervals_t4");
+        let d = Dataset::new(structts_series().df().slice(0, 100));
+        let r = run_causal_impact(&d, "nile", "t", (1, 90), (91, 100), None).unwrap();
+        let mut chk = Check::new(&case);
+        chk.named(
+            "nile_level_coef_tight",
+            &["level", "epsilon"],
+            &[r.model.level_variance, r.model.observation_variance],
+            Tol::iterative(1e-6),
+        );
+        check_intervals(&mut chk, "nile_level", &r, 90..100);
+        chk.finish();
+        // The p-value is two-sided and agrees with the interval.
+        assert!(!r.summary.significant);
+        assert!(r.summary.cumulative_effect_lower < 0.0 && r.summary.cumulative_effect_upper > 0.0);
+    }
+
+    #[test]
+    fn test_validate_causal_impact_intervals_nile_trend() {
+        let case = p2a_validation::Case::load("causal_impact_intervals_t4");
+        let d = Dataset::new(structts_series().df().slice(0, 100));
+        let config = CausalImpactConfig {
+            include_trend: true,
+            ..periods((1, 90), (91, 100))
+        };
+        let r = causal_impact(&d, "nile", "t", config).unwrap();
+        let mut chk = Check::new(&case);
+        chk.named(
+            "nile_trend_coef_tight",
+            &["level", "slope", "epsilon"],
+            &[
+                r.model.level_variance,
+                r.model.slope_variance.unwrap(),
+                r.model.observation_variance,
+            ],
+            Tol::iterative(1e-6),
+        );
+        check_intervals(&mut chk, "nile_trend", &r, 90..100);
+        chk.finish();
+    }
+
+    #[test]
+    fn test_validate_causal_impact_intervals_ukgas_bsm() {
+        let case = p2a_validation::Case::load("causal_impact_intervals_t4");
+        let d = structts_series();
+        let config = CausalImpactConfig {
+            include_trend: true,
+            seasonal_period: Some(4),
+            ..periods((1, 92), (93, 108))
+        };
+        let r = causal_impact(&d, "ukgas", "t", config).unwrap();
+        let mut chk = Check::new(&case);
+        chk.named(
+            "ukgas_bsm_coef_tight",
+            &["level", "slope", "seas", "epsilon"],
+            &[
+                r.model.level_variance,
+                r.model.slope_variance.unwrap(),
+                r.model.seasonal_variance.unwrap(),
+                r.model.observation_variance,
+            ],
+            Tol::iterative(1e-6),
+        );
+        check_intervals(&mut chk, "ukgas_bsm", &r, 92..108);
+        chk.finish();
+    }
+
+    /// A control series as diffuse regression states (case causal_impact_control_t4: y = 2x +
+    /// level + noise, effect 3 from t = 81): the GLS coefficient and its SE, the
+    /// counterfactual, its pointwise variance and the cumulative interval with the
+    /// coefficient's uncertainty.
+    #[test]
+    fn test_validate_causal_impact_intervals_control() {
+        let case = p2a_validation::Case::load("causal_impact_intervals_t4");
+        let path =
+            p2a_validation::repo_path("validation/datasets/generated/causal_impact_control_t4.csv");
+        let d = Dataset::new(crate::data::DataLoader::load_csv(&path).unwrap());
+        let r = run_causal_impact(&d, "y", "t", (1, 80), (81, 100), Some(&["x"])).unwrap();
+        let tol = Tol::iterative(1e-6);
+        let z = z_critical(0.95).unwrap();
+        let point_var: Vec<f64> = (80..100)
+            .map(|i| ((r.series.predicted_upper[i] - r.series.predicted[i]) / z).powi(2))
+            .collect();
+        let mut chk = Check::new(&case);
+        chk.named(
+            "ctrl_coef_tight",
+            &["level", "epsilon"],
+            &[r.model.level_variance, r.model.observation_variance],
+            tol,
+        )
+        .scalar(
+            "ctrl_beta",
+            r.model.regression_coefficients.as_ref().unwrap()[0],
+            tol,
+        )
+        .scalar(
+            "ctrl_beta_se",
+            r.model.regression_std_errors.as_ref().unwrap()[0],
+            tol,
+        )
+        .vector("ctrl_pred", &r.series.predicted[80..100], tol)
+        .vector("ctrl_point_var", &point_var, tol);
+        check_intervals(&mut chk, "ctrl", &r, 80..100);
+        chk.finish();
+        assert!(r.summary.significant, "{}", r.summary.p_value);
+        assert_eq!(r.model.regression_coefficients.as_ref().unwrap().len(), 1);
+    }
+
+    /// The running variance of the sum equals the sum of the post-period block of the full
+    /// forecast-error covariance Z' T^(j-i) P_i Z + H 1{i = j}, built here entry by entry, and
+    /// its diagonal is kalman_forecast's variance.
+    #[test]
+    fn cumulative_variance_matches_the_full_covariance() {
+        use rand::{Rng, SeedableRng};
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(20261116);
+        for (slope, seasonal) in [
+            (false, None),
+            (true, None),
+            (false, Some(5)),
+            (true, Some(12)),
+        ] {
+            for n_gap in [0usize, 3] {
+                let spec = StructuralSpec {
+                    slope,
+                    seasonal,
+                    naming: CAUSAL_IMPACT_NAMING,
+                };
+                let m = spec.state_dim().unwrap();
+                let variances: Vec<f64> = (0..spec.parameter_names().len())
+                    .map(|_| 0.2 + rng.r#gen::<f64>())
+                    .collect();
+                let model = spec.model(&variances).unwrap();
+                let y: Vec<f64> = (0..40)
+                    .map(|t| 10.0 + 0.1 * t as f64 + (t % 4) as f64 + rng.r#gen::<f64>())
+                    .collect();
+                let (a0, p0, _) = spec.prior(&y).unwrap();
+                let fr = kalman_filter(&y, &model, a0.view(), p0.view()).unwrap();
+                let n_post = 9;
+                let horizon = n_gap + n_post;
+                let fc = kalman_forecast(&fr, &model, horizon).unwrap();
+                let p_final: Vec<f64> = fr.filtered_covs[39].iter().flatten().copied().collect();
+                let got = cumulative_forecast_variance(&model, &p_final, horizon, n_gap).unwrap();
+                // The forecast covariances P_h written out densely.
+                let t = model.transition.clone();
+                let rqr = model.state_disturbance_cov();
+                let zv = model.observation.clone();
+                let mut p = ndarray::Array2::from_shape_vec((m, m), p_final.clone()).unwrap();
+                let mut ps = Vec::new();
+                for _ in 0..horizon {
+                    p = t.dot(&p).dot(&t.t()) + &rqr;
+                    ps.push(p.clone());
+                }
+                let mut sigma = vec![vec![0.0; horizon]; horizon];
+                for i in 0..horizon {
+                    let mut tp = ndarray::Array2::<f64>::eye(m);
+                    for j in i..horizon {
+                        let c = zv.dot(&tp.dot(&ps[i]).dot(&zv));
+                        let c = c + if i == j { model.obs_var } else { 0.0 };
+                        sigma[i][j] = c;
+                        sigma[j][i] = c;
+                        tp = t.dot(&tp);
+                    }
+                }
+                for i in 0..horizon {
+                    let rel = (sigma[i][i] - fc.variances[i]).abs() / fc.variances[i];
+                    assert!(rel < 1e-12, "m {m} diag {i}: {rel}");
+                }
+                for (h, v) in got.iter().enumerate() {
+                    let want: f64 = (n_gap..=n_gap + h)
+                        .map(|i| (n_gap..=n_gap + h).map(|j| sigma[i][j]).sum::<f64>())
+                        .sum();
+                    assert!(
+                        (v - want).abs() <= 1e-12 * want,
+                        "m {m} gap {n_gap} h {h}: {v} vs {want}"
+                    );
+                }
+                // More than the sum of the marginal variances (positively correlated errors).
+                let marginal: f64 = fc.variances[n_gap..].iter().sum();
+                assert!(got[n_post - 1] > marginal, "m {m}");
+            }
+        }
+    }
+
+    /// (Y - P) / P is undefined for P = 0: NaN and a warning, not 0; at any scale the
+    /// interval is that of the scale-1 call.
+    #[test]
+    fn causal_impact_relative_effect_is_nan_when_the_counterfactual_sums_to_zero() {
+        let z = z_critical(0.95).unwrap();
+        for p in [0.0, -0.0, f64::NAN, f64::INFINITY] {
+            let (rel, lo, hi, w) = relative_effect(1.2, p, 0.3, z);
+            assert!(rel.is_nan() && lo.is_nan() && hi.is_nan(), "{p}");
+            assert!(w.unwrap().contains("relative effect is not defined"));
+        }
+        let unit = relative_effect(1.2, 1.0, 0.3, z);
+        let tiny = relative_effect(1.2e-300, 1e-300, 0.3e-300, z);
+        assert!(tiny.3.is_none());
+        for (a, b) in [(unit.0, tiny.0), (unit.1, tiny.1), (unit.2, tiny.2)] {
+            assert!(
+                a.is_finite() && (a - b).abs() <= 1e-14 * a.abs(),
+                "{a} vs {b}"
+            );
+        }
+        // The delta-method SE: |Y| / P^2 SE.
+        assert!((unit.2 - unit.0 - z * 1.2 * 0.3).abs() < 1e-14);
+    }
+
+    /// y = 3 + 2c exactly in the pre-period leaves the model no variance: the message names
+    /// the controls, not "the series is constant".
+    #[test]
+    fn causal_impact_names_a_control_fit_without_residual_variance() {
+        use rand::{Rng, SeedableRng};
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(77);
+        let n = 60;
+        let c: Vec<f64> = (0..n).map(|_| rng.r#gen::<f64>() * 10.0).collect();
+        let y: Vec<f64> = c
+            .iter()
+            .enumerate()
+            .map(|(t, c)| {
+                3.0 + 2.0 * c
+                    + if t >= 40 {
+                        5.0 + rng.r#gen::<f64>()
+                    } else {
+                        0.0
+                    }
+            })
+            .collect();
+        let time: Vec<i64> = (0..n as i64).collect();
+        let d = Dataset::new(df! {"y" => &y, "time" => &time, "c" => &c}.unwrap());
+        match run_causal_impact(&d, "y", "time", (0, 39), (40, 59), Some(&["c"])) {
+            Err(EconError::InvalidSpecification { message }) => assert!(
+                message.contains("the control regression leaves no residual variance")
+                    && message.contains("drop controls that reproduce the response"),
+                "{message}"
+            ),
+            other => panic!(
+                "expected InvalidSpecification, got {:?}",
+                other.map(|r| r.summary)
+            ),
+        }
+    }
+
+    /// A constant control has no innovation after the first step: it is aliased with the
+    /// level, warned about, and its coefficient and SE are NaN.
+    #[test]
+    fn causal_impact_constant_control_is_aliased_with_the_level() {
+        let (y, time) = generate_causal_impact_data(50, 20, 4.0, 91);
+        let c = vec![7.5; y.len()];
+        let d = Dataset::new(df! {"y" => &y, "time" => &time, "c" => &c}.unwrap());
+        let r = run_causal_impact(&d, "y", "time", (0, 49), (50, 69), Some(&["c"])).unwrap();
+        assert!(r.model.regression_coefficients.as_ref().unwrap()[0].is_nan());
+        assert!(r.model.regression_std_errors.as_ref().unwrap()[0].is_nan());
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.contains("Coefficients not defined because of singularities: c")),
+            "{:?}",
+            r.warnings
+        );
+        // The counterfactual is that of no control.
+        let none = run_causal_impact(&d, "y", "time", (0, 49), (50, 69), None).unwrap();
+        assert!(
+            r.summary.cumulative_effect.is_finite() && none.summary.cumulative_effect.is_finite()
+        );
+    }
+
+    /// The mean-only passes are the filter, and beta solves the GLS normal equations, for a
+    /// level + trend + seasonal model with two controls (the R case covers the local level
+    /// with one control only).
+    #[test]
+    fn control_gls_solves_the_innovation_normal_equations() {
+        use rand::{Rng, SeedableRng};
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(4242);
+        let n_pre = 40;
+        let spec = StructuralSpec {
+            slope: true,
+            seasonal: Some(4),
+            naming: CAUSAL_IMPACT_NAMING,
+        };
+        let model = spec.model(&[0.3, 0.01, 0.05, 1.0]).unwrap();
+        let mut walk = 0.0;
+        let x1: Vec<f64> = (0..n_pre)
+            .map(|_| {
+                walk += rng.r#gen::<f64>() - 0.5;
+                5.0 + walk
+            })
+            .collect();
+        let x2: Vec<f64> = (0..n_pre)
+            .map(|t| (t as f64 * 0.7).sin() + rng.r#gen::<f64>())
+            .collect();
+        let y: Vec<f64> = (0..n_pre)
+            .map(|t| {
+                1.5 * x1[t] - 0.8 * x2[t] + (t % 4) as f64 + 0.1 * t as f64 + rng.r#gen::<f64>()
+            })
+            .collect();
+        let (mut a0, p0, _) = spec.prior(&y).unwrap();
+        a0[0] = y[0];
+        let fr = kalman_filter(&y, &model, a0.view(), p0.view()).unwrap();
+        let periods = PeriodIndices {
+            pre_start: 0,
+            pre_end: n_pre - 1,
+            post_start: n_pre,
+            post_end: n_pre,
+            n_pre,
+            n_post: 1,
+            n_gap: 0,
+        };
+        let controls = vec![x1.clone(), x2.clone()];
+        let names = vec!["x1".to_string(), "x2".to_string()];
+        let mut warnings = Vec::new();
+        let cs =
+            control_states(&controls, &names, &fr, &model, &a0, &periods, &mut warnings).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let b = &cs.beta;
+        // (i) each mean-only pass is the filter of its control (same model and prior).
+        for (j, x) in controls.iter().enumerate() {
+            let mut ax = a0.clone();
+            ax[0] = x[0];
+            let fx = kalman_filter(x, &model, ax.view(), p0.view()).unwrap();
+            for t in 0..n_pre {
+                let scale = x[t].abs().max(1.0);
+                assert!((fx.innovations[t] - cs.innovations[[t, j]]).abs() <= 1e-10 * scale);
+                let zx: f64 = model
+                    .observation
+                    .dot(&ndarray::ArrayView1::from(&fx.filtered_states[t]));
+                assert!((zx - cs.filtered_means[[t, j]]).abs() <= 1e-10 * scale);
+            }
+        }
+        // ... so the filter of y - beta'X has the innovations v(y) - beta'v(X) ...
+        let resid: Vec<f64> = (0..n_pre)
+            .map(|t| y[t] - b[0] * x1[t] - b[1] * x2[t])
+            .collect();
+        let mut ar = a0.clone();
+        ar[0] = resid[0];
+        let fres = kalman_filter(&resid, &model, ar.view(), p0.view()).unwrap();
+        for t in 0..n_pre {
+            let want =
+                fr.innovations[t] - b[0] * cs.innovations[[t, 0]] - b[1] * cs.innovations[[t, 1]];
+            let scale = y[t].abs().max(1.0);
+            assert!((fres.innovations[t] - want).abs() <= 1e-10 * scale, "t {t}");
+        }
+        // (ii) and beta solves sum_t v_t(x_j) (v_t(y) - beta'v_t(X)) / F_t = 0.
+        for j in 0..2 {
+            let (mut dot, mut size) = (0.0, 0.0);
+            for t in 0..n_pre {
+                let term = cs.innovations[[t, j]] * fres.innovations[t] / fr.innovation_vars[t];
+                dot += term;
+                size += term.abs();
+            }
+            assert!(dot.abs() <= 1e-9 * size, "{j}: {dot} vs {size}");
+        }
+        assert!(
+            (b[0] - 1.5).abs() < 0.5 && (b[1] + 0.8).abs() < 0.5,
+            "{b:?}"
+        );
+    }
+
     #[test]
     fn test_causal_impact_tail_probability_is_not_zero() {
-        // Effect -8 on noise of half-width 0.5 and level steps of half-width 1.
-        let (y, time) = generate_causal_impact_data(70, 30, -8.0, 42);
+        // Effect -25 on noise of half-width 0.5 and level steps of half-width 1.
+        let (y, time) = generate_causal_impact_data(70, 30, -25.0, 42);
         let r = run_causal_impact(&ds(&y, &time), "y", "time", (0, 69), (70, 99), None).unwrap();
         assert!(r.summary.cumulative_effect < 0.0);
         let z = r.inference.expected_effect / r.inference.effect_sd;
@@ -1119,9 +1801,12 @@ mod tests {
         assert!(-37.0 < z && z < -9.0, "{z}");
         assert!(r.summary.p_value > 0.0);
         assert!(r.inference.prob_positive > 0.0);
-        let want = Normal::standard().sf(-z);
+        // Two-sided: 2 Phi(-|z|) (statrs' cdf, the reference here, is good to about 1e-10
+        // relative this far out; the p-value comes from the direct tail of
+        // traits::estimator).
+        let want = 2.0 * Normal::standard().cdf(z);
         assert!(
-            ((r.summary.p_value - want) / want).abs() < 1e-12,
+            ((r.summary.p_value - want) / want).abs() < 1e-9,
             "{} vs {want}",
             r.summary.p_value
         );
@@ -1189,10 +1874,12 @@ mod tests {
         let time: Vec<i64> = (0..n as i64).collect();
         let d = Dataset::new(df! {"y" => &y, "time" => &time, "c1" => &c1, "c2" => &c2}.unwrap());
         let r = run_causal_impact(&d, "y", "time", (0, 59), (60, 79), Some(&["c1", "c2"])).unwrap();
-        assert!(r.model.regression_coefficients.as_ref().unwrap()[2].is_nan());
+        // One coefficient per control (no intercept): c2 is aliased with c1.
+        assert!(r.model.regression_coefficients.as_ref().unwrap()[1].is_nan());
+        assert!(r.model.regression_coefficients.as_ref().unwrap()[0].is_finite());
         for needle in [
             "Coefficients not defined because of singularities: c2",
-            "the control regression is rank deficient",
+            "the control regression (GLS on the filter innovations) is rank deficient",
         ] {
             assert!(
                 r.warnings.iter().any(|w| w.contains(needle)),
@@ -1280,14 +1967,17 @@ mod tests {
         // n_pre = 80, n_post = 20, no intervention). The same design with stats::StructTS +
         // KalmanForecast in R (six seeds) gave one-step 95% coverage 0.905-0.965 and
         // all-horizon pointwise coverage 0.918-0.939 (MC SE about 0.015 and 0.009). The
-        // cumulative interval sums marginal variances: its coverage was 0.35-0.46 there; it
-        // is a registry deviation (TS-5), not asserted here.
+        // cumulative interval from the joint forecast-error covariance covered 0.88-0.92 (the
+        // sum of the marginal variances, used before: 0.35-0.46), and the two-sided p < 0.05
+        // fired in 0.08-0.12 of the series (MC SE about 0.021 at 200 reps); below 0.95 because
+        // the fitted variances are plugged in.
         use rand::SeedableRng;
         use rand_chacha::ChaCha8Rng;
         use rand_distr::{Distribution, StandardNormal};
         let (reps, n_pre, n_post) = (200usize, 80usize, 20usize);
         let mut rng = ChaCha8Rng::seed_from_u64(20261022);
         let (mut first, mut all, mut effects) = (0usize, 0.0f64, Vec::with_capacity(reps));
+        let (mut cum_covers, mut rejected) = (0usize, 0usize);
         for _ in 0..reps {
             let mut level = 100.0;
             let y: Vec<f64> = (0..n_pre + n_post)
@@ -1315,7 +2005,26 @@ mod tests {
             first += covers(n_pre) as usize;
             all += (n_pre..n_pre + n_post).filter(|&i| covers(i)).count() as f64 / n_post as f64;
             effects.push(r.summary.average_effect);
+            cum_covers += (r.summary.cumulative_effect_lower <= 0.0
+                && 0.0 <= r.summary.cumulative_effect_upper) as usize;
+            rejected += r.summary.significant as usize;
+            // The test and the interval agree.
+            assert_eq!(
+                r.summary.significant,
+                !(r.summary.cumulative_effect_lower <= 0.0
+                    && 0.0 <= r.summary.cumulative_effect_upper)
+            );
         }
+        let cum_rate = cum_covers as f64 / reps as f64;
+        assert!(
+            (0.84..=0.96).contains(&cum_rate),
+            "cumulative coverage {cum_rate}"
+        );
+        let fp_rate = rejected as f64 / reps as f64;
+        assert!(
+            (0.02..=0.18).contains(&fp_rate),
+            "false positives {fp_rate}"
+        );
         let first_rate = first as f64 / reps as f64;
         let all_rate = all / reps as f64;
         assert!(

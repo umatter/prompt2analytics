@@ -586,10 +586,20 @@ impl Model {
             .checked_add(d)
             .and_then(|s| s.checked_add(q))
             .and_then(|s| s.checked_add(10));
-        if required.is_none_or(|r| n < r) {
-            return Err(invalid(format!(
-                "Not enough observations ({n}) for ARIMA({p},{d},{q}): need at least p + d + q + 10"
-            )));
+        match required {
+            None => {
+                return Err(invalid(format!(
+                    "Not enough observations ({n}) for ARIMA({p},{d},{q}): orders too large to \
+                     fit any series"
+                )));
+            }
+            Some(r) if n < r => {
+                return Err(invalid(format!(
+                    "Not enough observations ({n}) for ARIMA({p},{d},{q}): need at least {r} \
+                     (p + d + q + 10)"
+                )));
+            }
+            Some(_) => {}
         }
         if spec.include_mean == Some(true) && d > 0 {
             return Err(invalid(
@@ -822,6 +832,7 @@ fn css_pass(
 }
 
 /// Residuals (length n, the first d + p are 0) and SSR for given coefficients in R order.
+#[cfg(test)]
 fn css_residuals(x: &[f64], spec: &ArimaSpec, coefficients: &[f64]) -> EconResult<(Vec<f64>, f64)> {
     let model = Model::new(spec, x.len())?;
     model.check_coefficients(coefficients)?;
@@ -1863,6 +1874,66 @@ mod tests {
         ]
     }
 
+    /// A non-stationary AR part starts the ARMA state from the diffuse prior, with the
+    /// warning; the forecast is the AR recursion from the last value.
+    #[test]
+    fn arima_predict_warns_on_a_non_stationary_ar() {
+        let ds = crate::forecasting::test_fixtures::arima_series();
+        let (x, _) = numeric_column(ds.df(), "c", NaPolicy::Fail).unwrap();
+        let spec = ArimaSpec::new(1, 0, 0);
+        let pred = arima_predict(&x, &spec, &[1.02, 50.0], 1.0, 6).unwrap();
+        assert!(
+            pred.warnings.iter().any(|w| w == DIFFUSE_ARMA_PRIOR),
+            "{:?}",
+            pred.warnings
+        );
+        let last = x[x.len() - 1];
+        for (h, (m, se)) in pred.mean.iter().zip(&pred.se).enumerate() {
+            assert!(m.is_finite() && se.is_finite(), "h {h}: {m} {se}");
+            let expected = 50.0 + 1.02f64.powi(h as i32 + 1) * (last - 50.0);
+            assert!(
+                (m - expected).abs() <= 1e-8 * expected.abs().max(1.0),
+                "h {h}: {m} vs {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn arima_predict_warns_on_a_non_invertible_ma() {
+        let ds = crate::forecasting::test_fixtures::arima_series();
+        let (x, _) = numeric_column(ds.df(), "a", NaPolicy::Fail).unwrap();
+        let pred = arima_predict(&x, &ArimaSpec::new(0, 0, 1), &[1.5, 0.0], 1.0, 3).unwrap();
+        assert!(
+            pred.warnings.iter().any(|w| w == MA_NOT_INVERTIBLE),
+            "{:?}",
+            pred.warnings
+        );
+    }
+
+    /// A short explosive series: the CSS optimum has |phi| > 1, which CSS does not
+    /// constrain, and the fit says so. (The "did not converge" warning is reached only when
+    /// Levenberg-Marquardt exhausts its fixed iteration limit, which no option exposes.)
+    #[test]
+    fn arima_fit_warns_on_a_non_stationary_ar() {
+        let mut y = vec![1.0];
+        for t in 1..30 {
+            let noise = (((t * 37) % 11) as f64 - 5.0) * 0.05;
+            y.push(1.15 * y[t - 1] + noise);
+        }
+        let ds = Dataset::new(df! { "y" => y }.unwrap());
+        let spec = ArimaSpec {
+            include_mean: Some(false),
+            ..ArimaSpec::new(1, 0, 0)
+        };
+        let fit = run_arima_with(&ds, "y", &spec).unwrap();
+        assert!(fit.ar_coeffs[0] > 1.0, "{:?}", fit.ar_coeffs);
+        assert!(
+            fit.warnings.iter().any(|w| w == AR_NOT_STATIONARY),
+            "{:?}",
+            fit.warnings
+        );
+    }
+
     #[test]
     fn test_arima_spec_validation() {
         let ds = crate::forecasting::test_fixtures::arima_series();
@@ -1881,6 +1952,17 @@ mod tests {
         assert!(
             msg(run_arima_with(&short, "y", &ArimaSpec::new(1, 0, 1)))
                 .contains("Not enough observations")
+        );
+        let big = Dataset::new(
+            df! { "y" => (0..40).map(|i| ((i * 7) % 5) as f64).collect::<Vec<f64>>() }.unwrap(),
+        );
+        assert!(
+            msg(run_arima_with(&big, "y", &ArimaSpec::new(20, 5, 10)))
+                .contains("need at least 45 (p + d + q + 10)")
+        );
+        assert!(
+            msg(run_arima_with(&big, "y", &ArimaSpec::new(usize::MAX, 0, 1)))
+                .contains("orders too large to fit any series")
         );
         let flat = Dataset::new(df! { "y" => vec![5.0; 40] }.unwrap());
         assert!(

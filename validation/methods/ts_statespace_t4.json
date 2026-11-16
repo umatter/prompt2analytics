@@ -1,0 +1,36 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "forecasting_causal_impact_intervals",
+      "name": "CausalImpact intervals: the variance of the cumulative effect from the joint forecast-error covariance; controls as diffuse regression states",
+      "category": "forecasting",
+      "reference": "stats::StructTS tight optimum + stats::KalmanRun / KalmanForecast (nit = -1); the joint covariance of the forecast errors written out (checked against the full H x H matrix); control: GLS by lm.wfit on KalmanRun's innovations. The CausalImpact package (bsts) is not installed and is not the reference.",
+      "doc": "validation/forecasting/causal_impact.md",
+      "cases": [
+        "causal_impact_intervals_t4"
+      ],
+      "tests": [
+        "p2a-core::forecasting::causal_impact::tests::test_validate_causal_impact_intervals_nile_level",
+        "p2a-core::forecasting::causal_impact::tests::test_validate_causal_impact_intervals_nile_trend",
+        "p2a-core::forecasting::causal_impact::tests::test_validate_causal_impact_intervals_ukgas_bsm",
+        "p2a-core::forecasting::causal_impact::tests::test_validate_causal_impact_intervals_control",
+        "p2a-mcp::tier3::wp56_stats_ts::test_validate_mcp_causal_impact_texts"
+      ],
+      "quantities": [
+        "model variances at the tight optimum",
+        "cumulative effect and its standard error",
+        "cumulative and average interval bounds",
+        "relative effect and its bounds",
+        "Phi(z)",
+        "two-sided p-value",
+        "running cumulative band",
+        "control coefficient and its standard error",
+        "counterfactual and pointwise variance with a control"
+      ],
+      "tolerance": "Tol::iterative(1e-6); MCP printed bounds Tol::printed(4)",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}

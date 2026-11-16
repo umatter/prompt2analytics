@@ -1,0 +1,39 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "ts_changepoint_binseg",
+      "name": "Binary segmentation changepoints (mean, variance, mean and variance; MBIC and manual penalties; Q)",
+      "category": "forecasting",
+      "reference": "changepoint::cpt.mean, cpt.var, cpt.meanvar (method = 'BinSeg', penalty = 'MBIC' | 'Manual', Q, minseglen = 2)",
+      "doc": "validation/timeseries/changepoint.md",
+      "cases": [
+        "cpt_binseg_t4",
+        "ts_filter_ar_cpt"
+      ],
+      "tests": [
+        "p2a-core::forecasting::changepoint::tests::test_validate_binseg_mean_mbic",
+        "p2a-core::forecasting::changepoint::tests::test_validate_binseg_mean_manual",
+        "p2a-core::forecasting::changepoint::tests::test_validate_binseg_var_and_meanvar",
+        "p2a-core::forecasting::changepoint::tests::test_validate_binseg_q_reached",
+        "p2a-core::forecasting::changepoint::tests::test_validate_binseg_large_level",
+        "p2a-mcp::tier3::wp56_stats_ts::test_validate_mcp_changepoint_binseg"
+      ],
+      "quantities": [
+        "changepoints",
+        "penalty applied",
+        "total cost (sum of segment costs incl. MBIC terms)",
+        "Q-reached warning"
+      ],
+      "tolerance": "changepoints exact; penalty and cost Tol::stat(n) (n = 300, 240); MCP text Tol::printed(4)",
+      "deviations": [
+        {
+          "finding": "TS-8",
+          "quantity": "candidate range of a segment's split",
+          "note": "p2a searches s + minseglen <= t <= e - minseglen; changepoint's C code narrows that range by one at irregular places (always at the left end, at the right end only for the last segment at minseglen 2), so the two can select different positions on a series with a near-tie at a range edge (87 of 90 random series agreed at minseglen 2); every pinned series is one on which both agree (the case checks it)"
+        }
+      ],
+      "supersedes_legacy": []
+    }
+  ]
+}

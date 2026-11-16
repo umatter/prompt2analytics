@@ -804,11 +804,21 @@ pub(crate) fn fit_structural(
         minimize_nonnegative(&mut |x: &[f64]| objective.eval(x), &x0, max_iter, tolerance)?;
 
     objective.set_free(&minimum.x);
+    // A fixed variance is returned as given (scaling it by vx and back would round it); the
+    // model at the estimate is built from these variances.
     let variances: Vec<f64> = objective
         .p
         .iter()
-        .map(|p| (p * objective.vx).max(0.0))
+        .enumerate()
+        .map(|(i, p)| match fixed.and_then(|f| f[i]) {
+            Some(v) => v,
+            None => (p * objective.vx).max(0.0),
+        })
         .collect();
+    for a in 0..objective.disturbances {
+        objective.model.state_cov[[a, a]] = variances[a];
+    }
+    objective.model.obs_var = variances[objective.disturbances];
     let free: Vec<bool> = (0..variances.len())
         .map(|i| objective.free_index.contains(&i))
         .collect();
@@ -825,6 +835,13 @@ pub(crate) fn fit_structural(
         tolerance,
     );
     let mut warnings: Vec<String> = convergence.note(method).into_iter().collect();
+    if minimum.stopped_at_rounding {
+        warnings.push(format!(
+            "{method}: the objective cannot be reduced further in double precision; the scaled \
+             projected gradient is {:.1e} (tolerance {tolerance:.0e})",
+            minimum.crit
+        ));
+    }
     if minimum.line_search_failed {
         warnings.push(format!(
             "{method}: the line search could not reduce the objective further; the estimates \
@@ -868,6 +885,9 @@ struct Minimum {
     /// The scaled projected gradient at `x`.
     crit: f64,
     line_search_failed: bool,
+    /// Converged because double precision cannot reduce the objective further, with the
+    /// criterion still above the tolerance.
+    stopped_at_rounding: bool,
 }
 
 /// The forward-difference step of the Hessian, relative to max(x, 1).
@@ -988,6 +1008,7 @@ fn minimize_nonnegative(
     let mut iterations = 0usize;
     let mut converged = false;
     let mut line_search_failed = false;
+    let mut stopped_at_rounding = false;
 
     loop {
         checkpoint()?;
@@ -1000,6 +1021,9 @@ fn minimize_nonnegative(
             scoring_phase = false;
         }
         if iterations >= max_iter {
+            // At the criterion after a scoring step that no Newton step has polished yet:
+            // still converged by the stopping rule.
+            converged = at_tolerance;
             break;
         }
         let free: Vec<usize> = (0..x.len())
@@ -1100,6 +1124,7 @@ fn minimize_nonnegative(
             // as double precision resolves it.
             if at_tolerance || below_noise {
                 converged = true;
+                stopped_at_rounding = !at_tolerance;
             } else {
                 line_search_failed = true;
             }
@@ -1123,6 +1148,7 @@ fn minimize_nonnegative(
         if change_f <= STALL_F && change_x <= 1e-12 {
             // No further reduction is possible in double precision.
             converged = true;
+            stopped_at_rounding = projected_gradient(&x, &g) > tolerance;
             break;
         }
     }
@@ -1134,6 +1160,7 @@ fn minimize_nonnegative(
         iterations,
         converged,
         line_search_failed,
+        stopped_at_rounding,
     })
 }
 
@@ -1398,8 +1425,44 @@ mod tests {
         let flat = run(1e-8, 1.0);
         assert!(flat.converged && !flat.line_search_failed);
         assert_eq!(flat.x[0], 1.0 + 1e-8);
+        // Converged at the rounding of the objective, with the criterion above the tolerance:
+        // reported, not silent.
+        assert!(
+            flat.stopped_at_rounding && flat.crit > 1e-12,
+            "{}",
+            flat.crit
+        );
+        assert!(!near.stopped_at_rounding);
         let far = run(1.0, 0.0);
         assert!(!far.converged && far.line_search_failed, "{}", far.crit);
+    }
+
+    /// A scoring step that lands within the tolerance at max_iter has met the stopping
+    /// rule: converged, although no Newton step polished it.
+    #[test]
+    fn minimize_nonnegative_counts_the_criterion_at_max_iter() {
+        let mut quad = |x: &[f64]| -> EconResult<Evaluation> {
+            Ok(Evaluation {
+                f: 0.5 * (x[0] - 1.0).powi(2) + 0.25,
+                g: vec![x[0] - 1.0],
+                scoring: Some(vec![1.0]),
+            })
+        };
+        let at_max = super::minimize_nonnegative(&mut quad, &[3.0], 1, 1e-8).unwrap();
+        assert_eq!(at_max.iterations, 1);
+        assert!(at_max.crit <= 1e-8, "{}", at_max.crit);
+        assert!(at_max.converged);
+        assert!(!at_max.stopped_at_rounding);
+        // Above the tolerance at max_iter: not converged.
+        let mut slow = |x: &[f64]| -> EconResult<Evaluation> {
+            Ok(Evaluation {
+                f: 0.5 * (x[0] - 1.0).powi(2),
+                g: vec![x[0] - 1.0],
+                scoring: Some(vec![4.0]),
+            })
+        };
+        let short = super::minimize_nonnegative(&mut slow, &[3.0], 1, 1e-8).unwrap();
+        assert!(!short.converged && short.crit > 1e-8);
     }
 
     #[test]
@@ -1950,6 +2013,24 @@ mod tests {
             )
             .finish();
         assert_eq!(r.coef.level, 1500.0);
+        // Fixed values come back as given: values whose round trip through the scale vx
+        // would change them, found at this series' vx.
+        let spec = StructuralSpec {
+            slope: false,
+            seasonal: None,
+            naming: STRUCT_TS_NAMING,
+        };
+        let (_, _, vx) = spec.prior(&y).unwrap();
+        let rounding: Vec<f64> = (1..2000)
+            .map(|i| 0.1 * i as f64 + (i as f64).sqrt())
+            .filter(|v| (v / vx) * vx != *v)
+            .take(3)
+            .collect();
+        assert_eq!(rounding.len(), 3, "vx {vx}");
+        for v in rounding {
+            let rv = fit(&y, StructTsType::Level, None, Some(vec![None, Some(v)]));
+            assert_eq!(rv.coef.epsilon, v);
+        }
         assert_eq!(r.n_params, 1);
         assert_eq!(r.fixed_parameters, ["level"]);
         assert_eq!(slope_fixed.fixed_parameters, ["slope"]);

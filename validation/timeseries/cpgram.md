@@ -6,6 +6,10 @@ R reference case: `ts_filter_ar_cpt` (`validation/r/cases/ts_utils.R`), series `
 
 `stats::cpgram` plots and returns `NULL`, so the case writes out its body. p2a computes the same steps:
 
+0. **Scale.** The series is divided by the power of two at or below max |x|, which is exact and changes no result, so that
+   no square of the periodogram underflows or overflows at any finite magnitude
+   (`cpgram_is_invariant_to_a_power_of_two_scale`: bit-identical at scales 2^-700, 2^-600, 2^600, to 1e-12 at decimal
+   scales from 1e-200 to 1e308). A constant series is refused as having no variation before any arithmetic.
 1. **Centre, then taper.** `spec.taper(scale(x, TRUE, FALSE), p = taper)`: with m = floor(n p), the first and last m values
    are multiplied by 0.5 (1 - cos(pi (2i - 1) / (2m))), i = 1..m. Tapering before centring would turn the mean into a
    low-frequency component and declare every series with a non-zero mean non-white.
@@ -35,3 +39,15 @@ observations are errors.
 
 `test_cpgram_rejects_bad_taper_and_non_finite` holds the refusals. Without the `spectral-analysis` feature the
 periodogram is a direct DFT, which `fft_periodogram_matches_direct_dft` compares with the FFT.
+
+## Timing
+
+Release builds (`--no-default-features --features ci`) of v0.5.0 (f80b0131) and of this change, one row per process,
+pinned to one core with `RAYON_NUM_THREADS=1`, 9 interleaved processes per side, the median over processes of each
+process's median call. The machine was shared (load average 8-21 during the runs). White noise, taper 0.1:
+
+| n = 100 | n = 1,000 | n = 10,000 | Ratio |
+|---|---|---|---|
+| 8.7 us / 9.4 us | 66.1 us / 68.7 us | 855 us / 871 us | 1.02-1.08 |
+
+The power-of-two scaling and the constant-series check are two passes over the series before the FFT.

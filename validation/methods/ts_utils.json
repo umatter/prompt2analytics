@@ -76,11 +76,6 @@
       "tolerance": "changepoints exact, penalty and cost Tol::stat(210)",
       "deviations": [
         {
-          "finding": "TS-8",
-          "quantity": "binary segmentation",
-          "note": "zero default threshold and no penalty; cpt.mean BinSeg MBIC Q = 10 finds 0 changepoints (cpt_mean_binseg_ncpts), recorded only"
-        },
-        {
           "finding": "TS-18",
           "quantity": "cpt.mean and cpt.meanvar on uncentred data at large levels (cpt_meanvar_cpts, 54 changepoints)",
           "note": "changepoint cancels on raw sums; p2a centres, and the pins use R on the centred series"

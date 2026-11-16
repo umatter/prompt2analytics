@@ -94,8 +94,10 @@ pub struct CpgramResult {
 /// A `CpgramResult` containing the cumulative periodogram and confidence intervals
 ///
 /// # Errors
-/// Fails on fewer than 4 observations, a non-finite value, a taper outside [0, 0.5], a series
-/// without variation once tapered, and values so large that the periodogram overflows.
+/// Fails on fewer than 4 observations, a non-finite value, a taper outside [0, 0.5], and a
+/// series without variation once tapered. The result does not depend on the scale of the
+/// series: values at any finite magnitude are computed (the series is scaled by a power of two
+/// first).
 ///
 /// # Example
 /// ```
@@ -124,11 +126,26 @@ pub fn cpgram(x: &[f64], taper: Option<f64>) -> Result<CpgramResult, String> {
         ));
     }
 
-    // Centre BEFORE tapering, or the taper turns the mean into a low-frequency component.
-    let mean = x.iter().sum::<f64>() / n as f64;
+    // A constant series (its centred values would be rounding residue of the mean).
+    if x.iter().all(|v| *v == x[0]) {
+        return Err("the tapered series has no variation".to_string());
+    }
+    // The cumulative periodogram does not depend on the scale of the series: divide by the
+    // power of two nearest below max |x| (exact), so that no square underflows or overflows.
     let mut tapered = try_vec(n, 0.0, "the cpgram series").map_err(|e| e.to_string())?;
-    for (t, v) in tapered.iter_mut().zip(x) {
-        *t = v - mean;
+    let max_abs = x.iter().fold(0.0f64, |a, v| a.max(v.abs()));
+    if max_abs > 0.0 {
+        let e = max_abs.log2().floor() as i32;
+        // 2^-e in two factors, each representable, for e anywhere in double range.
+        let (f1, f2) = (2f64.powi(-e / 2), 2f64.powi(-e - (-e / 2)));
+        for (t, v) in tapered.iter_mut().zip(x) {
+            *t = v * f1 * f2;
+        }
+    }
+    // Centre BEFORE tapering, or the taper turns the mean into a low-frequency component.
+    let mean = tapered.iter().sum::<f64>() / n as f64;
+    for t in tapered.iter_mut() {
+        *t -= mean;
     }
     apply_taper(&mut tapered, taper_prop);
 
@@ -143,10 +160,13 @@ pub fn cpgram(x: &[f64], taper: Option<f64>) -> Result<CpgramResult, String> {
     pgram.truncate(mp);
 
     let total: f64 = pgram.iter().sum();
-    // The series is finite here, so a total that is not comes from overflow. Past that point every
-    // cumulated value would be NaN, and the deviation folded over them would read as white noise.
+    // Defensive: the series is finite and scaled to max |x| near 1, so the total cannot
+    // overflow. Were it not finite, every cumulated value would be NaN, and the deviation
+    // folded over them would read as white noise.
     if !total.is_finite() {
-        return Err("values too large: the periodogram overflows".to_string());
+        return Err(
+            "the periodogram is not finite (not reachable from a finite series)".to_string(),
+        );
     }
     if total <= 0.0 {
         return Err("the tapered series has no variation".to_string());
@@ -406,23 +426,51 @@ mod tests {
     }
     use approx::assert_relative_eq;
 
-    /// Finite values whose periodogram overflows: every cumulated value would be NaN, and the
-    /// largest deviation, folded past the NaNs, would be 0 and report white noise.
+    /// The cumulative periodogram does not depend on the scale: identical at a power of two,
+    /// to 1e-12 at a decimal scale (which rounds every input). Before: values near 1e154 and
+    /// above were refused as overflowing, and values whose squares underflow as without
+    /// variation.
     #[test]
-    fn test_cpgram_refuses_a_periodogram_that_overflows() {
-        let noisy = |scale: f64| -> Vec<f64> {
-            (0..64)
-                .map(|i| scale * (((i * 37) % 11) as f64 * 0.09 - 0.45))
-                .collect()
+    fn cpgram_is_invariant_to_a_power_of_two_scale() {
+        let base: Vec<f64> = (0..64)
+            .map(|i| ((i * 37) % 11) as f64 * 0.09 - 0.45 + ((i * 5) % 3) as f64 * 0.013)
+            .collect();
+        let at = |scale: f64| {
+            let y: Vec<f64> = base.iter().map(|v| v * scale).collect();
+            cpgram(&y, Some(0.1)).unwrap()
         };
-        for scale in [1e200, 1e308] {
-            let e = cpgram(&noisy(scale), Some(0.1)).unwrap_err();
-            assert!(e.contains("too large"), "{scale}: {e}");
+        let one = at(1.0);
+        for (scale, exact) in [
+            (2f64.powi(-700), true),
+            (2f64.powi(-600), true),
+            (2f64.powi(600), true),
+            (1e-200, false),
+            (1e100, false),
+            (1e200, false),
+            (1e308, false),
+        ] {
+            let r = at(scale);
+            let pairs = r.cpgram.iter().zip(&one.cpgram).chain([
+                (&r.max_deviation, &one.max_deviation),
+                (&r.ks_statistic, &one.ks_statistic),
+            ]);
+            for (a, b) in pairs {
+                if exact {
+                    assert_eq!(a.to_bits(), b.to_bits(), "{scale:e}: {a} vs {b}");
+                } else {
+                    assert!(
+                        (a - b).abs() <= 1e-12 * b.abs().max(1e-300),
+                        "{scale:e}: {a} vs {b}"
+                    );
+                }
+            }
+            assert_eq!(r.is_white_noise, one.is_white_noise);
         }
-        // Not the overflow: no variation, and a large scale that still fits.
-        let e = cpgram(&[3.0; 64], Some(0.1)).unwrap_err();
-        assert!(e.contains("no variation"), "{e}");
-        assert!(cpgram(&noisy(1e100), Some(0.1)).is_ok());
+        // No variation at any scale.
+        for v in [3.0, 0.1, 3e300, 3e-300] {
+            let e = cpgram(&[v; 64], Some(0.1)).unwrap_err();
+            assert!(e.contains("no variation"), "{v}: {e}");
+        }
     }
 
     #[test]

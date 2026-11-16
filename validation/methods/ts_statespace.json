@@ -91,13 +91,7 @@
         "cumulative effect"
       ],
       "tolerance": "Tol::iterative(1e-6); log-likelihood Tol::stat(90)",
-      "deviations": [
-        {
-          "finding": "TS-5",
-          "quantity": "cumulative and average effect intervals, p-value",
-          "note": "the variance of the cumulative effect is the sum of the marginal forecast variances; placebo coverage of the 95% cumulative interval 0.35-0.46 (R simulation of the same design; test_causal_impact_placebo_calibration asserts the pointwise intervals only)."
-        }
-      ],
+      "deviations": [],
       "supersedes_legacy": []
     }
   ]

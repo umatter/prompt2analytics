@@ -1,7 +1,8 @@
 //! Changepoint detection for time series.
 //!
-//! Implements the PELT (Pruned Exact Linear Time) algorithm for detecting
-//! multiple changepoints in time series data.
+//! Implements the PELT (Pruned Exact Linear Time) algorithm and binary segmentation (changepoint's
+//! `BinSeg`) for detecting multiple changepoints in time series data, with the normal costs and the
+//! MBIC or manual penalties of the changepoint package.
 
 use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
@@ -22,10 +23,14 @@ pub struct ChangepointResult {
     /// Sum of the segment costs, without the penalties: changepoint's cost functions, including
     /// their ln(segment length) term under the MBIC default
     pub total_cost: f64,
-    /// Penalty value used
+    /// The penalty applied: MBIC's (k + 2) ln(n) or the manual value
     pub penalty: f64,
     /// Method used for detection
     pub method: String,
+    /// Warnings about the result: binary segmentation's advice to raise `max_changepoints` when
+    /// the search stopped there. Empty for PELT.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 /// Statistics for a segment between changepoints
@@ -103,8 +108,9 @@ crate::option_enum!(
 /// On a series at a large level `cpt.meanvar` and `cpt.mean`, which do not centre, can differ.
 ///
 /// # Errors
-/// Fails on a series too short for the minimum segment length, on a non-finite value or penalty
-/// (a penalty must be finite and non-negative), on values so large that the sum of squares
+/// Fails on a series of fewer than 2 points, on a series shorter than 2 x `min_segment_length`
+/// points (a series must hold two minimum segments), on a non-finite value or penalty (a penalty
+/// must be finite and non-negative), on values so large that the sum of squares
 /// overflows, and when the budget installed with [`crate::resource::with_budget`] is cancelled or
 /// past its deadline.
 pub fn detect_changepoints(
@@ -129,22 +135,7 @@ pub fn detect_changepoints(
         ));
     }
 
-    if let Some(p) = penalty
-        && !(p.is_finite() && p >= 0.0)
-    {
-        return Err(format!("penalty must be a finite number >= 0, got {p}"));
-    }
-
-    // changepoint's MBIC when no penalty is given: (k + 2) ln(n), k parameters per segment.
-    let mbic = penalty.is_none();
-    let pen = penalty.unwrap_or_else(|| {
-        let log_n = (n as f64).ln();
-        match cost_function {
-            CostFunction::MeanChange => 3.0 * log_n,
-            CostFunction::VarianceChange => 3.0 * log_n,
-            CostFunction::MeanAndVariance => 4.0 * log_n,
-        }
-    });
+    let (pen, mbic) = resolve_penalty(n, penalty, cost_function)?;
 
     // Precompute cumulative sums for efficient cost calculation
     let (cum_sum, cum_sum_sq) = checked_cumulative_sums(data)?;
@@ -159,13 +150,9 @@ pub fn detect_changepoints(
     let total_cost =
         compute_total_cost(n, &cum_sum, &cum_sum_sq, &changepoints, cost_function, mbic);
 
-    let kind = match cost_function {
-        CostFunction::MeanChange => "mean change",
-        CostFunction::VarianceChange => "variance change",
-        CostFunction::MeanAndVariance => "mean and variance change",
-    };
     let method = format!(
-        "PELT ({kind}; {} penalty)",
+        "PELT ({}; {} penalty)",
+        cost_kind(cost_function),
         if mbic { "MBIC" } else { "manual" }
     );
 
@@ -176,6 +163,7 @@ pub fn detect_changepoints(
         total_cost,
         penalty: pen,
         method,
+        warnings: Vec::new(),
     })
 }
 
@@ -448,20 +436,145 @@ fn compute_total_cost(
     total
 }
 
-/// Binary segmentation algorithm (simpler alternative to PELT)
-/// Recursively finds the single best changepoint in each segment
+/// The default number of changepoints of [`binary_segmentation`]: changepoint's `Q = 5`.
+pub const DEFAULT_BINSEG_MAX_CHANGEPOINTS: usize = 5;
+
+/// The penalty a search applies and whether it is changepoint's MBIC: `None` is MBIC,
+/// (k + 2) ln(n) with k = 1 for a change in mean or variance and 2 for both; `Some(p)` is its
+/// "Manual" penalty p. One function for PELT and binary segmentation, so the two cannot drift.
+fn resolve_penalty(
+    n: usize,
+    penalty: Option<f64>,
+    cost_function: CostFunction,
+) -> Result<(f64, bool), String> {
+    if let Some(p) = penalty {
+        if !(p.is_finite() && p >= 0.0) {
+            return Err(format!("penalty must be a finite number >= 0, got {p}"));
+        }
+        return Ok((p, false));
+    }
+    let log_n = (n as f64).ln();
+    let k_plus_2 = match cost_function {
+        CostFunction::MeanChange | CostFunction::VarianceChange => 3.0,
+        CostFunction::MeanAndVariance => 4.0,
+    };
+    Ok((k_plus_2 * log_n, true))
+}
+
+/// The cost of [start, end) as binary segmentation scores it: the plain cost, plus
+/// ln(end - start) under MBIC.
+#[cfg(test)]
+fn binseg_cost(
+    cum_sum: &[f64],
+    cum_sum_sq: &[f64],
+    start: usize,
+    end: usize,
+    cost_function: CostFunction,
+    mbic: bool,
+) -> f64 {
+    let c = segment_cost(cum_sum, cum_sum_sq, start, end, cost_function);
+    if mbic {
+        c + ((end - start) as f64).ln()
+    } else {
+        c
+    }
+}
+
+/// The best single split of [start, end): the position t in start + min_seg ..= end - min_seg
+/// with the largest cost reduction C(start, end) - C(start, t) - C(t, end), the smallest t on a
+/// tie. `None` for a segment shorter than two minimum segments. Under MBIC `ln_len[m]` holds
+/// ln(m), the term each segment of length m adds (the same values as computing it in place).
+fn best_split(
+    cum_sum: &[f64],
+    cum_sum_sq: &[f64],
+    start: usize,
+    end: usize,
+    min_seg: usize,
+    cost_function: CostFunction,
+    ln_len: Option<&[f64]>,
+) -> Result<Option<(usize, f64)>, String> {
+    if end - start < min_seg.saturating_mul(2) {
+        return Ok(None);
+    }
+    // One monomorphised scan per cost, so that the hot mean-change scans compile without a
+    // branch on the cost function.
+    let (cs, cq) = (cum_sum, cum_sum_sq);
+    let mean = CostFunction::MeanChange;
+    let best = match (cost_function, ln_len) {
+        (CostFunction::MeanChange, None) => {
+            scan_splits(start, end, min_seg, |s, e| segment_cost(cs, cq, s, e, mean))?
+        }
+        (CostFunction::MeanChange, Some(ln)) => scan_splits(start, end, min_seg, |s, e| {
+            segment_cost(cs, cq, s, e, mean) + ln[e - s]
+        })?,
+        (c, None) => scan_splits(start, end, min_seg, |s, e| segment_cost(cs, cq, s, e, c))?,
+        (c, Some(ln)) => scan_splits(start, end, min_seg, |s, e| {
+            segment_cost(cs, cq, s, e, c) + ln[e - s]
+        })?,
+    };
+    Ok(Some(best))
+}
+
+/// The scan of [`best_split`] under the segment cost `cost`.
+#[inline]
+fn scan_splits(
+    start: usize,
+    end: usize,
+    min_seg: usize,
+    cost: impl Fn(usize, usize) -> f64,
+) -> Result<(usize, f64), String> {
+    let whole = cost(start, end);
+    let first = start + min_seg;
+    let mut best_t = first;
+    let mut best_g = whole - cost(start, first) - cost(first, end);
+    for (i, t) in ((first + 1)..=(end - min_seg)).enumerate() {
+        // A single scan is linear in the segment's length: check the budget inside it too.
+        if i % 65_536 == 65_535 {
+            crate::resource::checkpoint().map_err(|e| e.to_string())?;
+        }
+        let gain = whole - cost(start, t) - cost(t, end);
+        if gain > best_g {
+            best_t = t;
+            best_g = gain;
+        }
+    }
+    Ok((best_t, best_g))
+}
+
+/// Binary segmentation, as changepoint's `BinSeg` (`cpt.mean`, `cpt.var`, `cpt.meanvar` with
+/// `method = "BinSeg"`).
+///
+/// Starting from the whole series, the search splits the segment whose best split reduces the
+/// cost the most, while that reduction is strictly above the penalty, and stops at
+/// `max_changepoints` (changepoint's `Q`) changepoints. Ties go to the smallest position. The
+/// costs and penalties are those of [`detect_changepoints`]: `penalty` `None` is MBIC,
+/// (k + 2) ln(n), with ln(segment length) added to every segment's cost; `Some(p)` is the
+/// manual penalty p on the plain costs. Each segment's best split is computed once, when the
+/// segment is created, so the work is the length of the series times the depth of the split
+/// tree.
+///
+/// * `max_changepoints` - changepoint's `Q`; default [`DEFAULT_BINSEG_MAX_CHANGEPOINTS`] (5).
+///   Must be at least 1 and at most n / min_segment_length + 1, R's bound. When the search stops
+///   at `Q` under a positive penalty, `warnings` carries R's advice to raise `Q`.
+/// * `min_segment_length` - minimum length of a segment (default and minimum 2).
+///
+/// The candidate positions of a segment [s, e) are s + min_seg ..= e - min_seg. changepoint's C
+/// code narrows that range by one at irregular places (always at the left end; at the right end
+/// only for the last segment at minimum length 2), so on a series with a near-tie at the edge of
+/// a range the two can select different positions.
 ///
 /// # Errors
-/// Fails on a series of fewer than 2 points, on a series too short for two
-/// segments of the minimum segment length, on a NaN threshold, on a non-finite
-/// value, on values so large that the sum of squares overflows, and when the
-/// budget installed with [`crate::resource::with_budget`] is cancelled or past
-/// its deadline.
+/// Fails on a series of fewer than 2 points, on a series shorter than 2 x `min_segment_length`
+/// points (a series must hold two minimum segments), on `max_changepoints` 0 or above
+/// n / min_segment_length + 1, on a negative or non-finite penalty, on a non-finite value, on
+/// values so large that the sum of squares overflows, and when the budget installed with
+/// [`crate::resource::with_budget`] is cancelled or past its deadline.
 pub fn binary_segmentation(
     data: &[f64],
     max_changepoints: Option<usize>,
     min_segment_length: Option<usize>,
-    significance_threshold: Option<f64>,
+    penalty: Option<f64>,
+    cost_function: CostFunction,
 ) -> Result<ChangepointResult, String> {
     let n = data.len();
 
@@ -481,85 +594,103 @@ pub fn binary_segmentation(
         ));
     }
 
-    let max_cp = max_changepoints.unwrap_or(10);
-    let threshold = significance_threshold.unwrap_or(0.0);
-    // No gain compares as above NaN: the search would report no changepoint.
-    if threshold.is_nan() {
+    let max_cp = max_changepoints.unwrap_or(DEFAULT_BINSEG_MAX_CHANGEPOINTS);
+    if max_cp == 0 {
+        return Err("max_changepoints must be at least 1".to_string());
+    }
+    // changepoint: Q > n / minseglen + 1 is an error.
+    let q_bound = n as f64 / min_seg as f64 + 1.0;
+    if max_cp as f64 > q_bound {
         return Err(format!(
-            "significance_threshold must be a number, got {threshold}"
+            "max_changepoints ({max_cp}) must be at most n / min_segment_length + 1 = {}",
+            q_bound.floor()
         ));
     }
 
+    let (pen, mbic) = resolve_penalty(n, penalty, cost_function)?;
     let (cum_sum, cum_sum_sq) = checked_cumulative_sums(data)?;
+    // MBIC's ln(segment length), once per length instead of twice per candidate.
+    let ln_table = if mbic {
+        let mut t = crate::resource::try_vec(n + 1, 0.0, "the binary segmentation log lengths")
+            .map_err(|e| e.to_string())?;
+        for (m, v) in t.iter_mut().enumerate().skip(1) {
+            *v = (m as f64).ln();
+        }
+        Some(t)
+    } else {
+        None
+    };
+    let ln_len = ln_table.as_deref();
 
+    // Open segments with their cached best split.
+    let mut open: Vec<(usize, usize, Option<(usize, f64)>)> = vec![(
+        0,
+        n,
+        best_split(&cum_sum, &cum_sum_sq, 0, n, min_seg, cost_function, ln_len)?,
+    )];
     let mut changepoints = Vec::new();
-    let mut segments_to_check: Vec<(usize, usize)> = vec![(0, n)];
 
-    while !segments_to_check.is_empty() && changepoints.len() < max_cp {
-        // Each pass scans the whole series once.
+    while changepoints.len() < max_cp {
         crate::resource::checkpoint().map_err(|e| e.to_string())?;
 
-        // Find segment with best potential changepoint
-        let mut best_gain = threshold;
-        let mut best_cp = None;
-        let mut best_segment_idx = 0;
-
-        for (idx, &(start, end)) in segments_to_check.iter().enumerate() {
-            if end - start < min_seg.saturating_mul(2) {
-                continue;
-            }
-
-            let base_cost =
-                segment_cost(&cum_sum, &cum_sum_sq, start, end, CostFunction::MeanChange);
-
-            for cp in (start + min_seg)..(end - min_seg + 1) {
-                let left_cost =
-                    segment_cost(&cum_sum, &cum_sum_sq, start, cp, CostFunction::MeanChange);
-                let right_cost =
-                    segment_cost(&cum_sum, &cum_sum_sq, cp, end, CostFunction::MeanChange);
-                let gain = base_cost - left_cost - right_cost;
-
-                if gain > best_gain {
-                    best_gain = gain;
-                    best_cp = Some(cp);
-                    best_segment_idx = idx;
-                }
+        // The segment whose best split gains the most; the smallest position on a tie.
+        let mut pick: Option<(usize, usize, f64)> = None;
+        for (idx, &(_, _, best)) in open.iter().enumerate() {
+            if let Some((t, g)) = best
+                && pick.is_none_or(|(_, pt, pg)| g > pg || (g == pg && t < pt))
+            {
+                pick = Some((idx, t, g));
             }
         }
-
-        if let Some(cp) = best_cp {
-            let (start, end) = segments_to_check.remove(best_segment_idx);
-            changepoints.push(cp);
-            segments_to_check.push((start, cp));
-            segments_to_check.push((cp, end));
-        } else {
+        let Some((idx, t, gain)) = pick else { break };
+        if gain.is_nan() || gain <= pen {
             break;
+        }
+
+        let (start, end, _) = open.swap_remove(idx);
+        changepoints.push(t);
+        for (s, e) in [(start, t), (t, end)] {
+            let best = best_split(&cum_sum, &cum_sum_sq, s, e, min_seg, cost_function, ln_len)?;
+            open.push((s, e, best));
         }
     }
 
-    changepoints.sort();
+    changepoints.sort_unstable();
+
+    let mut warnings = Vec::new();
+    if changepoints.len() == max_cp && pen > 0.0 {
+        warnings.push(format!(
+            "The number of changepoints identified is Q = {max_cp}, it is advised to increase Q to make sure changepoints have not been missed."
+        ));
+    }
 
     let segments = compute_segment_stats(data, &changepoints);
-    let total_cost = compute_total_cost(
-        n,
-        &cum_sum,
-        &cum_sum_sq,
-        &changepoints,
-        CostFunction::MeanChange,
-        false,
-    );
+    let total_cost =
+        compute_total_cost(n, &cum_sum, &cum_sum_sq, &changepoints, cost_function, mbic);
 
-    // Use BIC as penalty estimate
-    let penalty = (n as f64).ln();
+    let method = format!(
+        "Binary Segmentation ({}; {} penalty, Q = {max_cp})",
+        cost_kind(cost_function),
+        if mbic { "MBIC" } else { "manual" }
+    );
 
     Ok(ChangepointResult {
         n_changepoints: changepoints.len(),
         changepoints,
         segments,
         total_cost,
-        penalty,
-        method: "Binary Segmentation".to_string(),
+        penalty: pen,
+        method,
+        warnings,
     })
+}
+
+fn cost_kind(cost_function: CostFunction) -> &'static str {
+    match cost_function {
+        CostFunction::MeanChange => "mean change",
+        CostFunction::VarianceChange => "variance change",
+        CostFunction::MeanAndVariance => "mean and variance change",
+    }
 }
 
 /// Run changepoint detection on a dataset column.
@@ -595,6 +726,9 @@ pub fn run_changepoint(
 
 /// Run binary segmentation changepoint detection on a dataset column.
 ///
+/// The arguments are those of [`binary_segmentation`]: `max_changepoints` is changepoint's `Q`
+/// (default 5), `penalty` `None` is MBIC, and `cost_function` the change to look for.
+///
 /// # Errors
 /// Fails when `column` is missing, not numeric (integer, float or Boolean), or has a
 /// missing value (`EconError::NullValues` inside the anyhow error), on fewer than
@@ -606,7 +740,8 @@ pub fn run_binary_segmentation(
     column: &str,
     max_changepoints: Option<usize>,
     min_segment_length: Option<usize>,
-    significance_threshold: Option<f64>,
+    penalty: Option<f64>,
+    cost_function: CostFunction,
 ) -> Result<ChangepointResult> {
     // Extract time series data (an EconError inside the anyhow error)
     let (values, _) = numeric_column(dataset.df(), column, NaPolicy::Fail)?;
@@ -622,7 +757,8 @@ pub fn run_binary_segmentation(
         &values,
         max_changepoints,
         min_segment_length,
-        significance_threshold,
+        penalty,
+        cost_function,
     )
     .map_err(|e| anyhow!(e))
 }
@@ -752,17 +888,261 @@ mod tests {
         assert!(e.contains("minimum segment length"), "{e}");
     }
 
-    /// `gain > NaN` is never true, so a NaN threshold would report no changepoint.
+    /// A penalty must be a finite number >= 0 (`gain > NaN` is never true, so a NaN penalty would
+    /// report no changepoint); Q must be at least 1 and at most n / min_segment_length + 1 (R).
     #[test]
-    fn test_binary_segmentation_refuses_a_nan_threshold() {
+    fn test_binary_segmentation_refuses_a_bad_penalty_or_q() {
         let data = create_mean_shift_data(30, 30, 0.0, 4.0, 1.0);
-        let e = binary_segmentation(&data, Some(3), None, Some(f64::NAN)).unwrap_err();
-        assert!(
-            e.contains("significance_threshold") && e.contains("NaN"),
-            "{e}"
-        );
-        let r = binary_segmentation(&data, Some(3), None, Some(1.0)).unwrap();
+        let mean = CostFunction::MeanChange;
+        for pen in [-1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let e = binary_segmentation(&data, Some(3), None, Some(pen), mean).unwrap_err();
+            assert!(e.contains("penalty must be a finite number >= 0"), "{e}");
+        }
+        let e = binary_segmentation(&data, Some(0), None, None, mean).unwrap_err();
+        assert_eq!(e, "max_changepoints must be at least 1");
+        // n = 60, min_seg 2: the bound is 31.
+        assert!(binary_segmentation(&data, Some(31), None, None, mean).is_ok());
+        let e = binary_segmentation(&data, Some(32), None, None, mean).unwrap_err();
+        assert!(e.contains("at most n / min_segment_length + 1 = 31"), "{e}");
+        let e = binary_segmentation(&data, Some(usize::MAX), Some(5), None, mean).unwrap_err();
+        assert!(e.contains("= 13"), "{e}");
+        let r = binary_segmentation(&data, Some(3), None, Some(1.0), mean).unwrap();
         assert!(r.n_changepoints >= 1);
+    }
+
+    /// The case `id` (cpt_binseg_t4) with its series and its variance series.
+    fn cpt_case(
+        id: &str,
+    ) -> (
+        p2a_validation::Case,
+        crate::data::Dataset,
+        crate::data::Dataset,
+    ) {
+        let (case, ds) = crate::test_support::load_case(id);
+        let path = p2a_validation::repo_path("validation/datasets/generated/cpt_binseg_t4_var.csv");
+        let dv = crate::data::Dataset::new(crate::data::DataLoader::load_csv(&path).unwrap());
+        (case, ds, dv)
+    }
+
+    fn centred(x: &[f64]) -> Vec<f64> {
+        let m = x.iter().sum::<f64>() / x.len() as f64;
+        x.iter().map(|v| v - m).collect()
+    }
+
+    /// Pins one cpt_binseg_t4 tag: changepoints exact, penalty and cost Tol::stat(n), the
+    /// Q-reached flag as the warning.
+    fn check_binseg(
+        chk: &mut p2a_validation::Check,
+        case: &p2a_validation::Case,
+        tag: &str,
+        r: &ChangepointResult,
+        n: usize,
+    ) {
+        // R writes no _cpts key for a series without a change.
+        let cpts_key = format!("{tag}_cpts");
+        if case.keys().any(|k| k == cpts_key) {
+            chk.vector(&cpts_key, &cps(r), Tol::exact());
+        }
+        chk.scalar(
+            &format!("{tag}_ncpts"),
+            r.n_changepoints as f64,
+            Tol::exact(),
+        )
+        .scalar(&format!("{tag}_pen"), r.penalty, Tol::stat(n))
+        .scalar(&format!("{tag}_cost"), r.total_cost, Tol::stat(n))
+        .scalar(
+            &format!("{tag}_q_reached"),
+            if r.warnings.is_empty() { 0.0 } else { 1.0 },
+            Tol::exact(),
+        );
+    }
+
+    /// cpt.mean(x, method = "BinSeg", penalty = "MBIC", Q = 5 | 10, minseglen = 2) on white noise
+    /// (no change) and on three regimes (99, 200).
+    #[test]
+    fn test_validate_binseg_mean_mbic() {
+        let (case, ds, _) = cpt_case("cpt_binseg_t4");
+        let wn = col(&ds, "wn");
+        let reg = col(&ds, "reg");
+        let mean = CostFunction::MeanChange;
+        let r_wn = binary_segmentation(&wn, None, None, None, mean).unwrap();
+        let r_reg = binary_segmentation(&reg, None, None, None, mean).unwrap();
+        let r_q10 = binary_segmentation(&reg, Some(10), None, None, mean).unwrap();
+        let mut chk = Check::new(&case);
+        check_binseg(&mut chk, &case, "wn_mean", &r_wn, 300);
+        check_binseg(&mut chk, &case, "reg_mean", &r_reg, 300);
+        check_binseg(&mut chk, &case, "reg_mean_q10", &r_q10, 300);
+        chk.finish();
+        for r in [&r_wn, &r_reg, &r_q10] {
+            assert!(r.method.contains("MBIC"), "{}", r.method);
+        }
+        assert!(r_reg.method.contains("Q = 5") && r_q10.method.contains("Q = 10"));
+    }
+
+    /// cpt.mean(reg, BinSeg, penalty = "Manual", pen.value = 10): 99, 200, plain costs.
+    #[test]
+    fn test_validate_binseg_mean_manual() {
+        let (case, ds, _) = cpt_case("cpt_binseg_t4");
+        let reg = col(&ds, "reg");
+        let r =
+            binary_segmentation(&reg, None, None, Some(10.0), CostFunction::MeanChange).unwrap();
+        let mut chk = Check::new(&case);
+        check_binseg(&mut chk, &case, "reg_mean_manual", &r, 300);
+        chk.finish();
+        assert!(r.method.contains("manual"), "{}", r.method);
+    }
+
+    /// cpt.var and cpt.meanvar (BinSeg, MBIC) on the centred variance-change series vr (91, 162
+    /// under var; none under meanvar) and mean-and-variance series mv (122 under both).
+    #[test]
+    fn test_validate_binseg_var_and_meanvar() {
+        let (case, _, dv) = cpt_case("cpt_binseg_t4");
+        let vr = centred(&col(&dv, "vr"));
+        let mv = centred(&col(&dv, "mv"));
+        let var = CostFunction::VarianceChange;
+        let mvc = CostFunction::MeanAndVariance;
+        let mut chk = Check::new(&case);
+        for (tag, x, cost) in [
+            ("vr_var", &vr, var),
+            ("vr_meanvar", &vr, mvc),
+            ("mv_meanvar", &mv, mvc),
+            ("mv_var", &mv, var),
+        ] {
+            let r = binary_segmentation(x, None, None, None, cost).unwrap();
+            check_binseg(&mut chk, &case, tag, &r, 240);
+        }
+        chk.finish();
+    }
+
+    /// cpt.mean(many, BinSeg, MBIC, Q = 2) stops at Q with R's warning (57, 121); with Q = 5 it
+    /// finds the four changes (57, 121, 180, 240) and does not warn.
+    #[test]
+    fn test_validate_binseg_q_reached() {
+        let (case, ds, _) = cpt_case("cpt_binseg_t4");
+        let many = col(&ds, "many");
+        let mean = CostFunction::MeanChange;
+        let r2 = binary_segmentation(&many, Some(2), None, None, mean).unwrap();
+        let r5 = binary_segmentation(&many, None, None, None, mean).unwrap();
+        let mut chk = Check::new(&case);
+        check_binseg(&mut chk, &case, "many_mean_q2", &r2, 300);
+        check_binseg(&mut chk, &case, "many_mean", &r5, 300);
+        chk.finish();
+        assert_eq!(r2.warnings.len(), 1);
+        assert!(r2.warnings[0].contains("increase Q"), "{:?}", r2.warnings);
+        assert!(r5.warnings.is_empty(), "{:?}", r5.warnings);
+        // A manual penalty of 0 never warns (R: the warning needs pen.value != 0).
+        let r0 = binary_segmentation(&many, Some(2), None, Some(0.0), mean).unwrap();
+        assert_eq!(r0.n_changepoints, 2);
+        assert!(r0.warnings.is_empty());
+    }
+
+    /// cpt.mean(lev - mean(lev), BinSeg, MBIC, Q = 10, minseglen = 2) on the series at level 1e7
+    /// finds no change (case ts_filter_ar_cpt, key cpt_mean_binseg_ncpts).
+    #[test]
+    fn test_validate_binseg_large_level() {
+        let (case, ds) = crate::test_support::load_case("ts_filter_ar_cpt");
+        let lev = col(&ds, "lev");
+        let r = binary_segmentation(&lev, Some(10), None, None, CostFunction::MeanChange).unwrap();
+        Check::new(&case)
+            .scalar(
+                "cpt_mean_binseg_ncpts",
+                r.n_changepoints as f64,
+                Tol::exact(),
+            )
+            .finish();
+        assert!(r.warnings.is_empty());
+    }
+
+    /// The naive greedy search: every pass rescans every segment of the current segmentation
+    /// (segments in position order, strict improvement, so the smallest position wins a tie).
+    fn naive_binseg(
+        data: &[f64],
+        q: usize,
+        min_seg: usize,
+        penalty: Option<f64>,
+        cost: CostFunction,
+    ) -> (Vec<usize>, f64) {
+        let n = data.len();
+        let (pen, mbic) = resolve_penalty(n, penalty, cost).unwrap();
+        let (cs, cq) = checked_cumulative_sums(data).unwrap();
+        let c = |s: usize, e: usize| binseg_cost(&cs, &cq, s, e, cost, mbic);
+        let mut bnd = vec![0, n];
+        let mut cps = Vec::new();
+        for _ in 0..q {
+            let mut best: Option<(usize, f64)> = None;
+            for w in bnd.windows(2) {
+                let (s, e) = (w[0], w[1]);
+                if e - s < 2 * min_seg {
+                    continue;
+                }
+                for t in (s + min_seg)..=(e - min_seg) {
+                    let g = c(s, e) - c(s, t) - c(t, e);
+                    if best.is_none_or(|(_, bg)| g > bg) {
+                        best = Some((t, g));
+                    }
+                }
+            }
+            match best {
+                Some((t, g)) if g > pen => {
+                    cps.push(t);
+                    bnd.push(t);
+                    bnd.sort_unstable();
+                }
+                _ => break,
+            }
+        }
+        cps.sort_unstable();
+        let cost_total = compute_total_cost(n, &cs, &cq, &cps, cost, mbic);
+        (cps, cost_total)
+    }
+
+    #[test]
+    fn binseg_matches_the_naive_greedy_search() {
+        let mut seed = 20261116u64;
+        let mut ties = 0;
+        for rep in 0..50u64 {
+            let n = 30 + (lcg_rand_cp(&mut seed) * 371.0) as usize;
+            let n_changes = (lcg_rand_cp(&mut seed) * 7.0) as usize;
+            let integer = rep % 5 == 0;
+            let mut data = Vec::with_capacity(n);
+            let mut level = 0.0;
+            let mut scale = 1.0;
+            for i in 0..n {
+                if n_changes > 0 && i > 0 && i % (n / (n_changes + 1)).max(1) == 0 {
+                    level += 3.0 * (lcg_rand_cp(&mut seed) - 0.5) * 4.0;
+                    scale = 0.5 + 2.0 * lcg_rand_cp(&mut seed);
+                }
+                let e = box_muller_cp(&mut seed);
+                let v = level + scale * e;
+                // integer data: exact ties between candidate gains
+                data.push(if integer { v.round() } else { v });
+            }
+            let cost = [
+                CostFunction::MeanChange,
+                CostFunction::VarianceChange,
+                CostFunction::MeanAndVariance,
+            ][rep as usize % 3];
+            let penalty = if rep % 2 == 0 {
+                None
+            } else {
+                Some(2.0 + (rep % 7) as f64)
+            };
+            let min_seg = 2 + (rep as usize % 4);
+            let q = 1 + (rep as usize % 8);
+            let r = binary_segmentation(&data, Some(q), Some(min_seg), penalty, cost).unwrap();
+            let (want, want_cost) = naive_binseg(&data, q, min_seg, penalty, cost);
+            assert_eq!(r.changepoints, want, "rep {rep} n {n} {cost:?} {penalty:?}");
+            assert_eq!(r.total_cost.to_bits(), want_cost.to_bits(), "rep {rep}");
+            if integer {
+                ties += 1;
+            }
+        }
+        assert!(ties >= 10);
+        // An exact tie: a symmetric series has equal gains at mirrored positions; the smallest wins.
+        let sym: Vec<f64> = [0.0, 0.0, 0.0, 5.0, 5.0, 5.0, 5.0, 0.0, 0.0, 0.0].to_vec();
+        let r =
+            binary_segmentation(&sym, Some(1), None, Some(0.0), CostFunction::MeanChange).unwrap();
+        assert_eq!(r.changepoints, vec![3]);
     }
 
     /// Optimal partitioning: the exact minimiser that PELT's pruning must not change. O(n^2).
@@ -1038,7 +1418,8 @@ mod tests {
                 let e = detect_changepoints(&data, None, None, cost).unwrap_err();
                 assert!(e.contains("too large"), "{scale} {cost:?}: {e}");
             }
-            let e = binary_segmentation(&data, Some(3), None, None).unwrap_err();
+            let e = binary_segmentation(&data, Some(3), None, None, CostFunction::MeanChange)
+                .unwrap_err();
             assert!(e.contains("too large"), "{scale}: {e}");
         }
         // Large values are fine as long as the sums hold them.
@@ -1058,7 +1439,8 @@ mod tests {
         for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             let mut data = clean.clone();
             data[7] = bad;
-            let e = binary_segmentation(&data, Some(3), None, None).unwrap_err();
+            let e = binary_segmentation(&data, Some(3), None, None, CostFunction::MeanChange)
+                .unwrap_err();
             assert!(e.contains("finite") && e.contains("position 7"), "{e}");
         }
     }
@@ -1070,7 +1452,9 @@ mod tests {
         use crate::forecasting::test_fixtures::*;
         let ds = with_float_copy(&arima_series(), "ai");
         let pelt = |col: &str| run_changepoint(&ds, col, None, None, CostFunction::MeanChange);
-        let binseg = |col: &str| run_binary_segmentation(&ds, col, Some(5), None, None);
+        let binseg = |col: &str| {
+            run_binary_segmentation(&ds, col, Some(5), None, None, CostFunction::MeanChange)
+        };
         for run in [&pelt as &dyn Fn(&str) -> Result<ChangepointResult>, &binseg] {
             let int = run("ai").unwrap();
             let flt = run("ai_f64").unwrap();
@@ -1136,7 +1520,9 @@ mod tests {
         let mut data: Vec<f64> = vec![0.0; 25];
         data.extend(vec![10.0; 25]);
 
-        let result = binary_segmentation(&data, Some(5), None, Some(10.0)).unwrap();
+        let result =
+            binary_segmentation(&data, Some(5), None, Some(10.0), CostFunction::MeanChange)
+                .unwrap();
 
         assert!(result.n_changepoints >= 1);
     }
@@ -1292,7 +1678,9 @@ mod tests {
 
         let pelt_result =
             detect_changepoints(&data, Some(5.0), None, CostFunction::MeanChange).unwrap();
-        let bs_result = binary_segmentation(&data, Some(3), None, Some(10.0)).unwrap();
+        let bs_result =
+            binary_segmentation(&data, Some(3), None, Some(10.0), CostFunction::MeanChange)
+                .unwrap();
 
         // Both should detect at least one changepoint
         assert!(
@@ -1440,9 +1828,19 @@ mod tests {
     #[test]
     fn binary_segmentation_stops_when_the_budget_is_cancelled() {
         let data = create_mean_shift_data(2_000, 2_000, 0.0, 0.0, 1.0);
-        assert!(binary_segmentation(&data, Some(5), None, None).is_ok());
-        let err = cancelled(|| binary_segmentation(&data, Some(5), None, None))
-            .expect_err("a cancelled budget must stop binary segmentation");
+        for cost in [
+            CostFunction::MeanChange,
+            CostFunction::VarianceChange,
+            CostFunction::MeanAndVariance,
+        ] {
+            assert!(binary_segmentation(&data, Some(5), None, None, cost).is_ok());
+            let err = cancelled(|| binary_segmentation(&data, Some(5), None, None, cost))
+                .expect_err("a cancelled budget must stop binary segmentation");
+            assert!(err.contains("cancelled"), "{cost:?}: {err}");
+        }
+        let err =
+            cancelled(|| binary_segmentation(&data, Some(5), None, None, CostFunction::MeanChange))
+                .expect_err("a cancelled budget must stop binary segmentation");
         assert!(err.contains("cancelled"), "{err}");
     }
 
@@ -1456,8 +1854,14 @@ mod tests {
                 detect_changepoints(&data, Some(5.0), Some(min_seg), CostFunction::MeanChange)
                     .expect_err("a minimum segment longer than the series must be refused");
             assert!(err.contains("minimum segment length"), "{err}");
-            let err = binary_segmentation(&data, Some(5), Some(min_seg), None)
-                .expect_err("a minimum segment longer than the series must be refused");
+            let err = binary_segmentation(
+                &data,
+                Some(5),
+                Some(min_seg),
+                None,
+                CostFunction::MeanChange,
+            )
+            .expect_err("a minimum segment longer than the series must be refused");
             assert!(err.contains("minimum segment length"), "{err}");
         }
     }
@@ -1468,7 +1872,7 @@ mod tests {
         // segments, so it answered "no changepoints" for a series it never
         // examined, where PELT refuses the same input.
         let data = create_mean_shift_data(50, 50, 0.0, 5.0, 1.0);
-        let err = binary_segmentation(&data, Some(5), Some(51), None)
+        let err = binary_segmentation(&data, Some(5), Some(51), None, CostFunction::MeanChange)
             .expect_err("100 points cannot hold two segments of 51");
         assert!(
             err.contains("Data length (100) must be at least 2x minimum segment length (51)"),
@@ -1478,7 +1882,14 @@ mod tests {
             .expect_err("PELT refuses it too");
         assert_eq!(err, pelt_err);
         // Two segments of 50 fit exactly; the shift sits at their boundary.
-        let r = binary_segmentation(&data, Some(5), Some(50), None).unwrap();
+        let r = binary_segmentation(
+            &data,
+            Some(3),
+            Some(50),
+            Some(5.0),
+            CostFunction::MeanChange,
+        )
+        .unwrap();
         assert_eq!(r.changepoints, vec![50]);
     }
 }

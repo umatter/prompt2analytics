@@ -139,6 +139,9 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/reset_quad.csv` | 100 × 2 (y, x) | `diag_reset_quad` | `r/cases/regression_legacy.R` | seed 42, DGP of `scripts/validate_regression_diag.R` |
 | `generated/harvtest_nonlin.csv` | 100 × 2 (y, x) | `diag_harvtest_nonlin` | `r/cases/regression_legacy.R` | seed 42, DGP of `scripts/validate_regression_diag.R` |
 | `generated/structts_series.csv` | 108 × 4 (t, nile, ukgas, nile_na) | `structts_nile_ukgas` | `r/cases/ts_statespace.R` | `datasets::Nile`, `log10(datasets::UKgas)`; `nile_na` missing in rows 21-25 and 61 |
+| `generated/causal_impact_control_t4.csv` | 100 × 3 (t, y, x) | `causal_impact_intervals_t4` | `r/cases/ts_statespace_t4.R` | seed 20261115; random-walk control x, y = 2 x + random-walk level + N(0, 1), effect 3 from t = 81 |
+| `generated/cpt_binseg_t4.csv` | 300 × 4 (t, wn, reg, many) | `cpt_binseg_t4` | `r/cases/ts_changepoint_t4.R` | seed 20261115; white noise, three mean regimes, five alternating mean regimes |
+| `generated/cpt_binseg_t4_var.csv` | 240 × 3 (t, vr, mv) | `cpt_binseg_t4` | `r/cases/ts_changepoint_t4.R` | seed 20261115 (same stream); three variance regimes, a mean and variance change at 121 |
 | `generated/ts_acf_spline_t3.csv` | 64 × 4 (x, y, kx, ky) | `stat_ts_acf_spline_t3` | `r/cases/stats_misc_t3.R` | AR(1) pair and spline knots, padded with NA |
 | `generated/ttest_levels_t3.csv` | 15 × 3 (id, x, y) | `stat_ttest_levels_t3` | `r/cases/stats_misc_t3.R` | two samples, padded with NA |
 | `generated/wald_sim.csv` | 100 × 4 (y, x1, x2, x3) | `diag_wald_sim` | `r/cases/regression_legacy.R` | seed 42, DGP of `scripts/validate_regression_diag.R` |

@@ -216,7 +216,9 @@ Tests: `test_na_arima_int64_and_missing` (and, for the other time-series entry p
    Hessian.
 3. A non-stationary AR part (CSS does not constrain it) starts the Kalman state of the ARMA
    block from a diffuse prior (variance 1e6), with a warning. R uses Gardner's Q0, which is
-   undefined there; pure AR forecasts coincide. At an exact unit root R returns NaN.
+   undefined there, and returns NaN at an exact unit root, so there is no R value to compare.
+   A pure AR forecast is then the AR recursion from the last value
+   (`arima_predict_warns_on_a_non_stationary_ar`).
 4. No seasonal terms.
 5. `include_mean = true` with d > 0 and a drift with d >= 2 are errors; R ignores them, the
    latter with a warning.
