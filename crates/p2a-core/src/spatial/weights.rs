@@ -999,8 +999,8 @@ mod tests {
     use super::*;
 
     /// spatial_sim of the probit-pieces case: the 4-NN row-standardised W and X = [1, x1, x2].
-    fn probit_case() -> (p2a_validation::Case, SpatialWeights, Array2<f64>) {
-        let (case, ds) = crate::test_support::load_case("spatial_probit_pieces_t4");
+    fn probit_case(id: &str) -> (p2a_validation::Case, SpatialWeights, Array2<f64>) {
+        let (case, ds) = crate::test_support::load_case(id);
         let c = |name: &str| numeric_column(ds.df(), name, NaPolicy::Fail).unwrap().0;
         let coords: Vec<(f64, f64)> = c("cx").into_iter().zip(c("cy")).collect();
         let w = SpatialWeights::from_neighbors(
@@ -1018,7 +1018,7 @@ mod tests {
 
     #[test]
     fn log_det_grid_matches_log_det() {
-        let (_, mut w, _) = probit_case();
+        let (_, mut w, _) = probit_case("spatial_probit_pieces_t4");
         let s = w.try_spectrum().unwrap();
         let rhos = [-0.9, -0.3, 0.0, 0.3, 0.6, 0.9, 0.987];
         let grid = s.log_det_grid(&rhos);
@@ -1033,7 +1033,7 @@ mod tests {
     #[test]
     fn test_validate_dense_inverse_parts_spatial_sim() {
         use p2a_validation::{Check, Tol};
-        let (case, w, x) = probit_case();
+        let (case, w, x) = probit_case("spatial_probit_pieces_t4");
         let b = Array1::from(case.vector("beta"));
         let tol = Tol::new(1e-10, 1e-14);
         let mut chk = Check::new(&case);
@@ -1058,7 +1058,7 @@ mod tests {
 
     #[test]
     fn dense_inverse_parts_respect_the_ceiling() {
-        let (_, w, x) = probit_case();
+        let (_, w, x) = probit_case("spatial_probit_pieces_t4");
         let r = crate::resource::with_alloc_ceiling(Some(80 * 80 * 8 - 1), || {
             w.dense_inverse_parts(0.5, x.view())
         });

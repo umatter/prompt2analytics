@@ -631,7 +631,9 @@ impl Default for LocalMoranConfig {
 /// Whether Geary's randomisation variance is degenerate: NaN, or not above 1e-8 of the scale
 /// S1/S0^2 that Var(C) has (about 2/(n k) for a k-regular binary W).
 fn geary_variance_degenerate(vc: f64, s0: f64, s1: f64) -> bool {
-    !(vc > 1e-8 * s1 / (s0 * s0))
+    let floor = 1e-8 * s1 / (s0 * s0);
+    // NaN on either side counts as degenerate
+    vc.partial_cmp(&floor) != Some(std::cmp::Ordering::Greater)
 }
 
 /// Local Moran's I (LISA) with the default options of [`LocalMoranConfig`] (conditional
@@ -1817,9 +1819,9 @@ mod tests {
         ]
     }
 
-    fn check_localmoran(conditional: bool, tag: &str) {
+    fn check_localmoran(id: &str, conditional: bool, tag: &str) {
         use p2a_validation::Tol;
-        let (case, ds) = crate::test_support::load_case("spatial_localmoran_t4");
+        let (case, ds) = crate::test_support::load_case(id);
         let (y, _, coords) = sim_design(&ds);
         let cfg = LocalMoranConfig {
             conditional,
@@ -1842,13 +1844,13 @@ mod tests {
     /// two-sided) (spatial_diag_t4.R, case spatial_localmoran_t4).
     #[test]
     fn test_validate_localmoran_conditional_spatial_sim() {
-        check_localmoran(true, "cond");
+        check_localmoran("spatial_localmoran_t4", true, "cond");
     }
 
     /// R: spdep::localmoran(..., conditional = FALSE): total randomisation moments.
     #[test]
     fn test_validate_localmoran_total_spatial_sim() {
-        check_localmoran(false, "total");
+        check_localmoran("spatial_localmoran_t4", false, "total");
     }
 
     #[test]
