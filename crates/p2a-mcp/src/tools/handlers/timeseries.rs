@@ -929,6 +929,7 @@ impl AnalyticsServer {
                     Some(10), // max changepoints
                     request.min_segment_length,
                     request.penalty,
+                    cost_fn,
                 ) {
                     Ok(r) => r,
                     Err(e) => {

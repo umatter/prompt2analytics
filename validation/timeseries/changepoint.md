@@ -1,6 +1,7 @@
-# Changepoint detection (PELT)
+# Changepoint detection (PELT and binary segmentation)
 
-`detect_changepoints` and `run_changepoint` in `crates/p2a-core/src/forecasting/changepoint.rs`.
+`detect_changepoints` and `run_changepoint` (PELT), `binary_segmentation` and `run_binary_segmentation` (changepoint's
+`BinSeg`) in `crates/p2a-core/src/forecasting/changepoint.rs`.
 R reference case: `ts_filter_ar_cpt` (`validation/r/cases/ts_utils.R`), series `lev` of
 `validation/datasets/generated/ts_utils.csv`: N(0, 1) x 80, N(0, 3) x 70, N(0, 1) x 60, plus 1e7, 6 decimals.
 
@@ -54,13 +55,45 @@ Changepoints are compared exactly, the penalty and cost at `Tol::stat(210)`.
 `test_centred_and_raw_costs_agree_on_counts` compares the centred costs with the raw ones on whole numbers. None of the four
 compares with R.
 
+## Binary segmentation
+
+R reference: `changepoint::cpt.mean`, `cpt.var`, `cpt.meanvar` with `method = "BinSeg"` (changepoint 2.3), case
+`cpt_binseg_t4` (`validation/r/cases/ts_changepoint_t4.R`; series `wn`, `reg`, `many` of
+`validation/datasets/generated/cpt_binseg_t4.csv`, `vr`, `mv` of `cpt_binseg_t4_var.csv`). Registry:
+`validation/methods/ts_changepoint_t4.json` (`ts_changepoint_binseg`).
+
+The costs and penalties are PELT's (one function computes the penalty for both). Under MBIC every segment's cost holds
+its ln(m) term, so a split of [s, e) at t gains C(s, e) + ln(e - s) - C(s, t) - ln(t - s) - C(t, e) - ln(e - t). The
+search splits the segment with the largest gain while that gain is strictly above the penalty, up to `Q` changepoints
+(`max_changepoints`, default 5 as `cpt.*`; refused at 0 and above n / min_segment_length + 1 as R); ties go to the
+smallest position. When it stops at `Q` under a positive penalty, `warnings` carries R's advice to raise `Q`. Each
+segment's best split is computed once, when the segment is created, so the work is n times the depth of the split tree
+rather than n times `Q`. `penalty` reports the value applied, `total_cost` the sum of the segment costs as for PELT.
+
+| Test | R call | Pinned |
+|---|---|---|
+| `test_validate_binseg_mean_mbic` | `cpt.mean(x, BinSeg, MBIC, Q = 5 / 10)` on `wn`, `reg` | none; 99, 200 (Q 5 and 10); penalty 3 ln 300; cost |
+| `test_validate_binseg_mean_manual` | `cpt.mean(reg, BinSeg, Manual, pen.value = 10)` | 99, 200; cost |
+| `test_validate_binseg_var_and_meanvar` | `cpt.var`, `cpt.meanvar` (BinSeg, MBIC) on `vr - mean(vr)`, `mv - mean(mv)` | 91, 162 / none; 122 / 122; penalties; costs |
+| `test_validate_binseg_q_reached` | `cpt.mean(many, BinSeg, MBIC, Q = 2 / 5)` | 57, 121 and the Q warning; 57, 121, 180, 240 and none |
+| `test_validate_binseg_large_level` | `cpt.mean(lev - mean(lev), BinSeg, MBIC, Q = 10, minseglen = 2)` (case `ts_filter_ar_cpt`) | no changepoint |
+
+Changepoints, their count and the Q-reached flag exactly; penalty and cost at `Tol::stat(n)`.
+`binseg_matches_the_naive_greedy_search` compares the cached search with a naive one that rescans every segment on each
+pass (50 seeded series, n 30-400, 0-6 changes, all three costs, MBIC and manual penalties, minimum segments 2-5, Q 1-8,
+ten of them integer-valued for exact ties): identical changepoints and cost.
+
+**Candidate range (convention, registry deviation under TS-8).** p2a's candidates for [s, e) are s + min_seg <= t <=
+e - min_seg. changepoint's C code narrows the range by one at irregular places (always at the left end; at the right end
+only for the last segment at `minseglen` 2; other patterns at 1, 3, 5), so on a series with a near-tie at the edge of a
+range the two can choose different positions (87 of 90 random series agreed at `minseglen` 2). Every pinned series is one
+on which both agree: the case runs a written-out greedy search with p2a's range and stops if it differs from R.
+
 ## Deviations and conventions
 
 - **TS-18 (recorded).** `cpt.mean` and `cpt.meanvar` work on raw sums: `cpt.meanvar(lev)` reports 54 changepoints at
   level 1e7 (key `cpt_meanvar_cpts`, not compared). p2a centres, so the raw and centred series agree, and the pins call
   R on the centred series.
-- **TS-8 (recorded).** `binary_segmentation` has a zero default threshold and no penalty. `cpt.mean(method = "BinSeg",
-  penalty = "MBIC", Q = 10)` finds 0 changepoints (key `cpt_mean_binseg_ncpts`, not compared).
 - **The floor of `MeanAndVariance` (p2a's own).** While tau < 1e-11, that is Q below about 1.1e4, a tied segment takes
   R's floor. Above that, a tied segment takes tau, so its cost is m ln(tau / 1e-11) above R's: on long count series with a
   large variance the tied segments are rewarded less than in `cpt.meanvar`. One value far from the rest raises tau too:
