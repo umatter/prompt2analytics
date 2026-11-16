@@ -49,7 +49,9 @@
 //! regressor are refused with `EconError::NullValues` naming the column (spatialreg's
 //! `na.action = na.fail`); remove the incomplete rows and rebuild W first. Integer and
 //! Boolean (0/1) columns are accepted, text is `NonNumericColumn` and `±Inf` is
-//! `NonFiniteValues`. The same rules hold for `sphet` and `spatialprobit`.
+//! `NonFiniteValues`. The same rules hold for `sphet` and `spatialprobit`. The sample needs
+//! more observations than parameters (the coefficients, each spatial parameter and sigma^2),
+//! else `InsufficientData`.
 //!
 //! # Example
 //!
@@ -195,12 +197,16 @@ const INTERVAL_MARGIN: f64 = 1e-8;
 const BOUND_FRACTION: f64 = 1e-6;
 
 /// spatialreg's search interval 1/range(Re(eig)). Refuses an interval that is not finite (W has no
-/// negative or no positive real part among its eigenvalues, up to rounding), where neither
-/// spatialreg's nor any other golden section can start.
+/// real part below -1e-12 max|Re(eig)| or none above +1e-12 max|Re(eig)|, a test free of the
+/// scale of W), where neither spatialreg's nor any other golden section can start.
 fn search_interval(listw: &mut SpatialWeights) -> EconResult<(f64, f64)> {
-    let (lo, hi) = listw.try_rho_range()?;
+    let eigs = listw.try_eigenvalues()?;
+    let min = eigs.iter().copied().fold(f64::INFINITY, f64::min);
+    let max = eigs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let scale = min.abs().max(max.abs());
+    let (lo, hi) = (1.0 / min, 1.0 / max);
     let width = hi - lo;
-    if !(lo.abs() <= 1e12 && hi.abs() <= 1e12 && width > 4.0 * INTERVAL_MARGIN) {
+    if !(min < -1e-12 * scale && max > 1e-12 * scale && width > 4.0 * INTERVAL_MARGIN) {
         return Err(EconError::InvalidSpecification {
             message: format!(
                 "the spatial weights give no finite search interval for the spatial parameter: \
@@ -216,10 +222,10 @@ fn search_interval(listw: &mut SpatialWeights) -> EconResult<(f64, f64)> {
 #[derive(Debug)]
 struct GoldenSection {
     x: f64,
-    value: f64,
     convergence: Convergence,
-    /// The final bracket still holds an end of the search interval, or the estimate is within
-    /// [`BOUND_FRACTION`] of one.
+    /// The search converged with the final bracket still holding an end of the search
+    /// interval, or the estimate is within [`BOUND_FRACTION`] of one. An unconverged search
+    /// whose bracket still holds an end has not located the maximum: its note says so.
     at_bound: bool,
 }
 
@@ -267,11 +273,11 @@ fn golden_section_max(
     }
     let width = (b - a).abs();
     let x = (a + b) / 2.0;
+    let converged = width < tol;
     Ok(GoldenSection {
         x,
-        value: eval(x)?,
         convergence: Convergence::new(
-            width < tol,
+            converged,
             steps,
             max_iter,
             "golden-section bracket width",
@@ -279,8 +285,7 @@ fn golden_section_max(
             tol,
         ),
         // Near the end the objective can be lost to rounding before the bracket reaches it.
-        at_bound: a == lower
-            || b == upper
+        at_bound: (converged && (a == lower || b == upper))
             || (x - lower).min(upper - x) <= BOUND_FRACTION * (upper - lower),
     })
 }
@@ -567,6 +572,19 @@ impl ResultNotes for SemResult {
 /// # Returns
 ///
 /// SAR estimation results
+///
+/// # Errors
+///
+/// - `ColumnNotFound`, `NullValues`, `NonNumericColumn`, `NonFiniteValues`: a column is missing,
+///   has a missing value, is not numeric or holds ±Inf (see the module's data requirements).
+/// - `InvalidSpecification`: the data and the weights differ in length, `tol` or `max_iter` is
+///   not usable, or W gives no finite search interval.
+/// - `InsufficientData`: no more observations than parameters (the coefficients, rho and sigma^2).
+/// - `PerfectMulticollinearity`: the design (after any lagged regressors) is rank deficient.
+/// - `Computation`: the eigenvalues of W fail, or the information matrix is not positive
+///   definite at the estimate.
+/// - `ResourceLimit`, `Cancelled`: the dense W does not fit the allocation ceiling, or the
+///   installed budget expired.
 pub fn run_sar(
     dataset: &Dataset,
     y_col: &str,
@@ -731,6 +749,19 @@ pub fn run_sar(
 /// # Returns
 ///
 /// SEM estimation results
+///
+/// # Errors
+///
+/// - `ColumnNotFound`, `NullValues`, `NonNumericColumn`, `NonFiniteValues`: a column is missing,
+///   has a missing value, is not numeric or holds ±Inf (see the module's data requirements).
+/// - `InvalidSpecification`: the data and the weights differ in length, `tol` or `max_iter` is
+///   not usable, or W gives no finite search interval.
+/// - `InsufficientData`: no more observations than parameters (the coefficients, lambda and sigma^2).
+/// - `PerfectMulticollinearity`: the design (after any lagged regressors) is rank deficient.
+/// - `Computation`: the eigenvalues of W fail, or the information matrix is not positive
+///   definite at the estimate.
+/// - `ResourceLimit`, `Cancelled`: the dense W does not fit the allocation ceiling, or the
+///   installed budget expired.
 pub fn run_sem(
     dataset: &Dataset,
     y_col: &str,
@@ -984,6 +1015,19 @@ impl ResultNotes for SacResult {
 /// # Returns
 ///
 /// SAC estimation results
+///
+/// # Errors
+///
+/// - `ColumnNotFound`, `NullValues`, `NonNumericColumn`, `NonFiniteValues`: a column is missing,
+///   has a missing value, is not numeric or holds ±Inf (see the module's data requirements).
+/// - `InvalidSpecification`: the data and the weights differ in length, `tol` or `max_iter` is
+///   not usable, or W gives no finite search interval.
+/// - `InsufficientData`: no more observations than parameters (the coefficients, rho, lambda and sigma^2).
+/// - `PerfectMulticollinearity`: the design (after any lagged regressors) is rank deficient.
+/// - `Computation`: the eigenvalues of W fail, or the information matrix is not positive
+///   definite at the estimate.
+/// - `ResourceLimit`, `Cancelled`: the dense W does not fit the allocation ceiling, or the
+///   installed budget expired.
 pub fn run_sac(
     dataset: &Dataset,
     y_col: &str,
@@ -1580,7 +1624,7 @@ fn optimize_rho_sar(
 ///    - Transform: y* = y - λWy, X* = X - λWX
 ///    - Compute β = (X*'X*)⁻¹ X*'y*
 ///    - Compute RSS and σ²
-///    - Compute log|I - λW| = Σ ln(1 - λeᵢ) using eigenvalues eᵢ
+///    - Compute log|I - λW| = Σ ln|1 - λeᵢ| over the complex eigenvalues eᵢ
 /// 3. Use golden section search to find λ minimizing negative log-likelihood
 ///
 /// # Efficiency
@@ -2207,7 +2251,8 @@ mod tests {
 
     /// The SEs of a dimensionless rho or lambda do not depend on the units of y, and every beta SE
     /// scales with them. The estimates themselves move within the likelihood's flatness (1.3e-7
-    /// in rho), so the comparison leaves room for that.
+    /// in rho), so the SEs agree to about 1e-7 (largest measured: 9.0e-8, an SEM beta), and the
+    /// comparison is at 1e-6 relative.
     #[test]
     fn test_spatial_ml_se_scale_with_y() {
         let ds = spatial_sim();
@@ -2235,27 +2280,27 @@ mod tests {
             run_sar(&d10, "y", &x, &mut w, durbin()).unwrap(),
         );
         for (a, b) in [&sar, &sdm] {
-            close(b.rho_se, a.rho_se, 1e-5, "rho se");
+            close(b.rho_se, a.rho_se, 1e-6, "rho se");
             for (u, v) in a.std_errors.iter().zip(&b.std_errors) {
-                close(*v, 10.0 * u, 1e-5, "beta se");
+                close(*v, 10.0 * u, 1e-6, "beta se");
             }
         }
         let sem = (
             run_sem(&ds, "y", &x, &mut w, SemConfig::default()).unwrap(),
             run_sem(&d10, "y", &x, &mut w, SemConfig::default()).unwrap(),
         );
-        close(sem.1.lambda_se, sem.0.lambda_se, 1e-5, "lambda se");
+        close(sem.1.lambda_se, sem.0.lambda_se, 1e-6, "lambda se");
         for (u, v) in sem.0.std_errors.iter().zip(&sem.1.std_errors) {
-            close(*v, 10.0 * u, 1e-5, "sem beta se");
+            close(*v, 10.0 * u, 1e-6, "sem beta se");
         }
         let sac = (
             run_sac(&ds, "y", &x, &mut w, tight()).unwrap(),
             run_sac(&d10, "y", &x, &mut w, tight()).unwrap(),
         );
-        close(sac.1.rho_se, sac.0.rho_se, 1e-4, "sac rho se");
-        close(sac.1.lambda_se, sac.0.lambda_se, 1e-4, "sac lambda se");
+        close(sac.1.rho_se, sac.0.rho_se, 1e-6, "sac rho se");
+        close(sac.1.lambda_se, sac.0.lambda_se, 1e-6, "sac lambda se");
         for (u, v) in sac.0.std_errors.iter().zip(&sac.1.std_errors) {
-            close(*v, 10.0 * u, 1e-4, "sac beta se");
+            close(*v, 10.0 * u, 1e-6, "sac beta se");
         }
     }
 
@@ -2457,6 +2502,43 @@ mod tests {
         assert!(r.warnings.is_empty(), "{:?}", r.warnings);
     }
 
+    /// An unconverged search whose bracket still holds an end has not found a bound optimum:
+    /// three steps on the reference case leave a non-convergence note and no bound warning.
+    #[test]
+    fn golden_section_unconverged_interior_is_not_at_bound() {
+        let ds = spatial_sim();
+        let mut w = knn4(&ds);
+        let config = SarConfig {
+            max_iter: 3,
+            ..Default::default()
+        };
+        let r = run_sar(&ds, "y", &["x1", "x2"], &mut w, config).unwrap();
+        assert!(!r.convergence.converged);
+        assert!(
+            r.warnings.iter().all(|w| !w.contains("bound")),
+            "{:?}",
+            r.warnings
+        );
+        assert!(!r.warnings.is_empty(), "no non-convergence note");
+    }
+
+    /// The interval test is free of the scale of W: weights scaled by 1e-13 give the interval
+    /// scaled by 1e13.
+    #[test]
+    fn search_interval_accepts_tiny_weights() {
+        let coords: Vec<(f64, f64)> = (0..30)
+            .map(|i| ((i % 6) as f64 + 0.1 * (i as f64).sin(), (i / 6) as f64))
+            .collect();
+        let nb = Neighbors::try_from_knn(&coords, 4).unwrap();
+        let mut w = SpatialWeights::from_distance_decay(&nb, &coords, 1.0, false);
+        let big: Vec<(f64, f64)> = coords.iter().map(|&(a, b)| (a * 1e13, b * 1e13)).collect();
+        let mut tiny = SpatialWeights::from_distance_decay(&nb, &big, 1.0, false);
+        let (lo, hi) = search_interval(&mut w).unwrap();
+        let (tlo, thi) = search_interval(&mut tiny).unwrap();
+        assert!((tlo / (lo * 1e13) - 1.0).abs() < 1e-9, "{tlo} vs {lo}");
+        assert!((thi / (hi * 1e13) - 1.0).abs() < 1e-9, "{thi} vs {hi}");
+    }
+
     #[test]
     fn test_golden_section_flags_a_bound_optimum() {
         let bound = golden_section_max(Ok, -1.0, 1.0, 1e-10, 200).unwrap();
@@ -2618,8 +2700,9 @@ mod tests {
             .finish();
     }
 
-    /// The same impacts through the closed form (constant row sums) and through the solves: the
-    /// binary list is rescaled so that the rows do not sum to one value.
+    /// The impacts against the dense formula S = 2 A^-1 + 0.7 A^-1 W, A = I - rho W: through
+    /// the closed form on the row-standardised W (constant row sums) and through the solves on
+    /// the binary W (whose rows do not sum to one value).
     #[test]
     fn test_sdm_impacts_match_the_dense_formula_without_constant_row_sums() {
         let names = vec!["a".to_string()];
