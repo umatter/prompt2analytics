@@ -322,13 +322,34 @@ pub(crate) fn roc_sweep(sorted_desc: &[(f64, bool)], n_pos: usize, n_neg: usize)
 
 /// The AUC of [`roc_sweep`] without the curve.
 pub(crate) fn auc_sorted_desc(sorted_desc: &[(f64, bool)], n_pos: usize, n_neg: usize) -> f64 {
-    let mut tp = 0usize;
-    let mut numerator: u128 = 0;
-    for (_, gp, gn) in tie_groups(sorted_desc) {
-        numerator += auc_term(gn, tp, gp);
-        tp += gp;
+    // The numerator is at most 2 n_pos n_neg; in u64 whenever that fits (any n below about 6e9).
+    let fits_u64 = (n_pos as u128) * (n_neg as u128) * 2 <= u64::MAX as u128;
+    if !fits_u64 {
+        let mut tp = 0usize;
+        let mut numerator: u128 = 0;
+        for (_, gp, gn) in tie_groups(sorted_desc) {
+            numerator += auc_term(gn, tp, gp);
+            tp += gp;
+        }
+        return auc_from(numerator, n_pos, n_neg);
     }
-    auc_from(numerator, n_pos, n_neg)
+    let n = sorted_desc.len();
+    let (mut tp, mut numerator) = (0u64, 0u64);
+    let mut i = 0;
+    while i < n {
+        let score = sorted_desc[i].0;
+        let mut gp = u64::from(sorted_desc[i].1);
+        let mut j = i + 1;
+        while j < n && sorted_desc[j].0 == score {
+            gp += u64::from(sorted_desc[j].1);
+            j += 1;
+        }
+        let gn = (j - i) as u64 - gp;
+        numerator += gn * (2 * tp + gp);
+        tp += gp;
+        i = j;
+    }
+    auc_from(u128::from(numerator), n_pos, n_neg)
 }
 
 /// Indices of the curve points kept under a cap of `m + 1` points: the first, the last and `best`, the rest
