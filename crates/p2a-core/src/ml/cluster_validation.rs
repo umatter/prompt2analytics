@@ -72,6 +72,73 @@ pub(crate) fn compact_labels(labels: &[usize], what: &str) -> Result<CompactLabe
     }
 }
 
+/// The contingency table of two labellings: its nonzero cells `(t, p, count)` in lexicographic
+/// order of the labels, the row and column sums (indexed as the cells; zero sums are allowed) and
+/// the numbers of distinct labels.
+struct Contingency {
+    cells: Vec<(usize, usize, usize)>,
+    rows: Vec<usize>,
+    cols: Vec<usize>,
+    k_true: usize,
+    k_pred: usize,
+}
+
+/// The contingency table of two labellings of equal length. Indexed by the raw labels when the
+/// table of `(max_t + 1) (max_p + 1)` entries has at most `4n` of them (one pass, as for
+/// contiguous labels), otherwise by the compacted labels, densely or from the sorted pairs. Every
+/// path gives the same cells in the same order, so the sums over them are identical.
+fn contingency(
+    labels_true: &[usize],
+    labels_pred: &[usize],
+    what: &str,
+) -> Result<Contingency, String> {
+    let n = labels_true.len();
+    let to_string = |e: EconError| e.to_string();
+    let max_t = labels_true.iter().copied().max().unwrap_or(0);
+    let max_p = labels_pred.iter().copied().max().unwrap_or(0);
+    let raw = max_t
+        .checked_add(1)
+        .zip(max_p.checked_add(1))
+        .and_then(|(a, b)| a.checked_mul(b).map(|size| (a, b, size)))
+        .filter(|&(_, _, size)| size <= 4 * n.max(1));
+    if let Some((kt, kp, size)) = raw {
+        let mut table = crate::resource::try_vec(size, 0usize, what).map_err(to_string)?;
+        for (&a, &b) in labels_true.iter().zip(labels_pred) {
+            table[a * kp + b] += 1;
+        }
+        let mut rows = crate::resource::try_vec(kt, 0usize, what).map_err(to_string)?;
+        let mut cols = crate::resource::try_vec(kp, 0usize, what).map_err(to_string)?;
+        let mut cells = Vec::new();
+        for (idx, &c) in table.iter().enumerate() {
+            if c > 0 {
+                let (i, j) = (idx / kp, idx % kp);
+                rows[i] += c;
+                cols[j] += c;
+                cells.push((i, j, c));
+            }
+        }
+        let k_true = rows.iter().filter(|&&r| r > 0).count();
+        let k_pred = cols.iter().filter(|&&c| c > 0).count();
+        return Ok(Contingency {
+            cells,
+            rows,
+            cols,
+            k_true,
+            k_pred,
+        });
+    }
+    let t = compact_labels(labels_true, what)?;
+    let p = compact_labels(labels_pred, what)?;
+    let (cells, rows, cols) = contingency_cells(&t, &p)?;
+    Ok(Contingency {
+        cells,
+        rows,
+        cols,
+        k_true: t.k,
+        k_pred: p.k,
+    })
+}
+
 /// The nonzero cells `(t, p, count)` of the contingency table of two compacted labellings, in
 /// lexicographic order of `(t, p)`, with the row and column sums. Dense when `k_t * k_p <= 4n`,
 /// otherwise from the sorted pairs; both give the same cells in the same order.
@@ -1069,9 +1136,13 @@ pub fn rand_index(labels_true: &[usize], labels_pred: &[usize]) -> EconResult<Ra
     }
 
     // Contingency table of the compacted labels (any label values)
-    let t = compact_labels(labels_true, "Rand index labels").map_err(EconError::Computation)?;
-    let p = compact_labels(labels_pred, "Rand index labels").map_err(EconError::Computation)?;
-    let (cells, row_sums, col_sums) = contingency_cells(&t, &p).map_err(EconError::Computation)?;
+    let Contingency {
+        cells,
+        rows: row_sums,
+        cols: col_sums,
+        ..
+    } = contingency(labels_true, labels_pred, "Rand index labels")
+        .map_err(EconError::Computation)?;
 
     // Compute combinations
     fn comb2(x: usize) -> f64 {
@@ -1216,9 +1287,13 @@ pub fn nmi(
     let method = average_method.unwrap_or("geometric");
 
     // Contingency table of the compacted labels (any label values)
-    let t = compact_labels(labels_true, "NMI labels").map_err(EconError::Computation)?;
-    let p = compact_labels(labels_pred, "NMI labels").map_err(EconError::Computation)?;
-    let (cells, row_sums, col_sums) = contingency_cells(&t, &p).map_err(EconError::Computation)?;
+    let Contingency {
+        cells,
+        rows: row_sums,
+        cols: col_sums,
+        k_true,
+        k_pred,
+    } = contingency(labels_true, labels_pred, "NMI labels").map_err(EconError::Computation)?;
 
     let n_f = n as f64;
 
@@ -1263,7 +1338,7 @@ pub fn nmi(
         }
     };
 
-    let nmi_value = if t.k == 1 && p.k == 1 {
+    let nmi_value = if k_true == 1 && k_pred == 1 {
         1.0 // one cluster on both sides: the same (trivial) partition
     } else if mi == 0.0 {
         0.0 // independent; includes one trivial partition against a non-trivial one
@@ -1975,6 +2050,30 @@ mod tests {
         assert_eq!(r.cluster_silhouettes.len(), 5);
         assert_eq!(r.cluster_silhouettes[1], 0.0);
         assert_eq!(r.cluster_silhouettes[3], 0.0);
+    }
+
+    #[test]
+    fn test_contingency_paths_agree() {
+        let t = [0usize, 2, 2, 5, 0, 5, 2];
+        let p = [1usize, 1, 0, 3, 3, 1, 0];
+        let raw = contingency(&t, &p, "t").unwrap();
+        let ct = compact_labels(&t, "t").unwrap();
+        let cp = compact_labels(&p, "t").unwrap();
+        let (cells, rows, cols) = contingency_cells(&ct, &cp).unwrap();
+        let remap = |v: &[(usize, usize, usize)]| -> Vec<(usize, usize, usize)> {
+            v.iter()
+                .map(|&(i, j, c)| (ct.levels[i], cp.levels[j], c))
+                .collect()
+        };
+        assert_eq!(raw.cells, remap(&cells));
+        assert_eq!((raw.k_true, raw.k_pred), (3, 3));
+        let nz = |v: &[usize]| v.iter().copied().filter(|&x| x > 0).collect::<Vec<_>>();
+        assert_eq!(nz(&raw.rows), rows);
+        assert_eq!(nz(&raw.cols), cols);
+        let far: Vec<usize> = t.iter().map(|&l| l << 40).collect();
+        let r1 = nmi(&t, &p, None).unwrap().nmi;
+        let r2 = nmi(&far, &p, None).unwrap().nmi;
+        assert_eq!(r1.to_bits(), r2.to_bits());
     }
 
     #[test]
