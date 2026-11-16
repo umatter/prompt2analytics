@@ -1503,7 +1503,6 @@ pub fn arima_sim(
 ///
 /// - Box et al. (2015), Chapter 3
 /// - R `stats::arima.sim`
-#[allow(clippy::too_many_arguments)]
 pub fn arima_sim_with_sd(
     ar: &[f64],
     ma: &[f64],
