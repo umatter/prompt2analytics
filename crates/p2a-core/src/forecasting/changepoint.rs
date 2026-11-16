@@ -910,12 +910,15 @@ mod tests {
         assert!(r.n_changepoints >= 1);
     }
 
-    fn cpt_case() -> (
+    /// The case `id` (cpt_binseg_t4) with its series and its variance series.
+    fn cpt_case(
+        id: &str,
+    ) -> (
         p2a_validation::Case,
         crate::data::Dataset,
         crate::data::Dataset,
     ) {
-        let (case, ds) = crate::test_support::load_case("cpt_binseg_t4");
+        let (case, ds) = crate::test_support::load_case(id);
         let path = p2a_validation::repo_path("validation/datasets/generated/cpt_binseg_t4_var.csv");
         let dv = crate::data::Dataset::new(crate::data::DataLoader::load_csv(&path).unwrap());
         (case, ds, dv)
@@ -958,7 +961,7 @@ mod tests {
     /// (no change) and on three regimes (99, 200).
     #[test]
     fn test_validate_binseg_mean_mbic() {
-        let (case, ds, _) = cpt_case();
+        let (case, ds, _) = cpt_case("cpt_binseg_t4");
         let wn = col(&ds, "wn");
         let reg = col(&ds, "reg");
         let mean = CostFunction::MeanChange;
@@ -979,7 +982,7 @@ mod tests {
     /// cpt.mean(reg, BinSeg, penalty = "Manual", pen.value = 10): 99, 200, plain costs.
     #[test]
     fn test_validate_binseg_mean_manual() {
-        let (case, ds, _) = cpt_case();
+        let (case, ds, _) = cpt_case("cpt_binseg_t4");
         let reg = col(&ds, "reg");
         let r =
             binary_segmentation(&reg, None, None, Some(10.0), CostFunction::MeanChange).unwrap();
@@ -993,7 +996,7 @@ mod tests {
     /// under var; none under meanvar) and mean-and-variance series mv (122 under both).
     #[test]
     fn test_validate_binseg_var_and_meanvar() {
-        let (case, _, dv) = cpt_case();
+        let (case, _, dv) = cpt_case("cpt_binseg_t4");
         let vr = centred(&col(&dv, "vr"));
         let mv = centred(&col(&dv, "mv"));
         let var = CostFunction::VarianceChange;
@@ -1015,7 +1018,7 @@ mod tests {
     /// finds the four changes (57, 121, 180, 240) and does not warn.
     #[test]
     fn test_validate_binseg_q_reached() {
-        let (case, ds, _) = cpt_case();
+        let (case, ds, _) = cpt_case("cpt_binseg_t4");
         let many = col(&ds, "many");
         let mean = CostFunction::MeanChange;
         let r2 = binary_segmentation(&many, Some(2), None, None, mean).unwrap();
