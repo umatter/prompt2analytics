@@ -469,6 +469,8 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Mixture EMs (mixtools::normalmixEM, mvnormalmixEM; flexmix::flexmix) | [mixtures.md](ml/mixtures.md) | R-pinned |
 | Affinity propagation (apcluster::apcluster) | [affinity_propagation.md](ml/affinity_propagation.md) | R-pinned |
 | Conditional inference tree root statistics and p-values below 1e-16 (partykit::ctree formulas) | [ctree.md](ml/ctree.md) | R-pinned |
+| Conditional inference trees (partykit::ctree: regression and classification trees, Monte Carlo p-values) | [ctree.md](ml/ctree.md) | R-pinned |
+| C5.0-style classification trees (Quinlan 1993, 1996; R's C50 not installed) | [c50.md](ml/c50.md) | not R-pinned |
 | Cubist leaf linear model with collinear attributes | [cubist.md](ml/cubist.md) | R-pinned |
 | Quantile regression forest (quantile predictions; tree growth and importance pinned via rpart and randomForest) | [quantile_rf.md](ml/quantile_rf.md) | not R-pinned |
 | PAM and CLARA (cluster::pam, clara); fuzzy c-means partition and FANNY recorded (e1071::cmeans, cluster::fanny) | [partitioning.md](ml/partitioning.md) | R-pinned, known deviations (ML-11, ML-9) |
