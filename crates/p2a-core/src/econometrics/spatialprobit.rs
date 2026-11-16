@@ -727,7 +727,15 @@ fn rho_log_kernel(log_det: f64, rho: f64, (aa, ab, bb): (f64, f64, f64)) -> f64 
 /// (LeSage & Pace's griddy Gibbs `draw_rho`). No rejection step, so every draw moves.
 fn draw_from_grid<R: rand::Rng>(grid: &[f64], log_k: &[f64], rng: &mut R) -> f64 {
     let max = log_k.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    let f: Vec<f64> = log_k.iter().map(|&l| (l - max).exp()).collect();
+    // a cell below exp(-60) of the peak adds under 1e-23 of the total over the whole grid:
+    // zero without the exponential, as most of the grid is for a concentrated posterior
+    let f: Vec<f64> = log_k
+        .iter()
+        .map(|&l| {
+            let d = l - max;
+            if d < -60.0 { 0.0 } else { d.exp() }
+        })
+        .collect();
     let h = grid[1] - grid[0];
     let areas: Vec<f64> = f.windows(2).map(|p| 0.5 * h * (p[0] + p[1])).collect();
     let total: f64 = areas.iter().sum();
@@ -990,10 +998,10 @@ fn chebyshev_nodes(a: f64, b: f64, m: usize) -> Vec<f64> {
 
 /// The parts of (I - ρW)^-1 the impacts need, interpolated in ρ: barycentric interpolation on
 /// Chebyshev points of the second kind over the range of the ρ draws, from one dense inverse
-/// per node ([`SpatialWeights::dense_inverse_parts`]). The nodes double (9, 17, 33) until two
-/// nested interpolants agree to [`IMPACT_INTERPOLATION_TOL`] at the midpoints of the finer
-/// one, or the finer one agrees with the dense inverse to that tolerance in its two end
-/// cells; the finer one is kept. When 33 nodes miss the target a warning reports the
+/// per node ([`SpatialWeights::dense_inverse_parts`]). The nodes double (9, 17, 33) until the
+/// current interpolant agrees with the dense inverse to [`IMPACT_INTERPOLATION_TOL`] in its two
+/// end cells, where its error peaks, or two nested interpolants agree to that tolerance at
+/// the midpoints of the finer one (the finer one is kept). When 33 nodes miss the target a warning reports the
 /// accuracy measured in the end cells.
 struct InverseInterpolant {
     nodes: Vec<f64>,
@@ -1034,6 +1042,10 @@ impl InverseInterpolant {
             it.push_node(listw, x, r)?;
         }
         it.set_weights();
+        // a narrow posterior range often needs no more than the 9 nodes
+        if it.end_cell_error(listw, x)? <= IMPACT_INTERPOLATION_TOL {
+            return Ok(it);
+        }
         let mut m = 8;
         loop {
             let finer = chebyshev_nodes(lo, hi, 2 * m);
@@ -1390,8 +1402,8 @@ mod tests {
         b: Array1<f64>,
     }
 
-    fn pieces() -> Pieces {
-        let (case, ds) = crate::test_support::load_case("spatial_probit_pieces_t4");
+    fn pieces(id: &str) -> Pieces {
+        let (case, ds) = crate::test_support::load_case(id);
         let c = |name: &str| {
             crate::data::columns::numeric_column(
                 ds.df(),
@@ -1430,7 +1442,7 @@ mod tests {
     /// R: logdet(rho) - ||A z - c||^2 / 2 on the grid -0.9, ..., 0.9, SAR and SEM.
     #[test]
     fn test_validate_probit_rho_kernel_spatial_sim() {
-        let mut p = pieces();
+        let mut p = pieces("spatial_probit_pieces_t4");
         let grid = p.case.vector("grid");
         let log_det = p.w.try_spectrum().unwrap().log_det_grid(&grid);
         let xb = p.x.dot(&p.b);
@@ -1455,7 +1467,7 @@ mod tests {
     /// mu_i - sum_{j != i} H_ij (z_j - mu_j) / H_ii and variance 1 / H_ii, H = A'A.
     #[test]
     fn test_validate_probit_latent_conditional_spatial_sim() {
-        let p = pieces();
+        let p = pieces("spatial_probit_pieces_t4");
         let rho = 0.6;
         let cols = weight_columns(&p.w).unwrap();
         let xb = p.x.dot(&p.b);
@@ -1483,7 +1495,7 @@ mod tests {
     /// SAR at rho = 0.5 and 0.9 and SEM at lambda = 0.6.
     #[test]
     fn test_validate_probit_marginal_probabilities_spatial_sim() {
-        let p = pieces();
+        let p = pieces("spatial_probit_pieces_t4");
         let mut chk = p2a_validation::Check::new(&p.case);
         for (model, rho, tag) in [
             (SpatialProbitModel::Sar, 0.5, "sar_%_rho05"),
@@ -1503,7 +1515,7 @@ mod tests {
     /// mu = A^-1 X b, direct from diag(A^-1), total from A^-1 1), SEM direct effects at 0.6.
     #[test]
     fn test_validate_probit_impacts_exact_spatial_sim() {
-        let p = pieces();
+        let p = pieces("spatial_probit_pieces_t4");
         let mut chk = p2a_validation::Check::new(&p.case);
         for (rho, tag) in [(0.5, "rho05"), (0.9, "rho09")] {
             let interp = InverseInterpolant::build(&p.w, &p.x, rho, rho).unwrap();
@@ -1518,7 +1530,7 @@ mod tests {
 
     #[test]
     fn test_validate_sem_probit_direct_effects_spatial_sim() {
-        let p = pieces();
+        let p = pieces("spatial_probit_pieces_t4");
         let interp = InverseInterpolant::build(&p.w, &p.x, 0.6, 0.6).unwrap();
         let (d, _, _) = probit_impacts_one_draw(&p.x, &interp, &p.b, 0.6, SpatialProbitModel::Sem);
         p2a_validation::Check::new(&p.case)
@@ -1528,7 +1540,7 @@ mod tests {
 
     #[test]
     fn sem_probit_impacts_have_no_spillover() {
-        let p = pieces();
+        let p = pieces("spatial_probit_pieces_t4");
         let interp = InverseInterpolant::build(&p.w, &p.x, 0.2, 0.7).unwrap();
         for rho in [0.2, 0.45, 0.7] {
             let (d, i, t) =
@@ -1542,12 +1554,21 @@ mod tests {
     /// at that rho to 1e-9 relative.
     #[test]
     fn probit_impacts_interpolation_matches_dense() {
-        let p = pieces();
+        let p = pieces("spatial_probit_pieces_t4");
         let interp = InverseInterpolant::build(&p.w, &p.x, -0.2, 0.85).unwrap();
         assert!(interp.warning.is_none());
-        // a narrow range stops at 17 nodes, accepted by the dense check in its end cells
+        // a narrower range stops at 17 nodes and a very narrow one at 9, each accepted by the
+        // dense check in its end cells
         let narrow = InverseInterpolant::build(&p.w, &p.x, 0.4, 0.7).unwrap();
         assert!(narrow.nodes.len() == 17 && narrow.warning.is_none());
+        let narrower = InverseInterpolant::build(&p.w, &p.x, 0.30, 0.34).unwrap();
+        assert!(narrower.nodes.len() == 9 && narrower.warning.is_none());
+        for r in [0.30, 0.3123, 0.34] {
+            let mut exact = InverseInterpolant::empty();
+            exact.push_node(&p.w, &p.x, r).unwrap();
+            exact.bary = vec![1.0];
+            assert!(narrower.max_relative_difference(&exact, &[r]) <= 1e-9);
+        }
         for rho in [-0.199, -0.1, 0.123_456, 0.5, 0.77, 0.849] {
             let exact = InverseInterpolant::build(&p.w, &p.x, rho, rho).unwrap();
             for model in [SpatialProbitModel::Sar, SpatialProbitModel::Sem] {
@@ -1569,7 +1590,7 @@ mod tests {
     /// 33 nodes stop the doubling and the warning reports the measured accuracy.
     #[test]
     fn probit_impacts_interpolation_warns_near_the_singular_rho() {
-        let p = pieces();
+        let p = pieces("spatial_probit_pieces_t4");
         let interp = InverseInterpolant::build(&p.w, &p.x, -0.9, 0.97).unwrap();
         assert_eq!(interp.nodes.len(), 33);
         let w = interp.warning.as_deref().unwrap();
@@ -1605,7 +1626,7 @@ mod tests {
     #[test]
     fn probit_rho_step_draws_from_the_kernel() {
         use rand::SeedableRng;
-        let mut p = pieces();
+        let mut p = pieces("spatial_probit_pieces_t4");
         let (lo, hi) = p.w.try_rho_range().unwrap();
         let grid = rho_grid((lo.max(-0.99), hi.min(0.99)));
         let spectrum = p.w.try_spectrum().unwrap();
