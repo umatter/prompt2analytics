@@ -1907,7 +1907,7 @@ impl AnalyticsServer {
 
     /// Run Conditional Inference Trees (ctree) for regression or classification.
     #[tool(
-        description = "Conditional Inference Trees (ctree) - decision trees with unbiased variable selection via permutation tests. Based on Hothorn, Hornik & Zeileis (2006). Unlike CART, ctree uses statistical significance tests for variable selection, avoiding bias towards variables with many possible split points. The tree grows until no significant relationship exists between predictors and response (no pruning needed). Equivalent to R's partykit::ctree. A text, categorical or boolean target fits a classification tree (at most 10 classes)."
+        description = "Conditional inference trees as partykit::ctree (Hothorn, Hornik & Zeileis 2006). At each node every input is tested for independence from the response with the conditional linear statistic (numeric inputs untransformed; class indicators for a categorical response; asymptotic chi-squared p-values, Bonferroni-adjusted as partykit does, 1 - (1 - p)^m; or Monte Carlo permutation p-values with testtype 'montecarlo'). The most significant input is split at the cut that maximises the two-sample statistic (x <= the observed break goes left), and growth stops when no adjusted p-value is below 1 - mincriterion. A numeric target fits a regression tree; a text, categorical or boolean target, or classification = true, fits a classification tree (at most max(2, min(1000, n / 2)) classes). Variable importance is the sum of 1 - adjusted p over the splits on each input, not partykit's permutation varimp. root_tests reports every input's statistic and raw and adjusted p-value at the root."
     )]
     pub async fn ml_ctree(
         &self,
@@ -1939,6 +1939,10 @@ impl AnalyticsServer {
         config.teststat = CtreeTestStat::choices().canonical(teststat).to_string();
         config.testtype = CtreeTestType::choices().canonical(testtype).to_string();
         config.seed = self.seed_or_global(request.seed).await;
+        config.classification = request.classification;
+        if let Some(b) = request.n_permutations {
+            config.nresample = b;
+        }
 
         let feature_refs: Vec<&str> = request.features.iter().map(|s| s.as_str()).collect();
 
@@ -1988,6 +1992,23 @@ impl AnalyticsServer {
         }
 
         let n_features = result.variable_importance.len();
+        let finite = |v: Option<&f64>| v.copied().filter(|v| v.is_finite());
+        let root_tests: Vec<serde_json::Value> = (0..n_features)
+            .map(|j| {
+                let name = result
+                    .feature_names
+                    .as_ref()
+                    .and_then(|names| names.get(j))
+                    .cloned()
+                    .unwrap_or_else(|| format!("X{j}"));
+                serde_json::json!({
+                    "feature": name,
+                    "statistic": finite(result.root_statistics.get(j)),
+                    "p_value": finite(result.root_p_values.get(j)),
+                    "p_value_adjusted": finite(result.root_p_values_adjusted.get(j)),
+                })
+            })
+            .collect();
         let output = serde_json::json!({
             "n_nodes": result.n_nodes,
             "n_features": n_features,
@@ -1998,13 +2019,16 @@ impl AnalyticsServer {
             "variable_importance": result.variable_importance,
             "feature_names": result.feature_names,
             "tree_structure": node_to_json(&result.root, &result.feature_names),
+            "root_tests": root_tests,
             "config": {
                 "mincriterion": config.mincriterion,
                 "minsplit": config.minsplit,
                 "minbucket": config.minbucket,
                 "maxdepth": config.maxdepth,
                 "teststat": config.teststat,
-                "testtype": config.testtype
+                "testtype": config.testtype,
+                "classification": result.config.classification,
+                "n_permutations": config.nresample
             }
         });
 
@@ -3400,6 +3424,50 @@ mod tests {
             text_of(&r).contains("Column 'cls_na' contains 1 missing value(s)"),
             "{}",
             text_of(&r)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mcp_ctree_numeric_target_and_classification_flag() {
+        // ML-87: a numeric 0/1 target is a regression unless classification = true.
+        let s = server().await;
+        let ctr = |extra: Value| {
+            let mut a = json!({"dataset": "ml", "features": ["x1", "x2"], "target": "cls",
+                               "minsplit": 6, "minbucket": 3, "seed": 1});
+            for (k, v) in extra.as_object().unwrap() {
+                a[k] = v.clone();
+            }
+            a
+        };
+        let reg = json_summary(&s.ml_ctree(req(ctr(json!({})))).await.unwrap());
+        assert_eq!(reg["is_classification"], json!(false));
+        let cls = json_summary(
+            &s.ml_ctree(req(ctr(json!({"classification": true}))))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(cls["is_classification"], json!(true));
+        assert_eq!(cls["config"]["classification"], json!(true));
+        let tests = reg["root_tests"].as_array().unwrap();
+        assert_eq!(tests.len(), 2);
+        assert_eq!(tests[0]["feature"], json!("x1"));
+        assert!(tests[0]["p_value"].is_number() && tests[0]["p_value_adjusted"].is_number());
+    }
+
+    #[test]
+    fn test_ml_ctree_description_names_the_test_it_runs() {
+        let tools = crate::server::AnalyticsServer::new().router_tools();
+        let d = tools
+            .iter()
+            .find(|t| t.name == "ml_ctree")
+            .and_then(|t| t.description.clone())
+            .unwrap_or_default()
+            .to_string();
+        assert!(d.contains("partykit") && d.contains("conditional"), "{d}");
+        assert!(!d.contains("Equivalent to"), "{d}");
+        assert!(
+            !d.contains("permutation tests") || d.contains("Monte Carlo"),
+            "{d}"
         );
     }
 

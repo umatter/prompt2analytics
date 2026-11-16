@@ -3,26 +3,39 @@
 //! Pure Rust implementation of conditional inference trees based on
 //! Hothorn, Hornik & Zeileis (2006).
 //!
-//! ## Features
-//!
-//! - **Unbiased variable selection**: Uses permutation tests to select variables,
-//!   avoiding bias towards variables with many possible splits
-//! - **Statistical stopping rule**: Stops growing when no significant relationship
-//!   between predictors and response exists
-//! - **No pruning needed**: The significance-based stopping rule produces
-//!   appropriately-sized trees without post-hoc pruning
-//! - **Supports both regression and classification**: Automatic detection based
-//!   on number of unique values in response
+//! Follows `partykit::ctree` (partykit 1.3.1 / libcoin 1.0.13) for numeric inputs; the
+//! regression, classification, null and Monte Carlo cases of `validation/r/cases/ml_trees_t4.R`
+//! pin it.
 //!
 //! ## Algorithm
 //!
-//! The algorithm proceeds as follows:
+//! At each node of `n` rows:
 //!
-//! 1. Test global null hypothesis of independence between response and all predictors
-//! 2. If no variable rejects H0 at level alpha (1 - mincriterion), stop
-//! 3. Select the variable with smallest p-value (strongest association)
-//! 4. Find optimal split point for selected variable by maximizing test statistic
-//! 5. Recursively partition left and right child nodes
+//! 1. **Variable tests.** Each input is tested for independence from the response with the
+//!    conditional linear statistic of Strasser and Weber (numeric input untransformed; the
+//!    response itself, or class indicators for a classification). `quadratic`:
+//!    `(n - 1) r^2` (regression, 1 df) or `(n - 1) SSB / Sxx` (classification, df = classes in
+//!    the node - 1), with asymptotic chi-squared p-values; `maximum` (regression only): `|z|`
+//!    with a two-sided normal p-value.
+//! 2. **Untestable inputs.** An input whose statistic has variance below `sqrt(eps)` (constant
+//!    in the node) is not tested and does not count in the adjustment.
+//! 3. **P-values.** `bonferroni`: partykit's adjustment `1 - (1 - p)^m` over the `m` tested
+//!    inputs; `univariate`: none; `montecarlo`: the share of `nresample` permutations of the
+//!    response whose statistic reaches the observed one, unadjusted.
+//! 4. **Selection and stopping.** The input with the smallest adjusted p-value (the larger
+//!    statistic, then the first, on ties). The node is a leaf when no adjusted p-value is below
+//!    `1 - mincriterion`, when it has fewer than `minsplit` rows, or at `maxdepth`.
+//! 5. **Node minimum.** Each child keeps at least `max(minbucket, ceil(0.01 n))` rows.
+//! 6. **Split point.** The observed value `u` of the selected input (left: `x <= u`) that
+//!    maximises the two-sample statistic of `I(x <= u)`: the variance-reduction cut for a
+//!    regression, Pearson's X^2 for a classification; the first cut on ties. When the selected
+//!    input has no admissible cut, the next significant input is tried (partykit's
+//!    `splittry = 2`).
+//! 7. **Leaves.** The mean (regression) or the most frequent class, the first on ties.
+//!
+//! The task comes from the target: a numeric target is a regression unless
+//! `classification = Some(true)`. Variable importance is the sum of `1 - adjusted p` over the
+//! splits on each input, not partykit's permutation `varimp`.
 //!
 //! ## Example
 //!

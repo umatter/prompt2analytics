@@ -673,8 +673,8 @@ async fn test_validate_mcp_mboost_families() {
 }
 
 /// ctree options are parsed by the core enums and echoed canonically; a request giving only
-/// minbucket gets a valid minsplit. Before: the raw string was echoed and minbucket 12 alone was
-/// refused by the minsplit >= 2 minbucket rule.
+/// minbucket gets a valid minsplit; MonteCarlo fits. Before: the raw string was echoed, minbucket
+/// 12 alone was refused by the minsplit >= 2 minbucket rule, and MonteCarlo was refused.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_mcp_ctree_options_canonical_and_minsplit_default() {
     let (s, server) = session_with("shap_tree_rpart");
@@ -714,14 +714,28 @@ async fn test_mcp_ctree_options_canonical_and_minsplit_default() {
         ),
         (json!(24), json!(12))
     );
+    // Monte Carlo permutation p-values (before: refused as not implemented).
+    let mc = json_block(&ok(&call(
+        &server,
+        &s,
+        "ml_ctree",
+        with(
+            &base,
+            json!({"testtype": "MonteCarlo", "n_permutations": 99, "maxdepth": 1}),
+        ),
+    )
+    .await));
+    assert_eq!(mc["config"]["testtype"], json!("montecarlo"));
+    assert_eq!(mc["config"]["n_permutations"], json!(99));
+    assert_eq!(mc["root_tests"].as_array().unwrap().len(), 4);
     let e = err(&call(
         &server,
         &s,
         "ml_ctree",
-        with(&base, json!({"testtype": "MonteCarlo"})),
+        with(&base, json!({"testtype": "Teststatistic"})),
     )
     .await);
-    assert!(e.to_lowercase().contains("montecarlo"), "{e}");
+    assert!(e.contains("'Teststatistic'"), "{e}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
