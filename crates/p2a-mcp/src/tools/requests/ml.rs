@@ -554,7 +554,7 @@ pub struct CubistRequest {
 
     /// Number of neighbors for instance-based correction (default: 0)
     #[schemars(
-        description = "Number of nearest neighbors for prediction adjustment. Default is 0 (no adjustment). Higher values add k-NN smoothing."
+        description = "0-9: adjust each prediction by the mean residual of the k nearest training cases (R's Cubist). Default 0 (no adjustment)."
     )]
     pub neighbors: Option<usize>,
 

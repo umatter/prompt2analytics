@@ -1871,6 +1871,7 @@ async fn test_ml_descriptions_say_what_is_returned() {
             "ml_random_forest lacks {sub:?}"
         );
     }
+    assert!(!d("ml_random_forest").contains("(R nodesize 5)"));
     assert!(d("ml_cutree").contains("1-based") || d("ml_cutree").contains("R's cutree numbering"));
 }
 
