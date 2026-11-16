@@ -9,6 +9,7 @@ use crate::errors::{EconError, EconResult};
 use crate::resource::{
     check_alloc, checked_len, checkpoint, try_vec, try_with_capacity, try_zeros2,
 };
+use crate::traits::convergence::{ResultNotes, notes_text};
 use faer::Mat;
 use ndarray::{Array1, Array2, ArrayView2, Axis};
 
@@ -323,6 +324,14 @@ pub struct TsneResult {
     pub n_iterations: usize,
     /// KL(P || Q) of the returned embedding, with the unexaggerated P
     pub kl_divergence: f64,
+    /// Warnings: points whose bandwidth search missed the perplexity tolerance
+    pub warnings: Vec<String>,
+}
+
+impl ResultNotes for TsneResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
+    }
 }
 
 impl std::fmt::Display for TsneResult {
@@ -356,7 +365,7 @@ impl std::fmt::Display for TsneResult {
         if self.embedding.nrows() > 5 {
             writeln!(f, "  ... ({} more points)", self.embedding.nrows() - 5)?;
         }
-        Ok(())
+        write!(f, "{}", notes_text(self))
     }
 }
 
@@ -419,7 +428,7 @@ pub fn tsne(
 
     // Compute joint probabilities P_ij using Gaussian kernel (row by row; no
     // distance matrix is kept)
-    let p = compute_joint_probabilities(&data, perp)?;
+    let (p, calibration) = compute_joint_probabilities(&data, perp)?;
 
     // Initialize low-dimensional embedding using PCA or random
     let mut y = initialize_embedding(data.view(), n_comp, seed)?;
@@ -486,7 +495,7 @@ pub fn tsne(
 
     // KL(P || Q) of the returned embedding, with the unexaggerated P
     let sum_q = fill_q_distribution(&y.view(), &mut q);
-    let kl_div = compute_kl_divergence(&p.view(), 1.0, &q.view(), sum_q);
+    let kl_div = compute_kl_divergence(&p.view(), &q.view(), sum_q);
 
     Ok(TsneResult {
         embedding: y,
@@ -494,6 +503,7 @@ pub fn tsne(
         perplexity: perp,
         n_iterations: max_iter,
         kl_divergence: kl_div,
+        warnings: calibration.warning(n_samples, perp).into_iter().collect(),
     })
 }
 
@@ -508,17 +518,67 @@ fn sign3(v: f64) -> i8 {
     }
 }
 
-/// Compute joint probability matrix P using Gaussian kernel.
-/// Uses binary search to find sigma for each point to achieve target perplexity.
-///
-/// Row `i`'s squared distances are computed into a reusable buffer (pair
-/// `(min(i, j), max(i, j))`, the order a full distance matrix used), its
-/// conditional probabilities are written into row `i` of `P`, and `P` is then
-/// symmetrised in place. Only the `n x n` matrix `P` is allocated.
+/// Steps of the bandwidth search per point (bhtsne's limit).
+const PERPLEXITY_STEPS: usize = 200;
+/// Tolerance of the bandwidth search on `|H - ln(perplexity)|` (bhtsne's).
+const PERPLEXITY_TOL: f64 = 1e-5;
+
+/// Points whose bandwidth search missed [`PERPLEXITY_TOL`], and the largest miss.
+#[derive(Debug, Clone, Copy, Default)]
+struct Calibration {
+    missed: usize,
+    worst: f64,
+}
+
+impl Calibration {
+    /// The warning for points that missed the tolerance, if any.
+    fn warning(&self, n: usize, perplexity: f64) -> Option<String> {
+        (self.missed > 0).then(|| {
+            format!(
+                "the bandwidth search did not reach perplexity {perplexity} within {PERPLEXITY_TOL:e} for {} of {n} points in {PERPLEXITY_STEPS} steps (largest |H - ln(perplexity)| {:.4}); their affinities use the last bandwidth tried (exact duplicates or perplexity close to the number of distinct neighbours)",
+                self.missed, self.worst
+            )
+        })
+    }
+}
+
+/// The joint affinities `P` of t-SNE: the conditional rows of
+/// [`conditional_affinities`], symmetrised as `(P + P') / sum(P + P')` with no
+/// floor (bhtsne's exact path). Only the `n x n` matrix `P` is allocated.
 fn compute_joint_probabilities(
     data: &ArrayView2<f64>,
     perplexity: f64,
-) -> Result<Array2<f64>, String> {
+) -> Result<(Array2<f64>, Calibration), String> {
+    let (mut p, calibration) = conditional_affinities(data, perplexity)?;
+    let n = p.nrows();
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let val = p[[i, j]] + p[[j, i]];
+            p[[i, j]] = val;
+            p[[j, i]] = val;
+        }
+    }
+    let total = p.sum();
+    if total > 0.0 {
+        p /= total;
+    }
+    Ok((p, calibration))
+}
+
+/// The conditional affinities `p_{j|i}`, row by row, calibrated as bhtsne's
+/// `computeGaussianPerplexity`: for each point a search over the precision
+/// `beta = 1 / (2 sigma^2)`, starting at 1, doubling (or halving) while the
+/// other bound is open and bisecting once both are, for at most
+/// [`PERPLEXITY_STEPS`] steps, until the row entropy
+/// `H = beta sum_j d2_ij p_j / S + ln S` (`S = f64::MIN_POSITIVE + sum_j p_j`,
+/// `p_j = exp(-beta d2_ij)`) is within [`PERPLEXITY_TOL`] of `ln(perplexity)`.
+/// Every row is written, with the last bandwidth tried when the search misses;
+/// the misses are counted. The squared distances of row `i` go into a reused
+/// buffer (pair `(min(i, j), max(i, j))`); no distance matrix is kept.
+fn conditional_affinities(
+    data: &ArrayView2<f64>,
+    perplexity: f64,
+) -> Result<(Array2<f64>, Calibration), String> {
     let to_string = |e: EconError| e.to_string();
     let n = data.nrows();
     let n_features = data.ncols();
@@ -526,7 +586,7 @@ fn compute_joint_probabilities(
 
     let mut p = try_zeros2(n, n, "t-SNE affinity matrix").map_err(to_string)?;
     let mut distances = try_vec(n, 0.0f64, "t-SNE distance row").map_err(to_string)?;
-    let mut p_i = Array1::zeros(n);
+    let mut calibration = Calibration::default();
 
     for i in 0..n {
         checkpoint().map_err(to_string)?;
@@ -545,75 +605,54 @@ fn compute_joint_probabilities(
             };
         }
 
-        // The buffer is reused across rows: entry i must start at 0
-        p_i[i] = 0.0;
-
-        // Binary search for sigma_i
-        let mut sigma_min = 1e-10;
-        let mut sigma_max = 1e10;
-        let mut sigma = 1.0;
-
-        for _ in 0..50 {
-            // Compute conditional probability P_j|i (p_i[i] stays 0)
-            let mut sum_exp = 0.0;
-
+        let mut row = p.row_mut(i);
+        let mut beta = 1.0f64;
+        let mut min_beta: Option<f64> = None;
+        let mut max_beta: Option<f64> = None;
+        let mut sum_p = f64::MIN_POSITIVE;
+        let mut h_diff = f64::INFINITY;
+        for _ in 0..PERPLEXITY_STEPS {
+            sum_p = f64::MIN_POSITIVE;
+            let mut h = 0.0;
             for j in 0..n {
-                if i != j {
-                    let exp_val = (-distances[j] / (2.0 * sigma * sigma)).exp();
-                    p_i[j] = exp_val;
-                    sum_exp += exp_val;
+                if j == i {
+                    row[j] = 0.0;
+                    continue;
+                }
+                let v = (-beta * distances[j]).exp();
+                row[j] = v;
+                sum_p += v;
+                // an underflowed term adds nothing (and 0 x an overflowed distance is not NaN)
+                if v > 0.0 {
+                    h += beta * (distances[j] * v);
                 }
             }
-
-            if sum_exp > 0.0 {
-                p_i /= sum_exp;
-            }
-
-            // Compute entropy
-            let mut entropy = 0.0;
-            for j in 0..n {
-                if p_i[j] > 1e-10 {
-                    entropy -= p_i[j] * p_i[j].ln();
-                }
-            }
-
-            // Binary search
-            if (entropy - target_entropy).abs() < 1e-5 {
-                // Found good sigma
-                for j in 0..n {
-                    p[[i, j]] = p_i[j];
-                }
+            h_diff = h / sum_p + sum_p.ln() - target_entropy;
+            if h_diff.abs() < PERPLEXITY_TOL {
                 break;
-            } else if entropy > target_entropy {
-                sigma_max = sigma;
-                sigma = (sigma + sigma_min) / 2.0;
+            }
+            if h_diff > 0.0 {
+                // too flat: narrow the kernel
+                min_beta = Some(beta);
+                beta = match max_beta {
+                    None => beta * 2.0,
+                    Some(hi) => (beta + hi) / 2.0,
+                };
             } else {
-                sigma_min = sigma;
-                sigma = (sigma + sigma_max) / 2.0;
-            }
-
-            // If we exhausted iterations, use current sigma
-            if sigma_max - sigma_min < 1e-10 {
-                for j in 0..n {
-                    p[[i, j]] = p_i[j];
-                }
-                break;
+                max_beta = Some(beta);
+                beta = match min_beta {
+                    None => beta / 2.0,
+                    Some(lo) => (beta + lo) / 2.0,
+                };
             }
         }
-    }
-
-    // Symmetrize in place: P_ij = (P_j|i + P_i|j) / 2n; the diagonal stays 0
-    for i in 0..n {
-        for j in (i + 1)..n {
-            let val = (p[[i, j]] + p[[j, i]]) / (2.0 * n as f64);
-            // Ensure minimum probability for numerical stability
-            let val = val.max(1e-12);
-            p[[i, j]] = val;
-            p[[j, i]] = val;
+        if !(h_diff.abs() < PERPLEXITY_TOL) {
+            calibration.missed += 1;
+            calibration.worst = calibration.worst.max(h_diff.abs());
         }
+        row /= sum_p;
     }
-
-    Ok(p)
+    Ok((p, calibration))
 }
 
 /// Initialize low-dimensional embedding.
@@ -704,22 +743,19 @@ fn compute_gradient(
     gradient
 }
 
-/// Compute KL divergence between `P * exaggeration` and Q.
-fn compute_kl_divergence(
-    p: &ArrayView2<f64>,
-    exaggeration: f64,
-    q: &ArrayView2<f64>,
-    sum_q: f64,
-) -> f64 {
+/// KL(P || Q) in Rtsne's form, `sum_{i != j} p_ij ln((p_ij + FLT_MIN) / (q_ij + FLT_MIN))`
+/// with `q_ij = Q_ij / sum_Q` and `FLT_MIN = f32::MIN_POSITIVE`.
+fn compute_kl_divergence(p: &ArrayView2<f64>, q: &ArrayView2<f64>, sum_q: f64) -> f64 {
     let n = p.nrows();
+    let tiny = f64::from(f32::MIN_POSITIVE);
     let mut kl = 0.0;
 
     for i in 0..n {
         for j in 0..n {
-            let p_ij = p[[i, j]] * exaggeration;
-            if i != j && p_ij > 1e-12 {
-                let q_ij = (q[[i, j]] / sum_q).max(1e-12);
-                kl += p_ij * (p_ij / q_ij).ln();
+            if i != j {
+                let p_ij = p[[i, j]];
+                let q_ij = q[[i, j]] / sum_q;
+                kl += p_ij * ((p_ij + tiny) / (q_ij + tiny)).ln();
             }
         }
     }
@@ -1362,13 +1398,109 @@ mod tests {
         ]
     }
 
+    /// Row entropies `-sum p ln p` of conditional affinity rows.
+    fn row_entropies(p: &Array2<f64>) -> Vec<f64> {
+        p.rows()
+            .into_iter()
+            .map(|r| {
+                -r.iter()
+                    .filter(|&&v| v > 0.0)
+                    .map(|&v| v * v.ln())
+                    .sum::<f64>()
+            })
+            .collect()
+    }
+
+    /// ML-37: every point's bandwidth reaches the perplexity, on standard-normal data in 20
+    /// dimensions and on the same data rescaled (the old linear sigma search left about 220 of
+    /// 300 rows all zero here).
+    #[test]
+    fn test_tsne_affinities_calibrate_every_row() {
+        use rand_distr::{Distribution, Normal};
+        let mut rng = StdRng::seed_from_u64(20261118);
+        let normal = Normal::new(0.0, 1.0).unwrap();
+        let x = Array2::from_shape_fn((300, 20), |_| normal.sample(&mut rng));
+        let target = 30f64.ln();
+        let base = conditional_affinities(&x.view(), 30.0).unwrap().0;
+        for scale in [1.0, 10.0, 0.01] {
+            let xs = &x * scale;
+            let p = conditional_affinities(&xs.view(), 30.0).unwrap().0;
+            let zero = p.rows().into_iter().filter(|r| r.sum() == 0.0).count();
+            assert_eq!(zero, 0, "scale {scale}: {zero} of 300 rows are all zero");
+            for (i, r) in p.rows().into_iter().enumerate() {
+                assert!(
+                    (r.sum() - 1.0).abs() <= 1e-12,
+                    "scale {scale}, row {i}: {}",
+                    r.sum()
+                );
+            }
+            for (i, h) in row_entropies(&p).into_iter().enumerate() {
+                assert!((h - target).abs() < 1e-5, "scale {scale}, row {i}: H = {h}");
+            }
+            // the search is scale-free up to its entropy tolerance: each row agrees to 1e-4 of
+            // its largest entry (a relative error in beta moves an entry by beta d^2 times it)
+            for (row, base_row) in p.rows().into_iter().zip(base.rows()) {
+                let top = base_row.iter().copied().fold(0.0, f64::max);
+                for (a, b) in row.iter().zip(base_row.iter()) {
+                    assert!((a - b).abs() <= 1e-4 * top, "scale {scale}: {a} vs {b}");
+                }
+            }
+        }
+    }
+
+    /// The search cannot reach a perplexity below the number of exact duplicates: those rows are
+    /// written anyway (uniform over the duplicates) and reported.
+    #[test]
+    fn test_tsne_calibration_warns_when_unreached() {
+        let mut rows = vec![[0.0, 0.0]; 9];
+        rows.extend([[10.0, 10.0], [10.5, 10.0], [10.0, 11.0]]);
+        let x = Array2::from_shape_fn((12, 2), |(i, j)| rows[i][j]);
+        let r = tsne(x.view(), Some(2), Some(3.9), Some(5), None, Some(1)).unwrap();
+        assert_eq!(r.warnings.len(), 1, "{:?}", r.warnings);
+        let w = &r.warnings[0];
+        let miss = 8f64.ln() - 3.9f64.ln();
+        assert!(
+            w.contains("9 of 12 points") && w.contains(&format!("{miss:.4}")),
+            "{w}"
+        );
+        assert!(r.to_string().contains(&format!("Warning: {w}")));
+        let p = conditional_affinities(&x.view(), 3.9).unwrap().0;
+        for i in 0..9 {
+            let row = p.row(i);
+            assert!((row.sum() - 1.0).abs() <= 1e-12, "row {i}: {}", row.sum());
+            assert!(
+                row.iter()
+                    .take(9)
+                    .enumerate()
+                    .all(|(j, &v)| j == i || (v - 0.125).abs() < 1e-12)
+            );
+        }
+    }
+
+    /// ML-37: the joint affinities carry no 1e-12 floor and sum to one (perplexity 2: at 4 the
+    /// kernel must reach past the four neighbours of a group, and the cross-group entries are
+    /// about 6e-11).
+    #[test]
+    fn test_tsne_affinities_have_no_floor() {
+        let data = tsne_fixture();
+        let (p, _) = compute_joint_probabilities(&data.view(), 2.0).unwrap();
+        assert!((p.sum() - 1.0).abs() <= 1e-12, "{}", p.sum());
+        for i in 0..15 {
+            for j in 0..15 {
+                if i / 5 != j / 5 {
+                    assert!(p[[i, j]] < 1e-12, "P[{i},{j}] = {}", p[[i, j]]);
+                }
+            }
+        }
+    }
+
     /// ML-145: one iteration is bhtsne's first step. Velocity starts at 0 and sign(0) = 0, so
     /// every gain becomes 1.2 (gains + 0.2) wherever the gradient is non-zero; momentum times 0
     /// vanishes; then Y is centred.
     #[test]
     fn test_tsne_first_step_matches_bhtsne_update() {
         let data = tsne_fixture();
-        let p = compute_joint_probabilities(&data.view(), 4.0).unwrap();
+        let (p, _) = compute_joint_probabilities(&data.view(), 4.0).unwrap();
         let y0 = initialize_embedding(data.view(), 2, Some(42)).unwrap();
         let mut q = Array2::zeros((15, 15));
         let sq = fill_q_distribution(&y0.view(), &mut q);
@@ -1404,7 +1536,7 @@ mod tests {
     #[test]
     fn test_tsne_reports_kl_of_returned_embedding() {
         let data = tsne_fixture();
-        let p = compute_joint_probabilities(&data.view(), 4.0).unwrap();
+        let (p, _) = compute_joint_probabilities(&data.view(), 4.0).unwrap();
         // 1 and 50: inside early exaggeration
         for iters in [1usize, 50, 120] {
             let r = tsne(
@@ -1418,7 +1550,7 @@ mod tests {
             .unwrap();
             let mut q = Array2::zeros((15, 15));
             let sq = fill_q_distribution(&r.embedding.view(), &mut q);
-            let want = compute_kl_divergence(&p.view(), 1.0, &q.view(), sq);
+            let want = compute_kl_divergence(&p.view(), &q.view(), sq);
             assert!(
                 (r.kl_divergence - want).abs() <= 1e-12 * want.abs(),
                 "iters={iters}: {} vs {want}",
@@ -1427,14 +1559,15 @@ mod tests {
         }
     }
 
-    /// Re-captured at T3-WP42 (ML-145 changes the path from step 1, ML-146 the reported KL).
+    /// Re-captured at T3-WP42 (ML-145 changes the path from step 1, ML-146 the reported KL), and
+    /// for ML-37 (bhtsne's bandwidth search, no floor on P, Rtsne's KL form).
     #[test]
     fn tsne_memory_refactor_is_bit_identical() {
         const GOLDEN: [u64; 4] = [
-            13859390039091109202,
-            13872640547727622304,
-            13858743226655607939,
-            4613615299525055005,
+            13849809419206569802,
+            13871516010347534690,
+            13867331416230125663,
+            4610700378489271804,
         ];
         let data = tsne_fixture();
         // 120 iterations cross the early-exaggeration switch at 100
