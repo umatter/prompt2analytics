@@ -417,6 +417,9 @@ pub static PARAM_RULES: &[ParamRule] = {
                  node-size minimums and maxdepth bound as at the default",
             ),
         ),
+        // partykit's nresample (default 9,999), read only by the Monte Carlo test; the
+        // `ctree_permutation_work` budget bounds its product with the rows and inputs.
+        p("ml_ctree", "n_permutations", Max(SimulationSize)),
         p("ml_cubist", "neighbors", Max(Neighbors)),
         p("ml_cutree", "k", Max(Components)),
         p("ml_cutree", "cut_height", Exempt(CUT_HEIGHT)),
@@ -450,7 +453,7 @@ pub static PARAM_RULES: &[ParamRule] = {
         p(
             "ml_svm",
             "c",
-            Exempt("regularisation constant; max_iterations bounds the SMO sweeps"),
+            Exempt("regularisation constant; max_iterations bounds the passes of n pair updates"),
         ),
         p(
             "ml_tsne",
@@ -460,7 +463,7 @@ pub static PARAM_RULES: &[ParamRule] = {
         p(
             "ml_tsne",
             "perplexity",
-            Exempt("target perplexity; the bandwidth search of each point runs 50 steps"),
+            Exempt("target perplexity; the bandwidth search of each point runs up to 200 steps"),
         ),
         p("multivariate_mahalanobis", "center", ArrayLen(ListLength)),
         p("multivariate_mahalanobis", "center[]", Exempt(ARRAY_VALUE)),
@@ -798,7 +801,7 @@ pub static PARAM_RULES: &[ParamRule] = {
         p(
             "timeseries_lag",
             "k",
-            Exempt("core rejects |k| >= n; the output is a slice of the input"),
+            Exempt("core rejects |k| >= n; the output has the input's length, NA padded"),
         ),
         p("timeseries_runmed", "k", Max(SpanWidth)),
         p("timeseries_spectrum", "spans", ArrayLen(ListLength)),
@@ -871,10 +874,13 @@ pub static PARAM_RULES: &[ParamRule] = {
             "ts_changepoint",
             "penalty",
             Exempt(
-                "changepoint penalty; PELT's work is at most quadratic in the rows whatever its \
-                 value, and quadratic_rows bounds the rows",
+                "changepoint penalty; PELT's work is at most quadratic in the rows and binary \
+                 segmentation's at most max_changepoints scans of the series whatever its value, \
+                 and quadratic_rows bounds the rows",
             ),
         ),
+        // Binary segmentation's Q: one scan of the series per changepoint found.
+        p("ts_changepoint", "max_changepoints", Max(Lags)),
         p("ts_garch_fit", "p", Max(ModelOrder)),
         p("ts_garch_fit", "q", Max(ModelOrder)),
         p("ts_holt_winters", "period", Max(Lags)),
@@ -955,11 +961,12 @@ pub static PARAM_RULES: &[ParamRule] = {
 /// Deliberately not row-limited, because their cost is close to linear in the row count:
 /// `hypothesis_cor_test` (Kendall's tau by sort and merge), `stats_ecdf` (evaluation by binary
 /// search), `timeseries_cpgram` (an FFT periodogram), `ml_ctree` (splits from one sort and
-/// running sums), `treatment_twang` (features sorted once, stumps swept with prefix sums),
+/// running sums; its Monte Carlo test is bounded by `ctree_permutation_work`), `treatment_twang` (features sorted once, stumps swept with prefix sums),
 /// `treatment_sbw` (solved in the dimension of the balance constraints), `bacon_decomp` (cell
 /// sums, no dense design), `regression_gls` (O(n) whitening for each of its correlation
 /// structures), `panel_gls` (a T x T covariance with T at most N, linear work per entity),
-/// `moran_test` and `spatial_lm_tests_tool` (traces from the sparse W) and `spatial_neighbors`
+/// `moran_test` (traces from the sparse W), `spatial_lm_tests_tool` (traces from the sparse W and
+/// products of x with W, k columns wide) and `spatial_neighbors`
 /// (a k-d tree, bounded by `spatial_links`).
 pub static ROW_RULES: &[RowRule] = &[
     // Dense: `hierarchical` keeps the condensed n(n-1)/2 f64 distance matrix; `ml_cutree` builds
@@ -997,7 +1004,9 @@ pub static ROW_RULES: &[RowRule] = &[
     row("sar_model", RowClass::Cubic),
     row("sem_model", RowClass::Cubic),
     // Cubic: the range of the spatial parameter comes from the eigenvalues of the dense W
-    // (`try_rho_range`); the sampler and the impacts run on the sparse W.
+    // (`try_rho_range`), and the sampler runs on the sparse W. The SAR probit's impacts invert the
+    // dense n x n spatial multiplier at several values of rho (O(n^3) each), so
+    // `probit_impact_rows` holds `sar_probit_model` with `compute_impacts` to fewer rows.
     row("sar_probit_model", RowClass::Cubic),
     row("sem_probit_model", RowClass::Cubic),
     // Cubic: the spatial-lag models and the within spatial-error model take the eigenvalues of
@@ -1022,16 +1031,17 @@ pub static ROW_RULES: &[RowRule] = &[
     // Quadratic: with matching, each of the B permutations compares every unit with every unit
     // of the other group, O(B n^2).
     row("heterogeneity_test", RowClass::Quadratic),
-    // Quadratic: an SMO sweep examines each of the n rows, and every step it takes updates the
-    // cached errors of all n rows.
+    // Quadratic: the LIBSVM solver makes max_iterations passes of n pair updates, and each update
+    // evaluates two kernel rows over all n rows (a cache of at most 40 MB keeps some of them) and
+    // updates the gradient of all n rows.
     row("ml_svm", RowClass::Quadratic),
     // Quadratic: each of the n points is fitted on its ceil(span * n) nearest neighbours.
     row("regression_loess", RowClass::Quadratic),
     // Quadratic: at each t PELT examines every candidate changepoint that survived pruning, and
     // on a series without changes, or under a large penalty, it prunes none, so its work is
     // O(n^2). PELT checks the call's budget at every step, so an overrun ends at the deadline;
-    // the row cap keeps the default arguments well inside it. Binary segmentation (at most 10
-    // changepoints, one scan each) is linear and shares the rule.
+    // the row cap keeps the default arguments well inside it. Binary segmentation (at most
+    // max_changepoints changepoints, default 5, one scan each) is linear and shares the rule.
     row("ts_changepoint", RowClass::Quadratic),
 ];
 
@@ -1109,6 +1119,22 @@ pub fn scpi_work(sims: usize, post: usize, donors: usize, lasso: bool) -> u64 {
         .saturating_mul(post as u128)
         .saturating_mul(d.saturating_mul(d))
         .saturating_mul(if lasso { SCPI_LASSO_WEIGHT as u128 } else { 1 });
+    u64::try_from(w).unwrap_or(u64::MAX)
+}
+
+/// Work of an `ml_ctree` call with Monte Carlo p-values as the `ctree_permutation_work` budget
+/// counts it: `n_permutations * rows * inputs`, saturating at `u64::MAX`.
+///
+/// partykit's Monte Carlo test (`p2a_core::ml::ctree`) draws `n_permutations` permutations of a
+/// node's responses and evaluates the linear statistic of every input on each, one pass over the
+/// node's rows per input; the nodes of one depth hold at most all rows. The count is that of the
+/// root, the tree's depth is not counted: the core checks the call's budget at every
+/// permutation, so a deep tree that runs past the deadline is cancelled. The other test types
+/// run no permutations, and the handler checks this budget only for `montecarlo`.
+pub fn ctree_permutation_work(permutations: usize, rows: usize, inputs: usize) -> u64 {
+    let w = (permutations as u128)
+        .saturating_mul(rows as u128)
+        .saturating_mul(inputs as u128);
     u64::try_from(w).unwrap_or(u64::MAX)
 }
 
@@ -1839,6 +1865,8 @@ mod tests {
             ("bp_bounds", "n_bootstrap", 1000),
             ("gsynth", "bootstrap_reps", 200),
             ("scpi", "sims", 200),
+            ("ts_changepoint", "max_changepoints", 5),
+            ("ml_ctree", "n_permutations", 9999),
             ("gsynth", "n_factors", 2),
             ("gsynth", "r_max", 5),
             ("gformula", "n_bootstrap", 200),
@@ -2155,6 +2183,84 @@ mod tests {
         for tool in ["ml_dbscan", "regression_smooth_spline", "spatial_panel_gmm"] {
             assert!(Limits::off().check_rows(tool, 10_000_000, 5).is_ok());
         }
+    }
+
+    #[test]
+    fn ctree_permutation_work_is_permutations_times_rows_times_inputs() {
+        use super::ctree_permutation_work;
+        assert_eq!(ctree_permutation_work(9_999, 1_000, 5), 49_995_000);
+        assert_eq!(ctree_permutation_work(0, 1_000, 5), 0);
+        assert_eq!(
+            ctree_permutation_work(usize::MAX, usize::MAX, usize::MAX),
+            u64::MAX
+        );
+        let h = super::super::Limits::hosted();
+        let cap = h.ctree_permutation_work.expect("hosted ctree budget");
+        assert_eq!(cap, 400_000_000);
+        // partykit's default 9,999 permutations pass up to 8,000 rows on 5 inputs
+        assert!(
+            h.check_ctree_permutations("ml_ctree", 9_999, 8_000, 5)
+                .is_ok()
+        );
+        assert!(
+            h.check_ctree_permutations("ml_ctree", 9_999, 10_000, 5)
+                .is_err()
+        );
+        assert!(
+            h.check_ctree_permutations("ml_ctree", 8_000, 10_000, 5)
+                .is_ok()
+        );
+        assert!(
+            h.check_ctree_permutations("ml_ctree", 8_001, 10_000, 5)
+                .is_err()
+        );
+        let e = h
+            .check_ctree_permutations("ml_ctree", 9_999, 10_000, 5)
+            .unwrap_err();
+        assert_eq!(e.override_key, "ctree_permutation_work");
+        assert_eq!(e.parameter, "ctree_permutation_work");
+        assert!(!e.message.contains("  "), "{}", e.message);
+        assert!(
+            e.message.contains("set n_permutations to at most 8000"),
+            "{}",
+            e.message
+        );
+        assert!(e.message.contains("'bonferroni'"), "{}", e.message);
+        // no permutation advice when fewer than 99 permutations fit
+        let e = h
+            .check_ctree_permutations("ml_ctree", 9_999, 1_000_000, 100)
+            .unwrap_err();
+        assert!(!e.message.contains("at most"), "{}", e.message);
+        assert!(
+            super::super::Limits::off()
+                .check_ctree_permutations("ml_ctree", usize::MAX, usize::MAX, 9)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn probit_impact_rows_hold_impacts_to_fewer_rows_than_cubic_rows() {
+        let h = super::super::Limits::hosted();
+        assert_eq!(h.probit_impact_rows, Some(1_500));
+        assert!(h.probit_impact_rows < h.cubic_rows.map(|c| c as u64));
+        assert!(h.check_probit_impacts("sar_probit_model", 1_500).is_ok());
+        let e = h
+            .check_probit_impacts("sar_probit_model", 1_501)
+            .unwrap_err();
+        assert_eq!(e.override_key, "probit_impact_rows");
+        assert_eq!(e.requested, "1501");
+        assert_eq!(e.limit, "1500");
+        assert!(!e.message.contains("  "), "{}", e.message);
+        assert!(
+            e.message.contains("Set compute_impacts to false"),
+            "{}",
+            e.message
+        );
+        assert!(
+            super::super::Limits::off()
+                .check_probit_impacts("sar_probit_model", usize::MAX)
+                .is_ok()
+        );
     }
 
     #[test]

@@ -116,7 +116,7 @@ mod distinct;
 mod rules;
 pub use rules::{
     ARIMA_MIN_MAGNITUDE, PARAM_RULES, PIVOT_RULES, ROW_RULES, SCPI_LASSO_WEIGHT, SCPI_MIN_DONORS,
-    arima_fit_work, scpi_work,
+    arima_fit_work, ctree_permutation_work, scpi_work,
 };
 
 /// Generates [`Family`], [`Family::ALL`], [`Family::key`] and `Family::hosted_cap` from one list
@@ -256,6 +256,23 @@ const ARIMA_FIT_WORK_HOSTED: u64 = 7_500_000;
 /// at its next check. With a lower `P2A_TOOL_TIMEOUT_SECS`, or on a slower or throttled CPU,
 /// lower `scpi_work` in proportion with `P2A_LIMIT_OVERRIDES`.
 const SCPI_WORK_HOSTED: u64 = 512_000;
+
+/// Hosted [`Limits::ctree_permutation_work`]. Measured on a release build, one call at a time
+/// on one core: partykit's default 9,999 permutations on 5 inputs took 0.10 s, 1.24 s and
+/// 18.6 s on 100, 1,000 and 10,000 rows, about 37 ns per unit ([`ctree_permutation_work`]), so
+/// the slowest call this value allows takes about 15 s, a quarter of the hosted 60 s deadline.
+/// The tree's depth is not counted; the core checks the call's budget at every permutation, so
+/// a call that runs past the deadline is cancelled at its next check. With a lower
+/// `P2A_TOOL_TIMEOUT_SECS`, or on a slower or throttled CPU, lower `ctree_permutation_work` in
+/// proportion with `P2A_LIMIT_OVERRIDES`.
+const CTREE_PERMUTATION_WORK_HOSTED: u64 = 400_000_000;
+
+/// Hosted [`Limits::probit_impact_rows`]. The SAR probit's impacts invert the dense n x n
+/// spatial multiplier at each of 17 to 19 values of rho, O(n^3) each: on a release build, one
+/// call at a time on one core, they took 43.6 s on 2,000 rows (the hosted `cubic_rows`), where
+/// the sampler alone took 12.4 s, about 0.2 ns per n^3 unit, so 1,500 rows keep the impacts near
+/// a quarter of the hosted 60 s deadline and the whole call well inside it.
+const PROBIT_IMPACT_ROWS_HOSTED: u64 = 1_500;
 
 /// Hosted [`Limits::ensemble_bytes`]: 256 MiB, the hosted per-allocation ceiling
 /// (`P2A_MAX_ALLOC_MB`), so that one tree-ensemble fit grows the process by about as much as one
@@ -558,6 +575,15 @@ pub struct Limits {
     /// x max(donors, [`SCPI_MIN_DONORS`])^2, lasso weighted); checked by the handler with [`Limits::check_scpi`] before
     /// the simulations start.
     pub scpi_work: Option<u64>,
+    /// Work of an `ml_ctree` call with Monte Carlo p-values, as [`ctree_permutation_work`]
+    /// counts it (permutations x rows x inputs); checked by the handler with
+    /// [`Limits::check_ctree_permutations`] before the fit starts.
+    pub ctree_permutation_work: Option<u64>,
+    /// Dataset rows of a `sar_probit_model` call that computes impacts (the dense spatial
+    /// multiplier is inverted at several values of rho); checked by the handler with
+    /// [`Limits::check_probit_impacts`] before the sampler starts. `cubic_rows` still bounds every
+    /// call.
+    pub probit_impact_rows: Option<u64>,
     /// Bytes a tree-ensemble fit may hold at once (`ml_causal_forest`, `ml_bart_causal`): its
     /// trees, bootstrap draws and working copies of the data, as the core's `memory_bound`
     /// predicts them from the dataset's row count and the request's settings; checked by
@@ -648,8 +674,8 @@ named_limits! {
         max_groups, join_output_rows, onehot_levels, pivot_columns, pivot_cells,
         str_split_parts, str_pad_width,
         generated_cells, generated_bytes, export_bytes, load_file_bytes, response_bytes,
-        session_disk_bytes, spatial_links, arima_fit_work, scpi_work, ensemble_bytes, db_result_rows,
-        db_result_bytes, db_timeout_secs, db_memory_mb, db_threads, conversations_per_session,
+        session_disk_bytes, spatial_links, arima_fit_work, scpi_work, ctree_permutation_work,
+        probit_impact_rows, ensemble_bytes, db_result_rows, db_result_bytes, db_timeout_secs, db_memory_mb, db_threads, conversations_per_session,
         messages_per_conversation, session_db_bytes, llm_streams_per_session,
     }
     required {
@@ -686,6 +712,8 @@ impl Limits {
             spatial_links: None,
             arima_fit_work: None,
             scpi_work: None,
+            ctree_permutation_work: None,
+            probit_impact_rows: None,
             ensemble_bytes: None,
             db_result_rows: None,
             db_result_bytes: None,
@@ -738,6 +766,8 @@ impl Limits {
             spatial_links: Some(2_000_000),
             arima_fit_work: Some(ARIMA_FIT_WORK_HOSTED),
             scpi_work: Some(SCPI_WORK_HOSTED),
+            ctree_permutation_work: Some(CTREE_PERMUTATION_WORK_HOSTED),
+            probit_impact_rows: Some(PROBIT_IMPACT_ROWS_HOSTED),
             ensemble_bytes: Some(ENSEMBLE_BYTES_HOSTED),
             db_result_rows: Some(100_000),
             db_result_bytes: Some(64 * MIB),
@@ -1429,6 +1459,82 @@ impl Limits {
             tool: tool.to_string(),
             parameter: KNOB.to_string(),
             requested: work.to_string(),
+            limit: limit.to_string(),
+            override_key: KNOB,
+        })
+    }
+
+    /// Checks an `ml_ctree` call with Monte Carlo p-values of `permutations` permutations on
+    /// `rows` rows and `inputs` inputs ([`ctree_permutation_work`]) against the
+    /// [`Limits::ctree_permutation_work`] budget (`None` passes). The handler calls it before the
+    /// fit, only for `testtype = montecarlo`. The refusal says how many permutations the data
+    /// allow (when at least 99) and names the asymptotic tests, which run none.
+    pub fn check_ctree_permutations(
+        &self,
+        tool: &str,
+        permutations: usize,
+        rows: usize,
+        inputs: usize,
+    ) -> Result<(), LimitViolation> {
+        const KNOB: &str = "ctree_permutation_work";
+        let Some(limit) = self.ctree_permutation_work else {
+            return Ok(());
+        };
+        let work = ctree_permutation_work(permutations, rows, inputs);
+        if work <= limit {
+            return Ok(());
+        }
+        // `work > limit`, so `rows * inputs` is at least 1
+        let max_perms = limit / ctree_permutation_work(1, rows, inputs);
+        let mut advice = Vec::new();
+        if max_perms >= 99 {
+            advice.push(format!("set n_permutations to at most {max_perms}"));
+        }
+        advice.push(
+            "use testtype 'bonferroni' or 'univariate' (asymptotic p-values, no permutations)"
+                .to_string(),
+        );
+        advice.push("use fewer rows or features".to_string());
+        let advice = advice.join(", or ");
+        let tool = echo(tool);
+        Err(LimitViolation {
+            message: format!(
+                "`{tool}` with n_permutations = {permutations} on {rows} rows and {inputs} \
+                 features needs {work} ({KNOB}: permutations x rows x features), which exceeds \
+                 this server's limit of {limit} for one call, checked before the fit starts. To \
+                 run it, {advice}."
+            ),
+            tool: tool.to_string(),
+            parameter: KNOB.to_string(),
+            requested: work.to_string(),
+            limit: limit.to_string(),
+            override_key: KNOB,
+        })
+    }
+
+    /// Checks a `sar_probit_model` call on `rows` rows that computes impacts against the
+    /// [`Limits::probit_impact_rows`] cap (`None` passes). The handler calls it before the
+    /// sampler starts, only when `compute_impacts` is on.
+    pub fn check_probit_impacts(&self, tool: &str, rows: usize) -> Result<(), LimitViolation> {
+        const KNOB: &str = "probit_impact_rows";
+        let Some(limit) = self.probit_impact_rows else {
+            return Ok(());
+        };
+        let requested = u64::try_from(rows).unwrap_or(u64::MAX);
+        if requested <= limit {
+            return Ok(());
+        }
+        let tool = echo(tool);
+        Err(LimitViolation {
+            message: format!(
+                "`{tool}` with compute_impacts on {rows} rows inverts the dense {rows} x {rows} \
+                 spatial multiplier for its impacts, which this server allows on at most {limit} \
+                 rows ({KNOB}), checked before the sampler starts. Set compute_impacts to false, or use at \
+                 most {limit} rows."
+            ),
+            tool: tool.to_string(),
+            parameter: KNOB.to_string(),
+            requested: requested.to_string(),
             limit: limit.to_string(),
             override_key: KNOB,
         })
@@ -3195,6 +3301,8 @@ mod tests {
             "spatial_links",
             "arima_fit_work",
             "scpi_work",
+            "ctree_permutation_work",
+            "probit_impact_rows",
             "ensemble_bytes",
             "db_result_rows",
             "db_result_bytes",
@@ -3216,7 +3324,7 @@ mod tests {
         ] {
             assert!(keys.contains(&k), "{k}");
         }
-        assert_eq!(keys.len(), Family::ALL.len() + 40);
+        assert_eq!(keys.len(), Family::ALL.len() + 42);
         for k in keys {
             let v = if BOOLS.contains(&k) { "true" } else { "1" };
             Limits::off()

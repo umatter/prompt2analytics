@@ -623,6 +623,8 @@ Named budgets:
 | `spatial_links` | total links of a `spatial_neighbors` structure | 2,000,000 | none |
 | `arima_fit_work` | work of an ARIMA fit, observations × ((p + q + 3)² + d), checked before the fit starts; while set, a series holding a nonzero value below 1e-100 is refused as well | 7,500,000 | none |
 | `scpi_work` | work of an `scpi` call, simulations × post-treatment periods × max(donors, 8)² (× 8 with the lasso constraint), checked before the simulations start | 512,000 | none |
+| `ctree_permutation_work` | work of an `ml_ctree` call with Monte Carlo p-values (`testtype` `montecarlo`), permutations × rows × features, checked before the fit starts | 400,000,000 | none |
+| `probit_impact_rows` | dataset rows of a `sar_probit_model` call with `compute_impacts` (on by default), checked before the sampler starts; `cubic_rows` bounds every call | 1,500 | none |
 | `ensemble_bytes` | memory a `ml_causal_forest` or `ml_bart_causal` fit may hold at once (its trees, bootstrap draws and working copies of the data), as the core's bound predicts it from the rows and the settings, checked before the fit starts | 256 MiB | none |
 | `db_result_rows` | rows a SQL tool keeps | 100,000 | none |
 | `db_result_bytes` | estimated bytes a SQL tool keeps | 64 MiB | none |
@@ -671,6 +673,25 @@ that maximum. With a lower `P2A_TOOL_TIMEOUT_SECS`, or on a slower or throttled
 CPU, lower `scpi_work` in proportion with `P2A_LIMIT_OVERRIDES`. The core checks
 the call's budget at every centring of its programs, so a call that runs past
 the deadline is cancelled at its next check.
+
+The hosted `ctree_permutation_work` of 400,000,000 admits partykit's default
+9,999 permutations on 8,000 rows with 5 features. On a release build, one call
+at a time on one core, a counted unit cost about 37 ns, so the slowest call the
+value admits takes about 15 s, a quarter of the default deadline. The tree's
+depth is not counted; the core checks the call's budget at every permutation,
+so a deeper tree that runs past the deadline is cancelled at its next check.
+The asymptotic test types (`bonferroni`, `univariate`) run no permutations and
+are not counted.
+
+The hosted `probit_impact_rows` of 1,500 holds the SAR probit's impacts, which
+invert the dense spatial multiplier at 17 to 19 values of rho, to fewer rows
+than `cubic_rows`: on a release build, one call at a time on one core, the
+impacts took 43.6 s on 2,000 rows and the sampler 12.4 s, so on 1,500 rows the
+impacts take about a quarter of the default deadline. A call with
+`compute_impacts` set to false is held to `cubic_rows` only. With a lower
+`P2A_TOOL_TIMEOUT_SECS`, or on a slower or throttled CPU, lower both in
+proportion with `P2A_LIMIT_OVERRIDES` (`probit_impact_rows` with the cube root
+of the ratio).
 
 The hosted `ensemble_bytes` of 256 MiB matches the per-allocation ceiling: a
 causal-forest or BART-causal fit keeps every tree it grows, and BART keeps a

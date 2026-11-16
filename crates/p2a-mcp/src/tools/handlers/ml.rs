@@ -1958,6 +1958,18 @@ impl AnalyticsServer {
 
         let feature_refs: Vec<&str> = request.features.iter().map(|s| s.as_str()).collect();
 
+        // the Monte Carlo work, bounded before the fit (`ctree_permutation_work`)
+        if testtype == CtreeTestType::MonteCarlo
+            && let Err(v) = crate::tools::limits::current().check_ctree_permutations(
+                "ml_ctree",
+                config.nresample,
+                dataset.df().height(),
+                feature_refs.len(),
+            )
+        {
+            return Ok(limit_refusal(v));
+        }
+
         let result = match run_ctree(dataset, &request.target, &feature_refs, &config) {
             Ok(r) => r,
             Err(e) => {
@@ -3508,6 +3520,41 @@ mod tests {
             .unwrap();
         assert_eq!(r.is_error, Some(true), "{}", text_of(&r));
         assert!(text_of(&r).contains("n_permutations"), "{}", text_of(&r));
+    }
+
+    /// A Monte Carlo ctree whose permutations x rows x features exceed `ctree_permutation_work`
+    /// is refused before the fit, naming the budget and the permutations that fit; the
+    /// asymptotic test and the off profile are not checked.
+    #[test]
+    fn test_mcp_ctree_monte_carlo_work_is_bounded_before_the_fit() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let s = rt.block_on(server());
+        let args = |testtype: &str| {
+            req::<CtreeRequest>(
+                json!({"dataset": "ml", "features": ["x1", "x2"], "target": "cls",
+                "minsplit": 6, "minbucket": 3, "seed": 1, "testtype": testtype,
+                "n_permutations": 99}),
+            )
+        };
+        let mut tight = Limits::hosted();
+        tight.ctree_permutation_work = Some(100);
+        let r = with_limits(tight.clone(), || {
+            rt.block_on(s.ml_ctree(args("montecarlo")))
+        })
+        .unwrap();
+        assert_eq!(r.is_error, Some(true), "{}", text_of(&r));
+        let t = text_of(&r);
+        assert!(
+            t.contains("ctree_permutation_work") && t.contains("'bonferroni'"),
+            "{t}"
+        );
+        let r = with_limits(tight, || rt.block_on(s.ml_ctree(args("bonferroni")))).unwrap();
+        assert_ne!(r.is_error, Some(true), "{}", text_of(&r));
+        let r = with_limits(Limits::off(), || {
+            rt.block_on(s.ml_ctree(args("montecarlo")))
+        })
+        .unwrap();
+        assert_ne!(r.is_error, Some(true), "{}", text_of(&r));
     }
 
     #[test]

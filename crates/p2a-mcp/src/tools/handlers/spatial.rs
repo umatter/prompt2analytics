@@ -860,11 +860,21 @@ impl AnalyticsServer {
 
         let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
 
+        // the impacts invert the dense spatial multiplier, bounded before the sampler starts
+        // (`probit_impact_rows`)
+        let compute_impacts = request.compute_impacts.unwrap_or(true);
+        if compute_impacts
+            && let Err(v) = crate::tools::limits::current()
+                .check_probit_impacts("sar_probit_model", dataset.df().height())
+        {
+            return Ok(crate::tools::common::limit_refusal(v));
+        }
+
         let (seed, seed_source) = self.probit_seed(request.seed).await;
         let config = SpatialProbitConfig {
             n_draws: request.n_draws.unwrap_or(1000),
             burn_in: request.burn_in.unwrap_or(200),
-            compute_impacts: request.compute_impacts.unwrap_or(true),
+            compute_impacts,
             seed: Some(seed),
             ..Default::default()
         };
@@ -2000,6 +2010,43 @@ mod tests {
                 assert!(!t.contains(gone), "{gone}: {t}");
             }
         }
+    }
+
+    /// `probit_impact_rows` refuses a SAR probit with impacts on more rows before the sampler
+    /// starts and names compute_impacts; without impacts, or with the off profile, it runs.
+    #[test]
+    fn test_mcp_sar_probit_impact_rows_are_bounded_before_the_sampler() {
+        let (rt, s) = server_with(vec![("pts", points_df(false))]);
+        let r = call(&s, Limits::off(), knn4("pts", "w"));
+        assert_ne!(r.is_error, Some(true), "{}", text(&r));
+        let probit = |impacts: bool| {
+            req::<SarProbitRequest>(serde_json::json!({
+                "dataset": "pts", "y": "b", "x": ["gx"], "weights": "w",
+                "n_draws": 40, "burn_in": 10, "seed": 7, "compute_impacts": impacts,
+            }))
+        };
+        let mut tight = Limits::hosted();
+        tight.probit_impact_rows = Some(5);
+        let r = limits::with_limits(tight.clone(), || {
+            rt.block_on(s.sar_probit_model(Parameters(probit(true))))
+        })
+        .unwrap();
+        assert_eq!(r.is_error, Some(true), "{}", text(&r));
+        let t = text(&r);
+        assert!(
+            t.contains("probit_impact_rows") && t.contains("Set compute_impacts to false"),
+            "{t}"
+        );
+        let r = limits::with_limits(tight, || {
+            rt.block_on(s.sar_probit_model(Parameters(probit(false))))
+        })
+        .unwrap();
+        assert_ne!(r.is_error, Some(true), "{}", text(&r));
+        let r = limits::with_limits(Limits::off(), || {
+            rt.block_on(s.sar_probit_model(Parameters(probit(true))))
+        })
+        .unwrap();
+        assert_ne!(r.is_error, Some(true), "{}", text(&r));
     }
 
     /// A missing value gets the hint of its tool: the coordinates of spatial_neighbors and
