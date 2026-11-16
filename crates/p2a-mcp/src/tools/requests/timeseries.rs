@@ -515,7 +515,7 @@ pub struct ArModelRequest {
 
     /// Specific order to use
     #[schemars(
-        description = "Specific AR order to fit. If provided with aic=false, uses this exact order."
+        description = "Specific AR order to fit (below the number of observations). When given, this exact order is fitted and the AIC search is skipped."
     )]
     pub order: Option<usize>,
 
@@ -689,7 +689,7 @@ pub struct LagRequest {
 
     /// Number of lags
     #[schemars(
-        description = "Number of positions to lag. Positive = shift back, negative = shift forward. Default is 1."
+        description = "Positive k lags (x[t - k]), negative k leads (x[t + |k|]). Default 1."
     )]
     pub k: Option<i32>,
 }
@@ -724,7 +724,9 @@ pub struct DiffinvRequest {
     pub column: String,
 
     /// Initial values for integration
-    #[schemars(description = "Initial values to start the cumulative sum.")]
+    #[schemars(
+        description = "The first lag * differences values of the undifferenced series (R's xi). Default: zeros."
+    )]
     pub xi: Option<Vec<f64>>,
 
     /// Difference lag
@@ -882,7 +884,7 @@ pub struct RunmedRequest {
 
     /// End rule
     #[schemars(
-        description = "How to handle ends: 'keep' (default), 'constant' or 'median' (R's runmed default is 'median'; p2a's median end rule is not R's smoothEnds). Other values are refused."
+        description = "How to handle ends: 'keep' (default), 'constant' or 'median' (R's smoothEnds with Tukey's end-point rule; R's runmed default is 'median'). Other values are refused."
     )]
     pub endrule: Option<String>,
 }

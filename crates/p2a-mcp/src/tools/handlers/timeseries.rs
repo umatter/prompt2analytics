@@ -17,6 +17,7 @@ use crate::tools::requests::timeseries::*;
 use p2a_core::econometrics::timeseries::varma::{VarmaConfig, run_varma_with};
 use p2a_core::econometrics::timeseries::vecm::{VecmConfig, run_vecm_with};
 use p2a_core::forecasting::garch::GarchDistribution;
+use p2a_core::forecasting::tsutils::{arima_sim_with_sd, lag_padded};
 use p2a_core::forecasting::{ArimaSpec, forecast_arima_with, run_arima_with};
 use p2a_core::{
     ArConfig,
@@ -32,7 +33,6 @@ use p2a_core::{
     StructTsType,
     acf_to_ar,
     ar,
-    arima_sim,
     arma_acf,
     arma_to_ma,
     causal_impact,
@@ -45,7 +45,6 @@ use p2a_core::{
     garch_forecast,
     granger_test,
     holt_winters_forecast,
-    lag as ts_lag,
     run_binary_segmentation,
     run_changepoint,
     run_decompose,
@@ -997,7 +996,7 @@ impl AnalyticsServer {
 
     ///   OTexts. https://otexts.com/fpp3/
     #[tool(
-        description = "Fit Holt-Winters exponential smoothing model to a time series with trend and seasonality. Supports both additive (constant seasonal variation) and multiplicative (proportional variation) seasonality. Automatically optimizes smoothing parameters (alpha, beta, gamma) if not provided. Can generate forecasts for future periods, with predict.HoltWinters' 95% prediction intervals for additive and non-seasonal fits (point forecasts only for multiplicative fits). Returns fitted values, residuals, optimized parameters, and seasonal coefficients."
+        description = "Fit Holt-Winters exponential smoothing model to a time series with trend and seasonality. Supports both additive (constant seasonal variation) and multiplicative (proportional variation) seasonality. Optimises the smoothing parameters alpha, beta and gamma that are not provided on [0, 1], as R's HoltWinters does. Can generate forecasts for future periods, with predict.HoltWinters' 95% prediction intervals for additive and non-seasonal fits (point forecasts only for multiplicative fits). Returns fitted values, residuals, optimized parameters, and seasonal coefficients."
     )]
     pub async fn ts_holt_winters(
         &self,
@@ -1086,12 +1085,12 @@ impl AnalyticsServer {
                         output.push_str(&format!(
                             "\nForecasts ({horizon} periods ahead; 95% prediction intervals as predict.HoltWinters):\n"
                         ));
-                        for i in 1..=fc.forecast.len() {
+                        for (i, ((f, lo), up)) in
+                            fc.forecast.iter().zip(&fc.lower).zip(&fc.upper).enumerate()
+                        {
                             output.push_str(&format!(
-                                "  t+{i}: {:.4}  [{:.4}, {:.4}]\n",
-                                fc.forecast[i - 1],
-                                fc.lower[i - 1],
-                                fc.upper[i - 1]
+                                "  t+{}: {f:.4}  [{lo:.4}, {up:.4}]\n",
+                                i + 1
                             ));
                         }
                     })
@@ -1102,7 +1101,7 @@ impl AnalyticsServer {
                             output.push_str(&format!("  t+{}: {:.4}\n", i + 1, val));
                         }
                         output.push_str(
-                            "Note: prediction intervals are implemented for additive and non-seasonal fits only (predict.HoltWinters' multiplicative formula is wrong, TS-22)\n",
+                            "Note: prediction intervals are implemented for additive and non-seasonal fits only (predict.HoltWinters' multiplicative formula is wrong)\n",
                         );
                     })
                 };
@@ -1205,7 +1204,7 @@ impl AnalyticsServer {
             "partial_acf": result.partial_acf,
             "aic_relative": result.aic,
             "interpretation": {
-                "order_selected": if request.aic.unwrap_or(true) {
+                "order_selected": if request.order.is_none() && request.aic.unwrap_or(true) {
                     format!("Order {} selected by AIC minimization", result.order)
                 } else {
                     format!("Order {} specified by user", result.order)
@@ -1650,7 +1649,7 @@ impl AnalyticsServer {
 
     /// Lag a time series.
     #[tool(
-        description = "Shift a time series by k positions. Positive k shifts values backward (lag), negative k shifts forward (lead). Returns the lagged series with NA padding."
+        description = "Lag a time series by k positions, as dplyr::lag: element t is x[t - k]. Positive k lags (NA at the start), negative k leads (NA at the end). Returns the n values with NA padding."
     )]
     pub async fn timeseries_lag(
         &self,
@@ -1674,7 +1673,14 @@ impl AnalyticsServer {
         };
 
         let k = request.k.unwrap_or(1);
-        let result = match ts_lag(&values, k) {
+        // lag_padded pads a shift of the whole series with NA; refuse it as lag does.
+        if values.is_empty() || k.unsigned_abs() as usize >= values.len() {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "Lag failed: Lag {k} is too large for series of length {}",
+                values.len()
+            ))]));
+        }
+        let lagged = match lag_padded(&values, k) {
             Ok(r) => r,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -1686,9 +1692,9 @@ impl AnalyticsServer {
 
         let output = serde_json::json!({
             "lag": k,
-            "n": result.values.len(),
-            "values_sample": &result.values[..result.values.len().min(20)],
-            "note": if result.values.len() > 20 { Some(format!("Showing first 20 of {} values", result.values.len())) } else { None }
+            "n": lagged.len(),
+            "values_sample": &lagged[..lagged.len().min(20)],
+            "note": if lagged.len() > 20 { Some(format!("Showing first 20 of {} values", lagged.len())) } else { None }
         });
 
         Ok(CallToolResult::success(vec![Content::text(
@@ -1750,7 +1756,7 @@ impl AnalyticsServer {
 
     /// Inverse of differencing.
     #[tool(
-        description = "Compute the inverse of differencing (cumulative sum). Reconstructs the original series from differences given initial values."
+        description = "Inverse of differencing (R's diffinv). xi gives the first lag * differences values of the undifferenced series (zeros if omitted); any other length is refused."
     )]
     pub async fn timeseries_diffinv(
         &self,
@@ -1916,7 +1922,7 @@ impl AnalyticsServer {
 
     /// Compute theoretical ACF for ARMA model.
     #[tool(
-        description = "Compute the theoretical autocorrelation function (ACF) or partial ACF for an ARMA(p,q) model given AR and MA coefficients."
+        description = "Compute the theoretical ACF or partial ACF of an ARMA(p, q) model from its coefficients (R's ARMAacf). Returns lags 0..lag_max; a non-stationary AR part is refused."
     )]
     pub async fn timeseries_arma_acf(
         &self,
@@ -2017,7 +2023,7 @@ impl AnalyticsServer {
 
     /// Simulate from ARIMA model.
     #[tool(
-        description = "Simulate a time series from an ARIMA(p,d,q) model. Generates random innovations and applies the ARMA recursion with optional differencing."
+        description = "Simulate an ARIMA(p, d, q) series (R's arima.sim): N(0, sd^2) innovations, R's default burn-in, a non-stationary AR part refused."
     )]
     pub async fn timeseries_arima_sim(
         &self,
@@ -2027,7 +2033,8 @@ impl AnalyticsServer {
         let ma = request.ma.unwrap_or_default();
         let d = request.d.unwrap_or(0);
 
-        let result = match arima_sim(&ar, &ma, d, request.n, None, None, request.seed) {
+        let sd = request.sd.unwrap_or(1.0);
+        let result = match arima_sim_with_sd(&ar, &ma, d, request.n, sd, None, None, request.seed) {
             Ok(r) => r,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -2056,7 +2063,7 @@ impl AnalyticsServer {
 
     /// Running median smoothing.
     #[tool(
-        description = "Apply running median smoother to a time series. More robust to outliers than running mean. Uses Tukey's median polish for the smoothing."
+        description = "Running median smoother (R's runmed). End rules: 'keep' (default), 'constant', 'median' (R's smoothEnds with Tukey's end-point rule)."
     )]
     pub async fn timeseries_runmed(
         &self,

@@ -60,8 +60,12 @@ number.
 The fits at R's optimum supersede `validation/expected/holtwinters_*.csv`: R 4.3.3 reproduces those seven files' values to
 their 15 digits, with the legacy series regenerated from the legacy seeds.
 
-**Deviation TS-24.** The optimiser is not pinned. p2a runs Nelder-Mead on [0.01, 0.99], R L-BFGS-B from its own starts. A
-fixed value is used as given, whichever parameters are optimised. The filter is pinned at R's optimum.
+**Optimiser (not pinned).** p2a runs Nelder-Mead on R's box [0, 1] for alpha, beta and gamma; R runs L-BFGS-B on the
+same box from its own starts. The optimised parameters are not pinned, because the optimiser path is not R's. The
+`registered-property` test `test_validate_holtwinters_optimum_reaches_rs_box` holds that p2a's SSE is at most R's (relative 1e-6) on the four
+case series, and that the boundary optima R finds are reached (AirPassengers additive gamma 1, the quarterly series
+gamma 0). A fixed value is used as given, whichever parameters are optimised (a given alpha must lie in (0, 1], as R
+requires; an optimised one may reach 0, as R's may). The filter is pinned at R's optimum.
 
 ## Input data (column types and missing values)
 
@@ -70,6 +74,27 @@ fixed value is used as given, whichever parameters are optimised. The filter is 
 R's `HoltWinters` errors on a missing value ("NA/NaN/Inf in foreign function call"), so p2a refusing it matches R.
 
 Test: `test_na_holt_winters_int64_and_missing` (on `validation/datasets/generated/arima_series.csv`, the dataset of the ARIMA case `arima_css_forecast`: columns `ai` (Int64), `a_na` and `ai_na` (two missing cells), `lab` (text)).
+
+## Timing against v0.5.0
+
+Release builds of a scratch harness against f80b0131 (v0.5.0) and against this change, `--no-default-features
+--features ci`; one core (`taskset -c 10`), `RAYON_NUM_THREADS=1`, cwd `/dev/shm`; per row nine processes per side,
+interleaved, each the median of its calls after ten warm-ups; cells are the median over the processes, the ratio of the
+minima in brackets. The machine was heavily loaded (1-minute load average 11-36 on 12 cores), so the absolute times are
+preliminary and ratios within about 5% are noise. Measured 2026-11-16.
+
+| Method | n | f80b0131 (µs) | this change (µs) | ratio [min] |
+|---|---|---|---|---|
+| `holt_winters`, additive, period 12, all three parameters optimised | 100 | 318.9 | 541.3 | 1.70 [1.70] |
+| `holt_winters`, additive, period 12, all three parameters optimised | 1,000 | 3,558.1 | 5,961.9 | 1.68 [1.69] |
+| `holt_winters`, additive, period 12, all three parameters optimised | 10,000 | 46,587.2 | 85,422.3 | 1.83 [1.78] |
+
+The search box is the only change on this path, so the ratio is the number of Nelder-Mead iterations: on the harness
+series (trend, period-12 sine, noise) the search takes 117 / 151 / 135 iterations instead of 67 / 91 / 70 at
+n = 100 / 1,000 / 10,000. The old floor of 0.01 sat next to the optimal beta (0.021 at n = 1,000, where both reach
+the same optimum) and cut the search short; at n = 100 and 10,000 it held beta or alpha at 0.01, and the SSE at the
+optimum falls from 11.530 to 11.510 and from 892.32 to 880.54. These rows are above 1.10x and need the user's
+sign-off.
 
 ## References
 

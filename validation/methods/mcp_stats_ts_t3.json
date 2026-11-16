@@ -256,7 +256,7 @@
       "id": "mcp_t3_remaining_handlers",
       "name": "MCP handler tests for the remaining statistics, hypothesis and time-series tools (STAT-46, STAT-77)",
       "category": "stats",
-      "reference": "TukeyHSD, pairwise.wilcox.test, wilcox.test, mcnemar.test, poisson.test, model.tables, se.contrast, cor, cancor, quantile(type = 6), PP.test internals, Box.test, decompose, ar(burg), runmed, embed, window, filter, diffinv, toeplitz, ARMAtoMA, acf2AR, ARMAacf",
+      "reference": "TukeyHSD, pairwise.wilcox.test, wilcox.test, mcnemar.test, poisson.test, model.tables, se.contrast, cor, cancor, quantile(type = 6), PP.test internals, Box.test, decompose, ar(burg), runmed (endrule constant and median), dplyr::lag, embed, window, filter, diffinv, toeplitz, ARMAtoMA, acf2AR, ARMAacf",
       "doc": "validation/stats/mcp_stats_ts.md",
       "cases": [
         "mcp_groups_t3",
@@ -284,6 +284,7 @@
         "p2a-mcp::tier3::wp56_stats_ts::test_validate_mcp_decompose_additive",
         "p2a-mcp::tier3::wp56_stats_ts::test_validate_mcp_ar_burg",
         "p2a-mcp::tier3::wp56_stats_ts::test_validate_mcp_runmed_constant",
+        "p2a-mcp::tier3::wp56_stats_ts::test_validate_mcp_runmed_median",
         "p2a-mcp::tier3::wp56_stats_ts::test_validate_mcp_series_utilities",
         "p2a-mcp::tier3::wp56_stats_ts::test_validate_mcp_arma_acf",
         "p2a-mcp::tier3::wp56_stats_ts::test_validate_mcp_lag_mstl_arima_sim"
@@ -299,29 +300,9 @@
           "note": "means, grand mean and group sizes pinned"
         },
         {
-          "finding": "TS-14",
-          "quantity": "ARMAacf for mixed ARMA",
-          "note": "pure AR and MA pinned"
-        },
-        {
           "finding": "TS-26",
           "quantity": "MSTL components",
-          "note": "observation count and periods only"
-        },
-        {
-          "finding": "TS-29",
-          "quantity": "timeseries_lag values",
-          "note": "the tool returns x[t + k]; R's dplyr-style lag is lag_dplyr3_head"
-        },
-        {
-          "finding": "TS-34",
-          "quantity": "runmed endrule median",
-          "note": "constant pinned here (keep in the option test); R's median is runmed_median_head"
-        },
-        {
-          "finding": "TOOL-28",
-          "quantity": "arima_sim sd",
-          "note": "seed determinism only"
+          "note": "MSTL components not pinned against forecast::mstl (f32 core, centred and scaled; level invariance tested in the core); observation count and periods only"
         }
       ],
       "supersedes_legacy": []
