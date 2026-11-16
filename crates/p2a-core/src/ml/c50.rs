@@ -485,10 +485,73 @@ fn class_codes(y: &ArrayView1<f64>) -> EconResult<(Vec<usize>, Vec<usize>)> {
 /// shallower are unchanged.
 const MAX_TREE_DEPTH: usize = 512;
 
-/// The best gain-ratio split of the rows in `indices`, as
-/// `(feature, threshold, gain, gain_ratio)`, or `None` when no candidate
-/// leaves `min_cases` rows on each side or the best one fails the C4.5
-/// average-gain heuristic.
+/// One feature's best cut: `(threshold, gain, ratio)` with the gain MDL-penalised.
+type FeatureCut = (f64, f64, f64);
+
+/// The best cut of `feature` over the rows in `indices` as C4.5 Release 8 chooses it
+/// (Quinlan 1996): the threshold with the largest weighted information gain among the cuts
+/// leaving at least `min_cases` case weight on each side (the first on ties, at the midpoint
+/// between the two values), its gain minus the MDL cost `ln(N_f - 1) / W` (N_f distinct values
+/// of the feature in the node, W the node weight; nats, as the gain), and the penalised gain
+/// divided by the split information of that partition. `None` when no cut is admissible.
+fn best_feature_cut(
+    x: &ArrayView2<f64>,
+    y: &ArrayView1<f64>,
+    weights: &Array1<f64>,
+    indices: &[usize],
+    class_weights: &[f64],
+    min_cases: usize,
+    feature: usize,
+) -> Option<FeatureCut> {
+    let n_classes = class_weights.len();
+    let node_weight: f64 = class_weights.iter().sum();
+    let min_w = min_cases as f64;
+    let mut values: Vec<(f64, usize)> = indices.iter().map(|&i| (x[[i, feature]], i)).collect();
+    values.sort_by(|a, b| a.0.total_cmp(&b.0));
+
+    let mut left_counts = vec![0.0f64; n_classes];
+    let mut right_counts = vec![0.0f64; n_classes];
+    let mut left_total = 0.0f64;
+    let mut distinct = 1usize;
+    // (threshold, gain, left weight)
+    let mut best: Option<(f64, f64, f64)> = None;
+    for j in 0..values.len().saturating_sub(1) {
+        let (x_val, idx) = values[j];
+        left_counts[y[idx] as usize] += weights[idx];
+        left_total += weights[idx];
+        let next_x = values[j + 1].0;
+        if (next_x - x_val).abs() < 1e-10 {
+            continue;
+        }
+        distinct += 1;
+        let right_total = node_weight - left_total;
+        if left_total < min_w || right_total < min_w {
+            continue;
+        }
+        for (r, (&t, &l)) in right_counts
+            .iter_mut()
+            .zip(class_weights.iter().zip(left_counts.iter()))
+        {
+            *r = t - l;
+        }
+        let gain = information_gain(class_weights, &left_counts, &right_counts);
+        if best.is_none_or(|(_, g, _)| gain > g) {
+            best = Some(((x_val + next_x) / 2.0, gain, left_total));
+        }
+    }
+    let (threshold, gain, left) = best?;
+    let penalised = gain - ((distinct - 1) as f64).ln() / node_weight;
+    let ratio = penalised / split_info(left, node_weight - left);
+    Some((threshold, penalised, ratio))
+}
+
+/// The split of the rows in `indices` as C4.5 Release 8 selects it, as
+/// `(feature, threshold, gain, gain_ratio)` (gain MDL-penalised), or `None` when no feature
+/// has a positive penalised gain.
+///
+/// Each feature's cut is [`best_feature_cut`]. Among the features with positive penalised
+/// gain, those whose penalised gain is at least the average over them compete on gain ratio;
+/// the largest ratio wins, the first feature on ties.
 ///
 /// Kept out of [`build_c50_tree`], and never inlined into it, so the recursive
 /// frame holds only node bookkeeping: unoptimised (opt-level 0) builds give
@@ -504,74 +567,29 @@ fn best_c50_split(
     min_cases: usize,
     selected_features: Option<&[usize]>,
 ) -> Option<(usize, f64, f64, f64)> {
-    let n_classes = class_weights.len();
-    let node_weight: f64 = class_weights.iter().sum();
-    let min_w = min_cases as f64;
     let features_to_try: Vec<usize> = match selected_features {
         Some(f) => f.to_vec(),
         None => (0..x.ncols()).collect(),
     };
-
-    let mut best_gain_ratio = 0.0;
-    let mut best_split: Option<(usize, f64, f64, f64)> = None;
-
-    // Compute average gain to determine threshold (C4.5 heuristic)
-    let mut all_gains: Vec<f64> = Vec::new();
-
-    for &feature in &features_to_try {
-        // Get sorted values for this feature
-        let mut values: Vec<(f64, usize)> = indices.iter().map(|&i| (x[[i, feature]], i)).collect();
-        values.sort_by(|a, b| a.0.total_cmp(&b.0));
-
-        // Scan through possible thresholds with running weighted class counts.
-        let mut left_counts = vec![0.0f64; n_classes];
-        let mut right_counts = vec![0.0f64; n_classes];
-        let mut left_total = 0.0f64;
-
-        for j in 0..values.len().saturating_sub(1) {
-            let (x_val, idx) = values[j];
-            let class = y[idx] as usize;
-            left_counts[class] += weights[idx];
-            left_total += weights[idx];
-
-            // Skip if next value is the same
-            let next_x = values[j + 1].0;
-            if (next_x - x_val).abs() < 1e-10 {
-                continue;
-            }
-
-            // Check minimum cases constraint (case weights, as C4.5)
-            let right_total = node_weight - left_total;
-            if left_total < min_w || right_total < min_w {
-                continue;
-            }
-
-            // Compute right counts
-            for (r, (&t, &l)) in right_counts
-                .iter_mut()
-                .zip(class_weights.iter().zip(left_counts.iter()))
-            {
-                *r = t - l;
-            }
-
-            let (gain, gr) = gain_ratio(class_weights, &left_counts, &right_counts);
-            all_gains.push(gain);
-
-            if gr > best_gain_ratio {
-                best_gain_ratio = gr;
-                let threshold = (x_val + next_x) / 2.0;
-                best_split = Some((feature, threshold, gain, gr));
-            }
+    let cuts: Vec<(usize, FeatureCut)> = features_to_try
+        .iter()
+        .filter_map(|&f| {
+            best_feature_cut(x, y, weights, indices, class_weights, min_cases, f)
+                .filter(|&(_, gain, _)| gain > 0.0)
+                .map(|cut| (f, cut))
+        })
+        .collect();
+    if cuts.is_empty() {
+        return None;
+    }
+    let average = cuts.iter().map(|(_, (_, g, _))| g).sum::<f64>() / cuts.len() as f64;
+    let mut best: Option<(usize, f64, f64, f64)> = None;
+    for &(feature, (threshold, gain, ratio)) in &cuts {
+        if gain >= average - 1e-12 && best.is_none_or(|(_, _, _, r)| ratio > r) {
+            best = Some((feature, threshold, gain, ratio));
         }
     }
-
-    // C4.5 heuristic: only split if the gain is at least the average gain
-    let avg_gain = if all_gains.is_empty() {
-        0.0
-    } else {
-        all_gains.iter().sum::<f64>() / all_gains.len() as f64
-    };
-    best_split.filter(|&(_, _, gain, _)| gain >= avg_gain * 0.99)
+    best
 }
 
 /// Class counts and leaf statistics of one node.
@@ -1467,6 +1485,129 @@ mod tests {
     }
 
     #[test]
+    fn test_c50_threshold_is_chosen_by_gain() {
+        // ML-18. C4.5 R8 picks a continuous feature's threshold by information gain; the gain ratio
+        // favours cuts near the edges (here 19.5, ratio 0.4356, against 12.5, ratio 0.3673).
+        let x = Array2::from_shape_fn((24, 1), |(i, _)| (i + 1) as f64);
+        let y = Array1::from_vec(vec![
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0,
+            1.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+        ]);
+        let cfg = C50Config {
+            no_global_pruning: true,
+            ..Default::default()
+        };
+        let r = c50(x.view(), y.view(), &cfg).unwrap();
+        let split = r.trees[0].split.as_ref().expect("root split");
+        assert_eq!(split.threshold, 12.5);
+    }
+
+    #[test]
+    fn test_c50_mdl_penalty_and_feature_average() {
+        // ML-18. Before: the largest gain ratio over all cuts of all features, x2 at 2.5 (an edge peel).
+        let (x, y) = attribute_example();
+        let cfg = C50Config {
+            no_global_pruning: true,
+            ..Default::default()
+        };
+        let r = c50(x.view(), y.view(), &cfg).unwrap();
+        let split = r.trees[0].split.as_ref().expect("root split");
+        assert_eq!((split.feature, split.threshold), (0, 23.5));
+        // x2 alone: its penalised gain is negative, so the root is a leaf.
+        let x2 = x.slice(ndarray::s![.., 1..2]).to_owned();
+        let r = c50(x2.view(), y.view(), &cfg).unwrap();
+        assert!(r.trees[0].split.is_none());
+    }
+
+    /// The cut of [`best_feature_cut`] by a naive pass that sums the class weights on each side
+    /// of every candidate threshold from scratch.
+    fn naive_feature_cut(
+        x: &Array2<f64>,
+        y: &Array1<f64>,
+        w: &Array1<f64>,
+        feature: usize,
+        n_classes: usize,
+        min_cases: usize,
+    ) -> Option<FeatureCut> {
+        let n = x.nrows();
+        let mut distinct: Vec<f64> = (0..n).map(|i| x[[i, feature]]).collect();
+        distinct.sort_by(f64::total_cmp);
+        distinct.dedup();
+        let total: Vec<f64> = (0..n_classes)
+            .map(|k| (0..n).filter(|&i| y[i] as usize == k).map(|i| w[i]).sum())
+            .collect();
+        let node_weight: f64 = w.sum();
+        let mut best: Option<(f64, f64, f64)> = None;
+        for pair in distinct.windows(2) {
+            let t = (pair[0] + pair[1]) / 2.0;
+            let mut left = vec![0.0; n_classes];
+            let mut right = vec![0.0; n_classes];
+            for i in 0..n {
+                let side = if x[[i, feature]] <= pair[0] {
+                    &mut left
+                } else {
+                    &mut right
+                };
+                side[y[i] as usize] += w[i];
+            }
+            let (lw, rw): (f64, f64) = (left.iter().sum(), right.iter().sum());
+            if lw < min_cases as f64 || rw < min_cases as f64 {
+                continue;
+            }
+            let gain = information_gain(&total, &left, &right);
+            if best.is_none_or(|(_, g, _)| gain > g) {
+                best = Some((t, gain, lw));
+            }
+        }
+        let (t, gain, lw) = best?;
+        let penalised = gain - ((distinct.len() - 1) as f64).ln() / node_weight;
+        Some((t, penalised, penalised / split_info(lw, node_weight - lw)))
+    }
+
+    #[test]
+    fn test_c50_split_scan_matches_naive_reference() {
+        // The running-count scan against the naive per-threshold pass, on noisy data with tied
+        // values and unequal weights: same threshold, gain and ratio to 1e-12 relative (the scan
+        // forms the right-hand weights as total minus left, so the last bits may differ).
+        let rel = |a: f64, b: f64| (a - b).abs() <= 1e-12 * a.abs().max(b.abs()).max(1e-300);
+        for seed in 0..20u64 {
+            let mut u = lcg_uniforms(1000 + seed);
+            let n = 40 + (seed as usize) * 3;
+            let x = Array2::from_shape_fn((n, 2), |_| (u() * 12.0).round() / 2.0);
+            let y = Array1::from_shape_fn(n, |i| {
+                let noisy = u() < 0.2;
+                let k =
+                    usize::from(x[[i, 0]] + 0.5 * x[[i, 1]] > 4.5) + usize::from(x[[i, 1]] > 4.0);
+                (if noisy { (k + 1) % 3 } else { k }) as f64
+            });
+            let w = Array1::from_shape_fn(n, |_| 0.2 + 2.0 * u());
+            let indices: Vec<usize> = (0..n).collect();
+            let class_weights: Vec<f64> = (0..3)
+                .map(|k| (0..n).filter(|&i| y[i] as usize == k).map(|i| w[i]).sum())
+                .collect();
+            for feature in 0..2 {
+                let scan = best_feature_cut(
+                    &x.view(),
+                    &y.view(),
+                    &w,
+                    &indices,
+                    &class_weights,
+                    2,
+                    feature,
+                );
+                let naive = naive_feature_cut(&x, &y, &w, feature, 3, 2);
+                match (scan, naive) {
+                    (Some(a), Some(b)) => {
+                        assert_eq!(a.0, b.0, "seed {seed} feature {feature}");
+                        assert!(rel(a.1, b.1) && rel(a.2, b.2), "seed {seed}: {a:?} {b:?}");
+                    }
+                    (a, b) => assert_eq!(a.is_none(), b.is_none(), "seed {seed}: {a:?} {b:?}"),
+                }
+            }
+        }
+    }
+
+    #[test]
     fn test_c50_first_trial_weights_are_case_counts() {
         // Every case weighs 1 in the first trial, so the case weights per class are the counts, and a
         // tree grown from any constant weights (rescaled to mean 1 per trial) is the same tree.
@@ -1654,10 +1795,13 @@ mod tests {
     }
 
     /// x = 0, 1, 2, ...; y alternates 0/1: every best split peels one row off an end.
-    fn chain_data(n: usize) -> (Array2<f64>, Array1<f64>) {
+    /// `blocks` blocks of 12 cases with one x value each and alternating classes. Peeling the
+    /// first block is the largest gain at every node, and its gain, about 12 ln 2 / W, beats the
+    /// MDL cost ln(blocks - 1) / W, so the tree is a chain of `blocks - 1` splits.
+    fn chain_data(blocks: usize) -> (Array2<f64>, Array1<f64>) {
         (
-            Array2::from_shape_fn((n, 1), |(i, _)| i as f64),
-            Array1::from_shape_fn(n, |i| (i % 2) as f64),
+            Array2::from_shape_fn((12 * blocks, 1), |(i, _)| (i / 12) as f64),
+            Array1::from_shape_fn(12 * blocks, |i| ((i / 12) % 2) as f64),
         )
     }
 
@@ -1686,11 +1830,11 @@ mod tests {
 
     #[test]
     fn test_c50_depth_is_capped_on_a_chain_input() {
-        // User decision 2026-10-21 (8). Before the fix the build recurses about 2,000 levels: the thread
-        // overflows its stack (the test binary aborts) or the tree comes back deeper than 512.
+        // User decision 2026-10-21 (8). The data grow a chain of 599 splits: without the depth guard
+        // the build recurses past 512 levels (before the guard, deep chains overflowed the stack).
         assert_eq!(MAX_TREE_DEPTH, 512);
         let depth = on_small_stack(|| {
-            let (x, y) = chain_data(2_000);
+            let (x, y) = chain_data(600);
             let cfg = C50Config {
                 min_cases: 1,
                 no_global_pruning: true,
