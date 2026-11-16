@@ -1352,15 +1352,18 @@ pub(crate) fn check_target_scale(y: &ArrayView1<f64>, method: &str) -> Result<()
 /// Anything else is refused.
 fn parse_max_features(max_features: Option<&str>, n_features: usize) -> Result<usize, String> {
     let at_least_one = |v: f64| (v.ceil() as usize).max(1);
-    match max_features {
+    // keywords are case-insensitive and may carry surrounding spaces, as every option string
+    let key = max_features.map(|s| s.trim().to_ascii_lowercase());
+    match key.as_deref() {
         None | Some("sqrt") => Ok(at_least_one((n_features as f64).sqrt())),
         Some("log2") => Ok(at_least_one((n_features as f64).log2())),
         Some("all") => Ok(n_features),
-        Some(s) => match s.parse::<usize>() {
+        Some(k) => match k.parse::<usize>() {
             Ok(k) if k >= 1 => Ok(k),
             _ => Err(format!(
                 "max_features must be 'sqrt', 'log2', 'all' or a whole number of features of at \
-                 least 1 (got '{s}')"
+                 least 1 (got '{}')",
+                max_features.unwrap_or_default()
             )),
         },
     }
@@ -2617,6 +2620,11 @@ mod tests {
         assert_eq!(fit(Some("3")), fit(Some("all")));
         assert_eq!(fit(None), fit(Some("sqrt")));
         assert_ne!(fit(Some("1")), fit(Some("all")));
+        // keywords and numbers in any case, with surrounding spaces
+        assert_eq!(fit(Some("SQRT")), fit(Some("sqrt")));
+        assert_eq!(fit(Some(" log2 ")), fit(Some("log2")));
+        assert_eq!(fit(Some("All")), fit(Some("all")));
+        assert_eq!(fit(Some(" 2 ")), fit(Some("2")));
     }
 
     /// `n` rows, `p` features; with `decimals` the features are rounded (ties).
