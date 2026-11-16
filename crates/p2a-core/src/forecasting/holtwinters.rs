@@ -1641,7 +1641,7 @@ mod tests {
     /// legacy validation/expected/holtwinters_*.csv to their 15 digits): AirPassengers
     /// multiplicative, additive (gamma = 1), the legacy quarterly series (period 4, gamma = 0)
     /// and the legacy non-seasonal Holt series. The optimiser itself is not pinned (Nelder-Mead,
-    /// not R's L-BFGS-B; test_holtwinters_optimum_reaches_rs_box holds its SSE to R's).
+    /// not R's L-BFGS-B; test_validate_holtwinters_optimum_reaches_rs_box holds its SSE to R's).
     #[test]
     fn test_validate_holtwinters_at_r_optimum() {
         let (case, ds) = crate::test_support::load_case("ts_holtwinters_forecast");
@@ -1708,7 +1708,7 @@ mod tests {
     /// (AirPassengers additive gamma 1, the quarterly series gamma 0) are reached. A property: the
     /// optimiser is Nelder-Mead, not R's L-BFGS-B, so the parameters are not pinned.
     #[test]
-    fn test_holtwinters_optimum_reaches_rs_box() {
+    fn test_validate_holtwinters_optimum_reaches_rs_box() {
         let (case, ds) = crate::test_support::load_case("ts_holtwinters_forecast");
         let runs = [
             (

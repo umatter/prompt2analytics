@@ -430,8 +430,8 @@ mod tests {
     use p2a_validation::{Check, Tol};
 
     /// Case ts_utils_t4: the monthly series y (n = 144, level about 1,000 to 1,290) and y + 1e8.
-    fn stl_case() -> (p2a_validation::Case, Vec<f64>, Tol) {
-        let (case, ds) = crate::test_support::load_case("ts_utils_t4");
+    fn stl_case(id: &str) -> (p2a_validation::Case, Vec<f64>, Tol) {
+        let (case, ds) = crate::test_support::load_case(id);
         let (y, _) = numeric_column(ds.df(), "y", NaPolicy::Fail).unwrap();
         // stlrs computes in f32, so after centring and scaling the components carry about 1e-7 of
         // the series' spread per operation: absolute 1e-5 * sd(y).
@@ -449,7 +449,7 @@ mod tests {
     /// stl(ts(y, frequency = 12), s.window = "periodic").
     #[test]
     fn test_validate_stl_periodic_ts_utils_t4() {
-        let (case, y, tol) = stl_case();
+        let (case, y, tol) = stl_case("ts_utils_t4");
         let r = stl(&y, StlConfig::new(12).periodic()).unwrap();
         let mut check = Check::new(&case);
         check_stl(&mut check, "stl_periodic", &r, tol);
@@ -459,7 +459,7 @@ mod tests {
     /// stl(ts(y, frequency = 12), s.window = 13) (13 = stlrs' default nextodd(period)).
     #[test]
     fn test_validate_stl_swin13_ts_utils_t4() {
-        let (case, y, tol) = stl_case();
+        let (case, y, tol) = stl_case("ts_utils_t4");
         let r = stl(&y, StlConfig::new(12).seasonal_length(13)).unwrap();
         let mut check = Check::new(&case);
         check_stl(&mut check, "stl_swin13", &r, tol);
@@ -469,7 +469,7 @@ mod tests {
     /// The same two calls on y + 1e8: the precision follows the spread, not the level.
     #[test]
     fn test_validate_stl_level_1e8_ts_utils_t4() {
-        let (case, y, tol) = stl_case();
+        let (case, y, tol) = stl_case("ts_utils_t4");
         let big: Vec<f64> = y.iter().map(|v| v + 1e8).collect();
         let mut check = Check::new(&case);
         let p = stl(&big, StlConfig::new(12).periodic()).unwrap();
@@ -481,7 +481,7 @@ mod tests {
 
     #[test]
     fn test_stl_reconstructs_exactly() {
-        let (_, y, _) = stl_case();
+        let (_, y, _) = stl_case("ts_utils_t4");
         let big: Vec<f64> = y.iter().map(|v| v + 1e8).collect();
         for config in [StlConfig::new(12), StlConfig::new(12).periodic()] {
             let r = stl(&big, config).unwrap();
@@ -498,7 +498,7 @@ mod tests {
 
     #[test]
     fn test_stl_periodic_with_seasonal_length_is_refused() {
-        let (_, y, _) = stl_case();
+        let (_, y, _) = stl_case("ts_utils_t4");
         let err = stl(&y, StlConfig::new(12).periodic().seasonal_length(13)).unwrap_err();
         assert!(
             matches!(&err, EconError::InvalidSpecification { message } if message.contains("periodic")),

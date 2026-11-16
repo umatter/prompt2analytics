@@ -181,3 +181,4 @@ p2a-mcp::tier3::wp56_stats_ts::test_validate_mcp_causal_impact_reports_clipped_p
 p2a-mcp::tier3::wp56_stats_ts::test_validate_mcp_lag_mstl_arima_sim | registered-property | a stated property on the case's data (mcp lag mstl arima sim); compares no R value
 p2a-mcp::tier3::wp56_stats_ts::test_validate_mcp_timeseries_wp37_texts | registered-property | printed output on the case's data; its values are pinned by the method's other tests (mcp timeseries wp37 texts); compares no R value
 p2a-mcp::tools::handlers::data::tests::test_validate_mcp_describe_dataset_nan_inf | registered-property | a stated property on the case's data (mcp describe dataset nan inf); compares no R value
+p2a-core::forecasting::holtwinters::tests::test_validate_holtwinters_optimum_reaches_rs_box | registered-property | the SSE at the optimum is at most R's and R's boundary optima are reached; the optimiser is Nelder-Mead, so no parameter is compared with R

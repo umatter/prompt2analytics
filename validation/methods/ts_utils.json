@@ -167,7 +167,8 @@
         "p2a-core::forecasting::holtwinters::tests::test_validate_holtwinters_forecast_multiplicative",
         "p2a-core::forecasting::holtwinters::tests::test_validate_holtwinters_forecast_holt",
         "p2a-core::forecasting::holtwinters::tests::test_validate_holtwinters_notrend_and_ses",
-        "p2a-core::forecasting::holtwinters::tests::test_validate_holtwinters_at_r_optimum"
+        "p2a-core::forecasting::holtwinters::tests::test_validate_holtwinters_at_r_optimum",
+        "p2a-core::forecasting::holtwinters::tests::test_validate_holtwinters_optimum_reaches_rs_box"
       ],
       "quantities": [
         "SSE",

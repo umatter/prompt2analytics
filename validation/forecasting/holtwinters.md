@@ -62,7 +62,7 @@ their 15 digits, with the legacy series regenerated from the legacy seeds.
 
 **Optimiser (not pinned).** p2a runs Nelder-Mead on R's box [0, 1] for alpha, beta and gamma; R runs L-BFGS-B on the
 same box from its own starts. The optimised parameters are not pinned, because the optimiser path is not R's. The
-property test `test_holtwinters_optimum_reaches_rs_box` holds that p2a's SSE is at most R's (relative 1e-6) on the four
+`registered-property` test `test_validate_holtwinters_optimum_reaches_rs_box` holds that p2a's SSE is at most R's (relative 1e-6) on the four
 case series, and that the boundary optima R finds are reached (AirPassengers additive gamma 1, the quarterly series
 gamma 0). A fixed value is used as given, whichever parameters are optimised (a given alpha must lie in (0, 1], as R
 requires; an optimised one may reach 0, as R's may). The filter is pinned at R's optimum.
