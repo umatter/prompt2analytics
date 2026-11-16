@@ -179,29 +179,16 @@ pub(crate) fn roc_classes(
     if predictions.is_empty() {
         return Err("Need at least one sample".to_string());
     }
-    let k = predictions.iter().filter(|p| p.is_nan()).count();
-    if k > 0 {
-        return Err(format!(
-            "predictions contain {k} missing value(s) (NaN); ROC/AUC needs a score for every observation"
-        ));
-    }
-    let k = actual.iter().filter(|v| v.is_nan()).count();
-    if k > 0 {
-        return Err(format!("actual labels contain {k} missing value(s) (NaN)"));
-    }
-    if actual.iter().any(|v| v.is_infinite()) {
-        return Err("actual labels must be finite (two classes)".to_string());
-    }
-    let k = predictions.iter().filter(|p| p.is_infinite()).count();
-    if k > 0 {
-        return Err(format!(
-            "predictions must be finite (pROC refuses infinite scores); found {k} infinite value(s)"
-        ));
+    // One pass over each input on the common path; the error path says what is wrong.
+    if !(predictions.iter().all(|p| p.is_finite()) && actual.iter().all(|v| v.is_finite())) {
+        return Err(non_finite_message(predictions, actual));
     }
     let first = actual[0];
+    let mut n_first = 0usize;
     let mut other: Option<f64> = None;
     for &v in actual {
         if v == first {
+            n_first += 1;
             continue;
         }
         match other {
@@ -222,8 +209,34 @@ pub(crate) fn roc_classes(
         return Err("ROC requires exactly 2 classes, found 1".to_string());
     };
     let pos_class = first.max(other);
-    let n_pos = actual.iter().filter(|&&v| v == pos_class).count();
+    let n_pos = if pos_class == first {
+        n_first
+    } else {
+        actual.len() - n_first
+    };
     Ok((pos_class, n_pos, actual.len() - n_pos))
+}
+
+/// The refusal for NaN or infinite scores or labels, in this order: NaN scores, NaN labels, infinite labels,
+/// infinite scores.
+fn non_finite_message(predictions: &[f64], actual: &[f64]) -> String {
+    let k = predictions.iter().filter(|p| p.is_nan()).count();
+    if k > 0 {
+        return format!(
+            "predictions contain {k} missing value(s) (NaN); ROC/AUC needs a score for every observation"
+        );
+    }
+    let k = actual.iter().filter(|v| v.is_nan()).count();
+    if k > 0 {
+        return format!("actual labels contain {k} missing value(s) (NaN)");
+    }
+    if actual.iter().any(|v| v.is_infinite()) {
+        return "actual labels must be finite (two classes)".to_string();
+    }
+    let k = predictions.iter().filter(|p| p.is_infinite()).count();
+    format!(
+        "predictions must be finite (pROC refuses infinite scores); found {k} infinite value(s)"
+    )
 }
 
 /// One pass over scores sorted in decreasing order ([`roc_inputs`]): the ROC curve with the rule
