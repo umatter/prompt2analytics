@@ -1476,14 +1476,12 @@ mod tests {
 
     /// 50 stumps on the `gbm_leaf_t4` design with gbm's `n.minobsinnode = 1, bag.fraction = 1`.
     fn leaf_t4_stumps(
+        case_id: &str,
         y_col: &str,
         family: GbmFamily,
     ) -> (p2a_validation::Case, Array1<f64>, GbmResult) {
         use crate::data::columns::NaPolicy;
-        let (case, ds) = crate::test_support::load_case(match family {
-            GbmFamily::Binomial => "gbm_bernoulli_stumps",
-            _ => "gbm_laplace_stumps",
-        });
+        let (case, ds) = crate::test_support::load_case(case_id);
         let (x, y, _) =
             crate::ml::extract_xy(&ds, y_col, &["x0", "x1", "x2"], NaPolicy::Fail).unwrap();
         let mut config = GbmConfig::default();
@@ -1515,7 +1513,7 @@ mod tests {
         // 0.1 could not move the fit more than 5 from F0 = 704.88: fitted range [700.17, 707.14],
         // MAE 276.94 (R: [198.18, 1139.49], MAE 52.97).
         use p2a_validation::{Check, Tol};
-        let (case, y, r) = leaf_t4_stumps("y_lad", GbmFamily::Laplace);
+        let (case, y, r) = leaf_t4_stumps("gbm_laplace_stumps", "y_lad", GbmFamily::Laplace);
         let mae = y
             .iter()
             .zip(&r.predictions)
@@ -1538,7 +1536,7 @@ mod tests {
         // Before: the mean of y - p, a gradient step: probability range [0.442, 0.789]
         // (R: [0.190, 0.911]).
         use p2a_validation::{Check, Tol};
-        let (case, _, r) = leaf_t4_stumps("y_bin", GbmFamily::Binomial);
+        let (case, _, r) = leaf_t4_stumps("gbm_bernoulli_stumps", "y_bin", GbmFamily::Binomial);
         let tol = Tol::coef(200);
         Check::new(&case)
             .scalar("init_f", r.init_prediction, tol)
