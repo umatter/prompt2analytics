@@ -16,7 +16,8 @@
         "p2a-core::forecasting::changepoint::tests::test_validate_binseg_mean_manual",
         "p2a-core::forecasting::changepoint::tests::test_validate_binseg_var_and_meanvar",
         "p2a-core::forecasting::changepoint::tests::test_validate_binseg_q_reached",
-        "p2a-core::forecasting::changepoint::tests::test_validate_binseg_large_level"
+        "p2a-core::forecasting::changepoint::tests::test_validate_binseg_large_level",
+        "p2a-mcp::tier3::wp56_stats_ts::test_validate_mcp_changepoint_binseg"
       ],
       "quantities": [
         "changepoints",
@@ -24,7 +25,7 @@
         "total cost (sum of segment costs incl. MBIC terms)",
         "Q-reached warning"
       ],
-      "tolerance": "changepoints exact; penalty and cost Tol::stat(n) (n = 300, 240)",
+      "tolerance": "changepoints exact; penalty and cost Tol::stat(n) (n = 300, 240); MCP text Tol::printed(4)",
       "deviations": [
         {
           "finding": "TS-8",

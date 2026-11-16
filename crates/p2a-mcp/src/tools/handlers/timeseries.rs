@@ -11,7 +11,7 @@ use rmcp::{
 
 use crate::server::AnalyticsServer;
 use crate::tools::common::{NaPolicy, limit_refusal, missing_json, numeric_column, parse_option};
-use crate::tools::common::{insert_notes, parse_choice};
+use crate::tools::common::{append_notes, insert_notes, parse_choice};
 use crate::tools::requests::timeseries::*;
 
 use p2a_core::econometrics::timeseries::varma::{VarmaConfig, run_varma_with};
@@ -894,7 +894,7 @@ impl AnalyticsServer {
 
     /// Detect changepoints (structural breaks) in a time series.
     #[tool(
-        description = "Detect changepoints (structural breaks) in a time series using PELT (changepoint's cpt.mean / cpt.var / cpt.meanvar with the MBIC penalty by default; the mean cost assumes unit variance) or Binary Segmentation (mean changes only). Identifies points where the mean or variance changes. Useful for regime detection, anomaly detection, and segmenting time series into homogeneous periods."
+        description = "Detect changepoints (structural breaks) in a time series using PELT (changepoint's cpt.mean / cpt.var / cpt.meanvar with the MBIC penalty by default; the mean cost assumes unit variance) or Binary Segmentation (changepoint's BinSeg: the same costs and penalties, at most Q = 5 changepoints by default, set by max_changepoints). Identifies points where the mean or variance changes. Useful for regime detection, anomaly detection, and segmenting time series into homogeneous periods."
     )]
     pub async fn ts_changepoint(
         &self,
@@ -913,11 +913,10 @@ impl AnalyticsServer {
             Ok(v) => v,
             Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
         };
-        if cp_method == CpMethod::BinSeg && cost_fn != CostFunction::MeanChange {
-            return Ok(CallToolResult::error(vec![Content::text(format!(
-                "method 'binary' detects mean changes only (binary_segmentation has no variance cost); use method 'pelt' for change_type '{}'",
-                CostFunction::choices().canonical(cost_fn)
-            ))]));
+        if cp_method == CpMethod::Pelt && request.max_changepoints.is_some() {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "max_changepoints applies to method 'binary' only: PELT finds the number of changepoints from the penalty",
+            )]));
         }
 
         // Run detection based on method
@@ -926,7 +925,7 @@ impl AnalyticsServer {
                 match run_binary_segmentation(
                     dataset,
                     &request.column,
-                    Some(10), // max changepoints
+                    request.max_changepoints, // changepoint's Q; None = 5
                     request.min_segment_length,
                     request.penalty,
                     cost_fn,
@@ -991,6 +990,7 @@ impl AnalyticsServer {
         }
 
         output.push_str(&format!("\nTotal Cost: {:.4}\n", result.total_cost));
+        append_notes(&mut output, None, &result.warnings);
 
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }

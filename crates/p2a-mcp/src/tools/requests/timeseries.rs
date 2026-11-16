@@ -433,7 +433,7 @@ pub struct ChangepointRequest {
 
     /// Detection method: 'pelt' or 'binary'
     #[schemars(
-        description = "Algorithm to use: 'pelt' (Pruned Exact Linear Time, default) or 'binary' (Binary Segmentation; also 'binseg'). Binary segmentation detects mean changes only, so it is refused with change_type 'variance' or 'meanvar'."
+        description = "Algorithm to use: 'pelt' (Pruned Exact Linear Time, default) or 'binary' (Binary Segmentation as changepoint's BinSeg, with the same change types and penalties; also 'binseg')."
     )]
     pub method: Option<String>,
 
@@ -442,6 +442,12 @@ pub struct ChangepointRequest {
         description = "Type of change to detect, as changepoint's cpt.mean, cpt.var and cpt.meanvar: 'mean' (default; unit variance, as cpt.mean; also 'cpt.mean'), 'variance' (also 'var', 'cpt.var') or 'meanvar' (mean and variance; also 'both', 'cpt.meanvar'). Other values are refused."
     )]
     pub change_type: Option<String>,
+
+    /// Binary segmentation only: the most changepoints to find (changepoint's Q)
+    #[schemars(
+        description = "Binary segmentation only: the most changepoints to find (changepoint's Q). Default 5; at most n / min_segment_length + 1. When the search stops at Q, the result advises raising it."
+    )]
+    pub max_changepoints: Option<usize>,
 }
 
 /// Request for Holt-Winters exponential smoothing.

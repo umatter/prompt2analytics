@@ -666,8 +666,8 @@ async fn test_validate_mcp_timeseries_option_aliases() {
         ),
         (
             "ts_changepoint",
-            json!({"dataset": "mcp_series_t3", "column": "w", "method": "binary", "change_type": "variance"}),
-            "binary",
+            json!({"dataset": "mcp_series_t3", "column": "w", "max_changepoints": 3}),
+            "applies to method 'binary' only",
         ),
         (
             "timeseries_runmed",
@@ -2040,6 +2040,92 @@ async fn test_validate_mcp_causal_impact_reports_clipped_periods() {
         )
         .await
         .contains("post_period")
+    );
+}
+
+/// TS-8: ts_changepoint's binary method is changepoint's BinSeg (cpt_binseg_t4): the change
+/// type, the MBIC or manual penalty and Q reach it. Before: a zero threshold (white noise split
+/// up to 10 times), a reported ln(n) that was never applied, and variance changes refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_changepoint_binseg() {
+    let case = Case::load("cpt_binseg_t4");
+    let load = |rel: &str| {
+        p2a_core::data::Dataset::new(
+            p2a_core::data::DataLoader::load_csv(&p2a_validation::repo_path(rel)).unwrap(),
+        )
+    };
+    let (se, s) = session_with_datasets(vec![
+        (
+            "cpt_binseg_t4",
+            load("validation/datasets/generated/cpt_binseg_t4.csv"),
+        ),
+        (
+            "cpt_binseg_t4_var",
+            load("validation/datasets/generated/cpt_binseg_t4_var.csv"),
+        ),
+    ]);
+    let run = |args: Value| ok(&s, &se, "ts_changepoint", args);
+    // cpt.mean(reg, BinSeg, MBIC, Q = 5): 99, 200; pen 3 ln 300
+    let t = run(json!({"dataset": "cpt_binseg_t4", "column": "reg", "method": "binary"})).await;
+    assert!(t.contains("Changepoint Positions: [99, 200]"), "{t}");
+    assert!(!t.contains("Warning:"), "{t}");
+    Check::new(&case)
+        .scalar(
+            "reg_mean_pen",
+            number_after(&t, "Penalty:"),
+            Tol::printed(4),
+        )
+        .scalar(
+            "reg_mean_cost",
+            number_after(&t, "Total Cost:"),
+            Tol::printed(4),
+        )
+        .finish();
+    // white noise: no change
+    let t = run(json!({"dataset": "cpt_binseg_t4", "column": "wn", "method": "binary"})).await;
+    assert!(t.contains("No changepoints detected"), "{t}");
+    // cpt.var(vr - mean(vr), BinSeg, MBIC): 91, 162 (p2a centres by the series mean)
+    let t = run(json!({"dataset": "cpt_binseg_t4_var", "column": "vr", "method": "binary", "change_type": "variance"})).await;
+    assert!(t.contains("Changepoint Positions: [91, 162]"), "{t}");
+    Check::new(&case)
+        .scalar("vr_var_pen", number_after(&t, "Penalty:"), Tol::printed(4))
+        .finish();
+    // cpt.mean(many, BinSeg, MBIC, Q = 2): 57, 121 and R's warning
+    let t = run(json!({"dataset": "cpt_binseg_t4", "column": "many", "method": "binary", "max_changepoints": 2})).await;
+    assert!(t.contains("Changepoint Positions: [57, 121]"), "{t}");
+    assert!(t.contains("Warning:") && t.contains("increase Q"), "{t}");
+    // manual penalty 10 on reg: 99, 200
+    let t = run(
+        json!({"dataset": "cpt_binseg_t4", "column": "reg", "method": "binary", "penalty": 10.0}),
+    )
+    .await;
+    assert!(t.contains("Changepoint Positions: [99, 200]"), "{t}");
+    assert!(t.contains("manual penalty"), "{t}");
+    // Q above n / min_segment_length + 1 is refused
+    let e = refused(
+        &s,
+        &se,
+        "ts_changepoint",
+        json!({"dataset": "cpt_binseg_t4", "column": "reg", "method": "binary", "max_changepoints": 152}),
+    )
+    .await;
+    assert!(e.contains("max_changepoints"), "{e}");
+    // the tool text
+    let tools = s.router_tools();
+    let tool = tools.iter().find(|t| t.name == "ts_changepoint").unwrap();
+    let prop = |p: &str| {
+        tool.input_schema["properties"][p]["description"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    assert!(!prop("method").contains("refused"), "{}", prop("method"));
+    let q = prop("max_changepoints");
+    assert!(q.contains("Q") && q.contains("Default 5"), "{q}");
+    let desc = tool.description.clone().unwrap().to_string();
+    assert!(
+        desc.contains("BinSeg") && !desc.contains("mean changes only"),
+        "{desc}"
     );
 }
 
