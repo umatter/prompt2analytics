@@ -13,6 +13,7 @@ use crate::server::AnalyticsServer;
 use crate::tools::common::parse_choice;
 use crate::tools::common::{self, NaPolicy, error_text, parse_option};
 use crate::tools::requests::spatial::*;
+use p2a_core::data::columns::ColumnRequest;
 use p2a_core::econometrics::spatialprobit::SPATIAL_PROBIT_DEFAULT_SEED;
 use p2a_core::options::Choices;
 
@@ -40,8 +41,6 @@ use p2a_core::{
     econometrics::sphet::SpatialHacKernel,
     // Moran's I test
     moran_test,
-    // Regression
-    regression::{CovarianceType, run_ols},
     // Spatial regression models
     run_sar,
     // Spatial probit
@@ -402,7 +401,7 @@ impl AnalyticsServer {
 
     /// Run spatial LM tests to choose between SAR and SEM models.
     #[tool(
-        description = "Run Lagrange Multiplier tests for spatial dependence. Tests for spatial lag (SAR) vs spatial error (SEM) dependence in OLS residuals. Includes robust versions that account for the presence of the other form of spatial dependence. Use to decide between SAR and SEM models. Equivalent to R's spdep::lm.LMtests()."
+        description = "Run Rao score (Lagrange multiplier) tests for spatial dependence in an OLS regression of y on x (with intercept): RSlag (spatial lag, rho), RSerr (spatial error, lambda), their robust forms adjRSlag and adjRSerr (each robust to a local form of the other), and the joint SARMA test (df 2). Use to choose between SAR and SEM models. Equivalent to R's spdep::lm.RStests(test = 'all') (named lm.LMtests before spdep 1.3); the robust forms are adjRSlag and adjRSerr. The tests assume row-standardised weights (style W) and warn otherwise, as spdep does. y and x must have no missing values."
     )]
     pub async fn spatial_lm_tests_tool(
         &self,
@@ -413,7 +412,7 @@ impl AnalyticsServer {
             crate::get_dataset!(datasets, &request.dataset).clone()
         };
 
-        let mut listw = match self.weights_snapshot(&request.weights).await {
+        let listw = match self.weights_snapshot(&request.weights).await {
             Some(w) => w,
             None => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -425,73 +424,65 @@ impl AnalyticsServer {
 
         let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
 
-        // Run OLS to get residuals
-        let ols_result = match run_ols(
-            &dataset,
-            &request.y,
-            &x_refs,
-            true,
-            CovarianceType::Standard,
-        ) {
-            Ok(r) => r,
+        // y and the design [1, X]; no missing value (row i is unit i of the weights)
+        let data = ColumnRequest::new(dataset.df())
+            .numeric(&request.y)
+            .numerics(&x_refs)
+            .na(NaPolicy::Fail)
+            .extract()
+            .and_then(|cols| {
+                let x = cols.matrix(&x_refs, true)?.data;
+                Ok((cols.numeric_array(&request.y), x))
+            });
+        let (y, x_mat) = match data {
+            Ok(d) => d,
             Err(e) => {
                 return error_text(model_error(
-                    "OLS estimation failed: ",
+                    "Could not read the variables: ",
                     &e,
                     MISSING_HINT_MODELS,
                 ));
             }
         };
 
-        // Design matrix [1, X] (the regressors OLS used; no missing value)
-        let x_mat = match common::numeric_columns(&dataset, &x_refs, NaPolicy::Fail)
-            .and_then(|cols| cols.matrix(&x_refs, true).map_err(|e| e.to_string()))
-        {
-            Ok(m) => m.data,
-            Err(e) => return error_text(with_hint(e, MISSING_HINT_MODELS)),
-        };
-
-        let tests = spatial_lm_tests(ols_result.residuals(), &x_mat, &mut listw);
-        self.keep_weights_cache(&request.weights, listw).await;
-        match tests {
+        // spatial_lm_tests fits the OLS of y on [1, X] itself
+        match spatial_lm_tests(&y, &x_mat, &listw) {
             Ok(result) => {
-                let output = format!(
-                    "Spatial Lagrange Multiplier Tests\n\
-                     ==================================\n\
+                let line = |label: &str, t: &p2a_core::spatial::LmTestResult| {
+                    format!(
+                        "{label} statistic = {:.4}, df = {}, p-value = {:.6}\n",
+                        t.statistic, t.df, t.p_value
+                    )
+                };
+                let mut output = format!(
+                    "Rao Score (Lagrange Multiplier) Tests for Spatial Dependence\n\
+                     ============================================================\n\
                      Dependent variable: {}\n\n\
-                     LM tests for spatial dependence:\n\
-                     --------------------------------\n\
-                     LM-Lag (ρ):     statistic = {:.4}, df = {}, p-value = {:.6}\n\
-                     LM-Error (λ):   statistic = {:.4}, df = {}, p-value = {:.6}\n\n\
-                     Robust LM tests (controlling for the other):\n\
-                     --------------------------------------------\n\
-                     RLM-Lag:        statistic = {:.4}, df = {}, p-value = {:.6}\n\
-                     RLM-Error:      statistic = {:.4}, df = {}, p-value = {:.6}\n\n\
-                     Joint SARMA test:\n\
-                     -----------------\n\
-                     LM-SARMA:       statistic = {:.4}, df = {}, p-value = {:.6}\n\n\
-                     Decision Rule:\n\
+                     Tests for spatial dependence:\n\
+                     -----------------------------\n",
+                    request.y
+                );
+                output.push_str(&line("LM-Lag (ρ)    [RSlag]:   ", &result.lm_lag));
+                output.push_str(&line("LM-Error (λ)  [RSerr]:   ", &result.lm_error));
+                output.push_str(
+                    "\nRobust tests (each robust to a local form of the other):\n\
+                     --------------------------------------------------------\n",
+                );
+                output.push_str(&line("RLM-Lag       [adjRSlag]:", &result.rlm_lag));
+                output.push_str(&line("RLM-Error     [adjRSerr]:", &result.rlm_error));
+                output.push_str("\nJoint test:\n-----------\n");
+                output.push_str(&line("LM-SARMA      [SARMA]:   ", &result.lm_sarma));
+                output.push_str(
+                    "\nDecision Rule (Anselin et al. 1996):\n\
                      - Both LM tests significant: use robust versions\n\
                      - Only RLM-Lag significant: use SAR model (lagsarlm)\n\
                      - Only RLM-Error significant: use SEM model (errorsarlm)\n\
                      - Both robust tests significant: use SARAR model",
-                    request.y,
-                    result.lm_lag.statistic,
-                    result.lm_lag.df,
-                    result.lm_lag.p_value,
-                    result.lm_error.statistic,
-                    result.lm_error.df,
-                    result.lm_error.p_value,
-                    result.rlm_lag.statistic,
-                    result.rlm_lag.df,
-                    result.rlm_lag.p_value,
-                    result.rlm_error.statistic,
-                    result.rlm_error.df,
-                    result.rlm_error.p_value,
-                    result.lm_sarma.statistic,
-                    result.lm_sarma.df,
-                    result.lm_sarma.p_value
                 );
+                for w in &result.warnings {
+                    output.push_str("\nWarning: ");
+                    output.push_str(w);
+                }
                 Ok(CallToolResult::success(vec![Content::text(output)]))
             }
             Err(e) => error_text(model_error(
@@ -2133,6 +2124,72 @@ mod tests {
             assert!(
                 !t.contains("rebuild the weights with spatial_neighbors on the cleaned"),
                 "{t}"
+            );
+        }
+    }
+
+    /// The statistic and p-value printed on the line tagged `[name]`.
+    fn rs_line(t: &str, name: &str) -> (f64, f64) {
+        let tag = format!("[{name}]");
+        let line = t
+            .lines()
+            .find(|l| l.contains(&tag))
+            .unwrap_or_else(|| panic!("{tag} missing in {t}"));
+        let after = |key: &str| -> f64 {
+            let rest =
+                &line[line.find(key).unwrap_or_else(|| panic!("{key} in {line}")) + key.len()..];
+            rest.split(',').next().unwrap().trim().parse().unwrap()
+        };
+        (after("statistic = "), after("p-value = "))
+    }
+
+    /// R: spdep::lm.RStests(lm(y ~ x1 + x2), nb2listw(knn 4), test = "all") through the tool
+    /// text (spatial_diag_t4.R, case spatial_lm_diag_t4): statistics to 4 and p-values to 6
+    /// printed decimals.
+    #[test]
+    fn test_validate_mcp_lm_rstests_knn_spatial_sim() {
+        let case = p2a_validation::Case::load("spatial_lm_diag_t4");
+        let df = p2a_core::data::DataLoader::load_csv(case.dataset_path()).unwrap();
+        let (rt, s) = server_with(vec![("sim", df)]);
+        let r = call(
+            &s,
+            Limits::off(),
+            req(serde_json::json!({
+                "dataset": "sim", "x_coord": "cx", "y_coord": "cy",
+                "method": "knn", "k": 4, "weights_name": "w",
+            })),
+        );
+        assert_ne!(r.is_error, Some(true), "{}", text(&r));
+        let r = rt
+            .block_on(s.spatial_lm_tests_tool(Parameters(req(serde_json::json!({
+                "dataset": "sim", "y": "y", "x": ["x1", "x2"], "weights": "w"
+            })))))
+            .unwrap();
+        let t = text(&r);
+        assert_ne!(r.is_error, Some(true), "{t}");
+        assert!(!t.contains("Warning"), "{t}");
+        let stat = case.by_names(
+            "rstests_knn_stat",
+            &["RSerr", "RSlag", "adjRSerr", "adjRSlag", "SARMA"],
+        );
+        let p = case.by_names(
+            "rstests_knn_p",
+            &["RSerr", "RSlag", "adjRSerr", "adjRSlag", "SARMA"],
+        );
+        for (i, name) in ["RSerr", "RSlag", "adjRSerr", "adjRSlag", "SARMA"]
+            .iter()
+            .enumerate()
+        {
+            let (st, pv) = rs_line(&t, name);
+            assert!(
+                Tol::printed(4).allows(st, stat[i]),
+                "{name} {st} vs R {}",
+                stat[i]
+            );
+            assert!(
+                Tol::printed(6).allows(pv, p[i]),
+                "{name} p {pv} vs R {}",
+                p[i]
             );
         }
     }

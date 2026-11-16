@@ -163,19 +163,23 @@ pub struct LocalMoranResult {
     pub n_not_sig: usize,
 }
 
-/// Lagrange Multiplier tests for spatial dependence in regression residuals.
+/// Rao score (Lagrange multiplier) tests for spatial dependence in a linear regression
+/// (spdep `lm.RStests`; spdep's names in brackets).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpatialLmTests {
-    /// LM test for spatial lag (H0: ρ = 0)
+    /// Score test for a spatial lag, H0: ρ = 0 (RSlag)
     pub lm_lag: LmTestResult,
-    /// LM test for spatial error (H0: λ = 0)
+    /// Score test for a spatial error, H0: λ = 0 (RSerr)
     pub lm_error: LmTestResult,
-    /// Robust LM test for spatial lag (controlling for error)
+    /// Lag test robust to a local spatial error (adjRSlag)
     pub rlm_lag: LmTestResult,
-    /// Robust LM test for spatial error (controlling for lag)
+    /// Error test robust to a local spatial lag (adjRSerr)
     pub rlm_error: LmTestResult,
-    /// SARMA test (H0: ρ = λ = 0)
+    /// Joint test, H0: ρ = λ = 0 (SARMA, df 2)
     pub lm_sarma: LmTestResult,
+    /// Warnings (spdep's "Spatial weights matrix not row standardized")
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 /// What the global tests share: the moments of the centred variable and spdep's weight constants.
@@ -821,20 +825,36 @@ fn compute_all_local_moran_pvalues_permutation(
         .collect())
 }
 
-/// Lagrange Multiplier tests for spatial dependence in regression residuals.
+/// Rao score (Lagrange multiplier) tests for spatial dependence in a linear regression, as
+/// spdep's `lm.RStests(test = "all")` (named `lm.LMtests` before spdep 1.3).
 ///
-/// Tests whether OLS residuals exhibit spatial lag or spatial error dependence.
-/// Includes both standard and robust versions of the tests.
+/// Fits OLS of `y` on `x` (pivoted QR; aliased columns are dropped as `lm` drops them), then
+/// with u the residuals, ŷ the fitted values, s² = u'u / n and T = tr(W'W + W²):
+///
+/// ```text
+/// RSerr    = (u'Wu / s²)² / T
+/// RSlag    = (u'Wy / s²)² / nJ,   nJ = (||M Wŷ||² + T s²) / s²   (M the residual maker of x)
+/// adjRSerr = (u'Wu/s² - T/nJ u'Wy/s²)² / (T (1 - T/nJ))
+/// adjRSlag = (u'Wy/s² - u'Wu/s²)² / (nJ - T)
+/// SARMA    = adjRSlag + RSerr                                     (df 2)
+/// ```
+///
+/// (Anselin 1988; Anselin, Bera, Florax & Yoon 1996). The fields carry spdep's tests:
+/// `lm_error` = RSerr, `lm_lag` = RSlag, `rlm_error` = adjRSerr, `rlm_lag` = adjRSlag,
+/// `lm_sarma` = SARMA. As spdep, the tests assume a row-standardised W and warn otherwise.
 ///
 /// # Arguments
 ///
-/// * `residuals` - OLS residuals
-/// * `x` - Design matrix (including intercept)
+/// * `y` - Dependent variable
+/// * `x` - Design matrix (including the intercept column if the model has one)
 /// * `listw` - Spatial weights
 ///
-/// # Returns
+/// # Errors
 ///
-/// Suite of LM test results
+/// - `InvalidSpecification`: lengths differ, or `y` or `x` has a non-finite value.
+/// - `InsufficientData`: no rows.
+/// - `Computation`: the residuals are all zero, the weights have no links (T = 0), or a
+///   denominator of a test is not positive; the message names the test.
 ///
 /// # Reference
 ///
@@ -842,140 +862,92 @@ fn compute_all_local_moran_pvalues_permutation(
 /// Anselin, L., Bera, A.K., Florax, R., Yoon, M.J. (1996). Simple diagnostic tests
 /// for spatial dependence. Regional Science and Urban Economics.
 pub fn spatial_lm_tests(
-    residuals: &Array1<f64>,
+    y: &Array1<f64>,
     x: &Array2<f64>,
-    listw: &mut SpatialWeights,
+    listw: &SpatialWeights,
 ) -> EconResult<SpatialLmTests> {
-    let n = residuals.len();
+    use crate::linalg::solve::least_squares;
+
+    let n = y.len();
     if n != listw.n() || n != x.nrows() {
         return Err(EconError::InvalidSpecification {
-            message: "Dimensions must match".to_string(),
+            message: format!(
+                "spatial_lm_tests: y ({n}), the rows of x ({}) and the weights ({}) must have \
+                 the same length",
+                x.nrows(),
+                listw.n()
+            ),
         });
     }
-
-    let k = x.ncols();
+    let fit = least_squares(x.view(), y.view())?;
+    let u = &fit.residuals;
+    let yhat = &fit.fitted;
     let n_f = n as f64;
 
-    // Compute sigma^2 = e'e / n
-    let sigma2: f64 = residuals.iter().map(|&r| r * r).sum::<f64>() / n_f;
-
-    // Compute We (spatially lagged residuals)
-    let we = listw.lag(residuals);
-
-    // Compute e'We / sigma^2
-    let ewe: f64 = residuals
-        .iter()
-        .zip(we.iter())
-        .map(|(&e, &we)| e * we)
-        .sum();
-    let ewe_scaled = ewe / sigma2;
-
-    // Compute trace terms: tr(WW + W'W), from the sparse rows in O(links)
-    let tr_t: f64 = listw.trace_w2() + listw.trace_wtw();
-
-    // Compute (WX)'(WX) related terms
-    // J = (1/sigma^2) * [tr(WW + W'W) + (WXb)'(WXb)/sigma^2]
-    // For residuals test, we use tr(T) directly
-
-    // LM-Lag test
-    // LM_lag = (e'We/sigma^2)^2 / [n * T22]
-    // where T22 involves tr(T) and other terms
-
-    // Compute M = I - X(X'X)^{-1}X' projection matrix trace
-    // For large problems, we approximate
-
-    // Compute X'X inverse
-    let xtx = x.t().dot(x);
-    let xtx_inv = crate::linalg::matrix_ops::matrix_inverse(&xtx.view())?;
-
-    // Compute WX
-    let mut wx = Array2::zeros((n, k));
-    for col in 0..k {
-        let x_col = x.column(col).to_owned();
-        let wx_col = listw.lag(&x_col);
-        for i in 0..n {
-            wx[[i, col]] = wx_col[i];
-        }
+    let sigma2 = u.dot(u) / n_f;
+    if !(sigma2 > 0.0 && sigma2.is_finite()) {
+        return Err(EconError::Computation(
+            "spatial_lm_tests: the OLS residuals are all zero (or overflow), so the score tests \
+             are undefined"
+                .to_string(),
+        ));
+    }
+    let tr_w = listw.trace_w2() + listw.trace_wtw();
+    if !(tr_w > 0.0 && tr_w.is_finite()) {
+        return Err(EconError::Computation(format!(
+            "spatial_lm_tests: tr(W'W + W^2) = {tr_w:e} is not positive: the weights have no links"
+        )));
     }
 
-    // Compute (WX)'M(WX) where M = I - X(X'X)^{-1}X'
-    // This equals WX'WX - WX'X(X'X)^{-1}X'WX
-    let wxtx = wx.t().dot(x);
-    let wxtwx = wx.t().dot(&wx);
+    let du_wu = u.dot(&listw.lag(u)) / sigma2;
+    let du_wy = u.dot(&listw.lag(y)) / sigma2;
+    // ||M W yhat||^2 = (WXb)'M(WXb), from the residuals of W yhat on x
+    let wyhat = listw.lag(yhat);
+    let m_wyhat = least_squares(x.view(), wyhat.view())?.residuals;
+    let nj = (m_wyhat.dot(&m_wyhat) + tr_w * sigma2) / sigma2;
 
-    let term = wxtx.dot(&xtx_inv).dot(&wxtx.t());
-    let j22 = (&wxtwx - &term).diag().sum() / sigma2 + tr_t;
+    let positive = |v: f64, what: &str| -> EconResult<f64> {
+        if v > 0.0 && v.is_finite() {
+            Ok(v)
+        } else {
+            Err(EconError::Computation(format!(
+                "spatial_lm_tests: the denominator of {what} is not positive ({v:e})"
+            )))
+        }
+    };
+    let rs_err = du_wu * du_wu / tr_w;
+    let rs_lag = du_wy * du_wy / positive(nj, "RSlag")?;
+    let adj_err_den = positive(tr_w * (1.0 - tr_w / nj), "adjRSerr")?;
+    let adj_rs_err = (du_wu - tr_w / nj * du_wy).powi(2) / adj_err_den;
+    let adj_rs_lag = (du_wy - du_wu).powi(2) / positive(nj - tr_w, "adjRSlag")?;
+    let sarma = adj_rs_lag + rs_err;
 
-    // LM-Error test
-    // LM_error = (e'We/sigma^2)^2 / tr(T)
-    let lm_error_stat = ewe_scaled.powi(2) / tr_t;
-
-    // LM-Lag test
-    // LM_lag = (e'Wy/sigma^2)^2 / (WXMWX/sigma^2 + tr(T))
-    // where y = Xb + e, so Wy = WXb + We
-    // We approximate: e'Wy ≈ e'We since e'WXb = 0 in expectation
-    let lm_lag_stat = ewe_scaled.powi(2) / j22;
-
-    // Robust LM tests (controlling for the other spatial effect)
-    // RLM_lag = (e'We/sigma^2 - e'We/sigma^2 * tr(T)/J22)^2 / (J22 - tr(T)^2/J22)
-    // Simplified formulation:
-
-    let t_j = tr_t / j22;
-
-    // RLM-Lag
-    let rlm_lag_numer = (ewe_scaled - ewe_scaled * t_j).powi(2);
-    let rlm_lag_denom = j22 - tr_t * t_j;
-    let rlm_lag_stat = if rlm_lag_denom > 1e-10 {
-        rlm_lag_numer / rlm_lag_denom
-    } else {
-        0.0
+    let test = |statistic: f64, df: usize| LmTestResult {
+        statistic,
+        df,
+        p_value: chi_squared_p_value(statistic, df as f64),
     };
 
-    // RLM-Error
-    let rlm_error_numer = (ewe_scaled - lm_lag_stat.sqrt()).powi(2);
-    let rlm_error_denom = tr_t - j22.recip() * tr_t.powi(2);
-    let rlm_error_stat = if rlm_error_denom > 1e-10 {
-        rlm_error_numer / rlm_error_denom
-    } else {
-        0.0
-    };
-
-    // SARMA test (joint test for both lag and error)
-    let lm_sarma_stat = lm_lag_stat + rlm_error_stat;
-
-    // Compute p-values (chi-squared distribution)
-    let p_lm_lag = chi_squared_p_value(lm_lag_stat.max(0.0), 1.0);
-    let p_lm_error = chi_squared_p_value(lm_error_stat.max(0.0), 1.0);
-    let p_rlm_lag = chi_squared_p_value(rlm_lag_stat.max(0.0), 1.0);
-    let p_rlm_error = chi_squared_p_value(rlm_error_stat.max(0.0), 1.0);
-    let p_lm_sarma = chi_squared_p_value(lm_sarma_stat.max(0.0), 2.0);
+    let mut warnings = Vec::new();
+    let off = (0..n)
+        .map(|i| listw.get_weights(i))
+        .filter(|sw| !sw.weights.is_empty())
+        .any(|sw| (sw.weights.iter().sum::<f64>() - 1.0).abs() > 1e-10);
+    if off {
+        warnings.push(
+            "W is not row-standardised (spdep: \"Spatial weights matrix not row standardized\"); \
+             the score tests assume row sums of 1"
+                .to_string(),
+        );
+    }
 
     Ok(SpatialLmTests {
-        lm_lag: LmTestResult {
-            statistic: lm_lag_stat,
-            df: 1,
-            p_value: p_lm_lag,
-        },
-        lm_error: LmTestResult {
-            statistic: lm_error_stat,
-            df: 1,
-            p_value: p_lm_error,
-        },
-        rlm_lag: LmTestResult {
-            statistic: rlm_lag_stat,
-            df: 1,
-            p_value: p_rlm_lag,
-        },
-        rlm_error: LmTestResult {
-            statistic: rlm_error_stat,
-            df: 1,
-            p_value: p_rlm_error,
-        },
-        lm_sarma: LmTestResult {
-            statistic: lm_sarma_stat,
-            df: 2,
-            p_value: p_lm_sarma,
-        },
+        lm_lag: test(rs_lag, 1),
+        lm_error: test(rs_err, 1),
+        rlm_lag: test(adj_rs_lag, 1),
+        rlm_error: test(adj_rs_err, 1),
+        lm_sarma: test(sarma, 2),
+        warnings,
     })
 }
 
@@ -1259,26 +1231,6 @@ mod tests {
     }
 
     #[test]
-    fn test_lm_tests() {
-        let mut listw = test_weights();
-
-        // Simple residuals
-        let residuals = Array1::from_vec(vec![0.1, -0.2, 0.15, -0.05]);
-        let x =
-            Array2::from_shape_vec((4, 2), vec![1.0, 1.0, 1.0, 2.0, 1.0, 3.0, 1.0, 4.0]).unwrap();
-
-        let result = spatial_lm_tests(&residuals, &x, &mut listw).unwrap();
-
-        // All statistics should be non-negative
-        assert!(result.lm_lag.statistic >= 0.0);
-        assert!(result.lm_error.statistic >= 0.0);
-
-        // p-values should be in [0, 1]
-        assert!(result.lm_lag.p_value >= 0.0 && result.lm_lag.p_value <= 1.0);
-        assert!(result.lm_error.p_value >= 0.0 && result.lm_error.p_value <= 1.0);
-    }
-
-    #[test]
     fn test_localmoran_basic() {
         let listw = test_weights();
 
@@ -1380,17 +1332,13 @@ mod tests {
         t.diag().sum()
     }
 
-    /// OLS residuals of y ~ x1 on the fixture and the design [1, x1].
+    /// y and the design [1, x1] of the fixture.
     fn fixture_ols() -> (Array1<f64>, Array2<f64>) {
-        use crate::LinearEstimator;
-        use crate::regression::{CovarianceType, run_ols};
-        let ols = run_ols(&dataset(), "y", &["x1"], true, CovarianceType::Standard).unwrap();
-        let e = ols.residuals().to_owned();
         let mut x = Array2::ones((30, 2));
         for (i, &v) in crate::spatial::test_fixtures::X1.iter().enumerate() {
             x[[i, 1]] = v;
         }
-        (e, x)
+        (Array1::from(Y.to_vec()), x)
     }
 
     // R 4.3.3 (fixture), W row-standardised knn3, B binary knn3, Wd row-standardised band (0, 2]:
@@ -1441,57 +1389,6 @@ mod tests {
             let (da, db) = dense_s1_s2(&w);
             assert_close(a, da, 1e-11);
             assert_close(b, db, 1e-10);
-        }
-    }
-
-    #[test]
-    fn lm_tests_match_r_lm_error_and_dense_traces() {
-        let (e, x) = fixture_ols();
-        // The other four statistics, [lm_lag, rlm_lag, rlm_error, lm_sarma], are pinned at the
-        // values the dense-trace code printed before the sparse rewrite.
-        for (mut w, tr_t, lm_err, others) in [
-            (
-                knn3(WeightStyle::RowStd),
-                17.333333333333332,
-                16.996459496295262,
-                [
-                    11.330802171877023,
-                    2.2662424299472073,
-                    32.94995643165066,
-                    44.28075860352769,
-                ],
-            ),
-            (
-                knn3(WeightStyle::Binary),
-                156.0,
-                16.996459496295262,
-                [
-                    11.330802171877014,
-                    2.266242429947206,
-                    44.53942593643209,
-                    55.87022810830911,
-                ],
-            ),
-            (
-                band2(WeightStyle::RowStd),
-                15.712222222222223,
-                13.374603292722762,
-                [
-                    8.09353518719907,
-                    1.99097423272287,
-                    21.881743492574774,
-                    29.975278679773844,
-                ],
-            ),
-        ] {
-            assert_close(w.trace_w2() + w.trace_wtw(), tr_t, 1e-12);
-            assert_close(dense_tr_t(&w), tr_t, 1e-12);
-            let r = spatial_lm_tests(&e, &x, &mut w).unwrap();
-            assert_close(r.lm_error.statistic, lm_err, 1e-9);
-            assert_close(r.lm_lag.statistic, others[0], 1e-10);
-            assert_close(r.rlm_lag.statistic, others[1], 1e-10);
-            assert_close(r.rlm_error.statistic, others[2], 1e-10);
-            assert_close(r.lm_sarma.statistic, others[3], 1e-10);
         }
     }
 
@@ -1660,6 +1557,140 @@ mod tests {
         assert!(mean.abs() < 0.1, "mean {mean}");
         assert!((0.85..=1.15).contains(&var), "variance {var}");
         assert!(reject < 0.08, "rejection rate {reject}");
+    }
+
+    #[test]
+    fn lm_tests_match_r_lm_error_and_dense_traces() {
+        let (y, x) = fixture_ols();
+        for (w, tr_t, lm_err) in [
+            (
+                knn3(WeightStyle::RowStd),
+                17.333333333333332,
+                16.996459496295262,
+            ),
+            (knn3(WeightStyle::Binary), 156.0, 16.996459496295262),
+            (
+                band2(WeightStyle::RowStd),
+                15.712222222222223,
+                13.374603292722762,
+            ),
+        ] {
+            assert_close(w.trace_w2() + w.trace_wtw(), tr_t, 1e-12);
+            assert_close(dense_tr_t(&w), tr_t, 1e-12);
+            let r = spatial_lm_tests(&y, &x, &w).unwrap();
+            assert_close(r.lm_error.statistic, lm_err, 1e-9);
+            assert_sarma_identities(&r);
+        }
+    }
+
+    /// SARMA = RSerr + adjRSlag = RSlag + adjRSerr (Anselin et al. 1996).
+    fn assert_sarma_identities(r: &SpatialLmTests) {
+        let s = r.lm_sarma.statistic;
+        let tol = 1e-10 * s.abs();
+        assert!(
+            (s - r.lm_error.statistic - r.rlm_lag.statistic).abs() <= tol,
+            "SARMA {s} vs RSerr + adjRSlag {}",
+            r.lm_error.statistic + r.rlm_lag.statistic
+        );
+        assert!(
+            (s - r.lm_lag.statistic - r.rlm_error.statistic).abs() <= tol,
+            "SARMA {s} vs RSlag + adjRSerr {}",
+            r.lm_lag.statistic + r.rlm_error.statistic
+        );
+    }
+
+    /// The five statistics and p-values in spdep's order: RSerr, RSlag, adjRSerr, adjRSlag,
+    /// SARMA.
+    fn rs_values(r: &SpatialLmTests) -> ([f64; 5], [f64; 5]) {
+        let t = [
+            &r.lm_error,
+            &r.lm_lag,
+            &r.rlm_error,
+            &r.rlm_lag,
+            &r.lm_sarma,
+        ];
+        (t.map(|t| t.statistic), t.map(|t| t.p_value))
+    }
+
+    const RS_NAMES: [&str; 5] = ["RSerr", "RSlag", "adjRSerr", "adjRSlag", "SARMA"];
+
+    /// R: spdep::lm.RStests(lm(y ~ x1 + x2), nb2listw(knn 4), test = "all").
+    #[test]
+    fn test_validate_lm_rstests_knn_spatial_sim() {
+        use p2a_validation::Tol;
+        let (case, ds) = crate::test_support::load_case("spatial_lm_diag_t4");
+        let (y, x, coords) = sim_design(&ds);
+        let r = spatial_lm_tests(&y, &x, &sim_knn4(&coords)).unwrap();
+        assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+        assert_eq!(
+            [
+                r.lm_error.df,
+                r.lm_lag.df,
+                r.rlm_error.df,
+                r.rlm_lag.df,
+                r.lm_sarma.df
+            ],
+            [1, 1, 1, 1, 2]
+        );
+        let (stat, p) = rs_values(&r);
+        let n = y.len();
+        p2a_validation::Check::new(&case)
+            .named("rstests_knn_stat", &RS_NAMES, &stat, Tol::stat(n))
+            .named("rstests_knn_p", &RS_NAMES, &p, Tol::p_value(n))
+            .finish();
+    }
+
+    /// R: lm.RStests on the distance band (0, 0.2], style B (spdep warns that W is not row
+    /// standardised).
+    #[test]
+    fn test_validate_lm_rstests_band_binary_spatial_sim() {
+        use p2a_validation::Tol;
+        let (case, ds) = crate::test_support::load_case("spatial_lm_diag_t4");
+        let (y, x, coords) = sim_design(&ds);
+        let r = spatial_lm_tests(&y, &x, &sim_band(&coords, 0.2, WeightStyle::Binary)).unwrap();
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.contains("not row-standardised")),
+            "{:?}",
+            r.warnings
+        );
+        let (stat, p) = rs_values(&r);
+        let n = y.len();
+        p2a_validation::Check::new(&case)
+            .named("rstests_band_B_stat", &RS_NAMES, &stat, Tol::stat(n))
+            .named("rstests_band_B_p", &RS_NAMES, &p, Tol::p_value(n))
+            .finish();
+    }
+
+    /// The score tests do not depend on the units of a regressor.
+    #[test]
+    fn lm_rstests_are_invariant_to_regressor_scale() {
+        let (_, ds) = crate::test_support::load_case("spatial_lm_diag_t4");
+        let (y, x, coords) = sim_design(&ds);
+        let w = sim_knn4(&coords);
+        let (base, _) = rs_values(&spatial_lm_tests(&y, &x, &w).unwrap());
+        for scale in [1000.0, 1e-3] {
+            let mut xs = x.clone();
+            xs.column_mut(1).mapv_inplace(|v| v * scale);
+            let (stat, _) = rs_values(&spatial_lm_tests(&y, &xs, &w).unwrap());
+            for (a, b) in stat.iter().zip(&base) {
+                assert!((a - b).abs() <= 1e-9 * b.abs(), "scale {scale}: {a} vs {b}");
+            }
+        }
+    }
+
+    #[test]
+    fn lm_rstests_sarma_identities() {
+        let (_, ds) = crate::test_support::load_case("spatial_lm_diag_t4");
+        let (y, x, coords) = sim_design(&ds);
+        for w in [
+            sim_knn4(&coords),
+            sim_band(&coords, 0.2, WeightStyle::RowStd),
+            sim_band(&coords, 0.2, WeightStyle::Binary),
+        ] {
+            assert_sarma_identities(&spatial_lm_tests(&y, &x, &w).unwrap());
+        }
     }
 
     #[test]
