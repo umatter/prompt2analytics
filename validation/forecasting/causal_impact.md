@@ -135,3 +135,22 @@ simulation covered 0.89-0.92 with the diffuse regression states. A property test
   `test_causal_impact_inference`, `test_causal_impact_cumulative_effect_recovers_dgp`,
   `test_causal_impact_point_effects_recover_dgp`, `test_causal_impact_intervals_are_ordered`,
   `test_causal_impact_series_lengths`.
+
+## Timing
+
+Release builds (`--no-default-features --features ci`) of v0.5.0 (f80b0131) and of this change, one row per process,
+pinned to one core with `RAYON_NUM_THREADS=1`, 9 interleaved processes per side, the median over processes of each
+process's median call. The machine was shared (load average 8-21 during the runs). n is the pre-period length; the post-period has 30
+points. Median time per call against v0.5.0:
+
+| Model | n = 100 | n = 1,000 | n = 10,000 | Ratio |
+|---|---|---|---|---|
+| level | 1.07 ms / 1.07 ms | 7.38 ms / 7.34 ms | 63.2 ms / 63.5 ms | 0.99-1.00 |
+| level + trend + seasonal 12 | 16.0 ms / 16.3 ms | 291 ms / 304 ms | 4.14 s / 4.28 s | 1.02-1.04 |
+| level, 1 control | 0.97 ms / 1.00 ms | 7.46 ms / 7.78 ms | 62.9 ms / 64.4 ms | 1.02-1.04 |
+| level, 5 controls | 1.03 ms / 1.15 ms | 7.54 ms / 8.06 ms | 64.9 ms / 68.7 ms | 1.06-1.11 |
+
+The controls now cost one mean-only filter pass each and a GLS solve on the n x k innovations, beside the OLS fit the
+variances are estimated from. A second run of the control rows at a lower load gave 1.01 / 1.02 (one control) and
+1.05 / 1.01 (five controls) at n = 100 / 1,000; the 1.11 at n = 100 with five controls is 0.12 ms per call. Peak
+resident memory of one call with five controls at n = 10,000: 14.1 MiB at v0.5.0, 16.1 MiB here.

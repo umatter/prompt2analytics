@@ -143,3 +143,18 @@ about 990 ms on the same kind of series at n = 10,000, against 1.3-1.4 s here (a
 because it prunes on the cost with ln(m), which is not a valid PELT bound (see "Pruning"). Signed off by the user
 as a correctness-driven slowdown, every row of the table included: the `white` row at n = 10,000 (2.30x) and the
 `vshift` row at n = 100 (1.17x) have the same cause.
+
+## Timing of binary segmentation
+
+Release builds (`--no-default-features --features ci`) of v0.5.0 (f80b0131) and of this change, one row per process,
+pinned to one core with `RAYON_NUM_THREADS=1`, 9 interleaved processes per side, the median over processes of each
+process's median call. The machine was shared (load average 8-21 during the runs). `white`: white noise with the defaults (v0.5.0: up to 10
+splits at threshold 0, so it made 10; here MBIC, Q = 5, no split). `ten`: 10 mean changes of 6 standard deviations
+with a manual penalty of 50 and Q = 10, where both make the same 10 splits.
+
+| Series | n = 100 | n = 1,000 | n = 10,000 | Ratio |
+|---|---|---|---|---|
+| `white` | 11.8 us / 5.0 us | 115 us / 43 us | 1.14 ms / 0.43 ms | 0.38-0.43 |
+| `ten` | 11.9 us / 10.5 us | 114 us / 84 us | 1.20 ms / 0.83 ms | 0.69-0.88 |
+
+Each segment's best split is computed once, when the segment is created, instead of once per pass.
