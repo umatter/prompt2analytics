@@ -70,13 +70,19 @@
 //!
 //! # Marginal Effects
 //!
-//! For spatial probit models, marginal effects are computed as:
+//! Per posterior draw (β, ρ), with A = I - ρW and the intercept excluded:
 //!
-//! - **Direct effect**: Average diagonal element of S_k * phi(A^{-1}*X*beta)
-//! - **Indirect effect**: Average off-diagonal element of S_k * phi(A^{-1}*X*beta)
-//! - **Total effect**: Average column sum of S_k * phi(A^{-1}*X*beta)
+//! - **SAR** (spatialprobit's and LeSage & Pace's convention): μ = A⁻¹Xβ, φ_i = dnorm(μ_i),
+//!   direct_k = β_k mean_i(φ_i [A⁻¹]_ii), total_k = β_k mean_i(φ_i [A⁻¹1]_i), indirect =
+//!   total - direct.
+//! - **SEM**: the derivative of the reported probability Φ(μ_i/σ_i), μ = Xβ:
+//!   direct_k = β_k mean_i(φ(μ_i/σ_i)/σ_i); a change in x_j moves no other unit's probability,
+//!   so indirect is 0 and total = direct.
 //!
-//! where S_k = A^{-1} * beta_k, A = I - rho*W, and phi is the standard normal PDF.
+//! The reported impacts are the posterior means and SDs over the draws. A⁻¹ is exact, not a
+//! truncated series: the dense inverse is formed at Chebyshev nodes over the range of the ρ
+//! draws (9, then 17 or 33 until nested interpolants agree to 1e-10) and interpolated
+//! barycentrically to each draw; a warning reports the accuracy when 33 nodes miss it.
 //!
 //! # References
 //!
@@ -195,6 +201,9 @@ pub struct SpatialProbitImpacts {
     pub total_se: Vec<f64>,
     /// Variable names
     pub var_names: Vec<String>,
+    /// Notes on the computation (the interpolation accuracy when it misses its target)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 /// Result from spatial probit model estimation.
@@ -307,6 +316,9 @@ impl std::fmt::Display for SpatialProbitImpacts {
                 self.total[i],
                 self.total_se[i]
             )?;
+        }
+        for w in &self.warnings {
+            writeln!(f, "Warning: {w}")?;
         }
         Ok(())
     }
@@ -965,156 +977,284 @@ fn marginal_summary(
     })
 }
 
-/// Highest power of W in the truncated Neumann series the probit impacts use.
-const NEUMANN_MAX_POWER: usize = 10;
+/// Accuracy the impact interpolant must reach: the largest difference between two nested
+/// interpolants, relative to the largest value of the quantity.
+const IMPACT_INTERPOLATION_TOL: f64 = 1e-10;
 
-/// `diag(W^p)` and `W^p 1` for p = 0..=[`NEUMANN_MAX_POWER`], one row per power.
-struct NeumannTerms {
-    /// `diag[[p, i]] = (W^p)_ii`
-    diag: Array2<f64>,
-    /// `rowsum[[p, i]] = (W^p 1)_i`
-    rowsum: Array2<f64>,
+/// Chebyshev points of the second kind on [a, b]: (a + b)/2 + (b - a)/2 cos(jπ/m), j = 0..=m.
+fn chebyshev_nodes(a: f64, b: f64, m: usize) -> Vec<f64> {
+    (0..=m)
+        .map(|j| 0.5 * (a + b) + 0.5 * (b - a) * (std::f64::consts::PI * j as f64 / m as f64).cos())
+        .collect()
 }
 
-/// The powers of W the impacts need, computed once per fit from the sparse rows: the row
-/// sums by repeated lags, and each diagonal entry by propagating the row vector e_i' W^p.
-/// Costs at most O(10 n links), against ten dense n x n products per draw before.
-fn neumann_terms(listw: &SpatialWeights) -> EconResult<NeumannTerms> {
-    let n = listw.n();
-    let p_max = NEUMANN_MAX_POWER;
-    let mut diag = try_zeros2(p_max + 1, n, "diagonals of the powers of W")?;
-    let mut rowsum = try_zeros2(p_max + 1, n, "row sums of the powers of W")?;
+/// The parts of (I - ρW)^-1 the impacts need, interpolated in ρ: barycentric interpolation on
+/// Chebyshev points of the second kind over the range of the ρ draws, from one dense inverse
+/// per node ([`SpatialWeights::dense_inverse_parts`]). The nodes double (9, 17, 33) until two
+/// nested interpolants agree to [`IMPACT_INTERPOLATION_TOL`] at the midpoints of the finer
+/// one; the finer one is kept. At 33 nodes the kept interpolant is checked against the dense
+/// inverse in its two end cells, with a warning when it misses the target.
+struct InverseInterpolant {
+    nodes: Vec<f64>,
+    /// Barycentric weights (-1)^j, halved at both ends; `[1]` for a single node
+    bary: Vec<f64>,
+    /// diag((I - ρW)^-1) at each node
+    diag: Vec<Array1<f64>>,
+    /// [((I - ρW)'(I - ρW))^-1]_ii at each node
+    var: Vec<Array1<f64>>,
+    /// (I - ρW)^-1 X at each node
+    ax: Vec<Array2<f64>>,
+    /// The attained accuracy when 33 nodes do not reach the tolerance
+    warning: Option<String>,
+}
 
-    // W^p 1 by repeated lags
-    let mut v = Array1::ones(n);
-    rowsum.row_mut(0).assign(&v);
-    for p in 1..=p_max {
-        v = listw.lag(&v);
-        rowsum.row_mut(p).assign(&v);
+impl InverseInterpolant {
+    fn empty() -> Self {
+        InverseInterpolant {
+            nodes: Vec::new(),
+            bary: Vec::new(),
+            diag: Vec::new(),
+            var: Vec::new(),
+            ax: Vec::new(),
+            warning: None,
+        }
     }
 
-    // (W^p)_ii: propagate r = e_i' W^p through the sparse rows. `cur`/`next` are dense
-    // scratch rows; the index lists name their non-zero entries so they reset cheaply.
-    let mut cur = vec![0.0; n];
-    let mut next = vec![0.0; n];
-    let mut in_next = vec![false; n];
-    let mut cur_idx: Vec<usize> = Vec::new();
-    let mut next_idx: Vec<usize> = Vec::new();
-    for i in 0..n {
-        crate::resource::checkpoint()?;
-        diag[[0, i]] = 1.0;
-        cur[i] = 1.0;
-        cur_idx.clear();
-        cur_idx.push(i);
-        for p in 1..=p_max {
-            for &m in &cur_idx {
-                let r = cur[m];
-                let sw = listw.get_weights(m);
-                for (&j, &w) in sw.indices.iter().zip(sw.weights.iter()) {
-                    if !in_next[j] {
-                        in_next[j] = true;
-                        next_idx.push(j);
-                    }
-                    next[j] += r * w;
+    fn build(listw: &SpatialWeights, x: &Array2<f64>, lo: f64, hi: f64) -> EconResult<Self> {
+        let mut it = InverseInterpolant::empty();
+        if hi - lo <= 1e-12 * hi.abs().max(1.0) {
+            it.push_node(listw, x, 0.5 * (lo + hi))?;
+            it.bary = vec![1.0];
+            return Ok(it);
+        }
+        // 9 nodes, then the nested 17 and 33 (every other node of the finer set is a node of
+        // the coarser one)
+        for &r in &chebyshev_nodes(lo, hi, 8) {
+            it.push_node(listw, x, r)?;
+        }
+        it.set_weights();
+        let mut m = 8;
+        loop {
+            let finer = chebyshev_nodes(lo, hi, 2 * m);
+            let mut next = InverseInterpolant::empty();
+            for (j, &r) in finer.iter().enumerate() {
+                if j % 2 == 0 {
+                    let c = j / 2;
+                    next.nodes.push(it.nodes[c]);
+                    next.diag.push(it.diag[c].clone());
+                    next.var.push(it.var[c].clone());
+                    next.ax.push(it.ax[c].clone());
+                } else {
+                    next.push_node(listw, x, r)?;
                 }
-                cur[m] = 0.0;
             }
-            std::mem::swap(&mut cur, &mut next);
-            std::mem::swap(&mut cur_idx, &mut next_idx);
-            next_idx.clear();
-            for &j in &cur_idx {
-                in_next[j] = false;
+            next.set_weights();
+            let midpoints: Vec<f64> = next.nodes.windows(2).map(|p| 0.5 * (p[0] + p[1])).collect();
+            let diff = it.max_relative_difference(&next, &midpoints);
+            m *= 2;
+            it = next;
+            if diff <= IMPACT_INTERPOLATION_TOL {
+                return Ok(it);
             }
-            diag[[p, i]] = cur[i];
-        }
-        for &m in &cur_idx {
-            cur[m] = 0.0;
+            if m >= 32 {
+                // The nested difference measures the coarser interpolant; measure the kept one
+                // against the dense inverse in the two end cells, where its error peaks.
+                let last = it.nodes.len() - 1;
+                let mut err = 0.0f64;
+                for r in [
+                    0.5 * (it.nodes[0] + it.nodes[1]),
+                    0.5 * (it.nodes[last - 1] + it.nodes[last]),
+                ] {
+                    let mut exact = InverseInterpolant::empty();
+                    exact.push_node(listw, x, r)?;
+                    exact.bary = vec![1.0];
+                    err = err.max(it.max_relative_difference(&exact, &[r]));
+                }
+                if err > IMPACT_INTERPOLATION_TOL {
+                    it.warning = Some(format!(
+                        "the spatial multiplier is interpolated over the rho draws to a relative \
+                         accuracy of {err:.1e} (33 nodes), above the target \
+                         {IMPACT_INTERPOLATION_TOL:e}"
+                    ));
+                }
+                return Ok(it);
+            }
         }
     }
-    Ok(NeumannTerms { diag, rowsum })
+
+    fn push_node(&mut self, listw: &SpatialWeights, x: &Array2<f64>, rho: f64) -> EconResult<()> {
+        crate::resource::checkpoint()?;
+        let parts = listw.dense_inverse_parts(rho, x.view())?;
+        self.nodes.push(rho);
+        self.diag.push(parts.diag);
+        self.var.push(parts.row_sq_norms);
+        self.ax.push(parts.solved);
+        Ok(())
+    }
+
+    fn set_weights(&mut self) {
+        let m = self.nodes.len() - 1;
+        self.bary = (0..=m)
+            .map(|j| {
+                let s = if j % 2 == 0 { 1.0 } else { -1.0 };
+                if j == 0 || j == m { 0.5 * s } else { s }
+            })
+            .collect();
+    }
+
+    /// The interpolation coefficients at ρ (sum 1; a node gets weight 1).
+    fn coefficients(&self, rho: f64) -> Vec<f64> {
+        if let Some(j) = self.nodes.iter().position(|&r| r == rho) {
+            let mut c = vec![0.0; self.nodes.len()];
+            c[j] = 1.0;
+            return c;
+        }
+        let t: Vec<f64> = self
+            .nodes
+            .iter()
+            .zip(&self.bary)
+            .map(|(&r, &w)| w / (rho - r))
+            .collect();
+        let s: f64 = t.iter().sum();
+        t.into_iter().map(|v| v / s).collect()
+    }
+
+    /// diag, the marginal variances and (I - ρW)^-1 X at ρ.
+    fn at(&self, rho: f64) -> (Array1<f64>, Array1<f64>, Array2<f64>) {
+        let c = self.coefficients(rho);
+        let mut diag = Array1::zeros(self.diag[0].len());
+        let mut var = Array1::zeros(diag.len());
+        let mut ax = Array2::zeros(self.ax[0].raw_dim());
+        for (j, &cj) in c.iter().enumerate() {
+            if cj != 0.0 {
+                diag.scaled_add(cj, &self.diag[j]);
+                var.scaled_add(cj, &self.var[j]);
+                ax.scaled_add(cj, &self.ax[j]);
+            }
+        }
+        (diag, var, ax)
+    }
+
+    /// The largest difference between this interpolant and `other` at `points`, relative to
+    /// the largest value of each quantity at the nodes of `other`.
+    fn max_relative_difference(&self, other: &InverseInterpolant, points: &[f64]) -> f64 {
+        let finer = other;
+        let scale = |vals: &[Array1<f64>]| {
+            vals.iter()
+                .flat_map(|v| v.iter())
+                .fold(0.0f64, |m, v| m.max(v.abs()))
+                .max(f64::MIN_POSITIVE)
+        };
+        let s_diag = scale(&finer.diag);
+        let s_var = scale(&finer.var);
+        let s_ax = finer
+            .ax
+            .iter()
+            .flat_map(|v| v.iter())
+            .fold(0.0f64, |m, v| m.max(v.abs()))
+            .max(f64::MIN_POSITIVE);
+        let rel = |a: &[f64], b: &[f64], s: f64| {
+            a.iter()
+                .zip(b)
+                .fold(0.0f64, |m, (x, y)| m.max((x - y).abs() / s))
+        };
+        let mut worst = 0.0f64;
+        for &r in points {
+            let (d1, v1, a1) = self.at(r);
+            let (d2, v2, a2) = finer.at(r);
+            worst = worst
+                .max(rel(
+                    d1.as_slice().unwrap_or(&[]),
+                    d2.as_slice().unwrap_or(&[]),
+                    s_diag,
+                ))
+                .max(rel(
+                    v1.as_slice().unwrap_or(&[]),
+                    v2.as_slice().unwrap_or(&[]),
+                    s_var,
+                ))
+                .max(rel(
+                    a1.as_slice().unwrap_or(&[]),
+                    a2.as_slice().unwrap_or(&[]),
+                    s_ax,
+                ));
+        }
+        if worst.is_nan() { f64::INFINITY } else { worst }
+    }
 }
 
-/// Direct, indirect and total impacts of one posterior draw, from the truncated Neumann
-/// series A = I + Σ_p ρ^p W^p (the terms up to the first with |ρ^(p+1)| < 1e-10, at most
-/// [`NEUMANN_MAX_POWER`]): z = A Xβ, φ = dnorm(z), direct_j = β_j Σ_i φ_i A_ii / n and
-/// total_j = β_j Σ_i φ_i (A 1)_i / n.
+/// Direct, indirect and total impacts of one draw.
+///
+/// SAR (spatialprobit's and LeSage & Pace's convention): with μ = (I - ρW)^-1 Xβ and
+/// φ = dnorm(μ), direct_k = β_k mean(φ_i [(I - ρW)^-1]_ii) and total_k = β_k mean(φ_i
+/// [(I - ρW)^-1 1]_i). SEM: the derivative of the reported probability Φ(μ_i/σ_i), μ = Xβ,
+/// direct_k = β_k mean(φ(μ_i/σ_i)/σ_i), and no spillover (indirect 0, total = direct).
 fn probit_impacts_one_draw(
     x: &Array2<f64>,
-    listw: &SpatialWeights,
-    terms: &NeumannTerms,
+    interp: &InverseInterpolant,
     beta: &Array1<f64>,
     rho: f64,
+    model_type: SpatialProbitModel,
 ) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
-    let n = x.nrows();
-    let k = x.ncols() - 1; // Exclude intercept
-
-    // Series coefficients ρ^p by repeated multiplication, as the dense loop built them
-    let mut coefs = vec![1.0];
-    let mut c = rho;
-    for _ in 0..NEUMANN_MAX_POWER {
-        coefs.push(c);
-        c *= rho;
-        if c.abs() < 1e-10 {
-            break;
+    let k = x.ncols() - 1; // the intercept has no impact
+    let n_f = x.nrows() as f64;
+    let (diag, var, ax) = interp.at(rho);
+    match model_type {
+        SpatialProbitModel::Sar => {
+            let mu = ax.dot(beta);
+            // column 0 of X is the intercept, so column 0 of A^-1 X is A^-1 1
+            let row = ax.column(0);
+            let (mut d, mut t) = (0.0, 0.0);
+            for i in 0..mu.len() {
+                let phi = normal_pdf(mu[i]);
+                d += phi * diag[i];
+                t += phi * row[i];
+            }
+            let direct: Vec<f64> = (0..k).map(|j| beta[j + 1] * d / n_f).collect();
+            let total: Vec<f64> = (0..k).map(|j| beta[j + 1] * t / n_f).collect();
+            let indirect = total.iter().zip(&direct).map(|(t, d)| t - d).collect();
+            (direct, indirect, total)
+        }
+        SpatialProbitModel::Sem => {
+            let mu = x.dot(beta);
+            let s: f64 = mu
+                .iter()
+                .zip(var.iter())
+                .map(|(&m, &v)| {
+                    let sigma = v.sqrt();
+                    normal_pdf(m / sigma) / sigma
+                })
+                .sum();
+            let direct: Vec<f64> = (0..k).map(|j| beta[j + 1] * s / n_f).collect();
+            (direct.clone(), vec![0.0; k], direct)
         }
     }
-
-    // z = A Xβ by repeated lags
-    let xb = x.dot(beta);
-    let mut z = xb.clone();
-    let mut v = xb;
-    for &cp in &coefs[1..] {
-        v = listw.lag(&v);
-        z.scaled_add(cp, &v);
-    }
-    let phi_z: Array1<f64> = z.mapv(normal_pdf);
-
-    // Σ_i φ_i A_ii and Σ_i φ_i (A 1)_i
-    let mut diag_sum = 0.0;
-    let mut row_sum = 0.0;
-    for i in 0..n {
-        let mut a_ii = 0.0;
-        let mut a_i1 = 0.0;
-        for (p, &cp) in coefs.iter().enumerate() {
-            a_ii += cp * terms.diag[[p, i]];
-            a_i1 += cp * terms.rowsum[[p, i]];
-        }
-        diag_sum += phi_z[i] * a_ii;
-        row_sum += phi_z[i] * a_i1;
-    }
-
-    let n_f = n as f64;
-    let direct: Vec<f64> = (0..k).map(|j| beta[j + 1] * diag_sum / n_f).collect();
-    let total: Vec<f64> = (0..k).map(|j| beta[j + 1] * row_sum / n_f).collect();
-    let indirect: Vec<f64> = total.iter().zip(&direct).map(|(t, d)| t - d).collect();
-    (direct, indirect, total)
 }
 
-/// Compute spatial impacts for probit model.
+/// Posterior impacts: per draw from the exact spatial multiplier (interpolated in ρ to
+/// 1e-10, see [`InverseInterpolant`]), then their means and standard deviations.
 fn compute_spatial_probit_impacts(
     x: &Array2<f64>,
     listw: &SpatialWeights,
     beta_draws: &Array2<f64>,
     rho_draws: &Array1<f64>,
-    _model_type: SpatialProbitModel,
+    model_type: SpatialProbitModel,
     var_names: &[String],
 ) -> EconResult<SpatialProbitImpacts> {
-    let k = x.ncols() - 1; // Exclude intercept
+    let k = x.ncols() - 1;
     let n_draws = beta_draws.nrows();
+    let lo = rho_draws.iter().copied().fold(f64::INFINITY, f64::min);
+    let hi = rho_draws.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let interp = InverseInterpolant::build(listw, x, lo, hi)?;
 
-    let terms = neumann_terms(listw)?;
-
-    // Storage for impacts across draws
     let mut direct_draws = try_zeros2(n_draws, k, "direct impact draws")?;
     let mut indirect_draws = try_zeros2(n_draws, k, "indirect impact draws")?;
     let mut total_draws = try_zeros2(n_draws, k, "total impact draws")?;
-
-    // For each draw, compute impacts
     for d in 0..n_draws {
         crate::resource::checkpoint()?;
         let beta: Array1<f64> = beta_draws.row(d).to_owned();
         let (direct, indirect, total) =
-            probit_impacts_one_draw(x, listw, &terms, &beta, rho_draws[d]);
+            probit_impacts_one_draw(x, &interp, &beta, rho_draws[d], model_type);
         for j in 0..k {
             direct_draws[[d, j]] = direct[j];
             indirect_draws[[d, j]] = indirect[j];
@@ -1122,35 +1262,23 @@ fn compute_spatial_probit_impacts(
         }
     }
 
-    // Compute posterior means and standard deviations
-    let direct: Vec<f64> = (0..k)
-        .map(|j| direct_draws.column(j).mean().unwrap_or(0.0))
-        .collect();
-    let indirect: Vec<f64> = (0..k)
-        .map(|j| indirect_draws.column(j).mean().unwrap_or(0.0))
-        .collect();
-    let total: Vec<f64> = (0..k)
-        .map(|j| total_draws.column(j).mean().unwrap_or(0.0))
-        .collect();
-
-    let direct_se: Vec<f64> = (0..k)
-        .map(|j| compute_std(&direct_draws.column(j).to_owned()))
-        .collect();
-    let indirect_se: Vec<f64> = (0..k)
-        .map(|j| compute_std(&indirect_draws.column(j).to_owned()))
-        .collect();
-    let total_se: Vec<f64> = (0..k)
-        .map(|j| compute_std(&total_draws.column(j).to_owned()))
-        .collect();
-
+    let mean = |a: &Array2<f64>| -> Vec<f64> {
+        (0..k).map(|j| a.column(j).mean().unwrap_or(0.0)).collect()
+    };
+    let sd = |a: &Array2<f64>| -> Vec<f64> {
+        (0..k)
+            .map(|j| compute_std(&a.column(j).to_owned()))
+            .collect()
+    };
     Ok(SpatialProbitImpacts {
-        direct,
-        indirect,
-        total,
-        direct_se,
-        indirect_se,
-        total_se,
+        direct: mean(&direct_draws),
+        indirect: mean(&indirect_draws),
+        total: mean(&total_draws),
+        direct_se: sd(&direct_draws),
+        indirect_se: sd(&indirect_draws),
+        total_se: sd(&total_draws),
         var_names: var_names.to_vec(),
+        warnings: interp.warning.into_iter().collect(),
     })
 }
 
@@ -1358,6 +1486,80 @@ mod tests {
                 .scalar(&key("cll"), s.composite_log_likelihood, pieces_tol());
         }
         chk.finish();
+    }
+
+    /// R: impacts of one draw at rho = 0.5 and 0.9 from the exact inverse (SAR: phi(mu) with
+    /// mu = A^-1 X b, direct from diag(A^-1), total from A^-1 1), SEM direct effects at 0.6.
+    #[test]
+    fn test_validate_probit_impacts_exact_spatial_sim() {
+        let p = pieces();
+        let mut chk = p2a_validation::Check::new(&p.case);
+        for (rho, tag) in [(0.5, "rho05"), (0.9, "rho09")] {
+            let interp = InverseInterpolant::build(&p.w, &p.x, rho, rho).unwrap();
+            let (d, i, t) =
+                probit_impacts_one_draw(&p.x, &interp, &p.b, rho, SpatialProbitModel::Sar);
+            chk.vector(&format!("sar_direct_{tag}"), &d, pieces_tol())
+                .vector(&format!("sar_indirect_{tag}"), &i, pieces_tol())
+                .vector(&format!("sar_total_{tag}"), &t, pieces_tol());
+        }
+        chk.finish();
+    }
+
+    #[test]
+    fn test_validate_sem_probit_direct_effects_spatial_sim() {
+        let p = pieces();
+        let interp = InverseInterpolant::build(&p.w, &p.x, 0.6, 0.6).unwrap();
+        let (d, _, _) = probit_impacts_one_draw(&p.x, &interp, &p.b, 0.6, SpatialProbitModel::Sem);
+        p2a_validation::Check::new(&p.case)
+            .vector("sem_direct_rho06", &d, pieces_tol())
+            .finish();
+    }
+
+    #[test]
+    fn sem_probit_impacts_have_no_spillover() {
+        let p = pieces();
+        let interp = InverseInterpolant::build(&p.w, &p.x, 0.2, 0.7).unwrap();
+        for rho in [0.2, 0.45, 0.7] {
+            let (d, i, t) =
+                probit_impacts_one_draw(&p.x, &interp, &p.b, rho, SpatialProbitModel::Sem);
+            assert!(i.iter().all(|&v| v == 0.0));
+            assert_eq!(d, t);
+        }
+    }
+
+    /// Between the nodes, the interpolated multiplier gives the impacts of the dense inverse
+    /// at that rho to 1e-9 relative.
+    #[test]
+    fn probit_impacts_interpolation_matches_dense() {
+        let p = pieces();
+        let interp = InverseInterpolant::build(&p.w, &p.x, -0.2, 0.85).unwrap();
+        assert!(interp.warning.is_none());
+        for rho in [-0.199, -0.1, 0.123_456, 0.5, 0.77, 0.849] {
+            let exact = InverseInterpolant::build(&p.w, &p.x, rho, rho).unwrap();
+            for model in [SpatialProbitModel::Sar, SpatialProbitModel::Sem] {
+                let a = probit_impacts_one_draw(&p.x, &interp, &p.b, rho, model);
+                let b = probit_impacts_one_draw(&p.x, &exact, &p.b, rho, model);
+                for (u, v) in [(a.0, b.0), (a.2, b.2)] {
+                    for (x, y) in u.iter().zip(&v) {
+                        assert!(
+                            (x - y).abs() <= 1e-9 * y.abs().max(1e-3),
+                            "{model} rho={rho}: {x} vs {y}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// A range reaching close to 1/lambda_max (row-standardised W: rho = 1) converges slowly;
+    /// 33 nodes stop the doubling and the warning reports the measured accuracy.
+    #[test]
+    fn probit_impacts_interpolation_warns_near_the_singular_rho() {
+        let p = pieces();
+        let interp = InverseInterpolant::build(&p.w, &p.x, -0.9, 0.97).unwrap();
+        assert_eq!(interp.nodes.len(), 33);
+        let w = interp.warning.as_deref().unwrap();
+        assert!(w.contains("33 nodes"), "{w}");
     }
 
     #[test]
@@ -1737,50 +1939,6 @@ mod tests {
         assert!(matches!(r, Err(EconError::Cancelled(_))));
     }
 
-    // R 4.3.3 (fixture): X <- cbind(1, x1); xb <- X %*% beta; A <- diag(n); Wp <- W; rp <- rho
-    //   for (it in 1:10) { A <- A + rp*Wp; Wp <- W %*% Wp; rp <- rp*rho; if (abs(rp) < 1e-10) break }
-    //   z <- A %*% xb; phi <- dnorm(z); direct <- sum(beta[2]*diag(A)*phi)/n; total <- sum(beta[2]*A*phi)/n
-    //   (the existing truncated Neumann series, transcribed)
-    #[test]
-    fn probit_draw_impacts_match_r_reference() {
-        use crate::spatial::test_fixtures::{X1, knn3};
-        use ndarray::array;
-        let mut x = Array2::ones((30, 2));
-        for (i, &v) in X1.iter().enumerate() {
-            x[[i, 1]] = v;
-        }
-        for (w, rho, d, i, t) in [
-            (
-                knn3(WeightStyle::RowStd),
-                0.4,
-                0.07423545257844562,
-                0.04334337166509111,
-                0.11757882424353673,
-            ),
-            (
-                knn3(WeightStyle::RowStd),
-                0.0,
-                0.1181903507676808,
-                0.0,
-                0.1181903507676808,
-            ),
-            (
-                knn3(WeightStyle::Binary),
-                -0.3,
-                0.17835073842548715,
-                -0.07465542591941698,
-                0.10369531250607017,
-            ),
-        ] {
-            let terms = neumann_terms(&w).unwrap();
-            let (dd, ii, tt) = probit_impacts_one_draw(&x, &w, &terms, &array![0.2, 0.7], rho);
-            assert!(
-                (dd[0] - d).abs() < 1e-12 && (ii[0] - i).abs() < 1e-12 && (tt[0] - t).abs() < 1e-12,
-                "rho={rho}: {dd:?} {ii:?} {tt:?}"
-            );
-        }
-    }
-
     #[test]
     fn seeded_probit_runs_are_unchanged() {
         use crate::spatial::test_fixtures::{dataset, knn3};
@@ -1793,8 +1951,8 @@ mod tests {
             ..Default::default()
         };
         // Pinned at the values the sampler printed at seed 42 (single-site latent Gibbs, griddy
-        // rho with the log-determinant). Summation order may change the floating-point noise,
-        // so 1e-8 relative.
+        // rho with the log-determinant; impacts from the exact inverse). Summation order may
+        // change the floating-point noise, so 1e-8 relative.
         let close = |a: f64, b: f64, what: &str| {
             assert!(
                 (a - b).abs() <= 1e-8 * b.abs().max(1.0),
@@ -1841,12 +1999,12 @@ mod tests {
             close(r.pcp, pins[6], "pcp");
         }
         let imp = sar.impacts.as_ref().unwrap();
-        close(imp.direct[0], 0.17368067983001342, "direct");
-        close(imp.indirect[0], 0.08929574115297399, "indirect");
-        close(imp.total[0], 0.2629764209829874, "total");
-        close(imp.direct_se[0], 0.0320120656852442, "direct se");
-        close(imp.indirect_se[0], 0.06275525107119519, "indirect se");
-        close(imp.total_se[0], 0.07534950129374274, "total se");
+        close(imp.direct[0], 0.17366779759349335, "direct");
+        close(imp.indirect[0], 0.08944798156287251, "indirect");
+        close(imp.total[0], 0.26311577915636586, "total");
+        close(imp.direct_se[0], 0.03203089403860428, "direct se");
+        close(imp.indirect_se[0], 0.06302894554825618, "indirect se");
+        close(imp.total_se[0], 0.07557935355488735, "total se");
         assert!(sem.impacts.is_none());
     }
 
