@@ -1174,31 +1174,22 @@ impl InverseInterpolant {
             .flat_map(|v| v.iter())
             .fold(0.0f64, |m, v| m.max(v.abs()))
             .max(f64::MIN_POSITIVE);
-        let rel = |a: &[f64], b: &[f64], s: f64| {
-            a.iter()
-                .zip(b)
-                .fold(0.0f64, |m, (x, y)| m.max((x - y).abs() / s))
-        };
+        // element-wise over any memory layout (a non-contiguous array has no slice)
+        fn rel<'a>(
+            a: impl Iterator<Item = &'a f64>,
+            b: impl Iterator<Item = &'a f64>,
+            s: f64,
+        ) -> f64 {
+            a.zip(b).fold(0.0f64, |m, (x, y)| m.max((x - y).abs() / s))
+        }
         let mut worst = 0.0f64;
         for &r in points {
             let (d1, v1, a1) = self.at(r);
             let (d2, v2, a2) = finer.at(r);
             worst = worst
-                .max(rel(
-                    d1.as_slice().unwrap_or(&[]),
-                    d2.as_slice().unwrap_or(&[]),
-                    s_diag,
-                ))
-                .max(rel(
-                    v1.as_slice().unwrap_or(&[]),
-                    v2.as_slice().unwrap_or(&[]),
-                    s_var,
-                ))
-                .max(rel(
-                    a1.as_slice().unwrap_or(&[]),
-                    a2.as_slice().unwrap_or(&[]),
-                    s_ax,
-                ));
+                .max(rel(d1.iter(), d2.iter(), s_diag))
+                .max(rel(v1.iter(), v2.iter(), s_var))
+                .max(rel(a1.iter(), a2.iter(), s_ax));
         }
         if worst.is_nan() { f64::INFINITY } else { worst }
     }
