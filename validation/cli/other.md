@@ -167,7 +167,9 @@ fits):`, the JSON has `level`, `std_errors`, `lower` and `upper` null and a line
 | `test_validate_cli_holt_winters_horizon_prints_forecasts` | `ts_holtwinters_forecast` `airpass_mult_fit`, `airpass_mult_resvar` (alpha 0.3, beta 0.05, gamma 0.4, multiplicative); `airpass_notrend_fit`, `_lwr`, `_upr` (alpha 0.3, beta 0, gamma 0.2, additive) | JSON `Tol::coef(144)` / `Tol::stat(144)`; text `Tol::printed(4)` |
 
 Deviations: TS-22 (`airpass_mult_lwr`, `airpass_mult_upr` not compared); TS-24 (the optimiser
-is not pinned; the optimised run's forecasts are compared with the library in process).
+is Nelder-Mead on [0, 1], not R's L-BFGS-B, so the optimised parameters are not compared with R;
+the core checks the SSE at the optimum against R's; the optimised run's forecasts are compared
+with the library in process).
 
 ### `ts irf`, `ts var`
 
@@ -297,7 +299,7 @@ each canonical value of its table (so the help cannot drift when an enum grows),
 |---|---|---|
 | CAUS-39 | stdreg SEs | Tier 4; only point estimates are pinned |
 | TS-22 | multiplicative Holt-Winters prediction intervals | R's interval formula for that branch is wrong; the core refuses it, the CLI prints point forecasts and a warning |
-| TS-24 | optimised Holt-Winters parameters | the optimiser is not pinned; the pins fix alpha, beta, gamma |
+| TS-24 | optimised Holt-Winters parameters | Nelder-Mead on [0, 1], not R's L-BFGS-B; the pins fix alpha, beta, gamma |
 | (none) | gsynth ATT and coefficients | compared at 5e-4 relative: p2a's default EM stopping rule against R's converged fit |
 | (none) | StructTS BSM level and slope variances | the level variance is 0 at R's optimum (a boundary); the estimator's validation pins all four |
 | (none) | `--linkage ward` | p2a's `ward` is ward.D2; R's deprecated `hclust(method = "ward")` is ward.D (`--linkage ward.D`) |

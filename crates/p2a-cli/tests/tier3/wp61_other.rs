@@ -1129,7 +1129,8 @@ fn test_validate_cli_holt_winters_horizon_prints_forecasts() {
         .vector("airpass_notrend_upr", &column(&rows, 2), Tol::printed(4))
         .finish();
 
-    // optimised parameters (the optimiser is not pinned, TS-24): the CLI prints what the
+    // optimised parameters (Nelder-Mead on [0, 1], not R's L-BFGS-B, so the parameters are not
+    // compared with R; the core checks the SSE at the optimum, TS-24): the CLI prints what the
     // library predicts
     let j6 = s.json(&[
         "ts",

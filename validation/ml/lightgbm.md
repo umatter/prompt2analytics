@@ -22,8 +22,8 @@ differ. The rules below follow LightGBM 4.7.0 and are checked as properties.
   outside (0, 1], `num_iterations` 0 and a learning rate that is not finite and positive are refused
   (`test_lightgbm_rejects_bad_parameters`).
 
-Behaviour quoted from LightGBM 4.7.0 (R package, `exp3.R`/`exp4.R` of the T4 plan; not a pinned case):
-`regression_l1`, one round, learning rate 1, `num_leaves = 4`, `min_data_in_leaf = 5`, `min_data_in_bin = 1` gives
+Behaviour quoted from LightGBM 4.7.0 (R package, not a pinned case; `lgb.train` with objective `regression_l1`,
+`nrounds = 1`, `learning_rate = 1`, `num_leaves = 4`, `min_data_in_leaf = 5`, `min_data_in_bin = 1`): this gives
 exactly 4 distinct leaf outputs, each `median(y) + median(y - median(y))` over the leaf's rows (a leaf of 90 rows:
 60.888763, where the mean would give 62.445831); `bagging_fraction = 0.5, bagging_freq = 0` gives the unbagged fit
 for any seed (MSE 15.32438), `bagging_freq = 5` bags (37.56 / 38.94 for seeds 1 / 2).

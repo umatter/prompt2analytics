@@ -30,7 +30,7 @@ derived from `validation/methods/*.json`.
 |--------|------|--------------|-----------|
 | PCA | [pca.md](pca.md) | `pca()` | R `stats::prcomp()` |
 | Classical MDS | [cmdscale.md](cmdscale.md) | `cmdscale()` | R `stats::cmdscale()` |
-| t-SNE | no validation document yet | `tsne()` | R `Rtsne` (not installed) |
+| t-SNE | [tsne.md](tsne.md) | `tsne()` | R `Rtsne::Rtsne(theta = 0)` |
 
 ### Supervised Learning
 | Method | File | p2a Function | Reference |
@@ -50,7 +50,7 @@ derived from `validation/methods/*.json`.
 | BART causal inference | [bart_causal.md](bart_causal.md) | `run_bart_causal()` | none |
 | Causal forest | [causal_forest.md](causal_forest.md) | `causal_forest()` | grf (not installed) |
 | C5.0 | [c50.md](c50.md) | `run_c50()` | none |
-| Conditional inference trees | [ctree.md](ctree.md) | `run_ctree()` | none |
+| Conditional inference trees | [ctree.md](ctree.md) | `run_ctree()` | R `partykit::ctree()` |
 | Cubist | [cubist.md](cubist.md) | `run_cubist()` | none |
 
 ### Interpretation
@@ -58,6 +58,12 @@ derived from `validation/methods/*.json`.
 |--------|------|--------------|-----------|
 | Partial dependence / ICE | [pdp.md](pdp.md) | `partial_dependence()`, `compute_ice_curves()` | R `pdp::partial()` |
 | SHAP (TreeSHAP and Kernel SHAP) | [shap.md](shap.md) | `shap_tree_ensemble()`, `kernel_shap()` | exact Shapley values computed in R |
+
+### Evaluation and association rules
+| Method | File | p2a Function | Reference |
+|--------|------|--------------|-----------|
+| ROC curve, AUC and Youden optimum | [roc_auc.md](roc_auc.md) | `roc_auc()`, `fast_roc_auc()` | R `pROC::roc()`, `coords()` |
+| Association rules | [apriori.md](apriori.md) | `apriori()`, `eclat()` | R `arules::apriori()`, `eclat()` |
 
 ## Key Test Datasets
 
@@ -71,7 +77,7 @@ ML methods often have stochastic elements. Validation approaches:
 - Use fixed random seeds where possible
 - Compare clustering metrics (silhouette, ARI) rather than exact assignments
 - For PCA, compare explained variance ratios
-- For t-SNE, compare perplexity and basic structure
+- For t-SNE, compare the first iterations from a given start with Rtsne's exact algorithm
 
 ## MCP tools
 

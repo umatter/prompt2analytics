@@ -380,7 +380,8 @@ fn test_validate_cli_ts_ar_aic_flag() {
         .finish();
 }
 
-/// ts stl --robust true (the help example) reaches run_stl; not R-pinned (TS-26: f32 STL, default windows).
+/// ts stl --robust true (the help example) reaches run_stl; compared in process, not with R (the CLI's
+/// default windows are not R's; the core STL is pinned to stl, TS-26).
 #[test]
 fn test_validate_cli_ts_stl_robust_flag() {
     let case = Case::load("ts_ar_yw_aic");

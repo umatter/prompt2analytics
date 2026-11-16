@@ -109,6 +109,7 @@ looks like a validation failure but is not one.
   gsynth, tmle, gmm, bacondecomp, did, DRDID, CBPS, etwfe, marginaleffects, mclust, mixtools,
   flexmix, apcluster, e1071, changepoint, spatialreg, spdep, sphet, splm, haven, pdp,
   randomForest, purrr, gbm, dplyr, tidyr, mboost, xgboost, cobalt, CVXR, ECOSolveR, Qtools, alpaca,
+  Rtsne, aricode, arules, clusterCrit, fpc, libcoin, partykit, pvclust,
   and scpi 3.0.1 (scpi 4.x needs R >= 4.4; on R 4.3 install 3.0.1 from the CRAN archive). Some case
   files also record the base packages base, stats and datasets and the recommended packages boot
   and Matrix, which ship with R.
@@ -125,7 +126,8 @@ looks like a validation failure but is not one.
                      "apcluster", "e1071", "changepoint", "spatialreg",
                      "spdep", "sphet", "splm", "haven", "pdp", "randomForest", "purrr",
                      "gbm", "dplyr", "tidyr", "mboost", "xgboost", "cobalt", "CVXR",
-                     "ECOSolveR", "Qtools", "alpaca"))
+                     "ECOSolveR", "Qtools", "alpaca", "Rtsne", "aricode", "arules",
+                     "clusterCrit", "fpc", "libcoin", "partykit", "pvclust"))
   # R 4.3: scpi 3.0.1 from the CRAN archive (R >= 4.4: install.packages("scpi"))
   install.packages("https://cran.r-project.org/src/contrib/Archive/scpi/scpi_3.0.1.tar.gz",
                    repos = NULL, type = "source")
@@ -426,7 +428,7 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | VECM (Johansen, urca::ca.jo and cajorls) | [vecm.md](econometrics/timeseries/vecm.md) | R-pinned |
 | IRF (orthogonalised and plain) | [irf.md](econometrics/timeseries/irf.md) | R-pinned |
 | Cumulative Periodogram | [cpgram.md](timeseries/cpgram.md) | R-pinned |
-| Linear filter, diffinv, ARMAacf | [filter.md](timeseries/filter.md) | R-pinned, known deviations (TS-14, TS-28) |
+| Linear filter, diffinv, ARMAacf and its PACF, runmed, arima.sim from given innovations | [filter.md](timeseries/filter.md) | R-pinned |
 | AR (OLS, Burg, Yule-Walker) | [ar.md](timeseries/ar.md) | R-pinned |
 | Granger causality (lmtest::grangertest; lag orders, small samples, default order, integer series) | [granger.md](econometrics/timeseries/granger.md), [granger.md](econometrics/granger.md) | R-pinned |
 | ACF, PACF, CCF (missing-value refusal) | [acf.md](stats/acf.md) | R-pinned |
@@ -437,13 +439,14 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Method | File | Status |
 |--------|------|--------|
 | ARIMA | [arima.md](forecasting/arima.md) | R-pinned |
+| STL (stats::stl: periodic and numeric s.window, series at a large level) | [stl.md](forecasting/stl.md) | R-pinned |
 | MSTL | [mstl.md](forecasting/mstl.md) | not R-pinned |
 | Structural time series (StructTS) | [structts.md](forecasting/structts.md) | R-pinned, known deviations (TS-27) |
 | Kalman filter, smoother and forecast with intercepts | [kalman.md](forecasting/kalman.md) | R-pinned |
-| CausalImpact counterfactual (StructTS fit and Kalman forecast) | [causal_impact.md](forecasting/causal_impact.md) | R-pinned, known deviations (TS-5) |
+| CausalImpact counterfactual (StructTS fit and Kalman forecast; intervals of the cumulative effect) | [causal_impact.md](forecasting/causal_impact.md) | R-pinned |
 | GARCH(p, q) (maximum likelihood, normal and Student-t errors, variance forecasts) | [garch.md](forecasting/garch.md) | R-pinned |
-| Holt-Winters (filter, additive and non-seasonal prediction intervals) | [holtwinters.md](forecasting/holtwinters.md) | R-pinned, known deviations (TS-22, TS-24) |
-| Changepoint (PELT: cpt.var, cpt.meanvar, cpt.mean) | [changepoint.md](timeseries/changepoint.md) | R-pinned, known deviations (TS-18, TS-8) |
+| Holt-Winters (filter, additive and non-seasonal prediction intervals) | [holtwinters.md](forecasting/holtwinters.md) | R-pinned, known deviations (TS-22) |
+| Changepoint (PELT: cpt.var, cpt.meanvar, cpt.mean; binary segmentation: cpt.* with method = "BinSeg") | [changepoint.md](timeseries/changepoint.md) | R-pinned, known deviations (TS-18, TS-8) |
 
 ### Machine Learning
 | Method | File | Status |
@@ -453,12 +456,12 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Hierarchical (stats::hclust core; hierarchical, fastcluster, AGNES, DIANA, pvclust with pvclust:::msfit) | [hclust.md](ml/hclust.md) | R-pinned, known deviations (ML-55) |
 | Cutree | [cutree.md](ml/cutree.md) | R-pinned |
 | Dynamic tree cut (dynamicTreeCut::cutreeDynamic) | [dynamic_tree_cut.md](ml/dynamic_tree_cut.md) | R-pinned |
-| PCA | [pca.md](ml/pca.md) | R-pinned, known deviations (ML-35) |
-| t-SNE | no validation document yet | not R-pinned |
-| Classical MDS (cmdscale) | [cmdscale.md](ml/cmdscale.md) | R-pinned, known deviations (ML-98) |
+| PCA | [pca.md](ml/pca.md) | R-pinned |
+| t-SNE (Rtsne exact, theta = 0: the first iterations from a given start) | [tsne.md](ml/tsne.md) | R-pinned |
+| Classical MDS (cmdscale) | [cmdscale.md](ml/cmdscale.md) | R-pinned |
 | Projection Pursuit Regression | [ppr.md](ml/ppr.md) | R-pinned, known deviations (ML-34) |
 | Random Forest | no validation document yet | not R-pinned |
-| SVM (`fast_svm` as e1071::svm; `linear_svm`, `kernel_svm` not pinned) | [svm.md](ml/svm.md) | R-pinned, known deviations (ML-103, ML-40) |
+| SVM (`fast_svm` and `linear_svm` as e1071::svm; `kernel_svm` not pinned) | [svm.md](ml/svm.md) | R-pinned, known deviations (ML-103) |
 | MARS | [mars.md](ml/mars.md) | not R-pinned |
 | Causal Forest | [causal_forest.md](ml/causal_forest.md) | R-pinned, known deviations (ML-20) |
 | BART Causal (bartCause) | [bart_causal.md](ml/bart_causal.md) | not R-pinned |
@@ -479,6 +482,10 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Partial dependence (one and two features) and ICE / centred ICE curves on pdp::partial's grid rules | [pdp.md](ml/pdp.md) | R-pinned, known deviations (ML-137) |
 | CART (rpart: complexity table, V-fold cross-validation, prune, importance) | [cart.md](ml/cart.md) | R-pinned, known deviations (ML-125) |
 | Impurity importance of random forest, GBM and quantile forest (gbm::relative.influence, randomForest::importance) | [tree_importance.md](ml/tree_importance.md) | R-pinned |
+| GBM terminal-node estimates (gbm: Laplace and Bernoulli stumps, relative influence) | [gbm.md](ml/gbm.md) | R-pinned |
+| LightGBM-style histogram boosting (leaf-wise growth, bagging, L1 leaf renewal as properties) | [lightgbm.md](ml/lightgbm.md) | not R-pinned |
+| ROC curves, AUC and Youden optima on tied scores (pROC) | [roc_auc.md](ml/roc_auc.md) | R-pinned, known deviations (ML-92) |
+| Association rules (arules::apriori and eclat: frequent itemsets and single-item rules) | [apriori.md](ml/apriori.md) | R-pinned |
 | AdaBoost (M1 and SAMME written out with rpart learners; R2's first learner) | [adaboost.md](ml/adaboost.md) | R-pinned |
 | XGBoost exact trees (xgboost::xgb.train; the L1 rule written out); histogram trees | [xgboost.md](ml/xgboost.md) | R-pinned |
 | Component-wise boosting (mboost::mboost with bols; four families); the tree learner is not R-pinned | [mboost.md](ml/mboost.md) | R-pinned |
@@ -531,11 +538,11 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 ### Spatial Econometrics
 | Method | File | Status |
 |--------|------|--------|
-| Moran's I (randomisation variance) and Geary's C, with islands | [moran.md](spatial/moran.md) | R-pinned, known deviations (SPAT-28) |
+| Moran's I (randomisation variance) and Geary's C, with islands; residual Moran (lm.morantest), Rao score tests (lm.RStests) and local Moran (localmoran) | [moran.md](spatial/moran.md) | R-pinned, known deviations (SPAT-28) |
 | Spatial weight styles (W, B, C, U, minmax, S), k-nearest-neighbour ties; log-determinant, feasible rho interval and traces | [weights.md](spatial/weights.md) | R-pinned |
 | SAR, spatial Durbin (SDM), SEM and SAC by concentrated maximum likelihood; SAR and SDM impacts | [spatial.md](econometrics/spatial.md) | R-pinned, known deviations (SPAT-4) |
-| SAR Probit | [spatialprobit.md](econometrics/spatialprobit.md) | not R-pinned |
-| SEM Probit | [spatialprobit.md](econometrics/spatialprobit.md) | not R-pinned |
+| SAR Probit (the sampler's pieces and the exact impacts; the posterior draws are not pinned) | [spatialprobit.md](econometrics/spatialprobit.md) | R-pinned |
+| SEM Probit (the sampler's pieces and the direct effects; the posterior draws are not pinned) | [spatialprobit.md](econometrics/spatialprobit.md) | R-pinned |
 | Spatial GMM (sphet) | [sphet.md](econometrics/sphet.md) | R-pinned, known deviations (SPAT-20, SPAT-8) |
 | Spatial panel ML (spml): within (individual, time, two-way) and pooled lag, error and SARAR; individual random effects without, with Baltagi and with KKP spatial error | [splm.md](econometrics/splm.md) | R-pinned |
 | Spatial panel GM/2SLS (spgm): w2sls, b2sls, ec2sls, g2sls spatial lag; within GM spatial error; within GS2SLS | [splm.md](econometrics/splm.md) | R-pinned |
@@ -580,7 +587,7 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Missing cells and integer columns through MCP and the CLI (X-2, X-8 reviewer data: t-tests, cor.test, one-way ANOVA, Wilcoxon, Kaplan-Meier) | [hypothesis_tests.md](stats/hypothesis_tests.md) | R-pinned, known deviations (STAT-85) |
 | MCP regression, discrete, panel and survival tools (glmnet JSON, GLS, quantreg, diagnostics, smoothers, mlogit, Cox robust SEs, AFT, system GMM, unit-root lag selection, PVCM/PMG, panel GLS) and module dispatch | [models.md](mcp/models.md) | R-pinned, known deviations (REG-29, STAT-23, TS-23) |
 | MCP causal tools (option tables and aliases, MatchIt defaults and the matched sample, IPW, ltmle, gformula, gsynth and mediation fields) | [causal_surface.md](mcp/causal_surface.md) | R-pinned, known deviations (REG-27) |
-| MCP statistics, hypothesis and time-series tools (option spellings, ccf peak, spline and factanal defaults, power solvers, VAR/VARMA/VECM JSON, GARCH and Holt-Winters forecasts) | [mcp_stats_ts.md](stats/mcp_stats_ts.md) | R-pinned, known deviations (STAT-75, STAT-82, TOOL-28, TS-14, TS-22, TS-26, TS-29, TS-34) |
+| MCP statistics, hypothesis and time-series tools (option spellings, ccf peak, spline and factanal defaults, power solvers, VAR/VARMA/VECM JSON, GARCH and Holt-Winters forecasts) | [mcp_stats_ts.md](stats/mcp_stats_ts.md) | R-pinned, known deviations (STAT-75, STAT-82, TS-22, TS-26) |
 | MCP data and chart tools (describe_dataset columns, value counts, fill_na, dendrogram) | [mcp_data_tools.md](data/mcp_data_tools.md) | R-pinned, known deviations (DATA-65) |
 | CLI model commands (`reg`, `discrete`, `panel`, `survival`, `stats`), persisted datasets and notes | [models.md](cli/models.md) | R-pinned, known deviations (CLI-21, STAT-6) |
 | CLI causal, time-series, ML, spatial and viz commands (typed options, forecasts, PCA scores, impacts) | [other.md](cli/other.md) | R-pinned, known deviations (CAUS-39, TS-22, TS-24) |

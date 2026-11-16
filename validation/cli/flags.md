@@ -95,8 +95,9 @@ R-pinned (registry `validation/methods/cli_flags.json`, ids `cli_regression_flag
 - `var_pred` of `ts ar` is not compared by these tests; the Yule-Walker prediction variance
   (with `ar.yw`'s n/(n − (order + 1)) factor) is pinned by the core AR tests
   ([ar.md](../timeseries/ar.md)).
-- **TS-26** (`ts stl`): STL runs in f32 with p2a's default windows; R's `stl` needs `s.window`
-  and differs. The test compares the CLI with `run_stl` in process.
+- **TS-26** (`ts stl`): the CLI's default windows are not R's (`stl` needs `s.window`); the core
+  STL is pinned to `stl` ([stl.md](../forecasting/stl.md)). The test compares the CLI with
+  `run_stl` in process.
 - `ts spectrum`: the test compares the CLI with `run_spectrum` in process; the periodogram itself
   is pinned to `spec.pgram` by the core tests ([spectrum.md](../timeseries/spectrum.md)).
 - `reg quantreg --intercept false`: the test checks that the flag reaches `quantreg()` (equal

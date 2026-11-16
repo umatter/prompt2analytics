@@ -105,7 +105,7 @@
         {
           "finding": "TS-24",
           "quantity": "optimised Holt-Winters parameters",
-          "note": "Tier 4; the CLI pins fix alpha, beta, gamma; the optimised run is compared with the library in process"
+          "note": "the optimiser is Nelder-Mead on [0, 1], not R's L-BFGS-B, so the optimised parameters are not compared with R (the core checks the SSE at the optimum); the CLI pins fix alpha, beta, gamma; the optimised run is compared with the library in process"
         }
       ],
       "supersedes_legacy": []
