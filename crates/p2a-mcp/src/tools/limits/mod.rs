@@ -115,8 +115,8 @@ use serde_json::Value;
 mod distinct;
 mod rules;
 pub use rules::{
-    ARIMA_MIN_MAGNITUDE, PARAM_RULES, PIVOT_RULES, ROW_RULES, SCPI_LASSO_WEIGHT, SCPI_MIN_DONORS,
-    arima_fit_work, ctree_permutation_work, scpi_work,
+    ARIMA_MIN_MAGNITUDE, CTREE_FIXED_INPUTS, PARAM_RULES, PIVOT_RULES, ROW_RULES,
+    SCPI_LASSO_WEIGHT, SCPI_MIN_DONORS, arima_fit_work, ctree_permutation_work, scpi_work,
 };
 
 /// Generates [`Family`], [`Family::ALL`], [`Family::key`] and `Family::hosted_cap` from one list
@@ -258,14 +258,18 @@ const ARIMA_FIT_WORK_HOSTED: u64 = 7_500_000;
 const SCPI_WORK_HOSTED: u64 = 512_000;
 
 /// Hosted [`Limits::ctree_permutation_work`]. Measured on a release build, one call at a time
-/// on one core: partykit's default 9,999 permutations on 5 inputs took 0.10 s, 1.24 s and
-/// 18.6 s on 100, 1,000 and 10,000 rows, about 37 ns per unit ([`ctree_permutation_work`]), so
-/// the slowest call this value allows takes about 15 s, a quarter of the hosted 60 s deadline.
-/// The tree's depth is not counted; the core checks the call's budget at every permutation, so
-/// a call that runs past the deadline is cancelled at its next check. With a lower
-/// `P2A_TOOL_TIMEOUT_SECS`, or on a slower or throttled CPU, lower `ctree_permutation_work` in
-/// proportion with `P2A_LIMIT_OVERRIDES`.
-const CTREE_PERMUTATION_WORK_HOSTED: u64 = 400_000_000;
+/// on one core, partykit's default 9,999 permutations at this value with the default node sizes
+/// (9,524 rows on 1 input, 8,000 on 5, 5,000 on 20, 2,857 on 50, 909 on 200; regression and
+/// classification targets, trees of up to 16 levels) took 13.5 to 20.0 s, about 7 to 10 ns per
+/// unit ([`ctree_permutation_work`]), a third of the hosted 60 s deadline. Every level of the
+/// tree repeats the root's work, and the depth is not counted: with the smallest node sizes
+/// (`minsplit` 2, `minbucket` 1) and many inputs, which split noise further, the slowest calls
+/// at this value took about 47 s (100 and 200 inputs, 12 to 15 levels). The core checks the
+/// call's budget at every permutation, so a call that runs past the deadline is cancelled at its
+/// next check. The time scales linearly with the value: with a lower `P2A_TOOL_TIMEOUT_SECS`,
+/// or on a slower or throttled CPU, lower `ctree_permutation_work` in proportion with
+/// `P2A_LIMIT_OVERRIDES`.
+const CTREE_PERMUTATION_WORK_HOSTED: u64 = 2_000_000_000;
 
 /// Hosted [`Limits::probit_impact_rows`]. The SAR probit's impacts invert the dense n x n
 /// spatial multiplier at each of 17 to 19 values of rho, O(n^3) each: on a release build, one
@@ -576,7 +580,7 @@ pub struct Limits {
     /// the simulations start.
     pub scpi_work: Option<u64>,
     /// Work of an `ml_ctree` call with Monte Carlo p-values, as [`ctree_permutation_work`]
-    /// counts it (permutations x rows x inputs); checked by the handler with
+    /// counts it (permutations x rows x (inputs + [`CTREE_FIXED_INPUTS`])); checked by the handler with
     /// [`Limits::check_ctree_permutations`] before the fit starts.
     pub ctree_permutation_work: Option<u64>,
     /// Dataset rows of a `sar_probit_model` call that computes impacts (the dense spatial
@@ -1500,7 +1504,8 @@ impl Limits {
         Err(LimitViolation {
             message: format!(
                 "`{tool}` with n_permutations = {permutations} on {rows} rows and {inputs} \
-                 features needs {work} ({KNOB}: permutations x rows x features), which exceeds \
+                 features needs {work} ({KNOB}: permutations x rows x (features + \
+                 {CTREE_FIXED_INPUTS})), which exceeds \
                  this server's limit of {limit} for one call, checked before the fit starts. To \
                  run it, {advice}."
             ),

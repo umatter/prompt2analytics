@@ -1122,19 +1122,28 @@ pub fn scpi_work(sims: usize, post: usize, donors: usize, lasso: bool) -> u64 {
     u64::try_from(w).unwrap_or(u64::MAX)
 }
 
+/// The inputs [`ctree_permutation_work`] adds to a call's own: each permutation of a node resets
+/// and shuffles the node's row indices once, whatever the number of inputs, and that per-row
+/// cost was about that of 20 inputs' statistics (on one core, about 170 ns per permutation and
+/// row over all of a tree's levels against about 8 ns per input).
+pub const CTREE_FIXED_INPUTS: usize = 20;
+
 /// Work of an `ml_ctree` call with Monte Carlo p-values as the `ctree_permutation_work` budget
-/// counts it: `n_permutations * rows * inputs`, saturating at `u64::MAX`.
+/// counts it: `n_permutations * rows * (inputs + CTREE_FIXED_INPUTS)`, saturating at `u64::MAX`.
 ///
 /// partykit's Monte Carlo test (`p2a_core::ml::ctree`) draws `n_permutations` permutations of a
-/// node's responses and evaluates the linear statistic of every input on each, one pass over the
-/// node's rows per input; the nodes of one depth hold at most all rows. The count is that of the
-/// root, the tree's depth is not counted: the core checks the call's budget at every
-/// permutation, so a deep tree that runs past the deadline is cancelled. The other test types
-/// run no permutations, and the handler checks this budget only for `montecarlo`.
+/// node's responses, shuffling the node's row indices once per permutation, and evaluates the
+/// linear statistic of every input on each, one pass over the node's rows per input;
+/// [`CTREE_FIXED_INPUTS`] stands for the shuffle. The nodes of one depth hold at most all rows,
+/// so every level of the tree repeats this work: the count is that of the root, calibrated on
+/// trees of 10 to 16 levels, and the tree's depth is not counted. The core checks the call's
+/// budget at every permutation, so a deeper tree that runs past the deadline is cancelled at its
+/// next check. The other test types run no permutations, and the handler checks this budget
+/// only for `montecarlo`.
 pub fn ctree_permutation_work(permutations: usize, rows: usize, inputs: usize) -> u64 {
     let w = (permutations as u128)
         .saturating_mul(rows as u128)
-        .saturating_mul(inputs as u128);
+        .saturating_mul((inputs as u128).saturating_add(CTREE_FIXED_INPUTS as u128));
     u64::try_from(w).unwrap_or(u64::MAX)
 }
 
@@ -2186,9 +2195,11 @@ mod tests {
     }
 
     #[test]
-    fn ctree_permutation_work_is_permutations_times_rows_times_inputs() {
-        use super::ctree_permutation_work;
-        assert_eq!(ctree_permutation_work(9_999, 1_000, 5), 49_995_000);
+    fn ctree_permutation_work_counts_the_shuffle_as_fixed_inputs() {
+        use super::{CTREE_FIXED_INPUTS, ctree_permutation_work};
+        assert_eq!(CTREE_FIXED_INPUTS, 20);
+        assert_eq!(ctree_permutation_work(9_999, 1_000, 5), 249_975_000);
+        assert_eq!(ctree_permutation_work(9_999, 1_000, 0), 199_980_000);
         assert_eq!(ctree_permutation_work(0, 1_000, 5), 0);
         assert_eq!(
             ctree_permutation_work(usize::MAX, usize::MAX, usize::MAX),
@@ -2196,7 +2207,20 @@ mod tests {
         );
         let h = super::super::Limits::hosted();
         let cap = h.ctree_permutation_work.expect("hosted ctree budget");
-        assert_eq!(cap, 400_000_000);
+        assert_eq!(cap, 2_000_000_000);
+        // one input counts as 21: the default permutations pass up to 9,524 rows, not 40,000
+        assert!(
+            h.check_ctree_permutations("ml_ctree", 9_999, 9_524, 1)
+                .is_ok()
+        );
+        assert!(
+            h.check_ctree_permutations("ml_ctree", 9_999, 9_525, 1)
+                .is_err()
+        );
+        assert!(
+            h.check_ctree_permutations("ml_ctree", 9_999, 40_000, 1)
+                .is_err()
+        );
         // partykit's default 9,999 permutations pass up to 8,000 rows on 5 inputs
         assert!(
             h.check_ctree_permutations("ml_ctree", 9_999, 8_000, 5)

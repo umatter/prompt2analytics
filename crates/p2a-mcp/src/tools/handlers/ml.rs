@@ -3523,8 +3523,8 @@ mod tests {
         assert!(text_of(&r).contains("n_permutations"), "{}", text_of(&r));
     }
 
-    /// A Monte Carlo ctree whose permutations x rows x features exceed `ctree_permutation_work`
-    /// is refused before the fit, naming the budget and the permutations that fit; the
+    /// A Monte Carlo ctree whose counted work (permutations x rows x (features + 20)) exceeds
+    /// `ctree_permutation_work` is refused before the fit, naming the budget and the permutations that fit; the
     /// asymptotic test and the off profile are not checked.
     #[test]
     fn test_mcp_ctree_monte_carlo_work_is_bounded_before_the_fit() {
