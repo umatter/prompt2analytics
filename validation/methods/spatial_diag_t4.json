@@ -1,0 +1,113 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "spatial_lm_morantest",
+      "name": "Moran's I for OLS residuals (lm.morantest): W symmetrised, moments through the regression's projection, three alternatives, islands as zero.policy",
+      "category": "econometrics",
+      "reference": "spdep::lm.morantest(zero.policy = TRUE) (spdep 1.4.2)",
+      "doc": "validation/spatial/moran.md",
+      "cases": [
+        "spatial_lm_diag_t4"
+      ],
+      "tests": [
+        "p2a-core::spatial::diagnostics::tests::test_validate_lm_morantest_knn_spatial_sim",
+        "p2a-core::spatial::diagnostics::tests::test_validate_lm_morantest_band_styles_spatial_sim",
+        "p2a-core::spatial::diagnostics::tests::test_validate_lm_morantest_islands_spatial_sim"
+      ],
+      "quantities": [
+        "I",
+        "E[I]",
+        "Var[I]",
+        "z",
+        "p (greater, two.sided, less)",
+        "distance band, style W and B",
+        "band with islands (N = linked units)"
+      ],
+      "tolerance": "validation/README.md, n = 80: statistics and moments Tol::stat (1e-5 relative); p-values Tol::p_value (R computes upper tails as 1 - pnorm/pchisq)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "spatial_lm_rstests",
+      "name": "Rao score (LM) tests for spatial dependence (lm.RStests, test = 'all'): RSerr, RSlag, adjRSerr, adjRSlag, SARMA",
+      "category": "econometrics",
+      "reference": "spdep::lm.RStests(test = 'all') (spdep 1.4.2; lm.LMtests before spdep 1.3)",
+      "doc": "validation/spatial/moran.md",
+      "cases": [
+        "spatial_lm_diag_t4"
+      ],
+      "tests": [
+        "p2a-core::spatial::diagnostics::tests::test_validate_lm_rstests_knn_spatial_sim",
+        "p2a-core::spatial::diagnostics::tests::test_validate_lm_rstests_band_binary_spatial_sim",
+        "p2a-mcp::tools::handlers::spatial::tests::test_validate_mcp_lm_rstests_knn_spatial_sim"
+      ],
+      "quantities": [
+        "RSerr, RSlag, adjRSerr, adjRSlag, SARMA statistics",
+        "their p-values",
+        "4-NN style W and distance band style B",
+        "the MCP tool text (4 decimals)"
+      ],
+      "tolerance": "validation/README.md, n = 80: statistics Tol::stat (1e-5 relative); p-values Tol::p_value; the MCP text compares the printed 4-decimal numbers with R's values rounded to 4 decimals",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "spatial_localmoran",
+      "name": "Local Moran's I (localmoran): local I, conditional and total randomisation moments, z and two-sided p; global I as sum(Ii)/S0",
+      "category": "econometrics",
+      "reference": "spdep::localmoran(conditional = TRUE | FALSE, mlvar = TRUE) (spdep 1.4.2)",
+      "doc": "validation/spatial/moran.md",
+      "cases": [
+        "spatial_localmoran_t4"
+      ],
+      "tests": [
+        "p2a-core::spatial::diagnostics::tests::test_validate_localmoran_conditional_spatial_sim",
+        "p2a-core::spatial::diagnostics::tests::test_validate_localmoran_total_spatial_sim"
+      ],
+      "quantities": [
+        "Ii",
+        "E.Ii",
+        "Var.Ii",
+        "Z.Ii",
+        "Pr(z != E(Ii))",
+        "conditional = TRUE and FALSE",
+        "global I"
+      ],
+      "tolerance": "validation/README.md, n = 80: statistics and moments Tol::stat; p-values Tol::p_value. The conditional-permutation p-values are a property test against the enumerated limits (not a pin)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "spatial_probit_pieces",
+      "name": "SAR/SEM probit (LeSage & Pace 2009, ch. 10): rho full-conditional kernel with ln|I - rho W|, latent full conditional, exact impacts, marginal probabilities and composite log-likelihood",
+      "category": "econometrics",
+      "reference": "LeSage & Pace (2009, ch. 10) written out in base R (spatialprobit not installed); the posterior itself is not pinned (MCMC)",
+      "doc": "validation/econometrics/spatialprobit.md",
+      "cases": [
+        "spatial_probit_pieces_t4"
+      ],
+      "tests": [
+        "p2a-core::spatial::weights::tests::test_validate_dense_inverse_parts_spatial_sim",
+        "p2a-core::econometrics::spatialprobit::tests::test_validate_probit_rho_kernel_spatial_sim",
+        "p2a-core::econometrics::spatialprobit::tests::test_validate_probit_latent_conditional_spatial_sim",
+        "p2a-core::econometrics::spatialprobit::tests::test_validate_probit_marginal_probabilities_spatial_sim",
+        "p2a-core::econometrics::spatialprobit::tests::test_validate_probit_impacts_exact_spatial_sim",
+        "p2a-core::econometrics::spatialprobit::tests::test_validate_sem_probit_direct_effects_spatial_sim"
+      ],
+      "quantities": [
+        "ln|I - rho W| on a grid",
+        "rho kernel (SAR, SEM)",
+        "latent conditional mean and variance (SAR, SEM)",
+        "diag((I - rho W)^-1), (I - rho W)^-1 X b, sigma_i",
+        "SAR direct, indirect, total impacts (exact)",
+        "SEM direct effects",
+        "Phi(mu/sigma)",
+        "composite log-likelihood"
+      ],
+      "tolerance": "validation/README.md, n = 80: closed-form quantities 1e-8 relative (exact linear algebra on both sides); not pinned: the posterior (MCMC draws), checked by DGP recovery and kernel-sampling property tests",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}
