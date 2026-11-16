@@ -2742,7 +2742,8 @@ async fn test_validate_mcp_arma_acf() {
 
 /// STAT-46/STAT-77: timeseries_lag, ts_mstl and timeseries_arima_sim through the dispatch
 /// path. timeseries_lag is pinned to dplyr::lag (lag_dplyr3_head); arima_sim's sd scales the
-/// series. The MSTL components are not pinned (deviation TS-26).
+/// series. The MSTL components are not pinned against forecast::mstl: the core decomposes in
+/// f32 (centred and scaled), so only the observation count and periods are checked here.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_validate_mcp_lag_mstl_arima_sim() {
     let case = Case::load("mcp_series_t3");
@@ -2759,11 +2760,24 @@ async fn test_validate_mcp_lag_mstl_arima_sim() {
         .finish();
     let lead = json_of(&ok(&s, &se, "timeseries_lag", lag_of(-2)).await);
     assert_eq!(lead["n"].as_u64(), Some(96));
+    // k = -2 is a lead: element t is z[t + 2] (the trailing NAs are outside the sample).
+    let z = {
+        let ds = se.datasets.read().await["mcp_series_t3"].clone();
+        p2a_core::data::columns::ColumnRequest::new(ds.df())
+            .numeric("z")
+            .extract()
+            .unwrap()
+            .numeric("z")
+            .to_vec()
+    };
     let lead_head = fs(&lead["values_sample"]);
-    assert!(lead_head.iter().all(|v| v.is_finite()), "{lead}");
+    assert!(!lead_head.is_empty(), "{lead}");
+    for (i, v) in lead_head.iter().enumerate() {
+        assert_eq!(*v, z[i + 2], "lead element {i}: {lead}");
+    }
     let r = refused(&s, &se, "timeseries_lag", lag_of(96)).await;
     assert!(r.contains("too large"), "{r}");
-    // deviation TS-26: the MSTL components are not pinned.
+    // Not pinned against forecast::mstl (f32 core): observation count and periods only.
     let m = ok(
         &s,
         &se,
@@ -2800,11 +2814,11 @@ async fn test_validate_mcp_lag_mstl_arima_sim() {
         )
         .await,
     );
-    for (x, y) in fs(&a["values_sample"])
-        .iter()
-        .zip(fs(&scaled["values_sample"]))
-    {
-        assert!((y - 2.5 * x).abs() <= 1e-12 * y.abs(), "{x} {y}");
+    // The bound scales with the series: a value near 0 has no relative accuracy.
+    let scaled_values = fs(&scaled["values_sample"]);
+    let max_abs = scaled_values.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+    for (x, y) in fs(&a["values_sample"]).iter().zip(&scaled_values) {
+        assert!((y - 2.5 * x).abs() <= 1e-12 * max_abs, "{x} {y}");
     }
     let r = refused(
         &s,

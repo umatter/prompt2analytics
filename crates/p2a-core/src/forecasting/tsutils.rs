@@ -821,9 +821,10 @@ pub struct ArmaAcfResult {
 ///
 /// # Errors
 ///
-/// `InvalidSpecification` when the AR part is not stationary (a root of 1 − φ₁z − ... − φₚzᵖ on or
-/// inside the unit circle, or a non-finite coefficient): the theoretical ACF does not exist there.
-/// R's `ARMAacf` does not check and returns meaningless numbers or a singular-solve error.
+/// `InvalidSpecification` when an AR or MA coefficient is not finite, or when the AR part is not
+/// stationary (a root of 1 − φ₁z − ... − φₚzᵖ on or inside the unit circle): the theoretical ACF
+/// does not exist there. R's `ARMAacf` does not check and returns meaningless numbers or a
+/// singular-solve error.
 ///
 /// # Example
 ///
@@ -840,6 +841,16 @@ pub struct ArmaAcfResult {
 /// - Brockwell, P.J., & Davis, R.A. (1991). *Time Series: Theory and Methods*, Section 3.3
 /// - R `stats::ARMAacf`
 pub fn arma_acf(ar: &[f64], ma: &[f64], lag_max: usize, pacf: bool) -> EconResult<ArmaAcfResult> {
+    if ar.iter().any(|v| !v.is_finite()) {
+        return Err(EconError::InvalidSpecification {
+            message: "the AR coefficients must be finite".to_string(),
+        });
+    }
+    if ma.iter().any(|v| !v.is_finite()) {
+        return Err(EconError::InvalidSpecification {
+            message: "the MA coefficients must be finite".to_string(),
+        });
+    }
     if !ar_is_stationary(ar)? {
         return Err(EconError::InvalidSpecification {
             message: format!(
@@ -1469,10 +1480,10 @@ pub fn arima_sim(
 ///
 /// # Errors
 ///
-/// - [`EconError::InvalidSpecification`] for `n = 0`; for an AR part that is not stationary
-///   (R: "'ar' part of model is not stationary"); for `n_start < p + q` (R: "burn-in 'n.start'
-///   must be as long as 'ar + ma'"); for an `sd` that is not finite and positive; or for
-///   `innovations` shorter than `n` plus the burn-in.
+/// - [`EconError::InvalidSpecification`] for `n = 0`; for a non-finite AR or MA coefficient; for
+///   an AR part that is not stationary (R: "'ar' part of model is not stationary"); for
+///   `n_start < p + q` (R: "burn-in 'n.start' must be as long as 'ar + ma'"); for an `sd` that is
+///   not finite and positive; or for `innovations` shorter than `n` plus the burn-in.
 /// - [`EconError::ResourceLimit`] when `n` plus the burn-in overflows or the
 ///   series is too large to allocate (the per-allocation ceiling included).
 /// - [`EconError::Cancelled`] when the budget checked through [`checkpoint`]
@@ -1534,6 +1545,11 @@ pub fn arima_sim_with_sd(
                   lies on or inside the unit circle"
             .to_string(),
     };
+    if ar.iter().any(|v| !v.is_finite()) {
+        return Err(EconError::InvalidSpecification {
+            message: "the AR coefficients must be finite".to_string(),
+        });
+    }
     let min_root = if p > 0 {
         if !ar_is_stationary(ar)? {
             return Err(not_stationary());
@@ -1767,8 +1783,9 @@ pub fn runmed(x: &[f64], k: usize, endrule: EndRule) -> EconResult<RunmedResult>
             }
         }
         EndRule::Median => {
-            // R: smoothEnds(runmed(x, k, endrule = "keep"), k). The windows read the kept series y,
-            // never the smoothed values.
+            // R: smoothEnds(runmed(x, k, endrule = "keep"), k). The windows read the end-kept
+            // running median y (raw ends, smoothed interior), never the end-smoothed values being
+            // written.
             for i in 0..half_k {
                 result[i] = x[i];
                 result[n - 1 - i] = x[n - 1 - i];
@@ -2217,6 +2234,28 @@ mod tests {
         assert!(arma_acf(&[1.5, -0.56], &[], 5, false).is_ok());
     }
 
+    #[test]
+    fn test_arma_acf_refuses_non_finite_coefficients() {
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            for pacf in [false, true] {
+                // pure MA, mixed, and the AR side
+                for (ar, ma, what) in [
+                    (vec![], vec![0.4, bad], "MA"),
+                    (vec![0.5], vec![bad], "MA"),
+                    (vec![bad], vec![0.3], "AR"),
+                    (vec![0.5, bad], vec![], "AR"),
+                ] {
+                    let err = arma_acf(&ar, &ma, 5, pacf).unwrap_err();
+                    let want = format!("the {what} coefficients must be finite");
+                    assert!(
+                        matches!(&err, EconError::InvalidSpecification { message } if *message == want),
+                        "{ar:?} {ma:?}: {err}"
+                    );
+                }
+            }
+        }
+    }
+
     /// A long lag range decays below the normal range: the ACF holds no subnormal value and its
     /// tail is exactly 0, and the PACF's AR coefficients do not leave the normal range either.
     #[test]
@@ -2417,6 +2456,15 @@ mod tests {
                 "{ar:?}: {err}"
             );
         }
+        // A non-finite AR coefficient is refused for what it is, not as a non-stationary part.
+        for ar in [vec![f64::NAN], vec![0.5, f64::INFINITY]] {
+            let err = arima_sim(&ar, &[], 0, 10, None, None, Some(1)).unwrap_err();
+            assert!(
+                matches!(&err, EconError::InvalidSpecification { message }
+                    if message == "the AR coefficients must be finite"),
+                "{ar:?}: {err}"
+            );
+        }
         let err = arima_sim(&[0.5], &[0.3], 0, 10, None, Some(1), Some(1)).unwrap_err();
         assert!(
             err.to_string()
@@ -2430,11 +2478,11 @@ mod tests {
     fn test_arima_sim_sd_scales_the_series() {
         let one = arima_sim_with_sd(&[0.5, -0.3], &[0.4], 1, 30, 1.0, None, None, Some(9)).unwrap();
         let big = arima_sim_with_sd(&[0.5, -0.3], &[0.4], 1, 30, 2.5, None, None, Some(9)).unwrap();
+        // The bound scales with the series: sd * z through the filter and the integration is not
+        // bit-for-bit 2.5 times the sd = 1 path, so a value near 0 has no relative accuracy.
+        let max_abs_b = big.values.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
         for (a, b) in one.values.iter().zip(&big.values) {
-            assert!(
-                (b - 2.5 * a).abs() <= 1e-12 * b.abs().max(1e-300),
-                "{a} {b}"
-            );
+            assert!((b - 2.5 * a).abs() <= 1e-12 * max_abs_b, "{a} {b}");
         }
         assert_eq!(
             one.values,
@@ -2523,7 +2571,8 @@ mod tests {
         assert!(approx_eq(result.values[4], 5.0, 1e-10));
     }
 
-    /// Asserts the length only; the direction of lag is TS-29.
+    /// lag gives R's stats::lag values (x[t + k], |k| shorter); lag_padded gives the conventional
+    /// lag x[t - k] with NaN padding.
     #[test]
     fn test_lag_and_lag_padded_directions() {
         let y = [1.5, -0.25, 3.0, 2.25, 0.5];
@@ -2641,8 +2690,8 @@ mod tests {
 
     #[test]
     fn arma_pacf_honours_cancellation() {
-        // Covers the autocovariance loops: the pure-AR path checks the budget on its first
-        // convergence iteration, so it stops before Durbin-Levinson runs.
+        // arma_autocorrelation calls checkpoint() once before the (r + 1)-equation solve, so a
+        // cancelled budget stops it before Durbin-Levinson runs.
         // durbin_levinson_honours_cancellation covers the order loop.
         assert!(matches!(
             cancelled(|| arma_acf(&[0.5, 0.2], &[], 2_000, true)),
