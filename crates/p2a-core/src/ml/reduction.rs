@@ -23,7 +23,9 @@ pub struct PCAResult {
     pub explained_variance_ratio: Array1<f64>,
     /// Mean of each feature (used for centering)
     pub mean: Array1<f64>,
-    /// Total variance in the original data
+    /// Total variance in the original data: the sum of all `min(n, p)` component
+    /// variances (the trace of the sample covariance), on both computation paths,
+    /// so `explained_variance_ratio` is prcomp's proportion of variance
     pub total_variance: f64,
     /// Number of components kept
     pub n_components: usize,
@@ -131,8 +133,9 @@ pub fn pca(
         pca_via_svd(&centered.view(), n_comp)?
     };
 
-    // Compute explained variance
-    let total_variance: f64 = eigenvalues.iter().take(n_features).sum();
+    // Both paths return every component variance (min(n, p) on the SVD path, p on the
+    // covariance path), so the shares are of the full-spectrum total, as prcomp's
+    let total_variance: f64 = eigenvalues.sum();
     let explained_variance = eigenvalues.slice(ndarray::s![..n_comp]).to_owned();
     let explained_variance_ratio = &explained_variance / total_variance;
 
@@ -173,7 +176,8 @@ fn covariance_matrix(centered: &ArrayView2<f64>) -> Array2<f64> {
 /// - Transformed data = U * S
 ///
 /// Optimized to compute thin SVD only once, extracting both singular values
-/// and right singular vectors in a single pass.
+/// and right singular vectors in a single pass. Returns all `min(n, p)`
+/// variances (for the total) and the first `n_components` vectors.
 fn pca_via_svd(
     centered: &ArrayView2<f64>,
     n_components: usize,
@@ -198,8 +202,8 @@ fn pca_via_svd(
     // Convert singular values to explained variance
     // Variance = s² / (n - 1)
     let n_minus_1 = (n - 1) as f64;
-    let mut eigenvalues = Array1::zeros(n_comp);
-    for i in 0..n_comp {
+    let mut eigenvalues = Array1::zeros(n_singular);
+    for i in 0..n_singular {
         eigenvalues[i] = s_vec[i].powi(2) / n_minus_1;
     }
 
@@ -2014,8 +2018,7 @@ mod tests {
     fn test_validate_prcomp() {
         // prcomp(X, scale. = TRUE): sdev 1.3221524880813766 0.9819157249713941
         // 0.5364273551135557; prcomp(X) unscaled. Rotation signs are arbitrary: absolute values.
-        // n = 60 > 4p: the covariance path (ML-35's SVD-path ratio with n_components < p is not
-        // exercised; registry deviation ML-35).
+        // n = 60 > 4p: the covariance path (the SVD path: test_validate_prcomp_svd_path).
         let (case, ds) = crate::test_support::load_case("kmeans_lloyd_pca_mds");
         let x = matrix(ds.df(), &["a", "b", "c"]);
         let mean = x.mean_axis(ndarray::Axis(0)).unwrap();
@@ -2036,6 +2039,87 @@ mod tests {
                 );
         }
         c.finish();
+    }
+
+    /// ML-35: on the SVD path (n <= 4p) with fewer components than min(n, p), the shares were
+    /// taken over the kept components only (0.65135, 0.34865 here, against prcomp's 0.58270,
+    /// 0.31193).
+    #[test]
+    fn test_validate_prcomp_svd_path() {
+        let (case, ds) = crate::test_support::load_case("pca_svd_path");
+        let v: Vec<String> = (1..=8).map(|i| format!("v{i}")).collect();
+        let v: Vec<&str> = v.iter().map(String::as_str).collect();
+        let w: Vec<String> = (1..=10).map(|i| format!("w{i}")).collect();
+        let w: Vec<&str> = w.iter().map(String::as_str).collect();
+        let tall = matrix(ds.df(), &v);
+        let wide = matrix(&case_frame(&case, "pca_wide_6x10.csv"), &w);
+        let sdev =
+            |r: &PCAResult| -> Vec<f64> { r.explained_variance.iter().map(|v| v.sqrt()).collect() };
+        let ratios = |r: &PCAResult| r.explained_variance_ratio.to_vec();
+        // a share of the kept components equals prcomp's share of the same component
+        let prefix = |r: &PCAResult, key: &str, tol: Tol| {
+            let want = case.vector(key);
+            for (i, &got) in r.explained_variance_ratio.iter().enumerate() {
+                assert!(
+                    tol.allows(got, want[i]),
+                    "{key}[{i}] with k = {}: {got} vs R {}",
+                    r.n_components,
+                    want[i]
+                );
+            }
+        };
+        let mut c = Check::new(&case);
+
+        let all = pca(tall.view(), None, false).unwrap();
+        c.vector("tall_sdev", &sdev(&all), Tol::stat(20))
+            .vector("tall_prop", &ratios(&all), Tol::stat(20))
+            .scalar("tall_total_variance", all.total_variance, Tol::stat(20));
+        let k2 = pca(tall.view(), Some(2), false).unwrap();
+        prefix(&k2, "tall_prop", Tol::stat(20));
+        // rows = PCs: R's p x 2 rotation in column-major order
+        let rot: Vec<f64> = k2.components.iter().map(|v| v.abs()).collect();
+        c.scalar("tall_total_variance", k2.total_variance, Tol::stat(20))
+            .vector("tall_rotation_abs_k2", &rot, Tol::coef(20));
+
+        // n < p: six singular values, the last one roundoff (R 1.45e-16)
+        let all = pca(wide.view(), None, false).unwrap();
+        c.vector("wide_sdev", &sdev(&all), Tol::new(Tol::stat(6).rel, 1e-12))
+            .vector("wide_prop", &ratios(&all), Tol::stat(6))
+            .scalar("wide_total_variance", all.total_variance, Tol::stat(6));
+        let k3 = pca(wide.view(), Some(3), false).unwrap();
+        prefix(&k3, "wide_prop", Tol::stat(6));
+        c.scalar("wide_total_variance", k3.total_variance, Tol::stat(6));
+        c.finish();
+    }
+
+    /// ML-35: the SVD path (n <= 4p) and the covariance path (n > 4p) give the same shares.
+    /// Repeating every row 10 times keeps the shares and scales the covariance by 10 x 19 / 199.
+    #[test]
+    fn test_pca_ratio_agrees_across_paths() {
+        let mut rng = StdRng::seed_from_u64(20261115);
+        let z = Array2::from_shape_fn((20, 3), |_| rng.r#gen::<f64>() - 0.5);
+        let load = Array2::from_shape_fn((3, 8), |_| rng.r#gen::<f64>() * 2.0 - 1.0);
+        let x = z.dot(&load) + Array2::from_shape_fn((20, 8), |_| 0.3 * (rng.r#gen::<f64>() - 0.5));
+        let rep = Array2::from_shape_fn((200, 8), |(i, j)| x[[i % 20, j]]);
+        let svd = pca(x.view(), Some(2), false).unwrap();
+        let cov = pca(rep.view(), Some(2), false).unwrap();
+        for k in 0..2 {
+            let (a, b) = (
+                svd.explained_variance_ratio[k],
+                cov.explained_variance_ratio[k],
+            );
+            assert!(
+                (a - b).abs() <= 1e-12,
+                "PC{}: {a} (SVD path) vs {b} (covariance path)",
+                k + 1
+            );
+        }
+        let scaled = svd.total_variance * 10.0 * 19.0 / 199.0;
+        assert!(
+            (scaled - cov.total_variance).abs() <= 1e-12 * cov.total_variance,
+            "{scaled} vs {}",
+            cov.total_variance
+        );
     }
 
     #[test]

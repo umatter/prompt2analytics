@@ -245,13 +245,7 @@
         "variance ratio"
       ],
       "tolerance": "sdev and ratio Tol::stat(60); rotation Tol::coef(60)",
-      "deviations": [
-        {
-          "finding": "ML-35",
-          "quantity": "explained_variance_ratio with n_components < p on the SVD path (n <= 4p)",
-          "note": "Tier 4; the pins use all components on the covariance path"
-        }
-      ],
+      "deviations": [],
       "supersedes_legacy": []
     },
     {
