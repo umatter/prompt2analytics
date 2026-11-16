@@ -182,7 +182,11 @@ pub struct C50Node {
     /// Class distribution at this node; entry `k` counts class
     /// [`C50Result::class_labels`]`[k]`
     pub class_counts: Vec<usize>,
-    /// Predicted class (majority class), as an index into
+    /// Case weights of each class at this node (boosting reweights the cases; in the first
+    /// trial every case weighs 1, so these equal `class_counts`). They drive the majority
+    /// class, the entropy, the error estimate and the class probabilities.
+    pub class_weights: Vec<f64>,
+    /// Predicted class (majority class by weight), as an index into
     /// [`C50Result::class_labels`]
     pub predicted_class: usize,
     /// Entropy at this node
@@ -322,30 +326,29 @@ impl std::fmt::Display for C50Result {
 
 use super::lcg_random;
 
-/// Compute entropy of class distribution.
-fn entropy(counts: &[usize], total: usize) -> f64 {
-    if total == 0 {
+/// Entropy (natural log) of a class distribution given as case weights summing to `total`.
+fn entropy(counts: &[f64], total: f64) -> f64 {
+    if total <= 0.0 {
         return 0.0;
     }
-    let n = total as f64;
     counts
         .iter()
-        .filter(|&&c| c > 0)
+        .filter(|&&c| c > 0.0)
         .map(|&c| {
-            let p = c as f64 / n;
+            let p = c / total;
             -p * p.ln()
         })
         .sum()
 }
 
-/// Compute information gain for a split.
+/// Information gain of a binary split, in nats, from the case weights of each class.
 /// Gain(S, A) = Entropy(S) - sum((|Sv|/|S|) * Entropy(Sv))
-fn information_gain(parent_counts: &[usize], left_counts: &[usize], right_counts: &[usize]) -> f64 {
-    let parent_total: usize = parent_counts.iter().sum();
-    let left_total: usize = left_counts.iter().sum();
-    let right_total: usize = right_counts.iter().sum();
+fn information_gain(parent_counts: &[f64], left_counts: &[f64], right_counts: &[f64]) -> f64 {
+    let parent_total: f64 = parent_counts.iter().sum();
+    let left_total: f64 = left_counts.iter().sum();
+    let right_total: f64 = right_counts.iter().sum();
 
-    if parent_total == 0 || left_total == 0 || right_total == 0 {
+    if parent_total <= 0.0 || left_total <= 0.0 || right_total <= 0.0 {
         return 0.0;
     }
 
@@ -353,27 +356,26 @@ fn information_gain(parent_counts: &[usize], left_counts: &[usize], right_counts
     let left_entropy = entropy(left_counts, left_total);
     let right_entropy = entropy(right_counts, right_total);
 
-    let n = parent_total as f64;
     parent_entropy
-        - (left_total as f64 / n) * left_entropy
-        - (right_total as f64 / n) * right_entropy
+        - (left_total / parent_total) * left_entropy
+        - (right_total / parent_total) * right_entropy
 }
 
-/// Compute split information for gain ratio calculation.
-/// SplitInfo(S, A) = -sum((|Sv|/|S|) * log2(|Sv|/|S|))
-fn split_info(left_count: usize, right_count: usize) -> f64 {
-    let total = (left_count + right_count) as f64;
-    if total == 0.0 {
+/// Split information of a binary partition with side weights `left` and `right`, in nats.
+/// SplitInfo(S, A) = -sum((|Sv|/|S|) * ln(|Sv|/|S|))
+fn split_info(left: f64, right: f64) -> f64 {
+    let total = left + right;
+    if total <= 0.0 {
         return 1.0; // Avoid division by zero
     }
 
     let mut info = 0.0;
-    if left_count > 0 {
-        let p_left = left_count as f64 / total;
+    if left > 0.0 {
+        let p_left = left / total;
         info -= p_left * p_left.ln();
     }
-    if right_count > 0 {
-        let p_right = right_count as f64 / total;
+    if right > 0.0 {
+        let p_right = right / total;
         info -= p_right * p_right.ln();
     }
 
@@ -386,22 +388,18 @@ fn split_info(left_count: usize, right_count: usize) -> f64 {
 
 /// Compute gain ratio = information_gain / split_info
 /// This corrects for bias toward attributes with many values (Quinlan 1986).
-fn gain_ratio(
-    parent_counts: &[usize],
-    left_counts: &[usize],
-    right_counts: &[usize],
-) -> (f64, f64) {
+fn gain_ratio(parent_counts: &[f64], left_counts: &[f64], right_counts: &[f64]) -> (f64, f64) {
     let gain = information_gain(parent_counts, left_counts, right_counts);
-    let left_total: usize = left_counts.iter().sum();
-    let right_total: usize = right_counts.iter().sum();
+    let left_total: f64 = left_counts.iter().sum();
+    let right_total: f64 = right_counts.iter().sum();
     let split = split_info(left_total, right_total);
     (gain, gain / split)
 }
 
 /// Pessimistic error estimate for pruning (Quinlan 1993).
 /// Uses a continuity correction based on the confidence factor.
-fn pessimistic_error(n: usize, errors: usize, cf: f64) -> f64 {
-    if n == 0 {
+fn pessimistic_error(n: f64, errors: f64, cf: f64) -> f64 {
+    if n <= 0.0 {
         return 0.0;
     }
 
@@ -409,8 +407,8 @@ fn pessimistic_error(n: usize, errors: usize, cf: f64) -> f64 {
     // z value for confidence level (cf = 0.25 corresponds to z ~ 0.69)
     let z = 0.69 * (1.0 - cf) / cf;
 
-    let f = errors as f64 / n as f64;
-    let n_f = n as f64;
+    let f = errors / n;
+    let n_f = n;
 
     // Wilson score interval upper bound
     let numerator =
@@ -500,13 +498,15 @@ const MAX_TREE_DEPTH: usize = 512;
 fn best_c50_split(
     x: &ArrayView2<f64>,
     y: &ArrayView1<f64>,
+    weights: &Array1<f64>,
     indices: &[usize],
-    class_counts: &[usize],
+    class_weights: &[f64],
     min_cases: usize,
     selected_features: Option<&[usize]>,
 ) -> Option<(usize, f64, f64, f64)> {
-    let n = indices.len();
-    let n_classes = class_counts.len();
+    let n_classes = class_weights.len();
+    let node_weight: f64 = class_weights.iter().sum();
+    let min_w = min_cases as f64;
     let features_to_try: Vec<usize> = match selected_features {
         Some(f) => f.to_vec(),
         None => (0..x.ncols()).collect(),
@@ -523,18 +523,16 @@ fn best_c50_split(
         let mut values: Vec<(f64, usize)> = indices.iter().map(|&i| (x[[i, feature]], i)).collect();
         values.sort_by(|a, b| a.0.total_cmp(&b.0));
 
-        // Scan through possible thresholds. With up to 1000 classes the
-        // per-candidate work is O(K), so the left total is a running counter
-        // and the right counts reuse one buffer.
-        let mut left_counts = vec![0usize; n_classes];
-        let mut right_counts = vec![0usize; n_classes];
-        let mut left_total = 0usize;
+        // Scan through possible thresholds with running weighted class counts.
+        let mut left_counts = vec![0.0f64; n_classes];
+        let mut right_counts = vec![0.0f64; n_classes];
+        let mut left_total = 0.0f64;
 
         for j in 0..values.len().saturating_sub(1) {
             let (x_val, idx) = values[j];
             let class = y[idx] as usize;
-            left_counts[class] += 1;
-            left_total += 1;
+            left_counts[class] += weights[idx];
+            left_total += weights[idx];
 
             // Skip if next value is the same
             let next_x = values[j + 1].0;
@@ -542,21 +540,21 @@ fn best_c50_split(
                 continue;
             }
 
-            // Check minimum cases constraint
-            let right_total = n - left_total;
-            if left_total < min_cases || right_total < min_cases {
+            // Check minimum cases constraint (case weights, as C4.5)
+            let right_total = node_weight - left_total;
+            if left_total < min_w || right_total < min_w {
                 continue;
             }
 
             // Compute right counts
             for (r, (&t, &l)) in right_counts
                 .iter_mut()
-                .zip(class_counts.iter().zip(left_counts.iter()))
+                .zip(class_weights.iter().zip(left_counts.iter()))
             {
                 *r = t - l;
             }
 
-            let (gain, gr) = gain_ratio(class_counts, &left_counts, &right_counts);
+            let (gain, gr) = gain_ratio(class_weights, &left_counts, &right_counts);
             all_gains.push(gain);
 
             if gr > best_gain_ratio {
@@ -579,14 +577,15 @@ fn best_c50_split(
 /// Class counts and leaf statistics of one node.
 struct C50NodeStats {
     class_counts: Vec<usize>,
+    class_weights: Vec<f64>,
     predicted_class: usize,
     entropy: f64,
     error_estimate: f64,
 }
 
-/// Class counts, majority class (by weight), entropy and pessimistic error
-/// estimate of the rows in `indices`. Never inlined, for the reason given at
-/// [`best_c50_split`].
+/// Class counts, case weights per class, majority class (by weight, the first on ties),
+/// entropy and pessimistic error estimate (both from the weights) of the rows in `indices`.
+/// Never inlined, for the reason given at [`best_c50_split`].
 #[inline(never)]
 fn c50_node_stats(
     y: &ArrayView1<f64>,
@@ -595,39 +594,29 @@ fn c50_node_stats(
     n_classes: usize,
     cf: f64,
 ) -> C50NodeStats {
-    let n = indices.len();
-
-    // Compute weighted class counts
     let mut class_counts = vec![0usize; n_classes];
-    let mut weighted_counts = vec![0.0f64; n_classes];
+    let mut class_weights = vec![0.0f64; n_classes];
     for &i in indices {
         let class = y[i] as usize;
         class_counts[class] += 1;
-        weighted_counts[class] += weights[i];
+        class_weights[class] += weights[i];
     }
-
-    // Find majority class (using weighted counts)
-    let (predicted_class, _) = weighted_counts
-        .iter()
-        .enumerate()
-        .max_by(|(_, a), (_, b)| a.total_cmp(b))
-        .unwrap_or((0, &0.0));
-
-    let node_entropy = entropy(&class_counts, n);
-
-    // Count errors at this node
-    let errors: usize = class_counts
-        .iter()
-        .enumerate()
-        .filter(|(i, _)| *i != predicted_class)
-        .map(|(_, &c)| c)
-        .sum();
+    let mut predicted_class = 0;
+    for (k, &w) in class_weights.iter().enumerate() {
+        if w > class_weights[predicted_class] {
+            predicted_class = k;
+        }
+    }
+    let total: f64 = class_weights.iter().sum();
+    let node_entropy = entropy(&class_weights, total);
+    let errors = total - class_weights[predicted_class];
 
     C50NodeStats {
         class_counts,
+        class_weights,
         predicted_class,
         entropy: node_entropy,
-        error_estimate: pessimistic_error(n, errors, cf),
+        error_estimate: pessimistic_error(total, errors, cf),
     }
 }
 
@@ -638,6 +627,7 @@ fn c50_leaf(id: usize, n: usize, stats: C50NodeStats) -> Box<C50Node> {
         id,
         n,
         class_counts: stats.class_counts,
+        class_weights: stats.class_weights,
         predicted_class: stats.predicted_class,
         entropy: stats.entropy,
         split: None,
@@ -670,6 +660,7 @@ fn c50_join(
         id,
         n,
         class_counts: stats.class_counts,
+        class_weights: stats.class_weights,
         predicted_class: stats.predicted_class,
         entropy: stats.entropy,
         split: Some(C50Split {
@@ -709,18 +700,22 @@ fn build_c50_tree(
 
     let n = indices.len();
     let stats = c50_node_stats(y, weights, indices, n_classes, config.cf);
+    let node_weight: f64 = stats.class_weights.iter().sum();
 
-    // Check stopping conditions, then find the best split using gain ratio
-    let stop =
-        depth >= MAX_TREE_DEPTH || n < config.min_cases.saturating_mul(2) || stats.entropy < 1e-10;
+    // Check stopping conditions (the node weight against 2 * min_cases, as C4.5), then find
+    // the best split using gain ratio
+    let stop = depth >= MAX_TREE_DEPTH
+        || node_weight < 2.0 * config.min_cases as f64
+        || stats.entropy < 1e-10;
     let best = if stop {
         None
     } else {
         best_c50_split(
             x,
             y,
+            weights,
             indices,
-            &stats.class_counts,
+            &stats.class_weights,
             config.min_cases,
             selected_features,
         )
@@ -776,6 +771,15 @@ fn build_c50_tree(
     ))
 }
 
+/// Rescale case weights to mean 1 (sum n), the scale on which `min_cases` counts cases.
+fn normalise_case_weights(weights: &mut Array1<f64>) {
+    let n = weights.len() as f64;
+    let total = weights.sum();
+    if total > 0.0 && total.is_finite() {
+        weights.mapv_inplace(|w| w * (n / total));
+    }
+}
+
 /// Predict class for a single observation using one tree.
 fn predict_one_tree(node: &C50Node, x: &ArrayView1<f64>) -> usize {
     match &node.split {
@@ -803,15 +807,12 @@ fn predict_proba_one_tree(node: &C50Node, x: &ArrayView1<f64>, n_classes: usize)
         }
     };
 
-    // Return normalized class counts
-    let total: usize = leaf.class_counts.iter().sum();
-    if total == 0 {
+    // Return the normalized class weights
+    let total: f64 = leaf.class_weights.iter().sum();
+    if total <= 0.0 {
         return vec![1.0 / n_classes as f64; n_classes];
     }
-    leaf.class_counts
-        .iter()
-        .map(|&c| c as f64 / total as f64)
-        .collect()
+    leaf.class_weights.iter().map(|&c| c / total).collect()
 }
 
 /// Predict using boosted ensemble with weighted voting.
@@ -1098,8 +1099,9 @@ pub fn c50(x: ArrayView2<f64>, y: ArrayView1<f64>, config: &C50Config) -> EconRe
         None
     };
 
-    // Initialize sample weights
-    let mut weights = Array1::from_elem(n_samples, 1.0 / n_samples as f64);
+    // Case weights: 1 per case; boosting reweights them, and each trial grows its tree on
+    // weights rescaled to mean 1 (C4.5 case weights), which every count of the tree uses.
+    let mut weights = Array1::from_elem(n_samples, 1.0);
 
     // Build boosted ensemble
     let mut trees: Vec<C50Node> = Vec::with_capacity(config.trials);
@@ -1118,6 +1120,7 @@ pub fn c50(x: ArrayView2<f64>, y: ArrayView1<f64>, config: &C50Config) -> EconRe
             (0..n_samples).collect()
         };
 
+        normalise_case_weights(&mut weights);
         let mut node_id = 0;
         let tree = *build_c50_tree(
             &x,
@@ -1408,6 +1411,126 @@ mod tests {
         Array2::from_shape_fn((n, 2), |(i, j)| {
             (if i < n / 2 { 1.0 } else { 8.0 }) + ((i * 7 + j * 3) % 5) as f64 * 0.1
         })
+    }
+
+    /// Uniform draws in [0, 1) from a fixed LCG.
+    fn lcg_uniforms(seed: u64) -> impl FnMut() -> f64 {
+        let mut s = seed;
+        move || {
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (s >> 11) as f64 / (1u64 << 53) as f64
+        }
+    }
+
+    /// A tree's splits in preorder as (feature, threshold bits).
+    fn split_signature(root: &C50Node) -> Vec<(usize, u64)> {
+        let (mut out, mut stack) = (Vec::new(), vec![root]);
+        while let Some(node) = stack.pop() {
+            if let Some(s) = &node.split {
+                out.push((s.feature, s.threshold.to_bits()));
+            }
+            for child in [&node.right, &node.left].into_iter().flatten() {
+                stack.push(child.as_ref());
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn test_c50_boosting_grows_different_trees() {
+        // ML-17. The boosting weights reached only the leaves' majority vote, so every trial grew the
+        // first tree again.
+        let mut u = lcg_uniforms(17);
+        let x = Array2::from_shape_fn((200, 3), |_| u());
+        let y = Array1::from_shape_fn(200, |i| {
+            let label = usize::from(x[[i, 0]] + x[[i, 1]] > 1.0);
+            (if i % 7 == 0 { 1 - label } else { label }) as f64
+        });
+        let cfg = C50Config {
+            trials: 10,
+            early_stopping: false,
+            no_global_pruning: true,
+            ..Default::default()
+        };
+        let r = c50(x.view(), y.view(), &cfg).unwrap();
+        let mut signatures: Vec<Vec<(usize, u64)>> = r.trees.iter().map(split_signature).collect();
+        signatures.sort();
+        signatures.dedup();
+        assert!(
+            signatures.len() >= 2,
+            "{} trials grew {} distinct trees",
+            r.trees.len(),
+            signatures.len()
+        );
+    }
+
+    #[test]
+    fn test_c50_first_trial_weights_are_case_counts() {
+        // Every case weighs 1 in the first trial, so the case weights per class are the counts, and a
+        // tree grown from any constant weights (rescaled to mean 1 per trial) is the same tree.
+        let mut u = lcg_uniforms(23);
+        let x = Array2::from_shape_fn((80, 2), |_| u());
+        let y = Array1::from_shape_fn(80, |i| {
+            let label = usize::from(x[[i, 0]] + 0.3 * x[[i, 1]] > 0.6);
+            (if i % 9 == 0 { 1 - label } else { label }) as f64
+        });
+        let cfg = C50Config {
+            no_global_pruning: true,
+            ..Default::default()
+        };
+        let r = c50(x.view(), y.view(), &cfg).unwrap();
+        let mut stack = vec![&r.trees[0]];
+        while let Some(node) = stack.pop() {
+            let counts: Vec<f64> = node.class_counts.iter().map(|&c| c as f64).collect();
+            assert_eq!(node.class_weights, counts, "node {}", node.id);
+            for child in [&node.left, &node.right].into_iter().flatten() {
+                stack.push(child.as_ref());
+            }
+        }
+        let mut w = Array1::from_elem(80, 3.7);
+        normalise_case_weights(&mut w);
+        let indices: Vec<usize> = (0..80).collect();
+        let (mut node_id, mut importance) = (0, Array1::zeros(2));
+        let tree = build_c50_tree(
+            &x.view(),
+            &y.view(),
+            &w,
+            &indices,
+            &cfg,
+            2,
+            0,
+            &mut node_id,
+            &mut importance,
+            None,
+        )
+        .unwrap();
+        assert_eq!(split_signature(&tree), split_signature(&r.trees[0]));
+    }
+
+    /// The attribute-selection example: x1 has the larger MDL-penalised gain; x2 has a positive
+    /// gain that the MDL cost of its 30 distinct values outweighs.
+    fn attribute_example() -> (Array2<f64>, Array1<f64>) {
+        let x1 = [
+            22, 15, 24, 18, 3, 8, 13, 4, 9, 20, 23, 5, 27, 17, 21, 26, 29, 10, 16, 14, 12, 25, 28,
+            19, 11, 2, 1, 30, 7, 6,
+        ];
+        let x2 = [
+            9, 18, 16, 21, 6, 25, 8, 20, 17, 7, 2, 24, 27, 19, 13, 22, 29, 5, 4, 23, 14, 30, 10,
+            12, 26, 28, 11, 3, 15, 1,
+        ];
+        let y = [
+            1, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0, 1, 1, 1, 0, 0, 1, 0, 1, 0,
+            0,
+        ];
+        let x = Array2::from_shape_fn((30, 2), |(i, j)| [x1[i], x2[i]][j] as f64);
+        (x, y.iter().map(|&v| v as f64).collect())
+    }
+
+    /// Whether `feature` splits some node of `root`.
+    fn uses_feature(root: &C50Node, feature: usize) -> bool {
+        split_signature(root).iter().any(|&(f, _)| f == feature)
     }
 
     #[test]
@@ -1797,20 +1920,20 @@ mod tests {
     #[test]
     fn test_entropy_calculation() {
         // Pure node (all same class)
-        let pure_counts = vec![5, 0];
-        assert!((entropy(&pure_counts, 5) - 0.0).abs() < 1e-10);
+        let pure_counts = vec![5.0, 0.0];
+        assert!((entropy(&pure_counts, 5.0) - 0.0).abs() < 1e-10);
 
         // Balanced binary
-        let balanced_counts = vec![5, 5];
+        let balanced_counts = vec![5.0, 5.0];
         let expected = -2.0 * (0.5 * 0.5f64.ln());
-        assert!((entropy(&balanced_counts, 10) - expected).abs() < 1e-10);
+        assert!((entropy(&balanced_counts, 10.0) - expected).abs() < 1e-10);
     }
 
     #[test]
     fn test_gain_ratio_calculation() {
-        let parent = vec![5, 5];
-        let left = vec![5, 0];
-        let right = vec![0, 5];
+        let parent = vec![5.0, 5.0];
+        let left = vec![5.0, 0.0];
+        let right = vec![0.0, 5.0];
 
         let (gain, gr) = gain_ratio(&parent, &left, &right);
 
