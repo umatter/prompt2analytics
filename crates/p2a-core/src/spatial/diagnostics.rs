@@ -804,7 +804,9 @@ pub fn localmoran_with(
         } else if let Some(ref pvals) = perm_pvalues {
             pvals[i]
         } else {
-            normal_p_value_two_sided(z_score)
+            // once per unit: the erfc lower tail 2 Phi(-|z|), accurate far out and several
+            // times cheaper than the chi-square route of `normal_p_value_two_sided`
+            2.0 * Normal::standard().cdf(-z_score.abs())
         };
 
         let cluster = if p_value <= alpha {
