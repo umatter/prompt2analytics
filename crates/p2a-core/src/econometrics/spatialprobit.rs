@@ -992,8 +992,9 @@ fn chebyshev_nodes(a: f64, b: f64, m: usize) -> Vec<f64> {
 /// Chebyshev points of the second kind over the range of the ρ draws, from one dense inverse
 /// per node ([`SpatialWeights::dense_inverse_parts`]). The nodes double (9, 17, 33) until two
 /// nested interpolants agree to [`IMPACT_INTERPOLATION_TOL`] at the midpoints of the finer
-/// one; the finer one is kept. At 33 nodes the kept interpolant is checked against the dense
-/// inverse in its two end cells, with a warning when it misses the target.
+/// one, or the finer one agrees with the dense inverse to that tolerance in its two end
+/// cells; the finer one is kept. When 33 nodes miss the target a warning reports the
+/// accuracy measured in the end cells.
 struct InverseInterpolant {
     nodes: Vec<f64>,
     /// Barycentric weights (-1)^j, halved at both ends; `[1]` for a single node
@@ -1056,30 +1057,40 @@ impl InverseInterpolant {
             if diff <= IMPACT_INTERPOLATION_TOL {
                 return Ok(it);
             }
+            // The nested difference measures the coarser interpolant, which overstates the
+            // error of the kept one (geometric convergence squares it when the nodes double):
+            // measure the kept one against the dense inverse in its two end cells, where its
+            // error peaks. Two inverses instead of 16 more nodes when 17 suffice.
+            let err = it.end_cell_error(listw, x)?;
+            if err <= IMPACT_INTERPOLATION_TOL {
+                return Ok(it);
+            }
             if m >= 32 {
-                // The nested difference measures the coarser interpolant; measure the kept one
-                // against the dense inverse in the two end cells, where its error peaks.
-                let last = it.nodes.len() - 1;
-                let mut err = 0.0f64;
-                for r in [
-                    0.5 * (it.nodes[0] + it.nodes[1]),
-                    0.5 * (it.nodes[last - 1] + it.nodes[last]),
-                ] {
-                    let mut exact = InverseInterpolant::empty();
-                    exact.push_node(listw, x, r)?;
-                    exact.bary = vec![1.0];
-                    err = err.max(it.max_relative_difference(&exact, &[r]));
-                }
-                if err > IMPACT_INTERPOLATION_TOL {
-                    it.warning = Some(format!(
-                        "the spatial multiplier is interpolated over the rho draws to a relative \
-                         accuracy of {err:.1e} (33 nodes), above the target \
-                         {IMPACT_INTERPOLATION_TOL:e}"
-                    ));
-                }
+                it.warning = Some(format!(
+                    "the spatial multiplier is interpolated over the rho draws to a relative \
+                     accuracy of {err:.1e} (33 nodes), above the target \
+                     {IMPACT_INTERPOLATION_TOL:e}"
+                ));
                 return Ok(it);
             }
         }
+    }
+
+    /// The largest relative difference from the dense inverse at the midpoints of the two
+    /// end cells (two dense inverses).
+    fn end_cell_error(&self, listw: &SpatialWeights, x: &Array2<f64>) -> EconResult<f64> {
+        let last = self.nodes.len() - 1;
+        let mut err = 0.0f64;
+        for r in [
+            0.5 * (self.nodes[0] + self.nodes[1]),
+            0.5 * (self.nodes[last - 1] + self.nodes[last]),
+        ] {
+            let mut exact = InverseInterpolant::empty();
+            exact.push_node(listw, x, r)?;
+            exact.bary = vec![1.0];
+            err = err.max(self.max_relative_difference(&exact, &[r]));
+        }
+        Ok(err)
     }
 
     fn push_node(&mut self, listw: &SpatialWeights, x: &Array2<f64>, rho: f64) -> EconResult<()> {
@@ -1534,6 +1545,9 @@ mod tests {
         let p = pieces();
         let interp = InverseInterpolant::build(&p.w, &p.x, -0.2, 0.85).unwrap();
         assert!(interp.warning.is_none());
+        // a narrow range stops at 17 nodes, accepted by the dense check in its end cells
+        let narrow = InverseInterpolant::build(&p.w, &p.x, 0.4, 0.7).unwrap();
+        assert!(narrow.nodes.len() == 17 && narrow.warning.is_none());
         for rho in [-0.199, -0.1, 0.123_456, 0.5, 0.77, 0.849] {
             let exact = InverseInterpolant::build(&p.w, &p.x, rho, rho).unwrap();
             for model in [SpatialProbitModel::Sar, SpatialProbitModel::Sem] {
