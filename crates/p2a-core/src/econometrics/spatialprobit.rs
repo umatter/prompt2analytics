@@ -1,8 +1,12 @@
 //! Spatial Probit Models for Binary Outcomes with Spatial Dependence.
 //!
 //! Implements spatial autoregressive (SAR) probit and spatial error (SEM) probit models
-//! for binary dependent variables with spatial dependence, equivalent to R's `spatialprobit`
-//! package.
+//! for binary dependent variables with spatial dependence, by the Bayesian Gibbs sampler of
+//! LeSage & Pace (2009, ch. 10), the scheme of R's `spatialprobit` (`sarprobit`, `semprobit`).
+//! The deterministic pieces (the full conditionals, the marginal probabilities and the
+//! impacts at given parameters) are pinned to R written out in base R; the posterior itself
+//! is not R-pinned (an MCMC run cannot reproduce spatialprobit's draws) and is checked by
+//! recovering simulated parameters. See `validation/econometrics/spatialprobit.md`.
 //!
 //! # Models
 //!
@@ -44,14 +48,25 @@
 //!
 //! # Estimation Method
 //!
-//! Uses a Bayesian Markov Chain Monte Carlo (MCMC) approach with data augmentation,
-//! following LeSage & Pace (2009). The algorithm uses:
+//! Gibbs sampling with data augmentation (Albert & Chib 1993), A = I - ρW:
 //!
-//! 1. Albert & Chib (1993) data augmentation for latent y*
-//! 2. Exact one-sided truncated normal draws for the latent outcomes, in both tails: normal
-//!    rejection when the bound is on the near side of the mean, Robert's (1995) exponential
-//!    rejection when it is on the far side
-//! 3. Gibbs sampling for parameters
+//! 1. The latent outcomes z, one single-site sweep per iteration: z_i given the others is
+//!    N(m_i, 1/H_ii) with H = A'A, m_i = z_i - (A'(A z - c))_i / H_ii (c = Xβ for SAR, AXβ for
+//!    SEM), truncated to (0, ∞) where y_i = 1 and (-∞, 0] where y_i = 0. Each draw is exact
+//!    (normal rejection near the mean, Robert's (1995) exponential rejection in the far tail),
+//!    and a sweep costs O(links) with no solve. spatialprobit runs m = 10 inner sweeps of its
+//!    sparse truncated-multivariate-normal sampler per iteration; both are valid Gibbs schemes.
+//! 2. β | z, ρ: conjugate normal (prior precision `prior_beta_precision`, default 0.01).
+//! 3. ρ | z, β: griddy Gibbs on 2,000 cells of the prior range (intersected with the range
+//!    where I - ρW is invertible), with the log kernel ln|I - ρW| - ||A z - c||² / 2;
+//!    ln|I - ρW| comes from the eigenvalues of W once per fit, and the draw inverts the
+//!    trapezoid CDF within its cell. There is no rejection step, so `acceptance_rate` is 1.
+//!
+//! The summaries at the posterior mean use the marginal distribution of each latent outcome,
+//! z_i ~ N(μ_i, σ_i²) with μ = A⁻¹Xβ (SAR) or Xβ (SEM) and σ_i² = [(A'A)⁻¹]_ii (one dense
+//! inverse of A): `fitted_prob` = Φ(μ_i/σ_i), the composite log-likelihood Σ ln Φ(±μ_i/σ_i)
+//! (the joint likelihood is an n-dimensional orthant probability, which is not computed), the
+//! pseudo R² and the percent correctly predicted. `dic` and `log_marginal_likelihood` are NaN.
 //!
 //! # Marginal Effects
 //!
@@ -208,16 +223,20 @@ pub struct SpatialProbitResult {
     /// P-value for spatial parameter
     pub rho_p: f64,
 
-    /// Log-likelihood at posterior mean
+    /// Composite (marginal) log-likelihood at the posterior mean, Σ_i ln Φ(±μ_i / σ_i) with
+    /// σ_i² = [((I - ρW)'(I - ρW))^-1]_ii; not the joint likelihood, an n-dimensional orthant
+    /// probability
     pub log_likelihood: f64,
-    /// Log marginal likelihood (approximation via harmonic mean)
+    /// Not computed (NaN): the joint likelihood is an orthant probability, and the harmonic
+    /// mean estimator is unreliable; spatialprobit reports none
     pub log_marginal_likelihood: f64,
-    /// Deviance Information Criterion
+    /// Not computed (NaN), for the same reason; spatialprobit reports none
     pub dic: f64,
-    /// Pseudo R-squared (McFadden)
+    /// McFadden's pseudo R-squared of the composite log-likelihood against the
+    /// intercept-only probit
     pub pseudo_r_squared: f64,
 
-    /// Predicted probabilities at posterior mean
+    /// Marginal probabilities Φ(μ_i / σ_i) at the posterior mean
     pub fitted_prob: Vec<f64>,
     /// Percent correctly predicted
     pub pcp: f64,
@@ -231,7 +250,7 @@ pub struct SpatialProbitResult {
     pub n_positive: usize,
     /// Number of MCMC draws used
     pub n_draws: usize,
-    /// Acceptance rate for spatial parameter (if Metropolis-Hastings used)
+    /// Always 1: the griddy-Gibbs step for the spatial parameter has no rejection step
     pub acceptance_rate: f64,
 
     /// MCMC diagnostics
@@ -322,8 +341,11 @@ impl std::fmt::Display for SpatialProbitResult {
             )?;
         }
         writeln!(f)?;
-        writeln!(f, "Log-likelihood: {:.4}", self.log_likelihood)?;
-        writeln!(f, "DIC: {:.4}", self.dic)?;
+        writeln!(
+            f,
+            "Composite log-likelihood (marginal probabilities): {:.4}",
+            self.log_likelihood
+        )?;
         writeln!(f, "Pseudo R-squared: {:.4}", self.pseudo_r_squared)?;
         writeln!(f, "Percent correctly predicted: {:.2}", self.pcp)?;
         writeln!(f, "N: {}", self.n_obs)?;
@@ -498,37 +520,22 @@ fn run_spatial_probit_internal(
         coef_names.push(name.to_string());
     }
 
-    // Compute log-likelihood at posterior mean
-    let ll_mean =
-        compute_spatial_probit_log_likelihood(&y, &x, listw, &beta_mean, rho_mean, model_type);
+    // Marginal probabilities and the composite log-likelihood at the posterior mean
+    let summary = marginal_summary(&y, &x, listw, &beta_mean, rho_mean, model_type)?;
+    let ll_mean = summary.composite_log_likelihood;
 
-    // Compute null log-likelihood (intercept only, no spatial)
+    // Null log-likelihood (intercept only, no spatial dependence) and McFadden's pseudo R2
     let p_bar = n_positive as f64 / n as f64;
     let ll_null = (n_positive as f64) * p_bar.ln() + ((n - n_positive) as f64) * (1.0 - p_bar).ln();
-
-    // Pseudo R-squared
     let pseudo_r2 = 1.0 - ll_mean / ll_null;
 
-    // Compute fitted probabilities at posterior mean
-    let fitted_prob = compute_fitted_probabilities(&x, listw, &beta_mean, rho_mean, model_type);
-
-    // Percent correctly predicted
+    let fitted_prob = summary.prob;
     let correct: usize = y
         .iter()
         .zip(fitted_prob.iter())
         .filter(|&(&yi, &pi)| (yi >= 0.5) == (pi >= 0.5))
         .count();
     let pcp = 100.0 * correct as f64 / n as f64;
-
-    // Approximate log marginal likelihood via harmonic mean estimator
-    // (Newton & Raftery, 1994) - biased but simple
-    let log_marginal_ll = compute_log_marginal_likelihood_approx(&mcmc_result.log_lik_draws);
-
-    // DIC = D_bar + p_D where p_D = D_bar - D(theta_bar)
-    let d_bar = -2.0 * mcmc_result.log_lik_draws.mean().unwrap_or(ll_mean);
-    let d_theta_bar = -2.0 * ll_mean;
-    let p_d = d_bar - d_theta_bar;
-    let dic = d_bar + p_d;
 
     // Compute spatial impacts if requested
     let impacts = if config.compute_impacts {
@@ -556,8 +563,8 @@ fn run_spatial_probit_internal(
         rho_z,
         rho_p,
         log_likelihood: ll_mean,
-        log_marginal_likelihood: log_marginal_ll,
-        dic,
+        log_marginal_likelihood: f64::NAN,
+        dic: f64::NAN,
         pseudo_r_squared: pseudo_r2,
         fitted_prob: fitted_prob.to_vec(),
         pcp,
@@ -565,7 +572,7 @@ fn run_spatial_probit_internal(
         n_obs: n,
         n_positive,
         n_draws,
-        acceptance_rate: mcmc_result.acceptance_rate,
+        acceptance_rate: 1.0,
         beta_draws: mcmc_result.beta_draws,
         rho_draws: mcmc_result.rho_draws,
     })
@@ -601,29 +608,161 @@ fn total_mcmc_draws(config: &SpatialProbitConfig) -> EconResult<usize> {
 struct McmcResult {
     beta_draws: Array2<f64>,
     rho_draws: Array1<f64>,
-    log_lik_draws: Array1<f64>,
-    acceptance_rate: f64,
 }
 
-/// Run MCMC for spatial probit model.
-///
-/// Uses Gibbs sampling with:
-/// - Data augmentation for latent y* (Albert & Chib, 1993)
-/// - Conjugate update for beta
-/// - Griddy Gibbs for rho (Ritter & Tanner, 1992)
+/// Cells of the griddy-Gibbs grid for ρ (LeSage & Pace's spacing of about 0.001 on (-1, 1)).
+const RHO_GRID_CELLS: usize = 2000;
+
+/// The columns of W: `cols[i]` lists (j, w_ji) over the rows j with a link to i, so that a
+/// column of I - ρW is available in O(links of i).
+fn weight_columns(listw: &SpatialWeights) -> EconResult<Vec<Vec<(usize, f64)>>> {
+    let n = listw.n();
+    let mut cols: Vec<Vec<(usize, f64)>> = crate::resource::try_vec(n, Vec::new(), "columns of W")?;
+    for j in 0..n {
+        let sw = listw.get_weights(j);
+        for (&i, &w) in sw.indices.iter().zip(sw.weights.iter()) {
+            cols[i].push((j, w));
+        }
+    }
+    Ok(cols)
+}
+
+/// c in the latent model A z = c + ε: X β (SAR) or A X β (SEM), A = I - ρW.
+fn latent_offset(
+    xb: &Array1<f64>,
+    listw: &SpatialWeights,
+    rho: f64,
+    model_type: SpatialProbitModel,
+) -> Array1<f64> {
+    match model_type {
+        SpatialProbitModel::Sar => xb.clone(),
+        SpatialProbitModel::Sem => xb - &(rho * &listw.lag(xb)),
+    }
+}
+
+/// The mean of the full conditional of z_i given the other latent values, with r = A z - c and
+/// H = A'A: m_i = z_i - (A' r)_i / H_ii (the solve-free form of
+/// μ_i - Σ_{j≠i} H_ij (z_j - μ_j) / H_ii); its variance is 1 / H_ii, H_ii = 1 + ρ² Σ_j w_ji².
+fn latent_conditional_mean(
+    i: usize,
+    z_i: f64,
+    r: &Array1<f64>,
+    col: &[(usize, f64)],
+    rho: f64,
+    h_ii: f64,
+) -> f64 {
+    let g = r[i] - rho * col.iter().map(|&(j, w)| w * r[j]).sum::<f64>();
+    z_i - g / h_ii
+}
+
+/// One single-site Gibbs sweep over the latent outcomes: each z_i is drawn from its full
+/// conditional N(m_i, 1 / H_ii), truncated to (0, inf) where y_i = 1 and (-inf, 0] where
+/// y_i = 0. The residual r = A z - c is formed exactly at the start and updated along column
+/// i of A after each draw: O(links) per sweep, no solve.
+#[allow(clippy::too_many_arguments)]
+fn sample_latent_sweep<R: rand::Rng>(
+    y: &Array1<f64>,
+    z: &mut Array1<f64>,
+    c: &Array1<f64>,
+    listw: &SpatialWeights,
+    cols: &[Vec<(usize, f64)>],
+    col_sq: &[f64],
+    rho: f64,
+    rng: &mut R,
+) {
+    let mut r = &*z - &(rho * &listw.lag(z)) - c;
+    for i in 0..z.len() {
+        let h_ii = 1.0 + rho * rho * col_sq[i];
+        let m = latent_conditional_mean(i, z[i], &r, &cols[i], rho, h_ii);
+        let sd = h_ii.sqrt().recip();
+        let new = if y[i] >= 0.5 {
+            sample_truncated_normal_above(m, sd, 0.0, rng)
+        } else {
+            sample_truncated_normal_below(m, sd, 0.0, rng)
+        };
+        let dz = new - z[i];
+        z[i] = new;
+        r[i] += dz;
+        for &(j, w) in &cols[i] {
+            r[j] -= rho * w * dz;
+        }
+    }
+}
+
+/// The three inner products of the ρ full conditional: with a = z - Xβ and b = Wz (SAR) or
+/// Wa (SEM), ||A z - c||² = a'a - 2ρ a'b + ρ² b'b.
+fn rho_kernel_terms(
+    z: &Array1<f64>,
+    xb: &Array1<f64>,
+    listw: &SpatialWeights,
+    model_type: SpatialProbitModel,
+) -> (f64, f64, f64) {
+    let a = z - xb;
+    let b = match model_type {
+        SpatialProbitModel::Sar => listw.lag(z),
+        SpatialProbitModel::Sem => listw.lag(&a),
+    };
+    (a.dot(&a), a.dot(&b), b.dot(&b))
+}
+
+/// ln k(ρ) = ln|I - ρW| - ||A z - c||² / 2, the log kernel of ρ | z, β under a flat prior.
+fn rho_log_kernel(log_det: f64, rho: f64, (aa, ab, bb): (f64, f64, f64)) -> f64 {
+    log_det - 0.5 * (aa - 2.0 * rho * ab + rho * rho * bb)
+}
+
+/// A draw from the density whose log is `log_k` at the equally spaced `grid` and linear
+/// between neighbouring grid points: the trapezoid CDF inverted exactly within the cell
+/// (LeSage & Pace's griddy Gibbs `draw_rho`). No rejection step, so every draw moves.
+fn draw_from_grid<R: rand::Rng>(grid: &[f64], log_k: &[f64], rng: &mut R) -> f64 {
+    let max = log_k.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let f: Vec<f64> = log_k.iter().map(|&l| (l - max).exp()).collect();
+    let h = grid[1] - grid[0];
+    let areas: Vec<f64> = f.windows(2).map(|p| 0.5 * h * (p[0] + p[1])).collect();
+    let total: f64 = areas.iter().sum();
+    let mut u = rng.r#gen::<f64>() * total;
+    for (g, &area) in areas.iter().enumerate() {
+        if u <= area || g + 1 == areas.len() {
+            let u = u.min(area);
+            // ∫_0^t h (f0 + (f1 - f0) s) ds = u, t in [0, 1]: the stable root of
+            // (h (f1 - f0) / 2) t² + h f0 t - u = 0
+            let (a, b) = (0.5 * h * (f[g + 1] - f[g]), h * f[g]);
+            let disc = (b * b + 4.0 * a * u).max(0.0);
+            let t = if u > 0.0 {
+                (2.0 * u / (b + disc.sqrt())).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            return grid[g] + t * h;
+        }
+        u -= area;
+    }
+    grid[grid.len() - 1]
+}
+
+/// The griddy-Gibbs grid for ρ: the midpoints of [`RHO_GRID_CELLS`] equal cells on `range`.
+fn rho_grid(range: (f64, f64)) -> Vec<f64> {
+    let h = (range.1 - range.0) / RHO_GRID_CELLS as f64;
+    (0..RHO_GRID_CELLS)
+        .map(|g| range.0 + (g as f64 + 0.5) * h)
+        .collect()
+}
+
+/// Run MCMC for the spatial probit (LeSage & Pace 2009, ch. 10): Gibbs sampling over
+/// - the latent outcomes, one single-site sweep per iteration from their full conditional
+///   (precision (I - ρW)'(I - ρW)), truncated by the observed outcome;
+/// - β | z, ρ, conjugate normal;
+/// - ρ | z, β, griddy Gibbs on 2,000 cells with ln|I - ρW| from the eigenvalues.
 fn run_mcmc_spatial_probit(
     y: &Array1<f64>,
     x: &Array2<f64>,
-    listw: &SpatialWeights,
+    listw: &mut SpatialWeights,
     model_type: SpatialProbitModel,
     config: &SpatialProbitConfig,
     rho_range: (f64, f64),
 ) -> EconResult<McmcResult> {
-    let _n = y.len();
     let k = x.ncols();
     let total_draws = total_mcmc_draws(config)?;
 
-    // Initialize RNG
     use rand::SeedableRng;
     let mut rng =
         rand::rngs::StdRng::seed_from_u64(config.seed.unwrap_or(SPATIAL_PROBIT_DEFAULT_SEED));
@@ -635,43 +774,51 @@ fn run_mcmc_spatial_probit(
         .clone()
         .unwrap_or_else(|| Array1::zeros(k));
 
-    // Initialize parameters
-    // Start beta from OLS on pseudo-y
+    // Start: beta from OLS on the pseudo-outcome ±0.5 (consistent with y), rho = 0
     let pseudo_y: Array1<f64> = y.mapv(|yi| if yi >= 0.5 { 0.5 } else { -0.5 });
     let xtx_mat = xtx(&x.view());
     let xty_vec = xty(&x.view(), &pseudo_y);
     let xtx_inv = matrix_inverse(&xtx_mat.view())?;
     let mut beta = xtx_inv.dot(&xty_vec);
+    let mut rho = 0.0;
+    let mut z = pseudo_y;
 
-    let mut rho = 0.0; // Start at no spatial dependence
-    let mut y_star = pseudo_y.clone(); // Latent variable
-
-    // WX does not change between iterations
+    // Once per fit: WX, the columns of W, ln|I - rho W| on the grid
     let mut wx = Array2::zeros((x.nrows(), k));
     for col in 0..k {
         wx.column_mut(col)
             .assign(&listw.lag(&x.column(col).to_owned()));
     }
+    let cols = weight_columns(listw)?;
+    let col_sq: Vec<f64> = cols
+        .iter()
+        .map(|c| c.iter().map(|&(_, w)| w * w).sum())
+        .collect();
+    let grid = rho_grid(rho_range);
+    let log_det = listw.try_spectrum()?.log_det_grid(&grid);
+    if !log_det.iter().all(|v| v.is_finite()) {
+        return Err(EconError::Computation(
+            "spatial probit: ln|I - rho W| is not finite on the rho grid".to_string(),
+        ));
+    }
+    let mut log_k = vec![0.0; grid.len()];
 
-    // Storage for draws
     let keep_draws = config.n_draws;
     let mut beta_draws = try_zeros2(keep_draws, k, "posterior draws of beta")?;
     let mut rho_draws = try_zeros1(keep_draws, "posterior draws of rho")?;
-    let mut log_lik_draws = try_zeros1(keep_draws, "posterior log-likelihood draws")?;
-
-    // MCMC iterations
-    let mut n_accepted = 0;
     let mut draw_idx = 0;
 
     for iter in 0..total_draws {
         crate::resource::checkpoint()?;
 
-        // --- Step 1: Sample latent y* given (beta, rho) ---
-        y_star = sample_latent_y(y, x, listw, &beta, rho, model_type, &mut rng);
+        // --- z | beta, rho ---
+        let xb = x.dot(&beta);
+        let c = latent_offset(&xb, listw, rho, model_type);
+        sample_latent_sweep(y, &mut z, &c, listw, &cols, &col_sq, rho, &mut rng);
 
-        // --- Step 2: Sample beta given (y*, rho) ---
+        // --- beta | z, rho ---
         beta = sample_beta(
-            &y_star,
+            &z,
             x,
             &wx,
             listw,
@@ -687,107 +834,31 @@ fn run_mcmc_spatial_probit(
             )));
         }
 
-        // --- Step 3: Sample rho given (y*, beta) using griddy Gibbs ---
-        let (new_rho, accepted) = sample_rho_griddy_gibbs(
-            &y_star, x, listw, &beta, rho, model_type, rho_range, &mut rng,
-        );
-        rho = new_rho;
-        if accepted {
-            n_accepted += 1;
+        // --- rho | z, beta (griddy Gibbs) ---
+        let terms = rho_kernel_terms(&z, &x.dot(&beta), listw, model_type);
+        for ((lk, &ld), &r) in log_k.iter_mut().zip(&log_det).zip(&grid) {
+            *lk = rho_log_kernel(ld, r, terms);
         }
+        rho = draw_from_grid(&grid, &log_k, &mut rng);
 
-        // Store draws after burn-in, with thinning
         if iter >= config.burn_in
             && (iter - config.burn_in).is_multiple_of(config.thin)
             && draw_idx < keep_draws
         {
-            for j in 0..k {
-                beta_draws[[draw_idx, j]] = beta[j];
-            }
+            beta_draws.row_mut(draw_idx).assign(&beta);
             rho_draws[draw_idx] = rho;
-            log_lik_draws[draw_idx] =
-                compute_spatial_probit_log_likelihood(y, x, listw, &beta, rho, model_type);
             draw_idx += 1;
         }
     }
 
-    let acceptance_rate = n_accepted as f64 / total_draws as f64;
-
     Ok(McmcResult {
         beta_draws,
         rho_draws,
-        log_lik_draws,
-        acceptance_rate,
     })
 }
 
-/// Sample latent y* from truncated normal given observed y, parameters.
-fn sample_latent_y<R: rand::Rng>(
-    y: &Array1<f64>,
-    x: &Array2<f64>,
-    listw: &SpatialWeights,
-    beta: &Array1<f64>,
-    rho: f64,
-    model_type: SpatialProbitModel,
-    rng: &mut R,
-) -> Array1<f64> {
-    let n = y.len();
-    let mut y_star = Array1::zeros(n);
-
-    // Compute mean of y* based on model type
-    let mu = match model_type {
-        SpatialProbitModel::Sar => {
-            // y* = (I - rho*W)^{-1} * X * beta + (I - rho*W)^{-1} * epsilon
-            // Mean: (I - rho*W)^{-1} * X * beta
-            // For sampling, we use iterative approach
-
-            // Approximate: mu_i = (X*beta)_i + rho * sum_j(w_ij * y*_j)
-            // This is a simplified approximation
-            x.dot(beta)
-        }
-        SpatialProbitModel::Sem => {
-            // y* = X*beta + u, Var(y*) = (I - lambda*W)^{-1} * (I - lambda*W')^{-1}
-            // Mean is simply X*beta
-            x.dot(beta)
-        }
-    };
-
-    // Sample from truncated normal for each observation
-    for i in 0..n {
-        let mu_i = mu[i];
-        let sigma = 1.0; // Unit variance in probit
-
-        if y[i] >= 0.5 {
-            // y_i = 1: sample from TN(mu, sigma) truncated at (0, inf)
-            y_star[i] = sample_truncated_normal_above(mu_i, sigma, 0.0, rng);
-        } else {
-            // y_i = 0: sample from TN(mu, sigma) truncated at (-inf, 0)
-            y_star[i] = sample_truncated_normal_below(mu_i, sigma, 0.0, rng);
-        }
-    }
-
-    // For SAR model, iteratively adjust for spatial lag
-    if model_type == SpatialProbitModel::Sar && rho.abs() > 1e-6 {
-        // Apply one iteration of adjustment: y* = X*beta + rho*W*y*_old
-        let xb = x.dot(beta);
-        for _ in 0..3 {
-            // A few iterations for convergence
-            let wy = listw.lag(&y_star);
-            for i in 0..n {
-                let new_mu = xb[i] + rho * wy[i];
-                if y[i] >= 0.5 {
-                    y_star[i] = sample_truncated_normal_above(new_mu, 1.0, 0.0, rng);
-                } else {
-                    y_star[i] = sample_truncated_normal_below(new_mu, 1.0, 0.0, rng);
-                }
-            }
-        }
-    }
-
-    y_star
-}
-
 /// Sample beta from conditional posterior.
+#[allow(clippy::too_many_arguments)]
 fn sample_beta<R: rand::Rng>(
     y_star: &Array1<f64>,
     x: &Array2<f64>,
@@ -812,189 +883,86 @@ fn sample_beta<R: rand::Rng>(
             // y* = X*beta + (I - lambda*W)^{-1}*epsilon
             // Transform: (I - lambda*W)*y* = (I - lambda*W)*X*beta + epsilon
             let y_t: Array1<f64> = y_star - rho * &listw.lag(y_star);
-            let mut x_t = x.clone();
-            for i in 0..x.nrows() {
-                for j in 0..x.ncols() {
-                    x_t[[i, j]] -= rho * wx[[i, j]];
-                }
-            }
+            let x_t = x - &(rho * wx);
             (y_t, x_t)
         }
     };
 
     // Posterior precision: X'X + prior_precision * I
-    let xtx_mat = xtx(&x_tilde.view());
-    let mut post_precision = xtx_mat.clone();
+    let mut post_precision = xtx(&x_tilde.view());
     for i in 0..k {
         post_precision[[i, i]] += prior_precision;
     }
 
     // Posterior mean: post_var * (X'y_tilde + prior_precision * beta0)
     let xty_vec = xty(&x_tilde.view(), &y_tilde);
-    let prior_term = beta0.mapv(|b| b * prior_precision);
-    let post_mean_unnorm = &xty_vec + &prior_term;
+    let post_mean_unnorm = &xty_vec + &beta0.mapv(|b| b * prior_precision);
 
     let post_var = matrix_inverse(&post_precision.view())?;
     let post_mean = post_var.dot(&post_mean_unnorm);
 
-    // Sample from N(post_mean, post_var)
-    // Using Cholesky: beta = post_mean + L * z where L*L' = post_var
+    // beta = post_mean + L e, L L' = post_var
     let l = crate::linalg::matrix_ops::cholesky(&post_var.view())?;
-    let z: Array1<f64> = Array1::from_iter((0..k).map(|_| {
+    let e: Array1<f64> = Array1::from_iter((0..k).map(|_| {
         use rand_distr::{Distribution, StandardNormal};
         StandardNormal.sample(rng)
     }));
-    let beta = &post_mean + &l.dot(&z);
-
-    Ok(beta)
+    Ok(&post_mean + &l.dot(&e))
 }
 
-/// Sample rho using griddy Gibbs (grid-based evaluation).
-fn sample_rho_griddy_gibbs<R: rand::Rng>(
-    y_star: &Array1<f64>,
-    x: &Array2<f64>,
-    listw: &SpatialWeights,
-    beta: &Array1<f64>,
-    current_rho: f64,
-    model_type: SpatialProbitModel,
-    rho_range: (f64, f64),
-    rng: &mut R,
-) -> (f64, bool) {
-    // Create grid of rho values
-    let n_grid = 50;
-    let step = (rho_range.1 - rho_range.0) / (n_grid as f64);
-    let grid: Vec<f64> = (0..=n_grid)
-        .map(|i| rho_range.0 + i as f64 * step)
-        .collect();
-
-    // Evaluate log-likelihood kernel at each grid point
-    let xb = x.dot(beta);
-    let wy_star = listw.lag(y_star);
-    // W y* - W X beta, for the SEM residual; computed once, not per grid point
-    let dw = match model_type {
-        SpatialProbitModel::Sar => None,
-        SpatialProbitModel::Sem => Some(&wy_star - &listw.lag(&xb)),
-    };
-
-    let log_probs: Vec<f64> = grid
-        .iter()
-        .map(|&rho| {
-            let resid: Array1<f64> = match &dw {
-                None => y_star - rho * &wy_star - &xb,
-                Some(dw) => y_star - &xb - rho * dw,
-            };
-            // Log-likelihood contribution (ignoring normalizing constants)
-            -0.5 * resid.iter().map(|&r| r * r).sum::<f64>()
-        })
-        .collect();
-
-    // Convert to probabilities (softmax-like)
-    let max_log = log_probs.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-    let probs: Vec<f64> = log_probs.iter().map(|&lp| (lp - max_log).exp()).collect();
-    let sum_probs: f64 = probs.iter().sum();
-    let probs_normalized: Vec<f64> = probs.iter().map(|&p| p / sum_probs).collect();
-
-    // Sample from discrete distribution
-    use rand_distr::{Distribution, Uniform};
-    let u: f64 = Uniform::new(0.0, 1.0).sample(rng);
-    let mut cumsum = 0.0;
-    let mut selected_idx = 0;
-    for (i, &p) in probs_normalized.iter().enumerate() {
-        cumsum += p;
-        if u <= cumsum {
-            selected_idx = i;
-            break;
-        }
+/// ln Φ(x), accurate in both tails: ln(1 - Φ(-x)) above 0, ln Φ(x) from the upper-tail
+/// function down to -30, and the asymptotic series below.
+fn ln_normal_cdf(x: f64) -> f64 {
+    if x.is_nan() {
+        return f64::NAN;
     }
-
-    // Add small jitter within grid cell
-    let new_rho = if selected_idx == 0 {
-        grid[0] + Uniform::new(0.0, step).sample(rng) * 0.5
-    } else if selected_idx == n_grid {
-        grid[n_grid] - Uniform::new(0.0, step).sample(rng) * 0.5
+    if x > 0.0 {
+        (-0.5 * normal_p_value_two_sided(x)).ln_1p()
+    } else if x > -30.0 {
+        (0.5 * normal_p_value_two_sided(x)).ln()
     } else {
-        grid[selected_idx] + Uniform::new(-step * 0.5, step * 0.5).sample(rng)
-    };
-
-    // Clamp to valid range
-    let new_rho_clamped = new_rho.max(rho_range.0 + 0.001).min(rho_range.1 - 0.001);
-
-    (
-        new_rho_clamped,
-        (new_rho_clamped - current_rho).abs() > 1e-8,
-    )
+        // Φ(x) = φ(x)/|x| (1 - 1/x² + 3/x⁴ - 15/x⁶ + 105/x⁸ - ...), error below 1e-12 here
+        let q = (x * x).recip();
+        -0.5 * x * x - (-x).ln() - 0.5 * (2.0 * std::f64::consts::PI).ln()
+            + (1.0 - q * (1.0 - q * (3.0 - q * (15.0 - 105.0 * q)))).ln()
+    }
 }
 
-/// Compute log-likelihood for spatial probit model.
-fn compute_spatial_probit_log_likelihood(
+/// The marginal summaries at (β, ρ): σ_i² = [((I - ρW)'(I - ρW))^-1]_ii, μ = (I - ρW)^-1 Xβ
+/// (SAR) or Xβ (SEM), the probabilities Φ(μ_i / σ_i) and the composite (marginal)
+/// log-likelihood Σ_i ln Φ(±μ_i / σ_i). One dense inverse of I - ρW.
+struct MarginalSummary {
+    sigma: Array1<f64>,
+    prob: Array1<f64>,
+    composite_log_likelihood: f64,
+}
+
+fn marginal_summary(
     y: &Array1<f64>,
     x: &Array2<f64>,
     listw: &SpatialWeights,
     beta: &Array1<f64>,
     rho: f64,
     model_type: SpatialProbitModel,
-) -> f64 {
-    let xb = x.dot(beta);
-
-    // Compute z = A^{-1} * X * beta where A = I - rho*W
-    let z: Array1<f64> = match model_type {
-        SpatialProbitModel::Sar => {
-            // Use iterative approximation for (I - rho*W)^{-1} * X * beta
-            let mut z_approx = xb.clone();
-            for _ in 0..5 {
-                let wz = listw.lag(&z_approx);
-                z_approx = &xb + rho * &wz;
-            }
-            z_approx
-        }
-        SpatialProbitModel::Sem => {
-            // For SEM, mean is just X*beta
-            xb
-        }
+) -> EconResult<MarginalSummary> {
+    let parts = listw.dense_inverse_parts(rho, x.view())?;
+    let sigma = parts.row_sq_norms.mapv(f64::sqrt);
+    let mu = match model_type {
+        SpatialProbitModel::Sar => parts.solved.dot(beta),
+        SpatialProbitModel::Sem => x.dot(beta),
     };
-
-    // Log-likelihood: sum of log(Phi(z_i)) for y_i=1, log(1-Phi(z_i)) for y_i=0
-    let ll: f64 = y
+    let t = &mu / &sigma;
+    let prob = t.mapv(normal_cdf);
+    let composite_log_likelihood = y
         .iter()
-        .zip(z.iter())
-        .map(|(&yi, &zi)| {
-            let p = normal_cdf(zi);
-            let p_clipped = p.max(1e-10).min(1.0 - 1e-10);
-            if yi >= 0.5 {
-                p_clipped.ln()
-            } else {
-                (1.0 - p_clipped).ln()
-            }
-        })
+        .zip(t.iter())
+        .map(|(&yi, &ti)| ln_normal_cdf(if yi >= 0.5 { ti } else { -ti }))
         .sum();
-
-    ll
-}
-
-/// Compute fitted probabilities.
-fn compute_fitted_probabilities(
-    x: &Array2<f64>,
-    listw: &SpatialWeights,
-    beta: &Array1<f64>,
-    rho: f64,
-    model_type: SpatialProbitModel,
-) -> Array1<f64> {
-    let xb = x.dot(beta);
-
-    let z: Array1<f64> = match model_type {
-        SpatialProbitModel::Sar => {
-            // Approximate (I - rho*W)^{-1} * X * beta iteratively
-            let mut z_approx = xb.clone();
-            for _ in 0..10 {
-                let wz = listw.lag(&z_approx);
-                z_approx = &xb + rho * &wz;
-            }
-            z_approx
-        }
-        SpatialProbitModel::Sem => xb,
-    };
-
-    z.mapv(normal_cdf)
+    Ok(MarginalSummary {
+        sigma,
+        prob,
+        composite_log_likelihood,
+    })
 }
 
 /// Highest power of W in the truncated Neumann series the probit impacts use.
@@ -1189,11 +1157,12 @@ fn compute_spatial_probit_impacts(
 /// Exact draw from N(0, 1) truncated to [a, inf). For a <= 0, normal rejection (acceptance
 /// Phi(-a) >= 1/2). Otherwise Robert's (1995) exponential rejection with the optimal rate
 /// lambda = (a + sqrt(a^2 + 4)) / 2, accepting z = a + E/lambda with probability
-/// exp(-(z - lambda)^2 / 2) (acceptance above 0.76 for a > 0). NaN or +inf returns a (no loop);
-/// the Gibbs loop refuses non-finite draws.
+/// exp(-(z - lambda)^2 / 2) (acceptance above 0.76 for a > 0). NaN, +inf and a bound whose
+/// square overflows return a (no loop); the Gibbs loop refuses non-finite draws.
 fn standard_normal_truncated_below<R: rand::Rng>(a: f64, rng: &mut R) -> f64 {
     use rand_distr::{Distribution, Exp1, StandardNormal};
-    if a.is_nan() || a == f64::INFINITY {
+    // NaN or +inf, and a bound so far out that a² overflows: the mass lies within 1/a of a
+    if a.is_nan() || (a > 0.0 && !(a * a).is_finite()) {
         return a;
     }
     if a <= 0.0 {
@@ -1265,28 +1234,301 @@ fn compute_std_axis0(arr: &Array2<f64>) -> Array1<f64> {
     std
 }
 
-/// Approximate log marginal likelihood using harmonic mean estimator.
-fn compute_log_marginal_likelihood_approx(log_lik_draws: &Array1<f64>) -> f64 {
-    // Harmonic mean estimator: 1 / (1/n * sum(1/L))
-    // In log: -log(mean(exp(-log_lik)))
-    let max_ll = log_lik_draws
-        .iter()
-        .cloned()
-        .fold(f64::NEG_INFINITY, f64::max);
-    let mean_exp_neg: f64 = log_lik_draws
-        .iter()
-        .map(|&ll| (-(ll - max_ll)).exp())
-        .sum::<f64>()
-        / log_lik_draws.len() as f64;
-
-    max_ll - mean_exp_neg.ln()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::spatial::{Neighbors, WeightStyle};
     use polars::prelude::*;
+
+    /// The probit-pieces case (spatial_diag_t4.R): W the 4-NN row-standardised weights of
+    /// spatial_sim, X = [1, x1, x2], the outcome yb, the latent z and beta.
+    struct Pieces {
+        case: p2a_validation::Case,
+        w: SpatialWeights,
+        x: Array2<f64>,
+        yb: Array1<f64>,
+        z: Array1<f64>,
+        b: Array1<f64>,
+    }
+
+    fn pieces() -> Pieces {
+        let (case, ds) = crate::test_support::load_case("spatial_probit_pieces_t4");
+        let c = |name: &str| {
+            crate::data::columns::numeric_column(
+                ds.df(),
+                name,
+                crate::data::columns::NaPolicy::Fail,
+            )
+            .unwrap()
+            .0
+        };
+        let coords: Vec<(f64, f64)> = c("cx").into_iter().zip(c("cy")).collect();
+        let w = SpatialWeights::from_neighbors(
+            &Neighbors::try_from_knn(&coords, 4).unwrap(),
+            WeightStyle::RowStd,
+        );
+        let (x1, x2) = (c("x1"), c("x2"));
+        let x = Array2::from_shape_fn((x1.len(), 3), |(i, j)| match j {
+            0 => 1.0,
+            1 => x1[i],
+            _ => x2[i],
+        });
+        Pieces {
+            yb: Array1::from(case.vector("yb")),
+            z: Array1::from(case.vector("z")),
+            b: Array1::from(case.vector("beta")),
+            case,
+            w,
+            x,
+        }
+    }
+
+    /// Closed-form pieces: exact linear algebra on both sides.
+    fn pieces_tol() -> p2a_validation::Tol {
+        p2a_validation::Tol::new(1e-8, 1e-12)
+    }
+
+    /// R: logdet(rho) - ||A z - c||^2 / 2 on the grid -0.9, ..., 0.9, SAR and SEM.
+    #[test]
+    fn test_validate_probit_rho_kernel_spatial_sim() {
+        let mut p = pieces();
+        let grid = p.case.vector("grid");
+        let log_det = p.w.try_spectrum().unwrap().log_det_grid(&grid);
+        let xb = p.x.dot(&p.b);
+        let mut chk = p2a_validation::Check::new(&p.case);
+        chk.vector("logdet_grid", &log_det, pieces_tol());
+        for (model, key) in [
+            (SpatialProbitModel::Sar, "sar_rho_kernel"),
+            (SpatialProbitModel::Sem, "sem_rho_kernel"),
+        ] {
+            let terms = rho_kernel_terms(&p.z, &xb, &p.w, model);
+            let k: Vec<f64> = grid
+                .iter()
+                .zip(&log_det)
+                .map(|(&r, &ld)| rho_log_kernel(ld, r, terms))
+                .collect();
+            chk.vector(key, &k, pieces_tol());
+        }
+        chk.finish();
+    }
+
+    /// R: the full conditional of each z_i given the others at rho = 0.6: mean
+    /// mu_i - sum_{j != i} H_ij (z_j - mu_j) / H_ii and variance 1 / H_ii, H = A'A.
+    #[test]
+    fn test_validate_probit_latent_conditional_spatial_sim() {
+        let p = pieces();
+        let rho = 0.6;
+        let cols = weight_columns(&p.w).unwrap();
+        let xb = p.x.dot(&p.b);
+        let mut chk = p2a_validation::Check::new(&p.case);
+        let h: Vec<f64> = cols
+            .iter()
+            .map(|c| 1.0 + rho * rho * c.iter().map(|&(_, w)| w * w).sum::<f64>())
+            .collect();
+        for (model, key) in [
+            (SpatialProbitModel::Sar, "sar_latent_mean_rho06"),
+            (SpatialProbitModel::Sem, "sem_latent_mean_rho06"),
+        ] {
+            let c = latent_offset(&xb, &p.w, rho, model);
+            let r = &p.z - &(rho * &p.w.lag(&p.z)) - &c;
+            let m: Vec<f64> = (0..p.z.len())
+                .map(|i| latent_conditional_mean(i, p.z[i], &r, &cols[i], rho, h[i]))
+                .collect();
+            chk.vector(key, &m, pieces_tol());
+        }
+        let var: Vec<f64> = h.iter().map(|v| v.recip()).collect();
+        chk.vector("latent_var_rho06", &var, pieces_tol()).finish();
+    }
+
+    /// R: sigma_i = sqrt([(A'A)^-1]_ii), Phi(mu_i / sigma_i) and the composite log-likelihood,
+    /// SAR at rho = 0.5 and 0.9 and SEM at lambda = 0.6.
+    #[test]
+    fn test_validate_probit_marginal_probabilities_spatial_sim() {
+        let p = pieces();
+        let mut chk = p2a_validation::Check::new(&p.case);
+        for (model, rho, tag) in [
+            (SpatialProbitModel::Sar, 0.5, "sar_%_rho05"),
+            (SpatialProbitModel::Sar, 0.9, "sar_%_rho09"),
+            (SpatialProbitModel::Sem, 0.6, "sem_%_rho06"),
+        ] {
+            let s = marginal_summary(&p.yb, &p.x, &p.w, &p.b, rho, model).unwrap();
+            let key = |what: &str| tag.replace('%', what);
+            chk.vector(&key("sigma"), s.sigma.as_slice().unwrap(), pieces_tol())
+                .vector(&key("prob"), s.prob.as_slice().unwrap(), pieces_tol())
+                .scalar(&key("cll"), s.composite_log_likelihood, pieces_tol());
+        }
+        chk.finish();
+    }
+
+    #[test]
+    fn ln_normal_cdf_is_accurate_in_both_tails() {
+        for x in [-40.0, -31.0, -29.0, -5.0, -0.3, 0.0, 0.7, 6.0, 9.0] {
+            let reference = if x > -35.0 {
+                normal_cdf(x).ln()
+            } else {
+                f64::NAN
+            };
+            let v = ln_normal_cdf(x);
+            if x > 5.0 {
+                // ln(1 - tiny): normal_cdf rounds to 1
+                assert!(v < 0.0 && v > -1e-8, "{x}: {v}");
+            } else if reference.is_finite() {
+                assert!(
+                    (v - reference).abs() <= 1e-9 * reference.abs().max(1e-300),
+                    "{x}: {v}"
+                );
+            }
+        }
+        // the series against the exact value at -31 and -40 (R: pnorm(x, log.p = TRUE))
+        assert!((ln_normal_cdf(-40.0) - (-804.608_442_013_754)).abs() < 1e-9);
+        assert!((ln_normal_cdf(-31.0) - (-484.853_963_627_179_3)).abs() < 1e-9);
+    }
+
+    /// The grid draw targets the kernel: 20,000 draws of rho at fixed z and beta have the
+    /// kernel's mean and SD (by quadrature) within 4 Monte Carlo SEs.
+    #[test]
+    fn probit_rho_step_draws_from_the_kernel() {
+        use rand::SeedableRng;
+        let mut p = pieces();
+        let (lo, hi) = p.w.try_rho_range().unwrap();
+        let grid = rho_grid((lo.max(-0.99), hi.min(0.99)));
+        let spectrum = p.w.try_spectrum().unwrap();
+        let log_det = spectrum.log_det_grid(&grid);
+        let terms = rho_kernel_terms(&p.z, &p.x.dot(&p.b), &p.w, SpatialProbitModel::Sar);
+        let log_k: Vec<f64> = grid
+            .iter()
+            .zip(&log_det)
+            .map(|(&r, &ld)| rho_log_kernel(ld, r, terms))
+            .collect();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(2024);
+        let n_draws = 20_000;
+        let draws: Vec<f64> = (0..n_draws)
+            .map(|_| draw_from_grid(&grid, &log_k, &mut rng))
+            .collect();
+        let mean = draws.iter().sum::<f64>() / n_draws as f64;
+        let sd =
+            (draws.iter().map(|d| (d - mean).powi(2)).sum::<f64>() / (n_draws - 1) as f64).sqrt();
+        // quadrature of the exact kernel on [grid[0], grid[last]]
+        let (a, b) = (grid[0], grid[grid.len() - 1]);
+        let m = 200_000;
+        let pts: Vec<f64> = (0..=m).map(|i| a + (b - a) * i as f64 / m as f64).collect();
+        let lk: Vec<f64> = pts
+            .iter()
+            .map(|&r| rho_log_kernel(spectrum.log_det(r), r, terms))
+            .collect();
+        let top = lk.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let f: Vec<f64> = lk.iter().map(|l| (l - top).exp()).collect();
+        let trap = |g: &dyn Fn(usize) -> f64| {
+            (0..m).map(|i| 0.5 * (g(i) + g(i + 1))).sum::<f64>() * (b - a) / m as f64
+        };
+        let z0 = trap(&|i| f[i]);
+        let mu = trap(&|i| f[i] * pts[i]) / z0;
+        let var = trap(&|i| f[i] * (pts[i] - mu).powi(2)) / z0;
+        let se_mean = (var / n_draws as f64).sqrt();
+        let se_sd = (var / (2.0 * n_draws as f64)).sqrt();
+        assert!((mean - mu).abs() <= 4.0 * se_mean, "mean {mean} vs {mu}");
+        assert!(
+            (sd - var.sqrt()).abs() <= 4.0 * se_sd,
+            "sd {sd} vs {}",
+            var.sqrt()
+        );
+    }
+
+    #[test]
+    fn truncated_normal_far_bound_returns_the_bound() {
+        use rand::SeedableRng;
+        let mut rng = rand::rngs::StdRng::seed_from_u64(1);
+        assert_eq!(standard_normal_truncated_below(1e200, &mut rng), 1e200);
+        assert_eq!(
+            sample_truncated_normal_below(-1e200, 1.0, 0.0, &mut rng),
+            -1e200
+        );
+    }
+
+    /// A 20 x 20 rook grid (row-standardised), x ~ N(0, 1), beta = (0, 1), latent outcomes from
+    /// the SAR or SEM model with spatial parameter `rho`, y = 1(z > 0).
+    fn probit_dgp(model: SpatialProbitModel, rho: f64, seed: u64) -> (Dataset, SpatialWeights) {
+        use rand::SeedableRng;
+        use rand_distr::{Distribution, StandardNormal};
+        let side = 20;
+        let lists = (0..side * side)
+            .map(|i| {
+                let (r, c) = (i / side, i % side);
+                let mut v = Vec::new();
+                if r > 0 {
+                    v.push(i - side);
+                }
+                if c > 0 {
+                    v.push(i - 1);
+                }
+                if c + 1 < side {
+                    v.push(i + 1);
+                }
+                if r + 1 < side {
+                    v.push(i + side);
+                }
+                v
+            })
+            .collect();
+        let w =
+            SpatialWeights::from_neighbors(&Neighbors::from_indices(lists), WeightStyle::RowStd);
+        let n = side * side;
+        let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+        let x: Vec<f64> = (0..n).map(|_| StandardNormal.sample(&mut rng)).collect();
+        let e: Vec<f64> = (0..n).map(|_| StandardNormal.sample(&mut rng)).collect();
+        let z: Vec<f64> = match model {
+            SpatialProbitModel::Sar => {
+                let rhs = Array2::from_shape_fn((n, 1), |(i, _)| x[i] + e[i]);
+                w.dense_inverse_parts(rho, rhs.view())
+                    .unwrap()
+                    .solved
+                    .column(0)
+                    .to_vec()
+            }
+            SpatialProbitModel::Sem => {
+                let rhs = Array2::from_shape_fn((n, 1), |(i, _)| e[i]);
+                let u = w.dense_inverse_parts(rho, rhs.view()).unwrap().solved;
+                (0..n).map(|i| x[i] + u[[i, 0]]).collect()
+            }
+        };
+        let y: Vec<f64> = z.iter().map(|&v| if v > 0.0 { 1.0 } else { 0.0 }).collect();
+        (Dataset::new(df! { "y" => y, "x" => x }.unwrap()), w)
+    }
+
+    fn check_recovery(model: SpatialProbitModel, rho: f64) {
+        for seed in [11, 23, 37] {
+            let (d, mut w) = probit_dgp(model, rho, seed);
+            let config = SpatialProbitConfig {
+                n_draws: 2000,
+                burn_in: 500,
+                compute_impacts: false,
+                seed: Some(seed),
+                ..Default::default()
+            };
+            let r = match model {
+                SpatialProbitModel::Sar => run_sar_probit(&d, "y", &["x"], &mut w, config),
+                SpatialProbitModel::Sem => run_sem_probit(&d, "y", &["x"], &mut w, config),
+            }
+            .unwrap();
+            let (lo, hi) = r.credible_interval_rho(0.95);
+            assert!(
+                (r.rho - rho).abs() <= 0.15 && lo <= rho && rho <= hi,
+                "{model} rho = {rho}, seed {seed}: posterior mean {} [{lo}, {hi}]",
+                r.rho
+            );
+        }
+    }
+
+    #[test]
+    fn sem_probit_recovers_dgp() {
+        check_recovery(SpatialProbitModel::Sem, 0.6);
+    }
+
+    #[test]
+    fn sar_probit_recovers_dgp() {
+        check_recovery(SpatialProbitModel::Sar, 0.5);
+        check_recovery(SpatialProbitModel::Sar, 0.8);
+    }
 
     fn create_test_spatial_binary_data() -> (Dataset, SpatialWeights) {
         // Create a 5x5 grid (25 observations)
@@ -1550,9 +1792,9 @@ mod tests {
             seed: Some(42),
             ..Default::default()
         };
-        // Pinned at the values the dense-W sampler printed. Summation order may change the
-        // floating-point noise, so 1e-8 relative.
-        // Re-pinned for the exact truncated-normal sampler (Robert 1995, SPAT-6).
+        // Pinned at the values the sampler printed at seed 42 (single-site latent Gibbs, griddy
+        // rho with the log-determinant). Summation order may change the floating-point noise,
+        // so 1e-8 relative.
         let close = |a: f64, b: f64, what: &str| {
             assert!(
                 (a - b).abs() <= 1e-8 * b.abs().max(1.0),
@@ -1568,25 +1810,25 @@ mod tests {
             (
                 &sar,
                 [
-                    0.21561581519656442,
-                    -1.7620719814393688,
-                    1.0100875460961094,
-                    0.6419059802897408,
-                    0.31414857742601277,
-                    -10.554279814396638,
-                    83.33333333333333,
+                    0.33935990444742364,
+                    -1.8920669011406606,
+                    1.0458502912753576,
+                    0.6916706203357502,
+                    0.3288943171809251,
+                    -10.58827818212202,
+                    80.0,
                 ],
             ),
             (
                 &sem,
                 [
-                    0.375057484757089,
-                    -8.136770598618815,
-                    6.6014133446280585,
-                    7.0002900603296965,
-                    5.28338700058015,
-                    -80.85099173669074,
-                    76.66666666666667,
+                    0.7388000568415172,
+                    -3.5195331030245915,
+                    2.1441699735020996,
+                    2.1289762066771036,
+                    0.6266556880570991,
+                    -10.93023963401941,
+                    83.33333333333333,
                 ],
             ),
         ] {
@@ -1599,12 +1841,12 @@ mod tests {
             close(r.pcp, pins[6], "pcp");
         }
         let imp = sar.impacts.as_ref().unwrap();
-        close(imp.direct[0], 0.17744956884009333, "direct");
-        close(imp.indirect[0], 0.05606513641769403, "indirect");
-        close(imp.total[0], 0.23351470525778736, "total");
-        close(imp.direct_se[0], 0.03314944949117544, "direct se");
-        close(imp.indirect_se[0], 0.06918302638820466, "indirect se");
-        close(imp.total_se[0], 0.07512769921233899, "total se");
+        close(imp.direct[0], 0.17368067983001342, "direct");
+        close(imp.indirect[0], 0.08929574115297399, "indirect");
+        close(imp.total[0], 0.2629764209829874, "total");
+        close(imp.direct_se[0], 0.0320120656852442, "direct se");
+        close(imp.indirect_se[0], 0.06275525107119519, "indirect se");
+        close(imp.total_se[0], 0.07534950129374274, "total se");
         assert!(sem.impacts.is_none());
     }
 
