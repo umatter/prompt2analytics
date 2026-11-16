@@ -339,7 +339,7 @@ pub static CATEGORY_TABLE: &[(&str, ToolCategory, &[&str], Option<&str>)] = &[
     ("sensemakr", C::Regression, &["evalue", "regression_ols"], Some("sensemakr::sensemakr()")),
     ("server_stats", C::Utility, &["list_datasets"], None),
     ("set_seed", C::Utility, &["generate_random_data"], Some("set.seed()")),
-    ("spatial_lm_tests_tool", C::Spatial, &["moran_test", "sar_model", "sem_model"], Some("spdep::lm.LMtests()")),
+    ("spatial_lm_tests_tool", C::Spatial, &["moran_test", "sar_model", "sem_model"], Some("spdep::lm.RStests()")),
     ("spatial_neighbors", C::Spatial, &["moran_test", "sar_model"], Some("spdep::knearneigh(use_kd_tree = FALSE)")),
     ("spatial_panel_gmm", C::Spatial, &["spatial_panel_ml", "sphet_model"], Some("splm::spgm()")),
     ("spatial_panel_ml", C::Spatial, &["sar_model", "panel_fixed_effects"], Some("splm::spml()")),

@@ -1014,6 +1014,7 @@ impl AnalyticsServer {
             "class_labels": result.class_labels,
             "converged": result.converged,
             "iterations": result.n_iterations,
+            "warnings": notes_json(None, &result.warnings)["warnings"].clone(),
             "predictions_sample": first(&per_row, PREDICTIONS_SHOWN),
             "missing": missing_json(&missing),
             "output_column": request.output_column,

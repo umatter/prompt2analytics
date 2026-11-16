@@ -251,7 +251,7 @@ pub struct RandomForestRequest {
 
     /// Max features per split
     #[schemars(
-        description = "Max features to consider per split: 'sqrt', 'log2', 'all', or a number. Default is 'sqrt'."
+        description = "Max features to consider per split: 'sqrt', 'log2', 'all', or a whole number of features of at least 1 (more than the number of features means all); anything else is refused. Default 'sqrt'."
     )]
     pub max_features: Option<String>,
 

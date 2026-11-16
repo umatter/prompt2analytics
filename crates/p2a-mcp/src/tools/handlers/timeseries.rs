@@ -1674,8 +1674,9 @@ impl AnalyticsServer {
         };
 
         let k = request.k.unwrap_or(1);
-        // lag_padded pads a shift of the whole series with NA; refuse it as lag does.
-        if values.is_empty() || k.unsigned_abs() as usize >= values.len() {
+        // lag_padded pads a shift of the whole series with NA; refuse it as lag does. An empty
+        // series reaches lag_padded, whose error says so.
+        if !values.is_empty() && k.unsigned_abs() as usize >= values.len() {
             return Ok(CallToolResult::error(vec![Content::text(format!(
                 "Lag failed: Lag {k} is too large for series of length {}",
                 values.len()
