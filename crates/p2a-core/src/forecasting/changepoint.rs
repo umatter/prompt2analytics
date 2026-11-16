@@ -461,9 +461,9 @@ fn resolve_penalty(
     Ok((k_plus_2 * log_n, true))
 }
 
-/// The cost of segment [start, end) as binary segmentation compares it: the plain cost, plus
-/// ln(segment length) under MBIC (changepoint's `mbic` costs).
-#[inline]
+/// The cost of [start, end) as binary segmentation scores it: the plain cost, plus
+/// ln(end - start) under MBIC.
+#[cfg(test)]
 fn binseg_cost(
     cum_sum: &[f64],
     cum_sum_sq: &[f64],
@@ -482,7 +482,8 @@ fn binseg_cost(
 
 /// The best single split of [start, end): the position t in start + min_seg ..= end - min_seg
 /// with the largest cost reduction C(start, end) - C(start, t) - C(t, end), the smallest t on a
-/// tie. `None` for a segment shorter than two minimum segments.
+/// tie. `None` for a segment shorter than two minimum segments. Under MBIC `ln_len[m]` holds
+/// ln(m), the term each segment of length m adds (the same values as computing it in place).
 fn best_split(
     cum_sum: &[f64],
     cum_sum_sq: &[f64],
@@ -490,26 +491,54 @@ fn best_split(
     end: usize,
     min_seg: usize,
     cost_function: CostFunction,
-    mbic: bool,
+    ln_len: Option<&[f64]>,
 ) -> Result<Option<(usize, f64)>, String> {
     if end - start < min_seg.saturating_mul(2) {
         return Ok(None);
     }
-    let whole = binseg_cost(cum_sum, cum_sum_sq, start, end, cost_function, mbic);
-    let mut best: Option<(usize, f64)> = None;
-    for (i, t) in ((start + min_seg)..=(end - min_seg)).enumerate() {
+    // One monomorphised scan per cost, so that the hot mean-change scans compile without a
+    // branch on the cost function.
+    let (cs, cq) = (cum_sum, cum_sum_sq);
+    let mean = CostFunction::MeanChange;
+    let best = match (cost_function, ln_len) {
+        (CostFunction::MeanChange, None) => {
+            scan_splits(start, end, min_seg, |s, e| segment_cost(cs, cq, s, e, mean))?
+        }
+        (CostFunction::MeanChange, Some(ln)) => scan_splits(start, end, min_seg, |s, e| {
+            segment_cost(cs, cq, s, e, mean) + ln[e - s]
+        })?,
+        (c, None) => scan_splits(start, end, min_seg, |s, e| segment_cost(cs, cq, s, e, c))?,
+        (c, Some(ln)) => scan_splits(start, end, min_seg, |s, e| {
+            segment_cost(cs, cq, s, e, c) + ln[e - s]
+        })?,
+    };
+    Ok(Some(best))
+}
+
+/// The scan of [`best_split`] under the segment cost `cost`.
+#[inline]
+fn scan_splits(
+    start: usize,
+    end: usize,
+    min_seg: usize,
+    cost: impl Fn(usize, usize) -> f64,
+) -> Result<(usize, f64), String> {
+    let whole = cost(start, end);
+    let first = start + min_seg;
+    let mut best_t = first;
+    let mut best_g = whole - cost(start, first) - cost(first, end);
+    for (i, t) in ((first + 1)..=(end - min_seg)).enumerate() {
         // A single scan is linear in the segment's length: check the budget inside it too.
         if i % 65_536 == 65_535 {
             crate::resource::checkpoint().map_err(|e| e.to_string())?;
         }
-        let gain = whole
-            - binseg_cost(cum_sum, cum_sum_sq, start, t, cost_function, mbic)
-            - binseg_cost(cum_sum, cum_sum_sq, t, end, cost_function, mbic);
-        if best.is_none_or(|(_, g)| gain > g) {
-            best = Some((t, gain));
+        let gain = whole - cost(start, t) - cost(t, end);
+        if gain > best_g {
+            best_t = t;
+            best_g = gain;
         }
     }
-    Ok(best)
+    Ok((best_t, best_g))
 }
 
 /// Binary segmentation, as changepoint's `BinSeg` (`cpt.mean`, `cpt.var`, `cpt.meanvar` with
@@ -580,12 +609,24 @@ pub fn binary_segmentation(
 
     let (pen, mbic) = resolve_penalty(n, penalty, cost_function)?;
     let (cum_sum, cum_sum_sq) = checked_cumulative_sums(data)?;
+    // MBIC's ln(segment length), once per length instead of twice per candidate.
+    let ln_table = if mbic {
+        let mut t = crate::resource::try_vec(n + 1, 0.0, "the binary segmentation log lengths")
+            .map_err(|e| e.to_string())?;
+        for (m, v) in t.iter_mut().enumerate().skip(1) {
+            *v = (m as f64).ln();
+        }
+        Some(t)
+    } else {
+        None
+    };
+    let ln_len = ln_table.as_deref();
 
     // Open segments with their cached best split.
     let mut open: Vec<(usize, usize, Option<(usize, f64)>)> = vec![(
         0,
         n,
-        best_split(&cum_sum, &cum_sum_sq, 0, n, min_seg, cost_function, mbic)?,
+        best_split(&cum_sum, &cum_sum_sq, 0, n, min_seg, cost_function, ln_len)?,
     )];
     let mut changepoints = Vec::new();
 
@@ -609,7 +650,7 @@ pub fn binary_segmentation(
         let (start, end, _) = open.swap_remove(idx);
         changepoints.push(t);
         for (s, e) in [(start, t), (t, end)] {
-            let best = best_split(&cum_sum, &cum_sum_sq, s, e, min_seg, cost_function, mbic)?;
+            let best = best_split(&cum_sum, &cum_sum_sq, s, e, min_seg, cost_function, ln_len)?;
             open.push((s, e, best));
         }
     }
