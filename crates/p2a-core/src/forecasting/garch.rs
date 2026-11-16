@@ -237,10 +237,38 @@ pub struct GarchResult {
 }
 
 impl GarchResult {
-    /// Estimates in `param_names` order.
+    /// The parameter names: `param_names`, or for a result saved without them (an older
+    /// JSON) the names rebuilt from the orders and the shape, with mu when `n_params`
+    /// counts it (or, when `n_params` is 0 as well, when mu is not 0).
+    pub fn names(&self) -> Vec<String> {
+        if !self.param_names.is_empty() {
+            return self.param_names.clone();
+        }
+        let (p, q) = (self.alpha.len(), self.beta.len());
+        let shape = usize::from(self.shape.is_some());
+        let with_mu = if self.n_params == 0 {
+            self.mu != 0.0
+        } else {
+            self.n_params == 2 + p + q + shape
+        };
+        let mut names = Vec::with_capacity(2 + p + q + shape);
+        if with_mu {
+            names.push("mu".to_string());
+        }
+        names.push("omega".to_string());
+        names.extend((1..=p).map(|i| format!("alpha{i}")));
+        names.extend((1..=q).map(|j| format!("beta{j}")));
+        if self.shape.is_some() {
+            names.push("shape".to_string());
+        }
+        names
+    }
+
+    /// Estimates in [`GarchResult::names`] order.
     pub fn estimates(&self) -> Vec<f64> {
-        let mut v = Vec::with_capacity(self.param_names.len());
-        if self.param_names.first().is_some_and(|n| n == "mu") {
+        let names = self.names();
+        let mut v = Vec::with_capacity(names.len());
+        if names.first().is_some_and(|n| n == "mu") {
             v.push(self.mu);
         }
         v.push(self.omega);
@@ -303,7 +331,7 @@ impl fmt::Display for GarchResult {
         )?;
         writeln!(f, "{dash}")?;
         let est = self.estimates();
-        for (i, name) in self.param_names.iter().enumerate() {
+        for (i, name) in self.names().iter().enumerate() {
             let get = |v: &[f64]| v.get(i).copied().unwrap_or(f64::NAN);
             let stars = self.significance.get(i).map_or("", |s| s.stars());
             writeln!(
@@ -1043,9 +1071,12 @@ fn inference(spec: &Spec, x: &[f64], nat: &[f64], fixed: &[bool]) -> EconResult<
 /// * [`EconError::InsufficientData`]: fewer than 20 observations, or no more observations than
 ///   parameters.
 /// * [`EconError::InvalidSpecification`]: p = 0, an order above 20 or at least n, `max_iter` = 0,
-///   a tolerance that is not finite and positive, or a constant series.
+///   a tolerance that is not finite and positive, a constant series, or a series whose sample
+///   variance underflows to 0 or overflows (rescale it).
 /// * [`EconError::NullValues`] / [`EconError::NonFiniteValues`]: NaN or infinite data.
 /// * [`EconError::DivergenceError`]: the log-likelihood is not finite at any starting value.
+/// * [`EconError::ResourceLimit`]: the residual, variance or Hessian buffers cannot be allocated
+///   under the allocation ceiling.
 /// * [`EconError::Cancelled`] when the budget installed with [`crate::resource::with_budget`] is
 ///   cancelled or past its deadline: it is checked once per optimiser iteration, once per
 ///   Hessian column and about every 65,536 operations of each likelihood pass.
@@ -1295,11 +1326,20 @@ fn validate_inputs(data: &[f64], config: &GarchConfig) -> EconResult<()> {
     let xbar = data.iter().sum::<f64>() / n as f64;
     let s2 = data.iter().map(|x| (x - xbar) * (x - xbar)).sum::<f64>() / n as f64;
     // all-equal first: the two-pass s2 of a constant series can be a rounding residue above 0
-    if data.iter().all(|&v| v == data[0]) || s2 <= 0.0 {
+    if data.iter().all(|&v| v == data[0]) {
         return Err(EconError::InvalidSpecification {
             message: format!(
                 "GARCH needs a series with positive variance; the data are constant ({})",
                 data[0]
+            ),
+        });
+    }
+    // A varied series whose variance underflows to 0 or overflows (or whose mean does).
+    if !(s2 > 0.0 && s2.is_finite()) {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "the sample variance of the data ({s2:e}) is outside the range GARCH can work \
+                 with; rescale the series"
             ),
         });
     }
@@ -2246,6 +2286,63 @@ mod tests {
             garch(&y, None),
             Err(EconError::NonFiniteValues { count: 1, .. })
         ));
+    }
+
+    /// A varied series whose variance underflows or overflows was told "the data are
+    /// constant" (underflow) or passed to the starts (overflow, NaN mean): it is named, with
+    /// the remedy.
+    #[test]
+    fn garch_refuses_a_variance_outside_double_range() {
+        let pattern: Vec<f64> = (0..60)
+            .map(|i| 1.0 + ((i * 37) % 11) as f64 * 0.13 - ((i * 7) % 5) as f64 * 0.21)
+            .collect();
+        for scale in [1e-170, 1e160, f64::MAX / 4.0] {
+            let data: Vec<f64> = pattern.iter().map(|v| v * scale).collect();
+            match garch(&data, None) {
+                Err(EconError::InvalidSpecification { message }) => assert!(
+                    message.contains("sample variance of the data")
+                        && message.contains("rescale")
+                        && !message.contains("constant"),
+                    "{scale}: {message}"
+                ),
+                other => panic!("{scale}: expected InvalidSpecification, got {other:?}"),
+            }
+        }
+        match garch(&[0.01; 50], None) {
+            Err(EconError::InvalidSpecification { message }) => {
+                assert!(message.contains("the data are constant"), "{message}")
+            }
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+    }
+
+    /// A result saved before `param_names` existed (JSON without it) keeps mu in its
+    /// estimates and prints its rows under default names.
+    #[test]
+    fn garch_estimates_of_a_result_without_param_names() {
+        let fitted = garch(&generate_garch_data(300, 0.0001, 0.1, 0.8), None).unwrap();
+        let mut json = serde_json::to_value(&fitted).unwrap();
+        json.as_object_mut().unwrap().remove("param_names");
+        json["mu"] = serde_json::json!(0.0025);
+        let legacy: GarchResult = serde_json::from_value(json).unwrap();
+        assert!(legacy.param_names.is_empty());
+        assert_eq!(legacy.names(), ["mu", "omega", "alpha1", "beta1"]);
+        let est = legacy.estimates();
+        assert_eq!(est.len(), 4);
+        assert_eq!(est[0], 0.0025);
+        assert_eq!(est[1], legacy.omega);
+        let text = legacy.to_string();
+        for row in ["mu ", "omega ", "alpha1 ", "beta1 "] {
+            assert!(text.lines().any(|l| l.starts_with(row)), "{row} in\n{text}");
+        }
+        // n_params unknown as well: mu is shown when it is not 0.
+        let mut bare = legacy.clone();
+        bare.n_params = 0;
+        assert_eq!(bare.names()[0], "mu");
+        bare.mu = 0.0;
+        assert_eq!(bare.names()[0], "omega");
+        // A result with names is unchanged.
+        assert_eq!(fitted.names(), fitted.param_names);
     }
 
     #[test]
