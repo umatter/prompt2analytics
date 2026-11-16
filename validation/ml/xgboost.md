@@ -95,6 +95,25 @@ feature instead of once per bin (same splits and gains, bit for bit). Before tha
 from this tree's `lightgbm.rs` edits, and a fresh build of the base in the quiet run timed within 1% of the
 earlier base build. The Huber row is not like-for-like: the base's loss oscillated with zero hessians.
 
+### T4 early stopping and seeded draws
+
+`release`, `ci` features, the T4 boosting/forest fixes against the code before them (`34a4186a`), nine processes per
+side interleaved, one core (`taskset`), one rayon thread, 2026-11-16, load average 22-42 on 12 cores (a loaded
+machine: read ratios near 1 as within noise). Cells are the median of the process medians; "min ratio" is the ratio
+of the minima. Design: n rows, 5 features uniform on [0, 10], `y = 2 x0 - x4 + (x1 - 5)^2 / 5` plus noise.
+
+| Row | n | base (ms) | this tree (ms) | ratio | min ratio |
+|---|---:|---:|---:|---:|---:|
+| `xgboost()` defaults | 1,000 | 208.7 | 204.6 | 0.98 | 0.94 |
+| `xgboost()`, 1,000 rounds, `early_stopping_rounds` 10 | 1,000 | 1,961 | 48.68 | 0.02 | 0.02 |
+|  | 10,000 | 26,378 | 790.3 | 0.03 | 0.03 |
+| `fast_xgboost()`, `subsample` 0.8, seed 1 | 1,000 | 242.1 | 261.6 | 1.08 | 1.12 |
+|  | 10,000 | 546.2 | 567.5 | 1.04 | 1.03 |
+
+The early-stopping rows are informational: the base watched the training loss and ran all 1,000 rounds; this tree
+stops on the held-out rows after 14 (n = 1,000) and 15 (n = 10,000) rounds. The seeded `fast_xgboost` rows are not
+like-for-like either: the base reused one subsample in every round, this tree draws a new one each round.
+
 ## Not pinned
 
 The histogram trees against the package (the bins differ); `colsample_*` draws (p2a's own generator). For gbm, see

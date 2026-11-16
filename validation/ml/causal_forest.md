@@ -161,6 +161,15 @@ coverage 0.952.
   `target.sample` advice is replaced by a pointer to Crump, Hotz, Imbens and Mitnik (2009).
 - **`n_trees` below `ci_group_size`** (fewer trees than one group) is an error.
 
+## Wall-clock (T4)
+
+`release`, `ci` features, the T4 boosting/forest fixes against the code before them (`34a4186a`), nine processes per
+side interleaved, one core (`taskset`), one rayon thread, 2026-11-16, load average 22-42 on 12 cores (a loaded
+machine: read ratios near 1 as within noise). Cells are the median of the process medians; "min ratio" is the ratio
+of the minima. Design: n rows, 5 features uniform on [0, 10], `y = 2 x0 - x4 + (x1 - 5)^2 / 5` plus noise.
+`causal_forest_arrays` defaults, n = 1,000, treatment alternating: base 1,964 ms, this tree 1,976 ms (1.01; minima
+0.98).
+
 ## Findings closed
 
 Each finding below names the test that failed before the change.

@@ -33,6 +33,23 @@ on 4,000 rows; ML-31); `bagging_freq = 0` bagged every iteration and `freq = k` 
 (ML-95); `regression_l1` leaves were the mean sign of the residuals, so the fit moved at most `learning_rate` per
 iteration (WT-1); `num_leaves` and `max_bin` below 2 panicked (ML-75).
 
+## Wall-clock
+
+`release`, `ci` features, the T4 boosting/forest fixes against the code before them (`34a4186a`), nine processes per
+side interleaved, one core (`taskset`), one rayon thread, 2026-11-16, load average 22-42 on 12 cores (a loaded
+machine: read ratios near 1 as within noise). Cells are the median of the process medians; "min ratio" is the ratio
+of the minima. Design: n rows, 5 features uniform on [0, 10], `y = 2 x0 - x4 + (x1 - 5)^2 / 5` plus noise.
+
+| `lightgbm()` | n | base (ms) | this tree (ms) | ratio | min ratio |
+|---|---:|---:|---:|---:|---:|
+| defaults (regression) | 1,000 | 175.3 | 146.4 | 0.84 | 0.87 |
+|  | 10,000 | 2,218 | 414.8 | 0.19 | 0.19 |
+| `regression_l1` | 1,000 | 142.4 | 148.0 | 1.04 | 1.00 |
+|  | 10,000 | 1,662 | 406.1 | 0.24 | 0.25 |
+| bagging 0.8, `bagging_freq` 1 | 1,000 | 153.0 | 154.1 | 1.01 | 0.97 |
+
+Not like-for-like: the base grew trees past `num_leaves` (the speed-up at 10,000 is the leaf cap).
+
 ## What does not match LightGBM
 
 - Bins are quantile midpoints of the distinct values (LightGBM's bin finder also merges sparse bins and keeps a

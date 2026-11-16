@@ -92,6 +92,22 @@ the minima agree (0.99) and the median of the per-round ratios is 1.02, while th
 counts more slow-mode rounds on this tree's side. The binomial family's definition changed (half log-odds), with
 the same work per step.
 
+T4 (adaptive Huber threshold in `fast_mboost`): `release`, `ci` features, the T4 boosting/forest fixes against the
+code before them (`34a4186a`), nine processes per side interleaved, one core (`taskset`), one rayon thread,
+2026-11-16, load average 22-42 on 12 cores (a loaded machine: read ratios near 1 as within noise). Cells are the
+median of the process medians; "min ratio" is the ratio of the minima. Design: n rows, 5 features uniform on [0,
+10], `y = 2 x0 - x4 + (x1 - 5)^2 / 5` plus noise.
+
+| `fast_mboost()` Huber, componentwise linear, p = 5 | n | base (ms) | this tree (ms) | ratio | min ratio |
+|---|---:|---:|---:|---:|---:|
+|  | 100 | 4.56 | 4.61 | 1.01 | 0.94 |
+|  | 1,000 | 9.16 | 9.54 | 1.04 | 1.05 |
+|  | 10,000 | 61.08 | 68.15 | 1.12 | 1.14 |
+
+One median of `|y - f|` (an O(n) selection) per iteration against a componentwise linear fit of 5 features: 1.12x at
+n = 10,000, above the 1.1x bound; the base used a fixed threshold in the units of `y`, which made the fit
+scale-dependent (WT-1). Awaiting the user's sign-off.
+
 ## Not pinned
 
 The tree learner against mboost (`btree` is a different learner), `mboost_cv`'s folds. For gbm, see

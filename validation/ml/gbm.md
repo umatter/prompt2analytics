@@ -47,6 +47,26 @@ Tests (R-pinned, `Tol::coef(200)`, split variables exact): `test_validate_gbm_la
 (`test_validate_gbm_stump_influence`; see `tree_importance.md`). Before the fix the Laplace fit ranged over
 [700.17, 707.14] (MAE 276.94) and the Bernoulli probabilities over [0.442, 0.789].
 
+## Wall-clock
+
+`release`, `ci` features, the T4 boosting/forest fixes against the code before them (`34a4186a`), nine processes per
+side interleaved, one core (`taskset`), one rayon thread, 2026-11-16, load average 22-42 on 12 cores (a loaded
+machine: read ratios near 1 as within noise). Cells are the median of the process medians; "min ratio" is the ratio
+of the minima. Design: n rows, 5 features uniform on [0, 10], `y = 2 x0 - x4 + (x1 - 5)^2 / 5` plus noise.
+
+| `gbm()` defaults | n | base (ms) | this tree (ms) | ratio | min ratio |
+|---|---:|---:|---:|---:|---:|
+| Gaussian | 1,000 | 136.3 | 137.8 | 1.01 | 0.99 |
+|  | 10,000 | 1,681 | 1,662 | 0.99 | 0.99 |
+| Laplace | 1,000 | 133.3 | 132.5 | 0.99 | 1.00 |
+|  | 10,000 | 1,734 | 1,719 | 0.99 | 0.97 |
+| Bernoulli (`y > 5`) | 1,000 | 145.5 | 148.0 | 1.02 | 1.04 |
+|  | 10,000 | 1,873 | 1,906 | 1.02 | 1.01 |
+| Huber | 1,000 | 138.8 | 143.7 | 1.04 | 1.03 |
+|  | 10,000 | 1,792 | 1,839 | 1.03 | 0.99 |
+
+The leaf re-estimates are O(n) per tree against the split search's O(p n log n) per level: within 1.05x.
+
 ## What does not match R
 
 - **Trees deeper than stumps are not R-pinned.** gbm's `interaction.depth` counts splits (a tree grows by its best
