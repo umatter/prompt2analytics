@@ -1,7 +1,9 @@
-# Moran's I and Geary's C
+# Moran's I, Geary's C, regression diagnostics and local Moran
 
-`crates/p2a-core/src/spatial/diagnostics.rs`: `moran_test`, `geary_test`. Registry entry `spatial_moran` in
-`validation/methods/spatial_ml_weights.json`.
+`crates/p2a-core/src/spatial/diagnostics.rs`: `moran_test`, `geary_test`, `moran_test_residuals`,
+`spatial_lm_tests`, `localmoran` / `localmoran_with`. Registry entries `spatial_moran` in
+`validation/methods/spatial_ml_weights.json`; `spatial_lm_morantest`, `spatial_lm_rstests` and
+`spatial_localmoran` in `validation/methods/spatial_diag_t4.json`.
 
 R-pinned to the formulas of `spdep::moran.test(randomisation = TRUE, zero.policy = TRUE, adjust.n = TRUE)`
 and `spdep::geary()`, written out in base R because spdep is not installed: case
@@ -39,7 +41,47 @@ nn, and its sign of z, was not checked (spdep is not installed).
 | No links (S0 = 0) | `InvalidSpecification` | NaN |
 | Fewer than four units with neighbours | `InsufficientData` | NaN |
 | Moran variance at or below 1e-8 E[I]² | `Computation` | NaN with a warning |
-| Geary variance at or below 1e-8 | `Computation` | |
+| Geary variance at or below 1e-8 S1 / S0² | `Computation` | |
+
+## Residual Moran's I (`lm.morantest`)
+
+`moran_test_residuals(residuals, x, listw, alternative)` takes the OLS residuals and the design X (with
+its intercept column) and follows `spdep::lm.morantest(zero.policy = TRUE)`. W enters through its
+symmetric part U = (W + W') / 2, and with Z = U X, C1 = X'Z, C3 = (X'X)⁻¹ C1, tr A = tr C3:
+
+    I = (N / S0) u'Wu / u'u
+    E[I] = -N tr A / ((N - p) S0)
+    Var[I] = N² / (S0² (N - p)(N - p + 2)) (S1 + 2 tr C3² - 4 tr((X'X)⁻¹ Z'Z) - 2 (tr A)² / (N - p))
+
+N is the number of units with neighbours and p the rank of X (pivoted QR, tolerance 1e-7; aliased
+columns are dropped as `lm` drops them). N - p below 1 is `InsufficientData`; a non-positive variance
+is `Computation`. spdep's default alternative is "greater".
+
+## Rao score tests (`lm.RStests`)
+
+`spatial_lm_tests(y, x, &listw)` fits the OLS of y on X itself (pivoted QR) and returns spdep's five
+tests. With u the residuals, ŷ the fitted values, s² = u'u / n, T = tr(W'W + W²) and M the residual maker
+of X:
+
+    RSerr    = (u'Wu / s²)² / T
+    RSlag    = (u'Wy / s²)² / nJ,   nJ = (||M Wŷ||² + T s²) / s²
+    adjRSerr = (u'Wu/s² - T/nJ u'Wy/s²)² / (T (1 - T/nJ))
+    adjRSlag = (u'Wy/s² - u'Wu/s²)² / (nJ - T)
+    SARMA    = adjRSlag + RSerr   (df 2)
+
+All-zero residuals, a W without links (T = 0) or a denominator that is not positive is `Computation`
+naming the test. Like spdep, the tests assume a row-standardised W and warn (`warnings`) otherwise.
+
+## Local Moran (`localmoran`)
+
+I_i = (z_i / m2) Σ_j w_ij z_j with m2 = Σz² / n, as `spdep::localmoran(mlvar = TRUE)`. The moments
+default to spdep's conditional randomisation (`LocalMoranConfig.conditional = true`); `false` gives the
+total-randomisation moments. The p-value is two-sided normal, or with `permutations > 0` spdep's folded
+conditional-permutation p-value ("Pr(folded) Sim") with each unit's neighbour values drawn without
+repeats (Anselin's scheme, spdep's `no_repeat_in_row = TRUE`), seeded per permutation. A zero variance
+(an island, or z_i = 0 under conditional moments) gives NaN z and p and the cluster "not significant".
+`global_i` is Moran's I, Σ I_i / S0. Non-finite or constant x and `alpha` outside [0, 1] are
+`InvalidSpecification`.
 
 ## Reference values
 
@@ -59,16 +101,51 @@ nn, and its sign of z, was not checked (spdep is not installed).
 Tolerances from `validation/README.md` at n = 80: statistics 1e-5 relative, p-values 1e-5 relative or
 1e-12 absolute, the island count exact.
 
+Residual Moran (case `spatial_lm_diag_t4` of `validation/r/cases/spatial_diag_t4.R`, y on x1, x2):
+
+| | kNN-4, W | band, W | band, B | band with 4 islands, W |
+|---|---|---|---|---|
+| I | 0.384001 | 0.363220 | 0.232057 | 0.430584 |
+| E[I] | -0.011689 | -0.012639 | -0.013283 | -0.011026 |
+| Var[I] | 0.005062 | 0.003417 | 0.002516 | 0.009307 |
+| z | 5.561722 | 6.429717 | 4.891528 | 4.577650 |
+| p greater | 1.3356e-08 | 6.3921e-11 | 5.0028e-07 | 2.3511e-06 |
+
+Rao score tests (same case):
+
+| | kNN-4, W | band, B |
+|---|---|---|
+| RSerr | 27.255506 | 18.093790 |
+| RSlag | 44.391145 | 18.695085 |
+| adjRSerr | 0.796227 | 6.799108 |
+| adjRSlag | 17.931866 | 7.400403 |
+| SARMA | 45.187372 | 25.494193 |
+
+Local Moran (case `spatial_localmoran_t4`, kNN-4, W): the 80 values of I_i, E, Var, z and p under
+conditional and total randomisation; global I = 0.370321.
+
 ## Known differences
 
 spdep returns NaN where p2a refuses the input (table above).
 
 ## Not covered
 
-Not pinned to R: residual Moran moments (the `lm.morantest` formulas), the LM tests, `localmoran`.
+The permutation p-values of `localmoran` are a property test (99,999 permutations converge to the
+enumerated limits of a 7-unit case), not a pin: the draws differ from spdep's. spdep is not installed,
+so the residual Moran, score test and local Moran references are spdep's formulas written out in base R
+(`validation/r/cases/spatial_diag_t4.R`).
 
 ## Tests
 
 - `test_validate_moran_islands`
+- `test_validate_lm_morantest_knn_spatial_sim`, `test_validate_lm_morantest_band_styles_spatial_sim`,
+  `test_validate_lm_morantest_islands_spatial_sim`, `lm_morantest_under_h0_has_unit_variance_z`
+- `test_validate_lm_rstests_knn_spatial_sim`, `test_validate_lm_rstests_band_binary_spatial_sim`,
+  `lm_rstests_are_invariant_to_regressor_scale`, `lm_rstests_sarma_identities`,
+  `test_validate_mcp_lm_rstests_knn_spatial_sim` (p2a-mcp)
+- `test_validate_localmoran_conditional_spatial_sim`, `test_validate_localmoran_total_spatial_sim`,
+  `localmoran_global_i_is_morans_i`, `localmoran_conditional_permutation_converges_to_exact`,
+  `localmoran_seed_changes_permutation_p_only`, `localmoran_zero_variance_is_nan_not_clamped`
+- `geary_refuses_a_degenerate_permutation_distribution`, `geary_variance_guard_is_relative_to_s1_over_s0_squared`
 - `test_moran_and_geary_refuse_degenerate_inputs`, `test_moran_alternative_parses_aliases_and_rejects_unknown`,
   `test_moran_test_residuals_refuses_df_below_one`, `moran_matches_r_reference`

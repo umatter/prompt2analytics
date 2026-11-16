@@ -94,7 +94,7 @@ fn model<'a>(cmd: &'a str, dataset: &'a str, durbin: bool) -> Vec<&'a str> {
 /// installed): Moran's I with the randomisation variance on kNN-4 row-standardised
 /// weights.
 #[test]
-fn test_cli_spatial_moran_int64_matches_r() {
+fn test_cli_spatial_moran_int64_base_r_cross_check() {
     let ts = temp_session();
     ts.load_as(
         &write_points(ts.dir(), "pts.csv", false, None, None),

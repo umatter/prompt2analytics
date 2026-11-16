@@ -165,7 +165,7 @@ impl Neighbors {
     /// - [`EconError::InvalidSpecification`] if there are fewer than 2 observations, a
     ///   coordinate is not finite, or `k` is not between 1 and `n - 1`.
     /// - [`EconError::Cancelled`] if a budget installed with
-    ///   [`with_budget`](crate::resource::with_budget) expires.
+    ///   [`with_budget`] expires.
     ///
     /// # Example
     ///
@@ -253,7 +253,7 @@ impl Neighbors {
     ///   directed links (each unordered pair counts twice). Nothing larger than the cap is
     ///   allocated.
     /// - [`EconError::Cancelled`] if a budget installed with
-    ///   [`with_budget`](crate::resource::with_budget) expires.
+    ///   [`with_budget`] expires.
     pub fn try_from_distance(
         coords: &[(f64, f64)],
         d1: f64,

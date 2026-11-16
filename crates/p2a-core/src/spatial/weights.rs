@@ -513,7 +513,7 @@ impl SpatialWeights {
     ///
     /// # Errors
     ///
-    /// [`EconError::ResourceLimit`](crate::errors::EconError::ResourceLimit) when the n x n
+    /// [`EconError::ResourceLimit`] when the n x n
     /// matrix cannot be allocated (or exceeds an
     /// installed per-allocation ceiling).
     pub fn try_to_dense(&self) -> EconResult<Array2<f64>> {

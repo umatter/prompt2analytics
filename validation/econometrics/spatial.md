@@ -26,7 +26,9 @@ RSS is a quadratic in ρ.
 ρ and λ are searched by golden section on spatialreg's `1/range(Re(eig))`, less 1e-8 at each end.
 The SAC runs a grid over the same interval, then coordinate descent with a golden section per
 coordinate. A W whose interval is not finite is `InvalidSpecification`; spatialreg's `eig.range` is
-not finite there either.
+not finite there either. "Not finite" is decided relative to the scale of W: no real part of an
+eigenvalue below -1e-12 max|Re(eig)|, or none above +1e-12 max|Re(eig)|, so weights of any scale
+are accepted.
 
 Results carry `convergence` and `warnings` (`ResultNotes`):
 
@@ -34,7 +36,9 @@ Results carry `convergence` and `warnings` (`ResultNotes`):
   and the last change in (ρ, λ).
 - Stopping at the limit adds the standard non-convergence note.
 - An estimate on the interval bound adds "rho on interval bound (spatialreg: results should not be
-  used)", or the same for lambda.
+  used)", or the same for lambda: a converged search whose bracket still holds an end of the
+  interval, or an estimate within 1e-6 of the width from an end. An unconverged search is not
+  reported on the bound; its non-convergence note says what happened.
 
 ## Standard errors
 
@@ -113,7 +117,10 @@ In `econometrics::spatial::tests`:
   `test_spatial_ml_refuses_aliased_regressors`, `test_sac_refuses_a_grid_below_two`,
   `test_spatial_ml_reports_convergence`, `test_spatial_ml_invariant_to_the_scale_of_y`,
   `test_sar_search_covers_the_spatialreg_interval`, `test_golden_section_flags_a_bound_optimum`,
-  `test_spatial_ml_refuses_an_unbounded_search_interval`, `test_impacts_report_a_singular_multiplier`.
+  `test_spatial_ml_refuses_an_unbounded_search_interval`, `test_impacts_report_a_singular_multiplier`,
+  `golden_section_unconverged_interior_is_not_at_bound`, `search_interval_accepts_tiny_weights`.
+  `test_spatial_ml_se_scale_with_y` compares at 1e-6 relative; the largest measured difference is
+  9.0e-8 (an SEM beta SE), from the likelihood's flatness in the estimates.
 
 The paper's Makefile filters do not select spatial tests.
 
