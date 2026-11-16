@@ -602,7 +602,7 @@ pub fn binary_segmentation(
             }
         }
         let Some((idx, t, gain)) = pick else { break };
-        if !(gain > pen) {
+        if gain.is_nan() || gain <= pen {
             break;
         }
 
