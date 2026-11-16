@@ -176,7 +176,9 @@ The impacts cost 17 to 19 dense LU inverses of I - rho W (17 interpolation nodes
 the dense inverse in the end cells), O(n^3) each, where the old code summed a truncated power series in
 W; above about n = 1,000 they dominate the run. The sampler itself (no impacts) costs what the old one
 did within about 10% from n = 1,000; at n = 100 the 2,000-cell rho grid evaluated per iteration
-dominates the SEM run.
+dominates the SEM run. The SAR rows with impacts at n = 1,000 and 2,000 and the SEM row at n = 100 are
+signed off 2026-11-16; the SEM row at n = 2,000 (1.12x) is within the estimates signed off 2026-11-15.
+On a hosted server `probit_impact_rows` holds `sar_probit_model` with impacts to 1,500 rows.
 
 ## MCMC Diagnostics
 

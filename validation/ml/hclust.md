@@ -111,7 +111,7 @@ cargo test -p p2a-core --lib --no-default-features --features ci -- ml::hclust m
 
 ## Timing
 
-Release builds of v0.5.0 (`f80b0131`) and this change, `p2a-core` with `spectral-analysis` only, one thread (`RAYON_NUM_THREADS=1`, pinned to one core); noisy three-blob data (2 columns unless stated); 3 interleaved processes per side, each the median of up to 2,001 calls after up to 10 warm-ups; median of the medians. The machine was shared (load 23-53), so ratios within about 10% are noise. The Boruvka tree is now minimal (v0.5.0's tree weighed up to 13x the minimum on these data); at small n in 5 dimensions it costs more than the non-minimal tree (signed off up to 3x).
+Release builds of v0.5.0 (`f80b0131`) and this change, `p2a-core` with `spectral-analysis` only, one thread (`RAYON_NUM_THREADS=1`, pinned to one core); noisy three-blob data (2 columns unless stated); 3 interleaved processes per side, each the median of up to 2,001 calls after up to 10 warm-ups; median of the medians. The machine was shared (load 23-53), so ratios within about 10% are noise. The Boruvka tree is now minimal (v0.5.0's tree weighed up to 13x the minimum on these data); at small n in 5 dimensions it costs more than the non-minimal tree (signed off up to 3x, 2026-11-15).
 
 | Call | n | v0.5.0 | this change | ratio |
 |---|---|---|---|---|

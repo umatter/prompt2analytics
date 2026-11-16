@@ -154,7 +154,7 @@ regressions with an intercept and two regressors.
 The residual Moran test now forms `lm.morantest`'s moments through the regression's projection (solves
 with the k-column design and its trace terms), and the score tests their trace term and projected lag;
 the permutations of `localmoran` draw each unit's neighbours without repeats from the other n - 1
-values, from a generator per permutation. The ratios are within the estimates signed off for the review
+values, from a generator per permutation. The ratios are within the estimates signed off 2026-11-15
 (2-6x, 1.2-2x and 1.5-3x).
 
 ## Known differences

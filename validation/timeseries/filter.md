@@ -160,6 +160,8 @@ The AR(0.99) and AR(0.5) `arima_sim` rows are the median of 15 processes per sid
 
 `arima_sim` follows its burn-in: R's p + q + ceiling(6 / log(min root modulus)) replaces a fixed 100 steps, so
 fast-decaying models run fewer steps and persistent ones more (AR(0.95): 118, AR(0.99): 598). The AR(0.99) rows
-were estimated from the step count at 3.49x / 1.45x / 1.05x; the measured 1.49x and 1.09x are about 3% above, the
-same per-step cost the AR(0.5) row shows at n = 10,000 (1.02x where the step count gives 0.99x). `arma_acf` solves
+were estimated from the step count at 3.49x / 1.45x / 1.05x and signed off at those estimates 2026-11-15; the
+measured 1.49x and 1.09x are about 3% above, the same per-step cost the AR(0.5) row shows at n = 10,000 (1.02x where
+the step count gives 0.99x). Measured above the estimate, for the record: AR(0.99) at n = 1,000, 1.49x against
+1.45x, and AR(0.95) at n = 100, 1.18x against 1.09x. `arma_acf` solves
 R's linear system once instead of iterating, and its PACF no longer works on subnormal values.

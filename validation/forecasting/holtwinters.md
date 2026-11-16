@@ -93,8 +93,7 @@ The search box is the only change on this path, so the ratio is the number of Ne
 series (trend, period-12 sine, noise) the search takes 117 / 151 / 135 iterations instead of 67 / 91 / 70 at
 n = 100 / 1,000 / 10,000. The old floor of 0.01 sat next to the optimal beta (0.021 at n = 1,000, where both reach
 the same optimum) and cut the search short; at n = 100 and 10,000 it held beta or alpha at 0.01, and the SSE at the
-optimum falls from 11.530 to 11.510 and from 892.32 to 880.54. These rows are above 1.10x and need the user's
-sign-off.
+optimum falls from 11.530 to 11.510 and from 892.32 to 880.54. These rows are above 1.10x; signed off 2026-11-16.
 
 ## References
 

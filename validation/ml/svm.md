@@ -133,7 +133,7 @@ like-for-like row.
 Peak RSS: benchmark at n = 10,000 3.8 MB against 5.3 MB; overlapping at n = 1,000 3.3 MB against 4.1 MB, at
 n = 10,000 3.9 MB against 47.5 MB (the kernel cache of at most 40 MB, e1071's default). The memory increase on hard
 problems was signed off with the choice of LIBSVM's solver; the overlapping time rows at n >= 1,000 compare an
-exact solver with one that stopped early.
+exact solver with one that stopped early, and are signed off 2026-11-16.
 
 Benchmark outputs on the paper's `cluster_n*.csv` data (`n_support_vectors`, bias; all converged):
 
