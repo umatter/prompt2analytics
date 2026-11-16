@@ -55,6 +55,19 @@ R-pinned: `test_validate_spectral_njw_blobs`, `test_validate_spectral_njw_pair`.
 `test_spectral_knn_weights_are_binary`, `test_spectral_partial_and_dense_agree`,
 `test_spectral_precomputed_must_be_symmetric_and_nonnegative`, `test_spectral_clustering_is_cancellable`.
 
+## Timing
+
+Release builds of v0.5.0 (`f80b0131`) and this change, `p2a-core` with `spectral-analysis` only, one thread (`RAYON_NUM_THREADS=1`, pinned to one core); noisy three-blob data (2 columns unless stated); 3 interleaved processes per side, each the median of up to 2,001 calls after up to 10 warm-ups; median of the medians. The machine was shared (load 23-53), so ratios within about 10% are noise. Peak memory at n = 10,000 (RBF): 0.80 GB.
+
+| Affinity | n | v0.5.0 | this change | ratio |
+|---|---|---|---|---|
+| RBF, default gamma, k 3 | 100 | 18.04 ms | 3.41 ms | 0.19 |
+| RBF, default gamma, k 3 | 1,000 | 2.13 s | 504.88 ms | 0.24 |
+| RBF, default gamma, k 3 | 10,000 | 217.09 s | 16.31 s | 0.08 |
+| k-NN, k 10, 3 clusters | 100 | 18.64 ms | 1.71 ms | 0.09 |
+| k-NN, k 10, 3 clusters | 1,000 | 2.37 s | 677.43 ms | 0.29 |
+| k-NN, k 10, 3 clusters | 10,000 | 219.14 s | 39.96 s | 0.18 |
+
 ## Run
 
 ```bash

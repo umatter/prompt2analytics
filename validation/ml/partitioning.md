@@ -98,6 +98,25 @@ Properties: `test_kmedoids_result_does_not_depend_on_the_seed`, `test_clara_defa
 `test_fcm_manhattan_centres_are_weighted_medians`, `test_fanny_is_scale_free`, `test_fanny_refuses_k_above_half_n`,
 `test_kmedoids_optimized_reported_cost_is_true_cost`, `test_kmedoids_optimized_scale_free`.
 
+## Timing
+
+Release builds of v0.5.0 (`f80b0131`) and this change, `p2a-core` with `spectral-analysis` only, one thread (`RAYON_NUM_THREADS=1`, pinned to one core); noisy three-blob data (2 columns unless stated); 3 interleaved processes per side, each the median of up to 2,001 calls after up to 10 warm-ups; median of the medians. The machine was shared (load 23-53), so ratios within about 10% are noise. c-means now stops later on the same relative rule because its memberships are softer (e1071's fixed point): per iteration it is no slower. FANNY at n = 5,000 was not run on v0.5.0 (about 1,000 s per call extrapolated). Peak memory of `silhouette_optimized` at n = 10,000: 3.13 GB on v0.5.0, 0.79 GB now.
+
+| Call | n | v0.5.0 | this change | ratio |
+|---|---|---|---|---|
+| fuzzy_cmeans Euclidean, k 3 (iterations 8 / 10) | 100 | 572.1 µs | 631.4 µs | 1.10 |
+| fuzzy_cmeans Euclidean, k 3 (iterations 9 / 12) | 1,000 | 6.40 ms | 7.56 ms | 1.18 |
+| fuzzy_cmeans Euclidean, k 3 (iterations 9 / 12) | 10,000 | 67.10 ms | 93.90 ms | 1.40 |
+| fuzzy_cmeans Manhattan, k 3 (iterations 13 / 11) | 100 | 894.3 µs | 702.4 µs | 0.79 |
+| fuzzy_cmeans Manhattan, k 3 (iterations 13 / 15) | 1,000 | 9.04 ms | 9.55 ms | 1.06 |
+| fuzzy_cmeans Manhattan, k 3 (iterations 12 / 18) | 10,000 | 102.85 ms | 135.33 ms | 1.32 |
+| fanny, k 3 (iterations 153 / 12) | 100 | 394.73 ms | 2.74 ms | 0.01 |
+| fanny, k 3 (iterations 180 / 14) | 1,000 | 43.07 s | 267.28 ms | 0.01 |
+| fanny, k 3 (iterations - / 14) | 5,000 | not run | 6.50 s |  |
+| kmedoids_optimized, k 3 | 100 | 660.5 µs | 391.1 µs | 0.59 |
+| kmedoids_optimized, k 3 | 1,000 | 51.52 ms | 30.59 ms | 0.59 |
+| kmedoids_optimized, k 3 | 5,000 | 4.78 s | 3.99 s | 0.83 |
+
 ## Run
 
 ```bash

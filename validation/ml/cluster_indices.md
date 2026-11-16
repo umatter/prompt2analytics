@@ -70,6 +70,52 @@ R-pinned: `test_validate_cluster_indices_blobs`, `test_validate_partition_agreem
 `test_silhouette_reports_distinct_cluster_count`, `test_compact_labels_dense_and_sparse_agree`,
 `test_gap_refuses_fewer_than_two_references`, `test_cluster_stats_gapped_labels`.
 
+## Timing
+
+Release builds of v0.5.0 (`f80b0131`) and this change, `p2a-core` with `spectral-analysis` only, one thread (`RAYON_NUM_THREADS=1`, pinned to one core); noisy three-blob data (2 columns unless stated); 3 interleaved processes per side, each the median of up to 2,001 calls after up to 10 warm-ups; median of the medians. The machine was shared (load 23-53), so ratios within about 10% are noise. Rand index and NMI build the contingency table from the raw labels when it is small; the remaining 10-24% is microseconds of extra passes over the labels.
+
+| Call | n | v0.5.0 | this change | ratio |
+|---|---|---|---|---|
+| cluster_stats | 100 | 148.4 µs | 111.1 µs | 0.75 |
+| cluster_stats | 1,000 | 15.31 ms | 10.82 ms | 0.71 |
+| cluster_stats | 10,000 | 3.64 s | 3.36 s | 0.92 |
+| calinski_harabasz | 100 | 13.5 µs | 14.1 µs | 1.04 |
+| calinski_harabasz | 1,000 | 112.7 µs | 110.2 µs | 0.98 |
+| calinski_harabasz | 10,000 | 1.06 ms | 1.10 ms | 1.04 |
+| calinski_harabasz, gapped labels | 100 | 14.5 µs | 14.3 µs | 0.99 |
+| calinski_harabasz, gapped labels | 1,000 | 107.0 µs | 111.1 µs | 1.04 |
+| calinski_harabasz, gapped labels | 10,000 | 1.08 ms | 1.11 ms | 1.02 |
+| davies_bouldin | 100 | 11.7 µs | 12.2 µs | 1.04 |
+| davies_bouldin | 1,000 | 85.2 µs | 87.9 µs | 1.03 |
+| davies_bouldin | 10,000 | 851.0 µs | 890.8 µs | 1.05 |
+| davies_bouldin, gapped | 100 | 12.8 µs | 12.1 µs | 0.95 |
+| davies_bouldin, gapped | 1,000 | 95.5 µs | 96.7 µs | 1.01 |
+| davies_bouldin, gapped | 10,000 | 849.4 µs | 874.9 µs | 1.03 |
+| rand_index | 100 | 0.9 µs | 1.1 µs | 1.20 |
+| rand_index | 1,000 | 5.1 µs | 5.6 µs | 1.10 |
+| rand_index | 10,000 | 45.0 µs | 51.5 µs | 1.14 |
+| rand_index, gapped | 100 | 1.4 µs | 1.2 µs | 0.86 |
+| rand_index, gapped | 1,000 | 5.5 µs | 5.7 µs | 1.04 |
+| rand_index, gapped | 10,000 | 45.0 µs | 51.4 µs | 1.14 |
+| nmi | 100 | 1.2 µs | 1.5 µs | 1.20 |
+| nmi | 1,000 | 5.2 µs | 6.1 µs | 1.17 |
+| nmi | 10,000 | 42.1 µs | 52.1 µs | 1.24 |
+| nmi, gapped | 100 | 1.7 µs | 1.6 µs | 0.92 |
+| nmi, gapped | 1,000 | 5.6 µs | 6.2 µs | 1.10 |
+| nmi, gapped | 10,000 | 42.3 µs | 51.9 µs | 1.23 |
+| silhouette | 100 | 74.7 µs | 71.7 µs | 0.96 |
+| silhouette | 1,000 | 8.59 ms | 8.60 ms | 1.00 |
+| silhouette | 10,000 | 1.39 s | 1.40 s | 1.01 |
+| silhouette, gapped | 100 | 73.3 µs | 71.1 µs | 0.97 |
+| silhouette, gapped | 1,000 | 8.44 ms | 8.65 ms | 1.02 |
+| silhouette, gapped | 10,000 | 1.44 s | 1.44 s | 1.00 |
+| silhouette_optimized | 100 | 225.4 µs | 105.8 µs | 0.47 |
+| silhouette_optimized | 1,000 | 18.35 ms | 8.66 ms | 0.47 |
+| silhouette_optimized | 10,000 | 4.89 s | 1.42 s | 0.29 |
+| gap_statistic, k_max 5, B 20 | 100 | 7.88 ms | 6.92 ms | 0.88 |
+| gap_statistic, k_max 5, B 20 | 1,000 | 132.16 ms | 110.16 ms | 0.83 |
+| gap_statistic, k_max 5, B 20 | 10,000 | 1.56 s | 1.35 s | 0.87 |
+
 ## Run
 
 ```bash

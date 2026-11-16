@@ -79,6 +79,16 @@ the same on `X * 1e-5`, and with `iter.max = 2`.
   `test_cli_ml_integer_columns_accepted` (`crates/p2a-cli/tests/tier2/wp17_ml.rs`). They
   compare p2a with p2a and pin no R number.
 
+## Timing
+
+Release builds of v0.5.0 (`f80b0131`) and this change, `p2a-core` with `spectral-analysis` only, one thread (`RAYON_NUM_THREADS=1`, pinned to one core); noisy three-blob data (2 columns unless stated); 3 interleaved processes per side, each the median of up to 2,001 calls after up to 10 warm-ups; median of the medians. The machine was shared (load 23-53), so ratios within about 10% are noise.
+
+| Call | n | v0.5.0 | this change | ratio |
+|---|---|---|---|---|
+| kmeans, k 3, n_init 5 | 100 | 50.0 µs | 44.9 µs | 0.90 |
+| kmeans, k 3, n_init 5 | 1,000 | 494.5 µs | 401.1 µs | 0.81 |
+| kmeans, k 3, n_init 5 | 10,000 | 4.75 ms | 4.10 ms | 0.86 |
+
 ## Running the Tests
 
 ```bash
