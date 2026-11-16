@@ -2039,7 +2039,7 @@ impl AnalyticsServer {
                 "teststat": config.teststat,
                 "testtype": config.testtype,
                 "classification": result.config.classification,
-                "n_permutations": config.nresample
+                "n_permutations": (testtype == CtreeTestType::MonteCarlo).then_some(config.nresample)
             }
         });
 
@@ -3474,6 +3474,39 @@ mod tests {
         assert_eq!(tests.len(), 2);
         assert_eq!(tests[0]["feature"], json!("x1"));
         assert!(tests[0]["p_value"].is_number() && tests[0]["p_value_adjusted"].is_number());
+    }
+
+    #[tokio::test]
+    async fn test_mcp_ctree_n_permutations_echo_and_error() {
+        // n_permutations is echoed only when permutations run, and a zero count is refused by its
+        // request name.
+        let s = server().await;
+        let ctr = |extra: Value| {
+            let mut a = json!({"dataset": "ml", "features": ["x1", "x2"], "target": "cls",
+                               "minsplit": 6, "minbucket": 3, "seed": 1});
+            for (k, v) in extra.as_object().unwrap() {
+                a[k] = v.clone();
+            }
+            a
+        };
+        let bonf = json_summary(&s.ml_ctree(req(ctr(json!({})))).await.unwrap());
+        assert_eq!(bonf["config"]["n_permutations"], Value::Null);
+        let mc = json_summary(
+            &s.ml_ctree(req(ctr(
+                json!({"testtype": "montecarlo", "n_permutations": 99}),
+            )))
+            .await
+            .unwrap(),
+        );
+        assert_eq!(mc["config"]["n_permutations"], json!(99));
+        let r = s
+            .ml_ctree(req(ctr(
+                json!({"testtype": "montecarlo", "n_permutations": 0}),
+            )))
+            .await
+            .unwrap();
+        assert_eq!(r.is_error, Some(true), "{}", text_of(&r));
+        assert!(text_of(&r).contains("n_permutations"), "{}", text_of(&r));
     }
 
     #[test]
