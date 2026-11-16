@@ -87,6 +87,38 @@ R parity (X-10).
   `test_na_mcp_tree_tools_integer_and_missing_targets`, `test_mcp_c50_ctree_text_targets` and
   `test_mcp_ctree_numeric_target_and_classification_flag` (`crates/p2a-mcp/src/tools/handlers/ml.rs`).
 
+## Timing
+
+Against v0.5.0 (`f80b0131`), lane timing (preliminary): release builds, `--no-default-features --features ci`, one
+core (`taskset`, `RAYON_NUM_THREADS=1`), 9 interleaved processes per side, each the median of 21-201 fits after 5
+warm-ups, median of medians; machine load average 6-13 on 12 cores. Inputs: p = 5 uniform on [0, 10); regression
+`y = 3 (x1 > 5) + 0.5 x2 + U(-1, 1)`; classification K = 3 from x1 and x2 with 15% label noise. Defaults
+(Bonferroni, quadratic). Nodes are the nodes of the fitted tree; per node is the fit time divided by them.
+
+| Fit | n | v0.5.0 | nodes | now | nodes | per fit | per node | R `partykit::ctree` (nodes) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| regression | 100 | 0.142 ms | 13 | 0.050 ms | 13 | 0.36x | 0.36x | 38 ms (15) |
+| regression | 1,000 | 2.77 ms | 33 | 0.729 ms | 35 | 0.26x | 0.25x | 108 ms (31) |
+| regression | 10,000 | 33.3 ms | 67 | 8.35 ms | 67 | 0.25x | 0.25x | 364 ms (75) |
+| classification | 100 | 0.182 ms | 7 | 0.051 ms | 5 | 0.28x | 0.39x | 29 ms (5) |
+| classification | 1,000 | 1.71 ms | 5 | 0.415 ms | 5 | 0.24x | 0.24x | 40 ms (5) |
+| classification | 10,000 | 23.3 ms | 9 | 5.15 ms | 5 | 0.22x | 0.40x | 179 ms (7) |
+
+v0.5.0 fitted the classification rows as classification trees too (integer class codes), with its own tests and
+splits; the R column uses R's generator on the same design, so its trees differ.
+
+Monte Carlo p-values (`testtype = montecarlo`, new, no base; regression design; median of 3-5 processes):
+
+| n | nresample = 999 | nodes | nresample = 9,999 (default) | nodes | R, nresample = 999 |
+|---:|---:|---:|---:|---:|---:|
+| 100 | 10.2 ms | 13 | 98 ms | 13 | 79 ms |
+| 1,000 | 147 ms | 39 | 1.24 s | 39 | 0.78 s |
+| 10,000 | 1.90 s | 109 | 18.6 s | 111 | 4.58 s |
+
+At n = 10,000 the default 9,999 permutations take 18.6 s, inside the hosted 60 s deadline; the call is
+interruptible at every permutation. Peak RSS of a process fitting twice at n = 10,000: regression 4.0 MB (v0.5.0)
+and 3.7 MB (now), classification 3.9 MB and 3.9 MB, Monte Carlo (999) 4.2 MB.
+
 ## Release notes
 
 - The node statistics, p-values, split variables and break points now follow partykit: the conditional linear
