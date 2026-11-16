@@ -134,7 +134,7 @@ fn lm_tests_benchmark(c: &mut Criterion) {
             x_mat[[i, 1]] = x[i];
         }
 
-        // Clone listw for benchmarking (spatial_lm_tests takes mutable reference)
+        // One copy of the weights for the benchmark closure
         let listw_clone = listw.clone();
 
         // spatial_lm_tests fits the OLS itself (y on x_mat)

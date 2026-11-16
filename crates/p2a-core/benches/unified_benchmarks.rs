@@ -64,7 +64,7 @@ use p2a_core::regression::{
     reset_test, run_diagnostics, run_ols_clustered, run_vcov_driscoll_kraay, smooth_spline, step,
     vcov_bootstrap, vcov_hac, wald_test,
 };
-use p2a_core::spatial::{MoranAlternative, localmoran, moran_test};
+use p2a_core::spatial::{LocalMoranConfig, MoranAlternative, localmoran_with, moran_test};
 use p2a_core::spatial::{Neighbors, SpatialWeights, WeightStyle};
 use p2a_core::stats::power::{PowerAlternative, TTestType, power_t_test};
 use p2a_core::stats::robust::{fivenum, iqr};
@@ -2061,15 +2061,21 @@ fn main() {
             results.push(result);
         }
 
-        // Local Moran (LISA), analytic: permutations = 0 gives the total-randomisation
-        // moments and two-sided normal p-values, R's localmoran(conditional = FALSE).
-        // (99 permutations timed a permutation test against R's analytic one, and
-        // p2a-core's permutation is not spdep's conditional one: SPAT-22.) Every size R runs.
+        // Local Moran (LISA), analytic: conditional = false and permutations = 0 give the
+        // total-randomisation moments and two-sided normal p-values of the paper's R call,
+        // localmoran(conditional = FALSE); localmoran's own default is now spdep's conditional
+        // moments. Every size R runs.
+        let lisa = LocalMoranConfig {
+            alpha: 0.05,
+            permutations: 0,
+            conditional: false,
+            seed: 42,
+        };
         if wants("Local_Moran") {
             let mut result = run_benchmark_tracked("Local_Moran", "localmoran", n, &config, || {
-                localmoran(&y_arr, &listw, 0.05, 0)
+                localmoran_with(&y_arr, &listw, &lisa)
             });
-            if let Ok(ref lm) = localmoran(&y_arr, &listw, 0.05, 0) {
+            if let Ok(ref lm) = localmoran_with(&y_arr, &listw, &lisa) {
                 let mut outputs = BTreeMap::new();
                 let stats = &lm.local_stats;
                 let n_sig = stats.iter().filter(|s| s.p_value < 0.05).count();
@@ -4315,11 +4321,12 @@ fn main() {
     print_header();
 
     // Cap: t-SNE is O(n^2) with 500 internal iterations; n=10000 takes hours.
-    // R runs Rtsne with tsne()'s algorithm (exact, PCA x 1e-4 start,
-    // exaggeration 4 for 100 iterations, momentum switch at 250, eta 4 x 200
-    // for its gradient without the factor 4). The final KL divergence is
-    // chaotic in the start and the summation order, so it agrees to about
-    // 1-3% (n=100) and 0.5-1% (n=1000) only; the other keys are exact.
+    // The Rust defaults are now Rtsne's own (exact, an N(0, 1e-4) start from
+    // the seed, exaggeration 12 for 250 iterations, momentum switch at 250).
+    // The paper's R script still runs Rtsne with tsne()'s settings (a PCA x
+    // 1e-4 start, exaggeration 4 for 100 iterations, eta 4 x 200), so its KL
+    // divergence no longer corresponds to this one until that script moves to
+    // Rtsne's defaults; the other keys are exact.
     for n in sizes_for(&["tSNE"], [100, 1000]) {
         let data = load_csv_array2(&data_dir, "cluster", n)
             .unwrap_or_else(|| generate_cluster_data(n, 5, 42));
