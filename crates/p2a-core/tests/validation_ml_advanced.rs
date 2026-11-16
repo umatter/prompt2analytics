@@ -356,13 +356,14 @@ fn test_ctree_classification_properties() {
         minbucket: 7,
         maxdepth: 10,
         seed: Some(42),
+        classification: Some(true),
         ..Default::default()
     };
 
     let result = ctree(x.view(), y.view(), &config).unwrap();
     assert!(
         result.is_classification,
-        "CTree should detect classification task"
+        "classification = true fits a classification tree"
     );
 
     let predictions = ctree_predict(&result, x.view()).unwrap();

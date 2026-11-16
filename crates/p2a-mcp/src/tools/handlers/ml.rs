@@ -155,9 +155,16 @@ fn ensemble_refusal(
 
 /// The fewest trees both tree-ensemble fits accept (they refuse 0).
 const FEWEST_TREES: usize = 1;
-/// The fewest trees the causal forest accepts: one group of `ci_group_size` trees (2, the
-/// default, which the tool does not expose).
-const FEWEST_FOREST_TREES: usize = 2;
+/// The fewest causal-forest trees the refusals offer on `n_rows` rows:
+/// `2 * (ceil(log2(max(n_rows, 2))) + 5)`, that many groups of `ci_group_size` (2, the default,
+/// which the tool does not expose) trees. Each group draws its own half-sample, so a unit is in
+/// all `g` of them with probability `0.5^g`, and `n_rows * 0.5^g` is at most 1/32: with high
+/// probability every unit has an out-of-bag tree group, which one group (the least the fit
+/// accepts) leaves to half of them.
+fn fewest_forest_trees(n_rows: usize) -> usize {
+    let groups = usize::BITS - (n_rows.max(2) - 1).leading_zeros();
+    2 * (groups as usize + 5)
+}
 /// The shallowest trees both fits accept: at depth 0 each tree is a single leaf.
 const SHALLOWEST_TREES: usize = 0;
 /// The fewest bootstrap replications `bart_causal` accepts. Each replication fits
@@ -166,13 +173,14 @@ const FEWEST_BART_REPLICATIONS: usize = 2;
 
 /// One numeric setting a refused tree-ensemble request could change: the verb and the
 /// parameter that name the change in the refusal (`lower`, `n_trees`), and how to set it, on a
-/// dataset of the given rows, to the value of least memory the fit accepts.
+/// dataset of the given rows, to the value of least memory the refusal offers (the least the
+/// fit accepts, except the causal forest's trees: [`fewest_forest_trees`]).
 type Knob<C> = (&'static str, &'static str, fn(&mut C, usize));
 
 /// The changes among `knobs` that each lower `base`'s memory bound (`bound`) on their own,
 /// worded for a refusal (`lower n_trees or max_depth, or raise min_node_size`; empty when none
-/// does, because every setting is already at its least memory or has no effect there), and the
-/// bound once all of them are made. In both fits' bounds each knob at its least memory takes
+/// does, because every setting is already at its least memory or has no effect there), the
+/// bound once all of them are made, and the parameters chosen. In both fits' bounds each knob at its least memory takes
 /// every part of the bound it affects to that part's floor, whatever the other knobs are, so a
 /// knob that does not lower the bound alone does not lower it in any combination either, and
 /// the bound returned is the least the knobs reach from `base`
@@ -182,10 +190,11 @@ fn least_changes<C: Clone>(
     n_rows: usize,
     bound: impl Fn(&C) -> u64,
     knobs: &[Knob<C>],
-) -> (String, u64) {
+) -> (String, u64, Vec<&'static str>) {
     let from = bound(base);
     let mut least = base.clone();
     let mut groups: Vec<(&str, Vec<&str>)> = Vec::new();
+    let mut chosen = Vec::new();
     for &(verb, parameter, set_least) in knobs {
         let mut alone = base.clone();
         set_least(&mut alone, n_rows);
@@ -193,6 +202,7 @@ fn least_changes<C: Clone>(
             continue;
         }
         set_least(&mut least, n_rows);
+        chosen.push(parameter);
         match groups.last_mut() {
             Some((v, parameters)) if *v == verb => parameters.push(parameter),
             _ => groups.push((verb, vec![parameter])),
@@ -207,13 +217,13 @@ fn least_changes<C: Clone>(
         })
         .collect::<Vec<_>>()
         .join(", or ");
-    (advice, bound(&least))
+    (advice, bound(&least), chosen)
 }
 
 /// A later tier: `required`, the change it cannot do without, then the changes still left
 /// after it (`least_changes` from the settings with `required` made, with their bound), to
 /// make if that is not enough.
-fn required_then(required: &str, (left, cheapest): (String, u64)) -> EnsembleTier {
+fn required_then(required: &str, (left, cheapest, _): (String, u64, Vec<&str>)) -> EnsembleTier {
     let advice = if left.is_empty() {
         required.to_string()
     } else {
@@ -240,26 +250,28 @@ fn forest_change(
     n_covariates: usize,
 ) -> EnsembleChange {
     let knobs: [Knob<CausalForestConfig>; 3] = [
-        ("lower", "n_trees", |c, _| c.n_trees = FEWEST_FOREST_TREES),
+        ("lower", "n_trees", |c, n| {
+            c.n_trees = c.n_trees.min(fewest_forest_trees(n))
+        }),
         ("lower", "max_depth", |c, _| c.max_depth = SHALLOWEST_TREES),
         ("raise", "min_node_size", |c, n| {
             c.min_node_size = c.min_node_size.max(n)
         }),
     ];
     let changes = |base: &CausalForestConfig| {
-        let (mut advice, cheapest) = least_changes(
+        let (mut advice, cheapest, chosen) = least_changes(
             base,
             n_rows,
             |c: &CausalForestConfig| c.memory_bound(n_rows, n_covariates),
             &knobs,
         );
-        if advice.contains("max_depth") {
+        if chosen.contains(&"max_depth") {
             advice.push_str(MAX_DEPTH_SCOPE);
         }
-        (advice, cheapest)
+        (advice, cheapest, chosen)
     };
     let mut tiers = Vec::new();
-    let (advice, cheapest) = changes(config);
+    let (advice, cheapest, _) = changes(config);
     if !advice.is_empty() {
         tiers.push(EnsembleTier { advice, cheapest });
     }
@@ -301,7 +313,7 @@ fn bart_change(config: &BartCausalConfig, n_rows: usize, n_covariates: usize) ->
         ..config.clone()
     };
     let mut tiers = Vec::new();
-    let (advice, cheapest) = changes(config);
+    let (advice, cheapest, _) = changes(config);
     if !advice.is_empty() {
         let advice = if config.include_propensity && bound(&without) < bound(config) {
             format!("{advice}, or set include_propensity = false")
@@ -842,7 +854,7 @@ impl AnalyticsServer {
 
     /// Run Random Forest regression (a regression forest only; ML-108).
     #[tool(
-        description = "Run Random Forest regression: variance-reduction (MSE) splits with leaf means. A class label coded as numbers is averaged, not voted: there is no classification mode. Defaults differ from R's randomForest::randomForest() for regression: n_trees 100 (R ntree 500), features per split ceil(sqrt(p)) (R mtry max(floor(p/3), 1)), max_depth 10 (R unlimited), min_samples_split 2 (R nodesize 5). Returns the out-of-bag R², feature importances (shares of IncNodePurity, the summed squared-error decrease, as randomForest's importance type 2) and a JSON block with the first 20 in-sample predictions (the mean over all trees, R's predict(rf, newdata = data); not rf$predicted, which is out-of-bag). With output_column, writes every row's prediction."
+        description = "Run Random Forest regression: variance-reduction (MSE) splits with leaf means. A class label coded as numbers is averaged, not voted: there is no classification mode. Defaults differ from R's randomForest::randomForest() for regression: n_trees 100 (R ntree 500), features per split ceil(sqrt(p)) (R mtry max(floor(p/3), 1)), max_depth 10 (R unlimited), min_samples_split 2 (R has no split-size minimum; its nodesize 5 bounds terminal node size). Returns the out-of-bag R², feature importances (shares of IncNodePurity, the summed squared-error decrease, as randomForest's importance type 2) and a JSON block with the first 20 in-sample predictions (the mean over all trees, R's predict(rf, newdata = data); not rf$predicted, which is out-of-bag). With output_column, writes every row's prediction."
     )]
     pub async fn ml_random_forest(
         &self,
@@ -1086,7 +1098,7 @@ impl AnalyticsServer {
 
     /// Run C5.0 Decision Tree classification.
     #[tool(
-        description = "C5.0 Decision Tree for classification (Quinlan's successor to C4.5). Uses information gain ratio for splitting, pessimistic error pruning, and optionally boosting via AdaBoost.M1. Features: automatic feature selection (winnowing), rule extraction, multiclass support. Returns tree structure, rules (if requested), variable importance, and class predictions. Based on R's C50 package. The target can be integer class codes or a text, categorical or boolean column; labels are reported as class_names."
+        description = "C5.0-style decision tree for classification (Quinlan's C4.5 rules): thresholds by information gain with Quinlan's (1996) MDL correction, attributes by gain ratio among those with at least mean gain, pessimistic-error pruning at confidence cf (0 < cf < 1); trials > 1 boosts with AdaBoost.M1 case weights, which enter every count of the next tree. Winnowing keeps the features above the 25th percentile of a first tree's importance. Returns rules by feature and class name, variable importance (gain ratios of the kept splits) and class predictions. Not checked against R's C50 package. The target can be integer class codes or a text, categorical or boolean column; labels are reported as class_names."
     )]
     pub async fn ml_c50(
         &self,
@@ -1146,10 +1158,9 @@ impl AnalyticsServer {
                 .map(|rule| {
                     serde_json::json!({
                         "rule_id": rule.id,
-                        "conditions": rule.conditions.iter().map(|c| {
-                            format!("{} {} {:.4}", c.feature, c.operator, c.threshold)
-                        }).collect::<Vec<_>>(),
+                        "conditions": rule.conditions.iter().map(|c| result.condition_text(c)).collect::<Vec<_>>(),
                         "predicted_class": rule.predicted_class,
+                        "predicted_class_name": result.class_names.as_ref().map(|_| result.class_text(rule.predicted_class)),
                         "confidence": rule.confidence,
                         "support": rule.support,
                         "lift": rule.lift
@@ -1502,7 +1513,7 @@ impl AnalyticsServer {
 
     /// Run Cubist rule-based regression with linear models in terminal nodes.
     #[tool(
-        description = "Cubist is a rule-based regression model with linear models in terminal nodes. Based on Quinlan's M5 model tree algorithm. Key features: (1) Rule extraction with linear regression in leaves, (2) Committee models (boosted ensembles) for improved accuracy, (3) Instance-based (k-NN) prediction adjustment. Returns rules, variable importance, and predictions. Based on Quinlan (1992) 'Learning with Continuous Classes' and R's Cubist package."
+        description = "Cubist is a rule-based regression model with linear models in terminal nodes. Based on Quinlan's M5 model tree algorithm. Key features: (1) Rule extraction with linear regression in leaves, (2) Committee models (boosted ensembles) for improved accuracy, (3) Instance-based (k-NN) prediction adjustment. Returns rules, variable importance, and predictions. Based on Quinlan (1992) 'Learning with Continuous Classes' and R's Cubist package. r_squared and rmse are training values (leave-one-out in the neighbour step when neighbors > 0)."
     )]
     pub async fn ml_cubist(
         &self,
@@ -1907,7 +1918,7 @@ impl AnalyticsServer {
 
     /// Run Conditional Inference Trees (ctree) for regression or classification.
     #[tool(
-        description = "Conditional Inference Trees (ctree) - decision trees with unbiased variable selection via permutation tests. Based on Hothorn, Hornik & Zeileis (2006). Unlike CART, ctree uses statistical significance tests for variable selection, avoiding bias towards variables with many possible split points. The tree grows until no significant relationship exists between predictors and response (no pruning needed). Equivalent to R's partykit::ctree. A text, categorical or boolean target fits a classification tree (at most 10 classes)."
+        description = "Conditional inference trees as partykit::ctree (Hothorn, Hornik & Zeileis 2006). At each node every input is tested for independence from the response with the conditional linear statistic (numeric inputs untransformed; class indicators for a categorical response; asymptotic chi-squared p-values, Bonferroni-adjusted as partykit does, 1 - (1 - p)^m; or Monte Carlo permutation p-values with testtype 'montecarlo'). The most significant input is split at the cut that maximises the two-sample statistic (x <= the observed break goes left), and growth stops when no adjusted p-value is below 1 - mincriterion. A numeric target fits a regression tree; a text, categorical or boolean target, or classification = true, fits a classification tree (at most max(2, min(1000, n / 2)) classes). Variable importance is the sum of 1 - adjusted p over the splits on each input, not partykit's permutation varimp. root_tests reports every input's statistic and raw and adjusted p-value at the root."
     )]
     pub async fn ml_ctree(
         &self,
@@ -1939,6 +1950,10 @@ impl AnalyticsServer {
         config.teststat = CtreeTestStat::choices().canonical(teststat).to_string();
         config.testtype = CtreeTestType::choices().canonical(testtype).to_string();
         config.seed = self.seed_or_global(request.seed).await;
+        config.classification = request.classification;
+        if let Some(b) = request.n_permutations {
+            config.nresample = b;
+        }
 
         let feature_refs: Vec<&str> = request.features.iter().map(|s| s.as_str()).collect();
 
@@ -1988,6 +2003,23 @@ impl AnalyticsServer {
         }
 
         let n_features = result.variable_importance.len();
+        let finite = |v: Option<&f64>| v.copied().filter(|v| v.is_finite());
+        let root_tests: Vec<serde_json::Value> = (0..n_features)
+            .map(|j| {
+                let name = result
+                    .feature_names
+                    .as_ref()
+                    .and_then(|names| names.get(j))
+                    .cloned()
+                    .unwrap_or_else(|| format!("X{j}"));
+                serde_json::json!({
+                    "feature": name,
+                    "statistic": finite(result.root_statistics.get(j)),
+                    "p_value": finite(result.root_p_values.get(j)),
+                    "p_value_adjusted": finite(result.root_p_values_adjusted.get(j)),
+                })
+            })
+            .collect();
         let output = serde_json::json!({
             "n_nodes": result.n_nodes,
             "n_features": n_features,
@@ -1998,13 +2030,16 @@ impl AnalyticsServer {
             "variable_importance": result.variable_importance,
             "feature_names": result.feature_names,
             "tree_structure": node_to_json(&result.root, &result.feature_names),
+            "root_tests": root_tests,
             "config": {
                 "mincriterion": config.mincriterion,
                 "minsplit": config.minsplit,
                 "minbucket": config.minbucket,
                 "maxdepth": config.maxdepth,
                 "teststat": config.teststat,
-                "testtype": config.testtype
+                "testtype": config.testtype,
+                "classification": result.config.classification,
+                "n_permutations": (testtype == CtreeTestType::MonteCarlo).then_some(config.nresample)
             }
         });
 
@@ -2283,6 +2318,11 @@ mod tests {
         assert!(!with_depth.is_empty(), "{:?}", change.tiers);
         for a in with_depth {
             assert!(a.contains(MAX_DEPTH_SCOPE), "{a}");
+        }
+        // max_depth already at its least: not offered, so no note about it.
+        let c = run_causal_forest_config(Some(2_000), Some(1), Some(true), Some(0), None);
+        for t in forest_change(&c, 400_000, 8).tiers {
+            assert!(!t.advice.contains(MAX_DEPTH_SCOPE), "{}", t.advice);
         }
     }
 
@@ -2669,7 +2709,12 @@ mod tests {
             &hosted,
             true,
             (
-                forest(FEWEST_FOREST_TREES, SHALLOWEST_TREES, true, 1_500_000),
+                forest(
+                    fewest_forest_trees(1_500_000),
+                    SHALLOWEST_TREES,
+                    true,
+                    1_500_000,
+                ),
                 with_propensity(200, 4, 100),
             ),
         );
@@ -2691,7 +2736,12 @@ mod tests {
         );
 
         // Eight covariates: no forest setting fits 1.5 million rows.
-        let mut wide = forest(FEWEST_FOREST_TREES, SHALLOWEST_TREES, true, 1_500_000);
+        let mut wide = forest(
+            fewest_forest_trees(1_500_000),
+            SHALLOWEST_TREES,
+            true,
+            1_500_000,
+        );
         wide.covariates = (0..8).map(|k| format!("c{k}")).collect();
         let [(_, f), _] = calls(&rt, &server, &hosted, true, (wide, bart(1, 0, 2)));
         let f = refusal(&f);
@@ -2765,7 +2815,7 @@ mod tests {
             &hosted,
             true,
             (
-                forest(FEWEST_FOREST_TREES, SHALLOWEST_TREES, false, 1),
+                forest(fewest_forest_trees(rows), SHALLOWEST_TREES, false, 1),
                 with_propensity(FEWEST_TREES, SHALLOWEST_TREES, FEWEST_BART_REPLICATIONS),
             ),
         );
@@ -2872,7 +2922,9 @@ mod tests {
                             let bound = |c: &CausalForestConfig| c.memory_bound(rows, p);
                             let least =
                                 |c: &mut CausalForestConfig, parameter: &str| match parameter {
-                                    "n_trees" => c.n_trees = FEWEST_FOREST_TREES,
+                                    "n_trees" => {
+                                        c.n_trees = c.n_trees.min(fewest_forest_trees(rows))
+                                    }
                                     "max_depth" => c.max_depth = SHALLOWEST_TREES,
                                     _ => c.min_node_size = rows.max(min_node),
                                 };
@@ -2980,34 +3032,28 @@ mod tests {
         }
     }
 
-    /// The least-memory settings the refusals compute from are the smallest the fits accept:
-    /// each tool accepts them (the causal forest's one group of trees leaves half of the units
-    /// without an out-of-bag tree, which the fit reports), and one tree fewer (for either tool) or one replication fewer
-    /// (for BART) is an error.
+    /// The least-memory settings the refusals compute from fit: BART's are the smallest it
+    /// accepts (one tree or one replication fewer is an error), and the causal forest's trees
+    /// are the fewest that leave every unit an out-of-bag tree group with high probability
+    /// ([`fewest_forest_trees`]); below one group of trees the forest is an error.
     #[test]
-    fn ensemble_least_memory_settings_are_the_smallest_the_fits_accept() {
+    fn ensemble_least_memory_settings_fit() {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
         let server = rt.block_on(server_with_causal_data(300));
         let least = (
-            forest(FEWEST_FOREST_TREES, SHALLOWEST_TREES, true, 300),
+            forest(fewest_forest_trees(300), SHALLOWEST_TREES, true, 300),
             bart(FEWEST_TREES, SHALLOWEST_TREES, FEWEST_BART_REPLICATIONS),
         );
+        assert_eq!(fewest_forest_trees(300), 28);
+        assert_eq!(fewest_forest_trees(1_500_000), 52);
         for (tool, r) in calls(&rt, &server, &Limits::hosted(), false, least) {
-            // One group of causal trees shares one half-sample, so the units in it have no
-            // out-of-bag tree and the fit says so: the settings are accepted, the data decide.
-            let no_oob = tool == "ml_causal_forest"
-                && text_of(&r).contains("is in the subsample of every causal tree");
-            assert!(
-                r.is_error != Some(true) || no_oob,
-                "{tool}: {}",
-                text_of(&r)
-            );
+            assert!(r.is_error != Some(true), "{tool}: {}", text_of(&r));
         }
         let fewer = (
-            forest(FEWEST_FOREST_TREES - 1, SHALLOWEST_TREES, true, 300),
+            forest(1, SHALLOWEST_TREES, true, 300),
             bart(FEWEST_TREES, SHALLOWEST_TREES, FEWEST_BART_REPLICATIONS - 1),
         );
         let [(_, f), (_, b)] = calls(&rt, &server, &Limits::hosted(), false, fewer);
@@ -3023,7 +3069,7 @@ mod tests {
             text_of(&b)
         );
         let fewer_trees = (
-            forest(FEWEST_FOREST_TREES, SHALLOWEST_TREES, true, 300),
+            forest(fewest_forest_trees(300), SHALLOWEST_TREES, true, 300),
             bart(FEWEST_TREES - 1, SHALLOWEST_TREES, FEWEST_BART_REPLICATIONS),
         );
         let [_, (_, b)] = calls(&rt, &server, &Limits::hosted(), false, fewer_trees);
@@ -3401,6 +3447,118 @@ mod tests {
             "{}",
             text_of(&r)
         );
+    }
+
+    #[tokio::test]
+    async fn test_mcp_ctree_numeric_target_and_classification_flag() {
+        // ML-87: a numeric 0/1 target is a regression unless classification = true.
+        let s = server().await;
+        let ctr = |extra: Value| {
+            let mut a = json!({"dataset": "ml", "features": ["x1", "x2"], "target": "cls",
+                               "minsplit": 6, "minbucket": 3, "seed": 1});
+            for (k, v) in extra.as_object().unwrap() {
+                a[k] = v.clone();
+            }
+            a
+        };
+        let reg = json_summary(&s.ml_ctree(req(ctr(json!({})))).await.unwrap());
+        assert_eq!(reg["is_classification"], json!(false));
+        let cls = json_summary(
+            &s.ml_ctree(req(ctr(json!({"classification": true}))))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(cls["is_classification"], json!(true));
+        assert_eq!(cls["config"]["classification"], json!(true));
+        let tests = reg["root_tests"].as_array().unwrap();
+        assert_eq!(tests.len(), 2);
+        assert_eq!(tests[0]["feature"], json!("x1"));
+        assert!(tests[0]["p_value"].is_number() && tests[0]["p_value_adjusted"].is_number());
+    }
+
+    #[tokio::test]
+    async fn test_mcp_ctree_n_permutations_echo_and_error() {
+        // n_permutations is echoed only when permutations run, and a zero count is refused by its
+        // request name.
+        let s = server().await;
+        let ctr = |extra: Value| {
+            let mut a = json!({"dataset": "ml", "features": ["x1", "x2"], "target": "cls",
+                               "minsplit": 6, "minbucket": 3, "seed": 1});
+            for (k, v) in extra.as_object().unwrap() {
+                a[k] = v.clone();
+            }
+            a
+        };
+        let bonf = json_summary(&s.ml_ctree(req(ctr(json!({})))).await.unwrap());
+        assert_eq!(bonf["config"]["n_permutations"], Value::Null);
+        let mc = json_summary(
+            &s.ml_ctree(req(ctr(
+                json!({"testtype": "montecarlo", "n_permutations": 99}),
+            )))
+            .await
+            .unwrap(),
+        );
+        assert_eq!(mc["config"]["n_permutations"], json!(99));
+        let r = s
+            .ml_ctree(req(ctr(
+                json!({"testtype": "montecarlo", "n_permutations": 0}),
+            )))
+            .await
+            .unwrap();
+        assert_eq!(r.is_error, Some(true), "{}", text_of(&r));
+        assert!(text_of(&r).contains("n_permutations"), "{}", text_of(&r));
+    }
+
+    #[test]
+    fn test_ml_ctree_description_names_the_test_it_runs() {
+        let tools = crate::server::AnalyticsServer::new().router_tools();
+        let d = tools
+            .iter()
+            .find(|t| t.name == "ml_ctree")
+            .and_then(|t| t.description.clone())
+            .unwrap_or_default()
+            .to_string();
+        assert!(d.contains("partykit") && d.contains("conditional"), "{d}");
+        assert!(!d.contains("Equivalent to"), "{d}");
+        assert!(
+            !d.contains("permutation tests") || d.contains("Monte Carlo"),
+            "{d}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mcp_c50_rules_name_features_and_classes() {
+        // ML-144: conditions named the feature by index ("0 <= 3.2500") and rules had no class name.
+        let s = server().await;
+        let r = s
+            .ml_c50(req(
+                json!({"dataset": "ml", "features": ["x1", "x2"], "target": "lab",
+                               "rules": true, "min_cases": 1, "seed": 1}),
+            ))
+            .await
+            .unwrap();
+        let j = json_summary(&r);
+        let rules = j["rules"].as_array().unwrap();
+        assert!(!rules.is_empty(), "{j}");
+        for rule in rules {
+            for c in rule["conditions"].as_array().unwrap() {
+                let c = c.as_str().unwrap();
+                assert!(c.starts_with("x1 ") || c.starts_with("x2 "), "{c}");
+            }
+            let name = rule["predicted_class_name"].as_str().unwrap();
+            assert!(name == "no" || name == "yes", "{name}");
+        }
+        let codes = s
+            .ml_c50(req(
+                json!({"dataset": "ml", "features": ["x1", "x2"], "target": "cls",
+                               "rules": true, "min_cases": 1, "seed": 1}),
+            ))
+            .await
+            .unwrap();
+        let j = json_summary(&codes);
+        for rule in j["rules"].as_array().unwrap() {
+            assert!(rule["predicted_class_name"].is_null(), "{rule}");
+        }
     }
 
     #[tokio::test]

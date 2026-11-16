@@ -3,26 +3,39 @@
 //! Pure Rust implementation of conditional inference trees based on
 //! Hothorn, Hornik & Zeileis (2006).
 //!
-//! ## Features
-//!
-//! - **Unbiased variable selection**: Uses permutation tests to select variables,
-//!   avoiding bias towards variables with many possible splits
-//! - **Statistical stopping rule**: Stops growing when no significant relationship
-//!   between predictors and response exists
-//! - **No pruning needed**: The significance-based stopping rule produces
-//!   appropriately-sized trees without post-hoc pruning
-//! - **Supports both regression and classification**: Automatic detection based
-//!   on number of unique values in response
+//! Follows `partykit::ctree` (partykit 1.3.1 / libcoin 1.0.13) for numeric inputs; the
+//! regression, classification, null and Monte Carlo cases of `validation/r/cases/ml_trees_t4.R`
+//! pin it.
 //!
 //! ## Algorithm
 //!
-//! The algorithm proceeds as follows:
+//! At each node of `n` rows:
 //!
-//! 1. Test global null hypothesis of independence between response and all predictors
-//! 2. If no variable rejects H0 at level alpha (1 - mincriterion), stop
-//! 3. Select the variable with smallest p-value (strongest association)
-//! 4. Find optimal split point for selected variable by maximizing test statistic
-//! 5. Recursively partition left and right child nodes
+//! 1. **Variable tests.** Each input is tested for independence from the response with the
+//!    conditional linear statistic of Strasser and Weber (numeric input untransformed; the
+//!    response itself, or class indicators for a classification). `quadratic`:
+//!    `(n - 1) r^2` (regression, 1 df) or `(n - 1) SSB / Sxx` (classification, df = classes in
+//!    the node - 1), with asymptotic chi-squared p-values; `maximum` (regression only): `|z|`
+//!    with a two-sided normal p-value.
+//! 2. **Untestable inputs.** An input whose statistic has variance below `sqrt(eps)` (the input
+//!    or the response constant in the node) is not tested and does not count in the adjustment.
+//! 3. **P-values.** `bonferroni`: partykit's adjustment `1 - (1 - p)^m` over the `m` tested
+//!    inputs; `univariate`: none; `montecarlo`: the share of `nresample` permutations of the
+//!    response whose statistic reaches the observed one, unadjusted.
+//! 4. **Selection and stopping.** The input with the smallest adjusted p-value (the larger
+//!    statistic, then the first, on ties). The node is a leaf when no adjusted p-value is below
+//!    `1 - mincriterion`, when it has fewer than `minsplit` rows, or at `maxdepth`.
+//! 5. **Node minimum.** Each child keeps at least `max(minbucket, ceil(0.01 n))` rows.
+//! 6. **Split point.** The observed value `u` of the selected input (left: `x <= u`) that
+//!    maximises the two-sample statistic of `I(x <= u)`: the variance-reduction cut for a
+//!    regression, Pearson's X^2 for a classification; the first cut on ties. When the selected
+//!    input has no admissible cut, the next significant input is tried (partykit's
+//!    `splittry = 2`).
+//! 7. **Leaves.** The mean (regression) or the most frequent class, the first on ties.
+//!
+//! The task comes from the target: a numeric target is a regression unless
+//! `classification = Some(true)`. Variable importance is the sum of `1 - adjusted p` over the
+//! splits on each input, not partykit's permutation `varimp`.
 //!
 //! ## Example
 //!
@@ -49,6 +62,9 @@
 //!   <https://cran.r-project.org/package=partykit>
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis, s};
+use rand::SeedableRng;
+use rand::seq::SliceRandom;
+use rand_chacha::ChaCha8Rng;
 use serde::{Deserialize, Serialize};
 
 use super::extract::class_labels_line;
@@ -69,9 +85,12 @@ use crate::traits::estimator::{chi_squared_p_value, normal_p_value_two_sided};
 ///   because node ids are `2^depth`); 0 means that limit. Default is 0.
 /// - `teststat`: Type of test statistic: "quadratic" (chi-squared; also "quad") or "maximum"
 ///   (also "max"; regression trees only). Default is "quadratic".
-/// - `testtype`: P-value computation method: "bonferroni", or "univariate" (also "none").
-///   Default is "bonferroni".
-/// - `seed`: Random seed for reproducibility (used in permutation tests if enabled).
+/// - `testtype`: P-value computation method: "bonferroni" (partykit's adjustment,
+///   `1 - (1 - p)^m`), "univariate" (also "none"), or "montecarlo" (permutation p-values from
+///   `nresample` permutations, unadjusted). Default is "bonferroni".
+/// - `seed`: Random seed of the Monte Carlo permutations (42 when `None`).
+/// - `classification`: whether the target's distinct values are classes (default: regression).
+/// - `nresample`: permutations per Monte Carlo test. Default is 9999 (partykit's).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CtreeConfig {
     /// 1 - alpha threshold for splitting (e.g., 0.95 means p < 0.05)
@@ -84,10 +103,23 @@ pub struct CtreeConfig {
     pub maxdepth: usize,
     /// Test statistic type: "quadratic" (also "quad") or "maximum" (also "max"; regression trees only)
     pub teststat: String,
-    /// P-value adjustment: "bonferroni", or "univariate" (also "none")
+    /// P-values: "bonferroni", "univariate" (also "none") or "montecarlo"
     pub testtype: String,
     /// Random seed for reproducibility
     pub seed: Option<u64>,
+    /// Whether the target's distinct values are classes (R: `factor(y)`). [`ctree`] fits a
+    /// regression tree for `None` and `Some(false)`; [`run_ctree`] sets `Some(true)` for a
+    /// text, categorical or boolean target.
+    #[serde(default)]
+    pub classification: Option<bool>,
+    /// Permutations per test for `testtype = "montecarlo"` (partykit's `nresample`). Default 9999.
+    #[serde(default = "default_nresample")]
+    pub nresample: usize,
+}
+
+/// partykit's default `nresample`.
+fn default_nresample() -> usize {
+    9999
 }
 
 impl Default for CtreeConfig {
@@ -100,6 +132,8 @@ impl Default for CtreeConfig {
             teststat: "quadratic".to_string(),
             testtype: "bonferroni".to_string(),
             seed: None,
+            classification: None,
+            nresample: default_nresample(),
         }
     }
 }
@@ -128,11 +162,14 @@ crate::option_enum!(
 /// The p-value adjustment of the variable selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum CtreeTestType {
-    /// Multiply each p-value by the number of variables.
+    /// partykit's Bonferroni adjustment, `1 - (1 - p)^m` over the m tested inputs.
     #[default]
     Bonferroni,
     /// No adjustment.
     Univariate,
+    /// Monte Carlo permutation p-values (`nresample` permutations), unadjusted as partykit
+    /// leaves them for this test type.
+    MonteCarlo,
 }
 
 crate::option_enum!(
@@ -142,6 +179,7 @@ crate::option_enum!(
         values: &[
             (&["bonferroni"], CtreeTestType::Bonferroni),
             (&["univariate", "none"], CtreeTestType::Univariate),
+            (&["montecarlo"], CtreeTestType::MonteCarlo),
         ],
     }
 );
@@ -151,6 +189,10 @@ crate::option_enum!(
 struct CtreeOptions {
     teststat: CtreeTestStat,
     testtype: CtreeTestType,
+    /// Permutations per Monte Carlo test.
+    nresample: usize,
+    /// The seed of the Monte Carlo permutations (42 when the config has none).
+    seed: u64,
 }
 
 /// A split in the conditional inference tree.
@@ -199,8 +241,16 @@ pub struct CtreeResult {
     /// Sum over the splits on the variable of 1 - (adjusted) p-value; not partykit's permutation
     /// `varimp`.
     pub variable_importance: Vec<f64>,
-    /// P-values for each variable at the root (global test)
+    /// The test statistic of each input at the root (NaN: not tested, the input or the
+    /// response is constant there). Computed also when the root is not split.
+    #[serde(default)]
+    pub root_statistics: Vec<f64>,
+    /// The unadjusted p-value of each input at the root (NaN: not tested).
     pub root_p_values: Vec<f64>,
+    /// The adjusted p-value of each input at the root, the value the split decision compares with
+    /// `1 - mincriterion` (NaN: not tested).
+    #[serde(default)]
+    pub root_p_values_adjusted: Vec<f64>,
     /// Whether the model is for classification
     pub is_classification: bool,
     /// Number of classes (for classification)
@@ -288,345 +338,400 @@ impl std::fmt::Display for CtreeResult {
                 Some(names) => names.get(i).cloned().unwrap_or_else(|| format!("X{}", i)),
                 None => format!("X{}", i),
             };
-            writeln!(f, "  {}: p-value = {:.4}", name, p)?;
+            let stat = self.root_statistics.get(i).copied().unwrap_or(f64::NAN);
+            let adjusted = self
+                .root_p_values_adjusted
+                .get(i)
+                .copied()
+                .unwrap_or(f64::NAN);
+            if p.is_nan() {
+                writeln!(
+                    f,
+                    "  {}: not tested (input or response constant in the node)",
+                    name
+                )?;
+            } else {
+                writeln!(
+                    f,
+                    "  {}: statistic = {:.4}, p-value = {}, adjusted = {}",
+                    name,
+                    stat,
+                    format_p(p),
+                    format_p(adjusted)
+                )?;
+            }
         }
 
         Ok(())
     }
 }
 
-/// Mid-ranks of `values` (1-based; tied values share the average of their ranks).
-///
-/// Values within 1e-10 of the first value of a tie group join that group.
-/// Non-finite values are refused: they cannot be ranked against the others.
-fn midranks(values: &[f64]) -> EconResult<Vec<f64>> {
-    if values.iter().any(|v| !v.is_finite()) {
-        return Err(EconError::InvalidSpecification {
-            message:
-                "ctree needs finite feature values; found a non-finite value (NaN or infinite)"
-                    .to_string(),
-        });
+/// A p-value with 4 decimals, or in scientific notation below 1e-4.
+fn format_p(p: f64) -> String {
+    if p < 1e-4 {
+        format!("{p:.3e}")
+    } else {
+        format!("{p:.4}")
     }
-    let n = values.len();
-    let mut x_ranked: Vec<(f64, usize)> = values.iter().enumerate().map(|(i, &v)| (v, i)).collect();
-    x_ranked.sort_by(|a, b| a.0.total_cmp(&b.0));
-
-    let mut ranks = vec![0.0; n];
-    let mut rank = 1.0;
-    let mut i = 0;
-    while i < n {
-        // The group always holds x_ranked[i], so the scan always advances.
-        let mut j = i + 1;
-        while j < n && (x_ranked[j].0 - x_ranked[i].0).abs() < 1e-10 {
-            j += 1;
-        }
-        // Average rank for ties
-        let avg_rank = (rank + rank + (j - i - 1) as f64) / 2.0;
-        for k in i..j {
-            ranks[x_ranked[k].1] = avg_rank;
-        }
-        rank += (j - i) as f64;
-        i = j;
-    }
-    Ok(ranks)
 }
 
-/// Compute the linear test statistic for a single variable.
+/// partykit's tolerance below which an input is not tested (`ctree_control(tol = sqrt(eps))`).
 ///
-/// Uses the framework of Strasser & Weber (1999):
-/// T_j = sum_i h(X_{ij}) * g(Y_i)
+/// An input is untestable when every diagonal entry of the conditional covariance of its linear
+/// statistic is below this absolute tolerance; it then gets statistic and p-value NaN and does not
+/// count in the Bonferroni adjustment. The tolerance is absolute, as in partykit, so it depends on
+/// the scale of the data.
+const UNTESTABLE_TOL: f64 = 1.4901161193847656e-8;
+
+/// The response of one node as the conditional linear statistic of partykit sees it (Strasser and
+/// Weber 1999, with the identity transform for a numeric input and a numeric response, and class
+/// indicators for a categorical response).
 ///
-/// For regression: g(Y) = Y (influence function)
-/// For classification: g(Y) = indicator vector
-///
-/// The standardized statistic follows asymptotic normal/chi-squared distribution.
-fn compute_test_statistic(
-    x_feature: &[f64],
-    y: &ArrayView1<f64>,
-    is_classification: bool,
-    classes: Option<&[f64]>,
+/// For an input x of the node's rows, with `Sxx` the centred sum of squares of x:
+/// - regression: `c = (n - 1) Sxy^2 / (Sxx Syy)`, chi-squared with 1 df (`maximum`: `|z|` with
+///   `z = Sxy / sqrt(Syy Sxx / (n - 1))`, two-sided normal);
+/// - classification: `c = (n - 1) SSB / Sxx` with `SSB = sum_k n_k (xbar_k - xbar)^2`, chi-squared
+///   with (classes present in the node) - 1 df. This is the quadratic form `d' V^+ d` of the
+///   multinomial conditional covariance in closed form.
+pub(crate) struct LinearTest {
+    n: usize,
+    /// Regression: the node's responses minus their mean, in node order.
+    dy: Vec<f64>,
+    syy: f64,
+    /// Classification: the dense class of each node row, in node order, and the class counts.
+    class: Vec<usize>,
+    counts: Vec<usize>,
     teststat: CtreeTestStat,
-) -> EconResult<(f64, f64)> {
-    let n = x_feature.len();
-    if n < 2 {
-        return Ok((0.0, 1.0));
-    }
+}
 
-    // Compute ranks of X (to handle ordinal nature uniformly)
-    let ranks = midranks(x_feature)?;
+/// One input's centred values in node order and their sum of squares.
+pub(crate) struct CentredInput {
+    dx: Vec<f64>,
+    sxx: f64,
+}
 
-    if is_classification && classes.is_some() {
-        let cls = classes.unwrap();
-        let n_classes = cls.len();
-
-        // For classification, compute linear statistic for each class
-        // T_k = sum_i rank(X_i) * I(Y_i = class_k)
-        let mut t_vec = vec![0.0; n_classes];
-        let mut class_counts = vec![0usize; n_classes];
-
-        for i in 0..n {
-            if let Some(k) = cls.iter().position(|&c| (c - y[i]).abs() < 1e-10) {
-                t_vec[k] += ranks[i];
-                class_counts[k] += 1;
-            }
+impl CentredInput {
+    pub(crate) fn new(values: impl Iterator<Item = f64>) -> Self {
+        let mut dx: Vec<f64> = values.collect();
+        let mean = dx.iter().sum::<f64>() / dx.len().max(1) as f64;
+        let mut sxx = 0.0;
+        for v in &mut dx {
+            *v -= mean;
+            sxx += *v * *v;
         }
-
-        // Expected value: E[T_k] = n_k * (n+1)/2
-        let expected: Vec<f64> = class_counts
-            .iter()
-            .map(|&c| c as f64 * (n as f64 + 1.0) / 2.0)
-            .collect();
-
-        // Variance: Var(T_k) = n_k * (n - n_k) * (n+1) / 12
-        let variance: Vec<f64> = class_counts
-            .iter()
-            .map(|&c| c as f64 * (n - c) as f64 * (n as f64 + 1.0) / 12.0)
-            .collect();
-
-        // Compute quadratic form statistic: chi-squared
-        let mut chi_sq = 0.0;
-        for k in 0..n_classes {
-            if variance[k] > 1e-10 {
-                chi_sq += (t_vec[k] - expected[k]).powi(2) / variance[k];
-            }
-        }
-
-        // P-value from chi-squared distribution
-        let df = (n_classes - 1).max(1) as f64;
-        let p_value = if chi_sq.is_finite() && chi_sq >= 0.0 {
-            chi_squared_p_value(chi_sq, df)
-        } else {
-            1.0
-        };
-
-        Ok((chi_sq, p_value))
-    } else {
-        // Regression: compute correlation-based statistic
-        // T = sum_i rank(X_i) * Y_i
-        let mean_rank = (n as f64 + 1.0) / 2.0;
-        let mean_y = y.mean().unwrap_or(0.0);
-
-        let mut cov = 0.0;
-        let mut var_rank = 0.0;
-        let mut var_y = 0.0;
-
-        for i in 0..n {
-            let dr = ranks[i] - mean_rank;
-            let dy = y[i] - mean_y;
-            cov += dr * dy;
-            var_rank += dr * dr;
-            var_y += dy * dy;
-        }
-
-        // Standardized statistic
-        let denom = (var_rank * var_y).sqrt();
-        let z = if denom > 1e-10 {
-            cov / denom * (n as f64 - 1.0).sqrt()
-        } else {
-            0.0
-        };
-
-        let statistic = match teststat {
-            CtreeTestStat::Maximum => z.abs(),
-            CtreeTestStat::Quadratic => z * z,
-        };
-
-        // P-value
-        let p_value = if teststat == CtreeTestStat::Maximum {
-            // Two-sided normal
-            normal_p_value_two_sided(z)
-        } else {
-            // Chi-squared with df=1
-            if statistic.is_finite() && statistic >= 0.0 {
-                chi_squared_p_value(statistic, 1.0)
-            } else {
-                1.0
-            }
-        };
-
-        Ok((statistic, p_value))
+        CentredInput { dx, sxx }
     }
 }
 
-/// Select the best variable based on p-values with optional Bonferroni correction.
-fn select_best_variable(
+impl LinearTest {
+    /// The test of a node over `indices` of the response.
+    pub(crate) fn new(response: &Response<'_>, indices: &[usize], teststat: CtreeTestStat) -> Self {
+        let n = indices.len();
+        match response {
+            Response::Regression(y) => {
+                let mean = indices.iter().map(|&i| y[i]).sum::<f64>() / n.max(1) as f64;
+                let dy: Vec<f64> = indices.iter().map(|&i| y[i] - mean).collect();
+                let syy = dy.iter().map(|d| d * d).sum();
+                LinearTest {
+                    n,
+                    dy,
+                    syy,
+                    class: Vec::new(),
+                    counts: Vec::new(),
+                    teststat,
+                }
+            }
+            Response::Classes { class, k } => {
+                let node_class: Vec<usize> = indices.iter().map(|&i| class[i]).collect();
+                let mut counts = vec![0usize; *k];
+                for &c in &node_class {
+                    counts[c] += 1;
+                }
+                LinearTest {
+                    n,
+                    dy: Vec::new(),
+                    syy: 0.0,
+                    class: node_class,
+                    counts,
+                    teststat,
+                }
+            }
+        }
+    }
+
+    fn is_classification(&self) -> bool {
+        !self.counts.is_empty()
+    }
+
+    /// Whether some diagonal entry of Var(T) reaches [`UNTESTABLE_TOL`] (partykit tests the input).
+    fn testable(&self, input: &CentredInput) -> bool {
+        if self.n < 2 {
+            return false;
+        }
+        let nm1 = (self.n - 1) as f64;
+        if self.is_classification() {
+            let n = self.n as f64;
+            self.counts.iter().any(|&c| {
+                let c = c as f64;
+                c * (n - c) / n * input.sxx / nm1 >= UNTESTABLE_TOL
+            })
+        } else {
+            self.syy * input.sxx / nm1 >= UNTESTABLE_TOL
+        }
+    }
+
+    /// A zeroed per-class buffer for [`LinearTest::statistic`] (empty for regression), allocated once
+    /// per node and reused by every evaluation there.
+    fn scratch(&self) -> Vec<f64> {
+        vec![0.0; self.counts.len()]
+    }
+
+    /// The statistic of `input` against the responses in the order `perm` gives (the node order when
+    /// `perm` is `None`). The caller has checked [`LinearTest::testable`]; `sums` is the buffer of
+    /// [`LinearTest::scratch`], overwritten here.
+    fn statistic(&self, input: &CentredInput, perm: Option<&[usize]>, sums: &mut [f64]) -> f64 {
+        let nm1 = (self.n - 1) as f64;
+        let at = |i: usize| perm.map_or(i, |p| p[i]);
+        if self.is_classification() {
+            sums.fill(0.0);
+            for (i, &d) in input.dx.iter().enumerate() {
+                sums[self.class[at(i)]] += d;
+            }
+            let ssb: f64 = sums
+                .iter()
+                .zip(&self.counts)
+                .filter(|&(_, &c)| c > 0)
+                .map(|(s, &c)| s * s / c as f64)
+                .sum();
+            nm1 * ssb / input.sxx
+        } else {
+            let sxy: f64 = input
+                .dx
+                .iter()
+                .enumerate()
+                .map(|(i, &d)| d * self.dy[at(i)])
+                .sum();
+            let var = self.syy * input.sxx / nm1;
+            match self.teststat {
+                CtreeTestStat::Quadratic => sxy * sxy / var,
+                CtreeTestStat::Maximum => sxy.abs() / var.sqrt(),
+            }
+        }
+    }
+
+    /// The asymptotic p-value of `statistic`.
+    fn p_value(&self, statistic: f64) -> f64 {
+        if self.is_classification() {
+            let present = self.counts.iter().filter(|&&c| c > 0).count();
+            chi_squared_p_value(statistic, present.saturating_sub(1).max(1) as f64)
+        } else {
+            match self.teststat {
+                CtreeTestStat::Quadratic => chi_squared_p_value(statistic, 1.0),
+                CtreeTestStat::Maximum => normal_p_value_two_sided(statistic),
+            }
+        }
+    }
+}
+
+/// The response of [`ctree`]: numeric (regression) or dense class indices 0..k (classification).
+pub(crate) enum Response<'a> {
+    Regression(ArrayView1<'a, f64>),
+    Classes { class: &'a [usize], k: usize },
+}
+
+/// The tests of every input at one node: statistic, raw p and adjusted p (NaN: not tested).
+#[derive(Debug, Clone)]
+struct NodeTests {
+    statistic: Vec<f64>,
+    p: Vec<f64>,
+    p_adjusted: Vec<f64>,
+}
+
+impl NodeTests {
+    /// The inputs whose adjusted p is below `alpha`, best first: smallest adjusted p, then the larger
+    /// statistic, then the first input (partykit's order).
+    fn significant(&self, alpha: f64) -> Vec<usize> {
+        let mut order: Vec<usize> = (0..self.p_adjusted.len())
+            .filter(|&j| self.p_adjusted[j] < alpha)
+            .collect();
+        order.sort_by(|&a, &b| {
+            self.p_adjusted[a]
+                .total_cmp(&self.p_adjusted[b])
+                .then(self.statistic[b].total_cmp(&self.statistic[a]))
+                .then(a.cmp(&b))
+        });
+        order
+    }
+}
+
+/// The variable-selection tests of the node `node_id` over `indices`, for every input.
+///
+/// "Bonferroni" is partykit's: `1 - (1 - p)^m` computed as `-expm1(m log1p(-p))`, with m the number
+/// of tested inputs. "Univariate" leaves the p-values as they are. "MonteCarlo" draws `nresample`
+/// permutations of the node's responses, one per resample shared by every input, and reports
+/// `#{b : c*_b >= c} / B`, unadjusted; resample b's permutation is seeded from (seed, node, b).
+fn node_tests(
     x: &ArrayView2<f64>,
-    y: &ArrayView1<f64>,
+    response: &Response<'_>,
     indices: &[usize],
-    is_classification: bool,
-    classes: Option<&[f64]>,
-    config: &CtreeConfig,
     options: CtreeOptions,
-) -> EconResult<Option<(usize, f64, f64, Vec<f64>)>> {
-    let n_features = x.ncols();
-
-    // Extract subset for indices
-    let y_subset: Array1<f64> = indices.iter().map(|&i| y[i]).collect();
-
-    // Compute test statistic for each variable
-    let mut results: Vec<(usize, f64, f64)> = Vec::with_capacity(n_features);
-
-    for j in 0..n_features {
-        let x_subset: Vec<f64> = indices.iter().map(|&i| x[[i, j]]).collect();
-        let (stat, pval) = compute_test_statistic(
-            &x_subset,
-            &y_subset.view(),
-            is_classification,
-            classes,
-            options.teststat,
-        )?;
-        results.push((j, stat, pval));
-    }
-
-    // Store p-values for output
-    let p_values: Vec<f64> = results.iter().map(|(_, _, p)| *p).collect();
-
-    // Apply multiple testing correction
-    let adjusted_p_values: Vec<f64> = match options.testtype {
-        CtreeTestType::Bonferroni => results
-            .iter()
-            .map(|(_, _, p)| (p * n_features as f64).min(1.0))
-            .collect(),
-        CtreeTestType::Univariate => results.iter().map(|(_, _, p)| *p).collect(),
-    };
-
-    // Find the variable with the smallest p-value
-    let mut best_idx = None;
-    let mut best_pval = f64::INFINITY;
-    let mut best_stat = 0.0;
-
-    for (j, (_, stat, _)) in results.iter().enumerate() {
-        let adj_p = adjusted_p_values[j];
-        if adj_p < best_pval {
-            best_pval = adj_p;
-            best_stat = *stat;
-            best_idx = Some(j);
+    node_id: usize,
+) -> EconResult<NodeTests> {
+    let p_inputs = x.ncols();
+    let test = LinearTest::new(response, indices, options.teststat);
+    let mut statistic = vec![f64::NAN; p_inputs];
+    let mut p = vec![f64::NAN; p_inputs];
+    let monte_carlo = options.testtype == CtreeTestType::MonteCarlo;
+    let mut tested: Vec<(usize, CentredInput)> = Vec::new();
+    let mut sums = test.scratch();
+    for j in 0..p_inputs {
+        let input = CentredInput::new(indices.iter().map(|&i| x[[i, j]]));
+        if test.testable(&input) {
+            let s = test.statistic(&input, None, &mut sums);
+            statistic[j] = s;
+            p[j] = test.p_value(s);
+            if monte_carlo {
+                tested.push((j, input));
+            }
         }
     }
-
-    // Check if best variable meets criterion
-    // mincriterion is 1 - alpha, so we need 1 - p-value > mincriterion
-    // equivalently: p-value < 1 - mincriterion
-    let alpha = 1.0 - config.mincriterion;
-    if best_pval < alpha {
-        Ok(best_idx.map(|j| (j, best_stat, best_pval, p_values)))
-    } else {
-        Ok(None)
+    if monte_carlo && !tested.is_empty() {
+        let n = indices.len();
+        let mut perm = crate::resource::try_vec(n, 0usize, "ctree Monte Carlo permutation")?;
+        let mut exceed = vec![0usize; p_inputs];
+        let budget = options.nresample;
+        for b in 0..budget {
+            crate::resource::checkpoint()?;
+            for (i, v) in perm.iter_mut().enumerate() {
+                *v = i;
+            }
+            let mut rng = ChaCha8Rng::seed_from_u64(resample_seed(options.seed, node_id, b));
+            perm.shuffle(&mut rng);
+            for (j, input) in &tested {
+                if exceeds(test.statistic(input, Some(&perm), &mut sums), statistic[*j]) {
+                    exceed[*j] += 1;
+                }
+            }
+        }
+        for (j, _) in &tested {
+            p[*j] = exceed[*j] as f64 / budget as f64;
+        }
     }
+    let m = p.iter().filter(|v| !v.is_nan()).count() as f64;
+    let p_adjusted = match options.testtype {
+        CtreeTestType::Bonferroni => p.iter().map(|&v| -(m * (-v).ln_1p()).exp_m1()).collect(),
+        CtreeTestType::Univariate | CtreeTestType::MonteCarlo => p.clone(),
+    };
+    Ok(NodeTests {
+        statistic,
+        p,
+        p_adjusted,
+    })
 }
 
-/// Find the optimal split point for a selected variable.
+/// Whether a permuted statistic counts as at least the observed one. A permutation whose statistic
+/// equals the observed one mathematically (a tied or discrete input, a within-group shuffle) can come
+/// out a few ulps lower, because its sums accumulate in another order; the comparison therefore allows
+/// a relative `sqrt(eps)`, as libcoin does.
+fn exceeds(permuted: f64, observed: f64) -> bool {
+    permuted >= observed - f64::EPSILON.sqrt() * observed.abs().max(1.0)
+}
+
+/// The seed of Monte Carlo resample `b` at node `node`: SplitMix64 finalisers over the three.
+fn resample_seed(seed: u64, node: usize, b: usize) -> u64 {
+    fn mix(mut z: u64) -> u64 {
+        z = z.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    }
+    mix(mix(mix(seed) ^ node as u64) ^ b as u64)
+}
+
+/// partykit's default `minprob`: each child of a split holds at least `ceil(n * minprob)` of
+/// the node's `n` rows (and at least `minbucket`).
+const MINPROB: f64 = 0.01;
+
+/// partykit's default `splittry`: the number of significant inputs, best first, tried for a
+/// binary split before the node becomes a leaf.
+const SPLITTRY: usize = 2;
+
+/// The least rows of a child of a node of `n` rows: `max(minbucket, ceil(n * minprob))`, and at
+/// least one (`minbucket = 0` acts as 1).
+fn node_minimum(n: usize, minbucket: usize) -> usize {
+    let by_share = (n as f64 * MINPROB).ceil() as usize;
+    minbucket.max(by_share).max(1)
+}
+
+/// The cut of `feature` that maximises partykit's two-sample quadratic statistic of `I(x <= u)`
+/// over the rows in `indices`, among the observed values u (except the largest) that leave at
+/// least `mb` rows on each side; the first in ascending order on ties.
 ///
-/// Maximizes the split statistic over all candidate positions of the sorted
-/// feature: information gain for classification, variance reduction for
-/// regression. The rows are sorted once and scanned with running class counts
-/// (classification: the statistic is bit-identical to evaluating every
-/// candidate from scratch) or running sums of the node-centred response
-/// (regression: minimising the within-child sum of squares is maximising the
-/// variance reduction, so the split is the same except at rounding-level
-/// ties). That is O(n log n) per node instead of O(n^2).
+/// - Regression: `(S_L - n_L ybar)^2 / (n_L n_R)` up to a constant factor (the between-group sum
+///   of squares, so the variance-reduction cut).
+/// - Classification: `sum_k (n_Lk - n_L p_k)^2 / p_k / (n_L n_R)` up to a constant factor
+///   (Pearson's X^2 of the 2 x K table), over the classes present.
 ///
-/// Returns the threshold and the left (`x <= threshold`) and right row
+/// The rows are sorted once and scanned with running sums (regression, centred on the node mean)
+/// or running class counts. Returns the break u (left: `x <= u`) and the left and right row
 /// indices, each in sorted order.
 fn find_best_split(
     x: &ArrayView2<f64>,
-    y: &ArrayView1<f64>,
+    response: &Response<'_>,
     indices: &[usize],
     feature: usize,
-    is_classification: bool,
-    classes: Option<&[f64]>,
-    config: &CtreeConfig,
+    mb: usize,
 ) -> Option<(f64, Vec<usize>, Vec<usize>)> {
     let n = indices.len();
-    // A child needs at least one row, so minbucket = 0 acts as 1.
-    let mb = config.minbucket.max(1);
+    let mb = mb.max(1);
     if n < mb.saturating_mul(2) {
         return None;
     }
-
-    // Sort indices by feature value
     let mut sorted: Vec<(f64, usize)> = indices.iter().map(|&i| (x[[i, feature]], i)).collect();
     sorted.sort_by(|a, b| a.0.total_cmp(&b.0));
-
-    // Candidate positions split sorted[..pos] from sorted[pos..], skipping
-    // positions between (nearly) equal values.
-    let is_candidate = |pos: usize| (sorted[pos - 1].0 - sorted[pos].0).abs() >= 1e-10;
+    let is_candidate = |pos: usize| sorted[pos - 1].0 != sorted[pos].0;
     let mut best_pos: Option<usize> = None;
+    let mut best_stat = f64::NEG_INFINITY;
 
-    match classes.filter(|_| is_classification) {
-        Some(cls) => {
-            // Information gain (reduction in entropy)
-            let k = cls.len();
-            let class_of: Vec<Option<usize>> = sorted
-                .iter()
-                .map(|&(_, i)| cls.iter().position(|&c| (c - y[i]).abs() < 1e-10))
-                .collect();
-            let mut total = vec![0usize; k];
-            for c in class_of.iter().flatten() {
-                total[*c] += 1;
-            }
-            let parent_entropy = entropy_from_counts(&total, n);
-            let n_total = n as f64;
-
-            let mut left = vec![0usize; k];
-            let mut right = vec![0usize; k];
+    match response {
+        Response::Regression(y) => {
+            let mean = indices.iter().map(|&i| y[i]).sum::<f64>() / n as f64;
+            let mut sum_left = 0.0f64;
             let mut filled = 0usize;
-            let mut best_stat = f64::NEG_INFINITY;
             for pos in mb..=n - mb {
                 while filled < pos {
-                    if let Some(c) = class_of[filled] {
-                        left[c] += 1;
-                    }
+                    sum_left += y[sorted[filled].1] - mean;
                     filled += 1;
                 }
                 if !is_candidate(pos) {
                     continue;
                 }
-                for c in 0..k {
-                    right[c] = total[c] - left[c];
-                }
-                let n_left = pos as f64;
-                let n_right = (n - pos) as f64;
-                let weighted_child = (n_left * entropy_from_counts(&left, pos)
-                    + n_right * entropy_from_counts(&right, n - pos))
-                    / n_total;
-                let stat = parent_entropy - weighted_child;
+                let stat = sum_left * sum_left / (pos as f64 * (n - pos) as f64);
                 if stat > best_stat {
                     best_stat = stat;
                     best_pos = Some(pos);
                 }
             }
         }
-        None => {
-            // Variance reduction (regression). Centring on the node mean
-            // keeps the one-pass sums accurate when |mean| >> sd.
-            let mean = sorted.iter().map(|&(_, i)| y[i]).sum::<f64>() / n as f64;
-            let (sum_all, sum_sq_all) = sorted.iter().fold((0.0f64, 0.0f64), |(s, q), &(_, i)| {
-                let d = y[i] - mean;
-                (s + d, q + d * d)
-            });
-
-            let (mut sum_left, mut sum_sq_left) = (0.0f64, 0.0f64);
+        Response::Classes { class, k } => {
+            let mut total = vec![0usize; *k];
+            for &(_, i) in &sorted {
+                total[class[i]] += 1;
+            }
+            let nf = n as f64;
+            let mut left = vec![0usize; *k];
             let mut filled = 0usize;
-            let mut best_sse = f64::INFINITY;
             for pos in mb..=n - mb {
                 while filled < pos {
-                    let d = y[sorted[filled].1] - mean;
-                    sum_left += d;
-                    sum_sq_left += d * d;
+                    left[class[sorted[filled].1]] += 1;
                     filled += 1;
                 }
                 if !is_candidate(pos) {
                     continue;
                 }
-                let n_left = pos as f64;
-                let n_right = (n - pos) as f64;
-                let sum_right = sum_all - sum_left;
-                let sum_sq_right = sum_sq_all - sum_sq_left;
-                let sse = (sum_sq_left - sum_left * sum_left / n_left).max(0.0)
-                    + (sum_sq_right - sum_right * sum_right / n_right).max(0.0);
-                if sse < best_sse {
-                    best_sse = sse;
+                let stat = pearson_split_statistic(&left, &total, pos, nf);
+                if stat > best_stat {
+                    best_stat = stat;
                     best_pos = Some(pos);
                 }
             }
@@ -634,29 +739,25 @@ fn find_best_split(
     }
 
     best_pos.map(|pos| {
-        let threshold = (sorted[pos - 1].0 + sorted[pos].0) / 2.0;
+        let threshold = sorted[pos - 1].0;
         let left_indices: Vec<usize> = sorted[..pos].iter().map(|(_, i)| *i).collect();
         let right_indices: Vec<usize> = sorted[pos..].iter().map(|(_, i)| *i).collect();
         (threshold, left_indices, right_indices)
     })
 }
 
-/// Entropy (natural log) of the class counts of a side holding `n_side` rows,
-/// summed over the classes in order. Rows that match no class count towards
-/// `n_side` only, as in the original per-candidate pass.
-fn entropy_from_counts(counts: &[usize], n_side: usize) -> f64 {
-    if n_side == 0 {
-        return 0.0;
-    }
-    let n = n_side as f64;
-    let mut entropy = 0.0;
-    for &count in counts {
-        if count > 0 {
-            let p = count as f64 / n;
-            entropy -= p * p.ln();
+/// `sum_k (n_Lk - n_L p_k)^2 / p_k / (n_L n_R)` over the classes present (`p_k = total_k / n`).
+fn pearson_split_statistic(left: &[usize], total: &[usize], n_left: usize, n: f64) -> f64 {
+    let nl = n_left as f64;
+    let mut sum = 0.0;
+    for (&l, &t) in left.iter().zip(total) {
+        if t > 0 {
+            let p = t as f64 / n;
+            let d = l as f64 - nl * p;
+            sum += d * d / p;
         }
     }
-    entropy
+    sum / (nl * (n - nl))
 }
 
 /// Deepest `maxdepth` ctree accepts (`usize::BITS - 2`, 62 on 64-bit targets).
@@ -667,180 +768,138 @@ fn entropy_from_counts(counts: &[usize], n_side: usize) -> f64 {
 /// depth. A `maxdepth` of 0 means this limit.
 const MAX_CTREE_DEPTH: usize = usize::BITS as usize - 2;
 
+/// A terminal node.
+fn ctree_leaf(id: usize, n: usize, prediction: f64, class_probs: Option<Vec<f64>>) -> CtreeNode {
+    CtreeNode {
+        id,
+        n,
+        prediction,
+        class_probs,
+        split: None,
+        left: None,
+        right: None,
+    }
+}
+
 /// Build a conditional inference tree recursively.
+///
+/// The root's tests are always computed and stored in `root_tests`, also when the root is not
+/// split (stopped by minsplit, maxdepth or no significant input).
 fn build_ctree(
     x: &ArrayView2<f64>,
     y: &ArrayView1<f64>,
+    response: &Response<'_>,
     indices: &[usize],
-    is_classification: bool,
     classes: Option<&[f64]>,
     config: &CtreeConfig,
     options: CtreeOptions,
     depth: usize,
     node_id: usize,
     importance: &mut Array1<f64>,
-) -> EconResult<(CtreeNode, Vec<f64>)> {
+    root_tests: &mut Option<NodeTests>,
+) -> EconResult<CtreeNode> {
     crate::resource::checkpoint()?;
     let n = indices.len();
 
     // Compute node prediction
-    let (prediction, class_probs) = if is_classification && classes.is_some() {
-        let cls = classes.unwrap();
-        let counts: Vec<usize> = cls
-            .iter()
-            .map(|&c| {
-                indices
-                    .iter()
-                    .filter(|&&i| (y[i] - c).abs() < 1e-10)
-                    .count()
-            })
-            .collect();
-        let total = counts.iter().sum::<usize>() as f64;
-        let probs: Vec<f64> = counts.iter().map(|&c| c as f64 / total.max(1.0)).collect();
-        let best_class_idx = counts
-            .iter()
-            .enumerate()
-            .max_by_key(|(_, c)| *c)
-            .map(|(i, _)| i)
-            .unwrap_or(0);
-        (cls[best_class_idx], Some(probs))
-    } else {
-        let sum: f64 = indices.iter().map(|&i| y[i]).sum();
-        (sum / n.max(1) as f64, None)
+    let (prediction, class_probs) = match (response, classes) {
+        (Response::Classes { class, k }, Some(cls)) => {
+            let mut counts = vec![0usize; *k];
+            for &i in indices {
+                counts[class[i]] += 1;
+            }
+            let total = counts.iter().sum::<usize>() as f64;
+            let probs: Vec<f64> = counts.iter().map(|&c| c as f64 / total.max(1.0)).collect();
+            // The first class with the largest share, as which.max.
+            let mut best_class_idx = 0;
+            for (i, &c) in counts.iter().enumerate() {
+                if c > counts[best_class_idx] {
+                    best_class_idx = i;
+                }
+            }
+            (cls[best_class_idx], Some(probs))
+        }
+        _ => {
+            let sum: f64 = indices.iter().map(|&i| y[i]).sum();
+            (sum / n.max(1) as f64, None)
+        }
     };
 
-    // Empty root p-values by default
-    let mut root_p_values = vec![1.0; x.ncols()];
-
-    // Check stopping conditions
     let max_depth = if config.maxdepth == 0 {
         MAX_CTREE_DEPTH
     } else {
         config.maxdepth
     };
-
-    if depth >= max_depth || n < config.minsplit || n <= config.minbucket.saturating_mul(2) {
-        return Ok((
-            CtreeNode {
-                id: node_id,
-                n,
-                prediction,
-                class_probs,
-                split: None,
-                left: None,
-                right: None,
-            },
-            root_p_values,
-        ));
+    let stop = depth >= max_depth || n < config.minsplit;
+    if stop && depth > 0 {
+        return Ok(ctree_leaf(node_id, n, prediction, class_probs));
     }
 
-    // Check if all y values are the same
-    let first_y = y[indices[0]];
-    if indices.iter().all(|&i| (y[i] - first_y).abs() < 1e-10) {
-        return Ok((
-            CtreeNode {
-                id: node_id,
-                n,
-                prediction,
-                class_probs,
-                split: None,
-                left: None,
-                right: None,
-            },
-            root_p_values,
-        ));
+    // Variable selection: the conditional linear statistic of every input.
+    let tests = node_tests(x, response, indices, options, node_id)?;
+    if depth == 0 {
+        *root_tests = Some(tests.clone());
     }
-
-    // Variable selection via permutation tests
-    let selection =
-        select_best_variable(x, y, indices, is_classification, classes, config, options)?;
-
-    if let Some((best_var, best_stat, best_pval, p_vals)) = selection {
-        root_p_values = p_vals;
-
-        // Find optimal split point
-        if let Some((threshold, left_indices, right_indices)) =
-            find_best_split(x, y, indices, best_var, is_classification, classes, config)
-        {
-            // Check minimum bucket size
-            if left_indices.len() < config.minbucket || right_indices.len() < config.minbucket {
-                return Ok((
-                    CtreeNode {
-                        id: node_id,
-                        n,
-                        prediction,
-                        class_probs,
-                        split: None,
-                        left: None,
-                        right: None,
-                    },
-                    root_p_values,
-                ));
-            }
-
-            // Update variable importance
-            // Using 1 - p-value as importance measure
-            importance[best_var] += 1.0 - best_pval;
-
-            // Recursively build children
-            let (left_child, _) = build_ctree(
-                x,
-                y,
-                &left_indices,
-                is_classification,
-                classes,
-                config,
-                options,
-                depth + 1,
-                node_id * 2,
-                importance,
-            )?;
-            let (right_child, _) = build_ctree(
-                x,
-                y,
-                &right_indices,
-                is_classification,
-                classes,
-                config,
-                options,
-                depth + 1,
-                node_id * 2 + 1,
-                importance,
-            )?;
-
-            return Ok((
-                CtreeNode {
-                    id: node_id,
-                    n,
-                    prediction,
-                    class_probs,
-                    split: Some(CtreeSplit {
-                        feature: best_var,
-                        threshold,
-                        statistic: best_stat,
-                        p_value: best_pval,
-                    }),
-                    left: Some(Box::new(left_child)),
-                    right: Some(Box::new(right_child)),
-                },
-                root_p_values,
-            ));
-        }
+    if stop {
+        return Ok(ctree_leaf(node_id, n, prediction, class_probs));
     }
+    // The most significant input with an admissible cut, among the first SPLITTRY.
+    let alpha = 1.0 - config.mincriterion;
+    let mb = node_minimum(n, config.minbucket);
+    let Some((best_var, (threshold, left_indices, right_indices))) = tests
+        .significant(alpha)
+        .into_iter()
+        .take(SPLITTRY)
+        .find_map(|j| find_best_split(x, response, indices, j, mb).map(|split| (j, split)))
+    else {
+        return Ok(ctree_leaf(node_id, n, prediction, class_probs));
+    };
+    let (best_stat, best_pval) = (tests.statistic[best_var], tests.p_adjusted[best_var]);
 
-    // No valid split found
-    Ok((
-        CtreeNode {
-            id: node_id,
-            n,
-            prediction,
-            class_probs,
-            split: None,
-            left: None,
-            right: None,
-        },
-        root_p_values,
-    ))
+    // Variable importance: 1 - adjusted p-value of the split
+    importance[best_var] += 1.0 - best_pval;
+
+    let left_child = build_ctree(
+        x,
+        y,
+        response,
+        &left_indices,
+        classes,
+        config,
+        options,
+        depth + 1,
+        node_id * 2,
+        importance,
+        root_tests,
+    )?;
+    let right_child = build_ctree(
+        x,
+        y,
+        response,
+        &right_indices,
+        classes,
+        config,
+        options,
+        depth + 1,
+        node_id * 2 + 1,
+        importance,
+        root_tests,
+    )?;
+
+    Ok(CtreeNode {
+        id: node_id,
+        n,
+        prediction,
+        class_probs,
+        split: Some(CtreeSplit {
+            feature: best_var,
+            threshold,
+            statistic: best_stat,
+            p_value: best_pval,
+        }),
+        left: Some(Box::new(left_child)),
+        right: Some(Box::new(right_child)),
+    })
 }
 
 /// Count tree statistics recursively.
@@ -885,7 +944,8 @@ fn predict_one(node: &CtreeNode, x: &ArrayView1<f64>) -> f64 {
 /// # Arguments
 ///
 /// * `x` - Feature matrix (n_samples x n_features)
-/// * `y` - Target values (n_samples)
+/// * `y` - Target values (n_samples): a regression tree, unless `config.classification` is
+///   `Some(true)`, when the distinct values are the classes (at most `max(2, min(1000, n / 2))`)
 /// * `config` - Tree configuration
 ///
 /// # Returns
@@ -897,9 +957,11 @@ fn predict_one(node: &CtreeNode, x: &ArrayView1<f64>) -> f64 {
 /// `Computation` for fewer than 2 rows, when `x` and `y` differ in length, or
 /// when `mincriterion` is not strictly inside (0, 1), NaN included;
 /// `InvalidSpecification` for an unknown `teststat` or `testtype`, for partykit's
-/// `MonteCarlo` or `Teststatistic` test types (not implemented), for `minsplit` below
+/// `Teststatistic` test type (not implemented), for `testtype = montecarlo` with `nresample` 0,
+/// for `minsplit` below
 /// `2 * minbucket` (no node of that size can be split into two children of `minbucket` rows), for
-/// `teststat = maximum` with a classification target, when `x` or `y` holds a non-finite value or
+/// `teststat = maximum` with a classification target, for more classes than
+/// `max(2, min(1000, n / 2))`, when `x` or `y` holds a non-finite value or
 /// `maxdepth` exceeds 62 (`usize::BITS - 2` on 64-bit targets, since node ids
 /// double at each level); `Cancelled` once the installed computation budget
 /// expires (checked per node).
@@ -948,16 +1010,29 @@ pub fn ctree(
     }
     let teststat: CtreeTestStat = config.teststat.parse()?;
     let normalized_testtype = crate::options::normalize(&config.testtype);
-    if normalized_testtype == "montecarlo" || normalized_testtype == "teststatistic" {
+    if normalized_testtype == "teststatistic" {
         return Err(EconError::InvalidSpecification {
             message: format!(
-                "ctree: testtype '{}' (partykit) is not implemented; use bonferroni or univariate",
+                "ctree: testtype '{}' (partykit) is not implemented; use bonferroni, univariate \
+                 or montecarlo",
                 config.testtype
             ),
         });
     }
     let testtype: CtreeTestType = config.testtype.parse()?;
-    let options = CtreeOptions { teststat, testtype };
+    if testtype == CtreeTestType::MonteCarlo && config.nresample == 0 {
+        return Err(EconError::InvalidSpecification {
+            message: "ctree: testtype = montecarlo needs nresample (n_permutations in ml_ctree) of at least \
+                      1 permutation"
+                .to_string(),
+        });
+    }
+    let options = CtreeOptions {
+        teststat,
+        testtype,
+        nresample: config.nresample,
+        seed: config.seed.unwrap_or(42),
+    };
     if config
         .minbucket
         .checked_mul(2)
@@ -1000,9 +1075,8 @@ pub fn ctree(
         });
     }
 
-    // Determine if classification or regression
-    let unique_y: std::collections::HashSet<i64> = y.iter().map(|&v| (v * 1e10) as i64).collect();
-    let is_classification = ctree_classifies(unique_y.len(), n_samples);
+    // The task comes from the target, not from its values: classes only on request.
+    let is_classification = config.classification == Some(true);
     if teststat == CtreeTestStat::Maximum && is_classification {
         return Err(EconError::InvalidSpecification {
             message: "ctree: teststat = maximum is implemented for regression trees only (the \
@@ -1011,29 +1085,42 @@ pub fn ctree(
         });
     }
 
-    let classes: Option<Vec<f64>> = if is_classification {
-        let mut cls: Vec<f64> = unique_y.iter().map(|&v| v as f64 / 1e10).collect();
-        cls.sort_by(f64::total_cmp);
-        Some(cls)
+    let (classes, dense) = if is_classification {
+        let (labels, dense) = class_indices(&y)?;
+        (Some(labels), dense)
     } else {
-        None
+        (None, Vec::new())
     };
 
     let indices: Vec<usize> = (0..n_samples).collect();
     let mut importance = Array1::zeros(n_features);
 
-    let (root, root_p_values) = build_ctree(
+    let response = match &classes {
+        Some(cls) => Response::Classes {
+            class: &dense,
+            k: cls.len(),
+        },
+        None => Response::Regression(y.view()),
+    };
+    let mut root_tests = None;
+    let root = build_ctree(
         &x,
         &y,
+        &response,
         &indices,
-        is_classification,
         classes.as_deref(),
         config,
         options,
         0,
         1,
         &mut importance,
+        &mut root_tests,
     )?;
+    let root_tests = root_tests.unwrap_or_else(|| NodeTests {
+        statistic: vec![f64::NAN; n_features],
+        p: vec![f64::NAN; n_features],
+        p_adjusted: vec![f64::NAN; n_features],
+    });
 
     let (n_nodes, n_terminal, depth) = count_tree_stats(&root);
 
@@ -1048,7 +1135,9 @@ pub fn ctree(
         n_terminal,
         depth,
         variable_importance: importance.to_vec(),
-        root_p_values,
+        root_statistics: root_tests.statistic,
+        root_p_values: root_tests.p,
+        root_p_values_adjusted: root_tests.p_adjusted,
         is_classification,
         n_classes: classes.as_ref().map(|c| c.len()),
         class_labels: classes,
@@ -1059,10 +1148,40 @@ pub fn ctree(
     })
 }
 
-/// Whether [`ctree`] fits a classification tree for a target with `n_unique` distinct
-/// values in `n` rows: at most 10 classes, and fewer than n / 2, rounded down.
-fn ctree_classifies(n_unique: usize, n: usize) -> bool {
-    n_unique <= 10 && n_unique < n / 2
+/// The refusal of `k` classes in `n` rows, above the cap `max(2, min(1000, n / 2))` that C5.0 and
+/// CART use, or `None` within it.
+fn class_cap_error(k: usize, n: usize, target: &str) -> Option<EconError> {
+    let cap = super::c50::max_classes(n);
+    (k > cap).then(|| EconError::InvalidSpecification {
+        message: format!(
+            "ctree fits a classification tree for at most {cap} classes for {n} rows \
+             (max(2, min(1000, n / 2)), n / 2 rounded down ({} for {n} rows)); {target} has {k} \
+             classes. Merge rare classes, or fit a regression tree",
+            n / 2
+        ),
+    })
+}
+
+/// The distinct values of `y` as classes, in ascending order (-0.0 and 0.0 are one class), and
+/// each row's class index.
+fn class_indices(y: &ArrayView1<f64>) -> EconResult<(Vec<f64>, Vec<usize>)> {
+    let canonical = |v: f64| if v == 0.0 { 0.0 } else { v };
+    let mut labels: Vec<f64> = y.iter().map(|&v| canonical(v)).collect();
+    labels.sort_by(f64::total_cmp);
+    labels.dedup_by(|a, b| a.to_bits() == b.to_bits());
+    if let Some(e) = class_cap_error(labels.len(), y.len(), "the target") {
+        return Err(e);
+    }
+    let dense = y
+        .iter()
+        .map(|&v| {
+            let v = canonical(v);
+            labels
+                .binary_search_by(|c| c.total_cmp(&v))
+                .unwrap_or_default()
+        })
+        .collect();
+    Ok((labels, dense))
 }
 
 /// Predict using a fitted ctree.
@@ -1134,9 +1253,9 @@ fn find_terminal_node<'a>(node: &'a CtreeNode, x: &ArrayView1<f64>) -> &'a Ctree
 /// # Arguments
 ///
 /// * `dataset` - Input dataset
-/// * `y_col` - Target column: numeric (integer and decimal columns; classification when
-///   it has at most 10 distinct values and fewer than n / 2, rounded down, as in [`ctree`]),
-///   or a text, categorical or boolean column, whose labels become the class codes 0..K-1
+/// * `y_col` - Target column: numeric (integer and decimal columns; a regression tree unless
+///   `config.classification` is `Some(true)`, as in [`ctree`]), or a text, categorical or
+///   boolean column, always a classification tree, whose labels become the class codes 0..K-1
 ///   in R `factor()` order (reported in [`CtreeResult::class_names`]). A missing value
 ///   (null or NaN) in the target or a feature is an error naming the column
 ///   (`EconError::NullValues`)
@@ -1145,8 +1264,9 @@ fn find_terminal_node<'a>(node: &'a CtreeNode, x: &ArrayView1<f64>) -> &'a Ctree
 ///
 /// # Returns
 ///
-/// CtreeResult with fitted tree and diagnostics. A text target with more classes than the
-/// classification rule allows is `EconError::InvalidSpecification` (no override yet).
+/// CtreeResult with fitted tree and diagnostics. A classification target with more than
+/// `max(2, min(1000, n / 2))` classes (the cap of C5.0 and CART), or a text, categorical or
+/// boolean target with `classification = Some(false)`, is `EconError::InvalidSpecification`.
 pub fn run_ctree(
     dataset: &Dataset,
     y_col: &str,
@@ -1159,24 +1279,25 @@ pub fn run_ctree(
         x_cols,
         crate::data::columns::NaPolicy::Fail,
     )?;
-    if let Some(labels) = &target.labels
-        && !ctree_classifies(labels.len(), x.nrows())
-    {
-        return Err(EconError::InvalidSpecification {
-            message: format!(
-                "ctree fits a classification tree only for at most 10 classes and fewer \
-                 classes than n / 2 rounded down ({} for {} rows); the target '{y_col}' has {} \
-                 classes in {} rows. Merge rare classes or use C5.0",
-                x.nrows() / 2,
-                x.nrows(),
-                labels.len(),
-                x.nrows()
-            ),
-        });
+    let mut config = config.clone();
+    if let Some(labels) = &target.labels {
+        if config.classification == Some(false) {
+            return Err(EconError::InvalidSpecification {
+                message: format!(
+                    "the target '{y_col}' is a text, categorical or boolean column, so ctree fits \
+                     a classification tree; classification = false needs a numeric target"
+                ),
+            });
+        }
+        if let Some(e) = class_cap_error(labels.len(), x.nrows(), &format!("the target '{y_col}'"))
+        {
+            return Err(e);
+        }
+        config.classification = Some(true);
     }
     let feature_names: Vec<String> = x_cols.iter().map(|s| s.to_string()).collect();
 
-    let mut result = ctree(x.view(), target.y.view(), config)?;
+    let mut result = ctree(x.view(), target.y.view(), &config)?;
     result.feature_names = Some(feature_names);
     result.class_names = target.labels;
 
@@ -1204,43 +1325,547 @@ mod tests {
         p2a_validation::Tol::new(p2a_validation::Tol::p_value(n).rel, 0.0)
     }
 
+    /// The columns `names` of a case dataset as a matrix, and its column `y`.
+    /// `validation/datasets/generated/<name>.csv`, for property tests that pin no R value.
+    fn generated_dataset(name: &str) -> crate::Dataset {
+        let path = p2a_validation::repo_path(&format!("validation/datasets/generated/{name}.csv"));
+        match crate::data::DataLoader::load_csv(&path) {
+            Ok(df) => crate::Dataset::new(df),
+            Err(e) => panic!("cannot load {}: {e}", path.display()),
+        }
+    }
+
+    fn case_xy(ds: &crate::Dataset, names: &[&str], y: &str) -> (Array2<f64>, Array1<f64>) {
+        use crate::data::columns::{NaPolicy, numeric_column};
+        let col = |c: &str| Array1::from(numeric_column(ds.df(), c, NaPolicy::Fail).unwrap().0);
+        let cols: Vec<Array1<f64>> = names.iter().map(|c| col(c)).collect();
+        let views: Vec<_> = cols.iter().map(|c| c.view()).collect();
+        (ndarray::stack(Axis(1), &views).unwrap(), col(y))
+    }
+
     #[test]
     fn test_validate_ctree_root_tail_tie_break() {
-        use crate::data::columns::{NaPolicy, numeric_column};
         use p2a_validation::{Check, Tol};
         let (case, ds) = crate::test_support::load_case("tail_ctree_root");
-        let col = |c: &str| Array1::from(numeric_column(ds.df(), c, NaPolicy::Fail).unwrap().0);
-        let x = ndarray::stack![Axis(1), col("x1"), col("x2"), col("x3")];
-        let r = ctree(x.view(), col("y").view(), &CtreeConfig::default()).unwrap();
+        let (x, y) = case_xy(&ds, &["x1", "x2", "x3"], "y");
+        let r = ctree(x.view(), y.view(), &CtreeConfig::default()).unwrap();
         let split = r.root.split.as_ref().expect("root split");
         Check::new(&case)
+            .vector("statistic", &r.root_statistics, Tol::stat(300))
             .vector("p", &r.root_p_values, tail(300))
+            .vector("p_adjusted", &r.root_p_values_adjusted, tail(300))
+            .scalar("split_break", split.threshold, Tol::exact())
             .finish();
         assert_eq!(
             split.feature, 1,
             "the more significant x2 must win; both p were 0 before"
         );
-        // The chosen variable's statistic and Bonferroni p are element 1 (x2) of the 3-vectors.
-        let (z2, pb) = (case.vector("z2")[1], case.vector("p_bonferroni")[1]);
+        // The chosen variable's statistic and adjusted p are element 1 (x2) of the 3-vectors.
+        let (stat, padj) = (case.vector("statistic")[1], case.vector("p_adjusted")[1]);
         assert!(
-            Tol::stat(300).allows(split.statistic, z2),
-            "statistic {} vs R {z2}",
+            Tol::stat(300).allows(split.statistic, stat),
+            "statistic {} vs R {stat}",
             split.statistic
         );
         assert!(
-            tail(300).allows(split.p_value, pb),
-            "Bonferroni p {} vs R {pb}",
+            tail(300).allows(split.p_value, padj),
+            "adjusted p {} vs R {padj}",
             split.p_value
         );
     }
 
     #[test]
-    fn test_ctree_classifies_rule() {
-        // the rule ctree() always used: unique_y.len() <= 10 && unique_y.len() < n_samples / 2
-        // (n / 2 is integer division: 2 classes need at least 6 rows)
-        assert!(ctree_classifies(10, 22) && ctree_classifies(2, 6));
-        assert!(!ctree_classifies(11, 100) && !ctree_classifies(2, 4) && !ctree_classifies(2, 5));
-        assert!(!ctree_classifies(10, 21));
+    fn test_validate_ctree_null_root_t4() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("ctree_null_root_t4");
+        let (x, y) = case_xy(&ds, &["x1", "x2"], "y");
+        let r = ctree(x.view(), y.view(), &CtreeConfig::default()).unwrap();
+        assert!(r.root.split.is_none(), "partykit does not split this root");
+        Check::new(&case)
+            .scalar("n_nodes", r.n_nodes as f64, Tol::exact())
+            .vector("root_statistic", &r.root_statistics, Tol::stat(150))
+            .vector("root_p", &r.root_p_values, Tol::p_value(150))
+            .vector(
+                "root_p_adjusted",
+                &r.root_p_values_adjusted,
+                Tol::p_value(150),
+            )
+            .finish();
+    }
+
+    /// `n` noisy rows from a fixed LCG: one feature and a class code in 0..k that depends on it.
+    fn noisy_classes(n: usize, k: usize, seed: u64) -> (Array2<f64>, Array1<f64>) {
+        let mut s = seed;
+        let mut next = || {
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (s >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let mut x = Array2::zeros((n, 1));
+        let mut y = Array1::zeros(n);
+        for i in 0..n {
+            let class = i % k;
+            y[i] = class as f64;
+            x[[i, 0]] = class as f64 + 1.5 * next();
+        }
+        (x, y)
+    }
+
+    #[test]
+    fn test_ctree_classification_statistic_is_the_anova_quadratic_form() {
+        // partykit's quadratic statistic for a numeric input and a K-class response is
+        // (n - 1) SSB / Sxx, the between-class sum of squares of x over its total (computed here naively).
+        let (x, y) = noisy_classes(40, 3, 7);
+        let r = ctree(x.view(), y.view(), &classification_config()).unwrap();
+        let split = r.root.split.as_ref().expect("the classes differ in x");
+        let n = 40.0;
+        let xs: Vec<f64> = x.column(0).to_vec();
+        let mean = xs.iter().sum::<f64>() / n;
+        let sxx: f64 = xs.iter().map(|v| (v - mean).powi(2)).sum();
+        let mut ssb = 0.0;
+        for k in 0..3 {
+            let members: Vec<f64> = (0..40)
+                .filter(|&i| y[i] == k as f64)
+                .map(|i| xs[i])
+                .collect();
+            let mk = members.iter().sum::<f64>() / members.len() as f64;
+            ssb += members.len() as f64 * (mk - mean).powi(2);
+        }
+        let expected = (n - 1.0) * ssb / sxx;
+        assert!(
+            (split.statistic - expected).abs() <= 1e-10 * expected,
+            "statistic {} vs (n - 1) SSB / Sxx = {expected}",
+            split.statistic
+        );
+    }
+
+    #[test]
+    fn test_ctree_null_root_split_rate() {
+        // ML-26. A binary response independent of one input: at mincriterion 0.95 the root may split in about 5%
+        // of the samples. The sum of the per-class rank statistics referred to chi2(K - 1) split 18% of them.
+        let reps = 400;
+        let mut splits = 0;
+        for rep in 0..reps {
+            let mut s = 0x9e37_79b9_7f4a_7c15u64 ^ rep as u64;
+            let mut next = || {
+                s = s
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                (s >> 11) as f64 / (1u64 << 53) as f64
+            };
+            let x = Array2::from_shape_fn((100, 1), |_| next());
+            let y = Array1::from_shape_fn(100, |_| if next() < 0.5 { 0.0 } else { 1.0 });
+            let cfg = CtreeConfig {
+                testtype: "univariate".into(),
+                ..classification_config()
+            };
+            if ctree(x.view(), y.view(), &cfg)
+                .unwrap()
+                .root
+                .split
+                .is_some()
+            {
+                splits += 1;
+            }
+        }
+        let rate = splits as f64 / reps as f64;
+        assert!(rate <= 0.08, "null root split rate {rate}");
+    }
+
+    #[test]
+    fn test_ctree_constant_input_is_not_tested() {
+        // partykit: an input whose Var(T) is below sqrt(eps) gets no test and does not count in the adjustment.
+        let (x1, y) = noisy_regression(60, 1, 3);
+        let mut x = Array2::from_elem((60, 2), 4.0);
+        x.column_mut(1).assign(&x1.column(0));
+        let r = ctree(x.view(), y.view(), &CtreeConfig::default()).unwrap();
+        assert!(r.root_p_values[0].is_nan(), "{:?}", r.root_p_values);
+        let split = r.root.split.as_ref().expect("x is strong");
+        assert_eq!(split.feature, 1);
+        // m = 1: the adjusted p is the raw p.
+        assert_eq!(split.p_value.to_bits(), r.root_p_values[1].to_bits());
+    }
+
+    /// The nodes of `root` in preorder (partykit's node numbering).
+    fn preorder(root: &CtreeNode) -> Vec<&CtreeNode> {
+        let (mut out, mut stack) = (Vec::new(), vec![root]);
+        while let Some(node) = stack.pop() {
+            out.push(node);
+            if let (Some(l), Some(r)) = (&node.left, &node.right) {
+                stack.push(r);
+                stack.push(l);
+            }
+        }
+        out
+    }
+
+    /// The per-node quantities of the `ml_trees_t4` cases, in preorder.
+    struct TreeValues {
+        node_n: Vec<f64>,
+        split_var: Vec<f64>,
+        split_break: Vec<f64>,
+        split_statistic: Vec<f64>,
+        split_p_adjusted: Vec<f64>,
+        terminal_prediction: Vec<f64>,
+        terminal_class_prob: Vec<f64>,
+    }
+
+    fn tree_values(r: &CtreeResult) -> TreeValues {
+        let mut v = TreeValues {
+            node_n: Vec::new(),
+            split_var: Vec::new(),
+            split_break: Vec::new(),
+            split_statistic: Vec::new(),
+            split_p_adjusted: Vec::new(),
+            terminal_prediction: Vec::new(),
+            terminal_class_prob: Vec::new(),
+        };
+        for node in preorder(&r.root) {
+            v.node_n.push(node.n as f64);
+            match &node.split {
+                Some(s) => {
+                    v.split_var.push(s.feature as f64);
+                    v.split_break.push(s.threshold);
+                    v.split_statistic.push(s.statistic);
+                    v.split_p_adjusted.push(s.p_value);
+                }
+                None => {
+                    v.terminal_prediction.push(node.prediction);
+                    if let Some(p) = &node.class_probs {
+                        v.terminal_class_prob.extend(p);
+                    }
+                }
+            }
+        }
+        v
+    }
+
+    #[test]
+    fn test_validate_ctree_regression_tree_t4() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("ctree_reg_t4");
+        let (x, y) = case_xy(&ds, &["x1", "x2", "x3"], "y");
+        let r = ctree(x.view(), y.view(), &CtreeConfig::default()).unwrap();
+        let v = tree_values(&r);
+        Check::new(&case)
+            .scalar("n_nodes", r.n_nodes as f64, Tol::exact())
+            .scalar("n_terminal", r.n_terminal as f64, Tol::exact())
+            .scalar("depth", r.depth as f64, Tol::exact())
+            .vector("node_n", &v.node_n, Tol::exact())
+            .vector("split_var", &v.split_var, Tol::exact())
+            .vector("split_break", &v.split_break, Tol::exact())
+            .vector("split_statistic", &v.split_statistic, Tol::stat(200))
+            .vector("split_p_adjusted", &v.split_p_adjusted, tail(200))
+            .vector(
+                "terminal_prediction",
+                &v.terminal_prediction,
+                Tol::coef(200),
+            )
+            .vector("root_statistic", &r.root_statistics, Tol::stat(200))
+            .vector("root_p", &r.root_p_values, tail(200))
+            .vector("root_p_adjusted", &r.root_p_values_adjusted, tail(200))
+            .vector("fitted", &r.predictions, Tol::coef(200))
+            .finish();
+    }
+
+    #[test]
+    fn test_validate_ctree_classification_tree_t4() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("ctree_cls_t4");
+        let r = run_ctree(&ds, "cls", &["x1", "x2", "x3"], &CtreeConfig::default()).unwrap();
+        assert!(r.is_classification);
+        assert_eq!(
+            r.class_names.as_deref(),
+            Some(&["a".to_string(), "b".into(), "c".into()][..])
+        );
+        let v = tree_values(&r);
+        Check::new(&case)
+            .scalar("n_nodes", r.n_nodes as f64, Tol::exact())
+            .scalar("n_terminal", r.n_terminal as f64, Tol::exact())
+            .scalar("depth", r.depth as f64, Tol::exact())
+            .vector("node_n", &v.node_n, Tol::exact())
+            .vector("split_var", &v.split_var, Tol::exact())
+            .vector("split_break", &v.split_break, Tol::exact())
+            .vector("split_statistic", &v.split_statistic, Tol::stat(240))
+            .vector("split_p_adjusted", &v.split_p_adjusted, tail(240))
+            .vector("terminal_prediction", &v.terminal_prediction, Tol::exact())
+            .vector(
+                "terminal_class_prob",
+                &v.terminal_class_prob,
+                Tol::coef(240),
+            )
+            .vector("root_statistic", &r.root_statistics, Tol::stat(240))
+            .vector("root_p", &r.root_p_values, tail(240))
+            .vector("root_p_adjusted", &r.root_p_values_adjusted, tail(240))
+            .vector("fitted_class", &r.predictions, Tol::exact())
+            .finish();
+    }
+
+    #[test]
+    fn test_ctree_splits_a_node_of_twice_minbucket() {
+        // partykit splits a node of exactly 2 x minbucket rows (one admissible cut).
+        let x = Array2::from_shape_fn((14, 1), |(i, _)| (i + 1) as f64);
+        let y = Array1::from_shape_fn(14, |i| {
+            (if i < 7 { 1.0 } else { 6.0 }) + 0.1 * ((i * 7 % 5) as f64 - 2.0)
+        });
+        let cfg = CtreeConfig {
+            minsplit: 14,
+            minbucket: 7,
+            ..Default::default()
+        };
+        let r = ctree(x.view(), y.view(), &cfg).unwrap();
+        let split = r
+            .root
+            .split
+            .as_ref()
+            .expect("a node of 2 x minbucket rows splits");
+        assert_eq!(split.threshold, 7.0);
+        assert_eq!(
+            (
+                r.root.left.as_ref().unwrap().n,
+                r.root.right.as_ref().unwrap().n
+            ),
+            (7, 7)
+        );
+    }
+
+    #[test]
+    fn test_ctree_minprob_raises_the_node_minimum() {
+        // partykit's minprob = 0.01: a child of a node of 1,000 rows holds at least 10 rows. An outlier
+        // at the largest x makes the best cut of the root isolate it; with minbucket 1 alone that
+        // child had 1 row.
+        let (x, mut y) = noisy_regression(1000, 1, 11);
+        let top = (0..1000)
+            .max_by(|&a, &b| x[[a, 0]].total_cmp(&x[[b, 0]]))
+            .unwrap();
+        y[top] += 500.0;
+        let cfg = CtreeConfig {
+            minsplit: 2,
+            minbucket: 1,
+            ..Default::default()
+        };
+        let r = ctree(x.view(), y.view(), &cfg).unwrap();
+        assert!(r.root.split.is_some());
+        for node in preorder(&r.root) {
+            if let (Some(a), Some(b)) = (&node.left, &node.right) {
+                let mb = (node.n as f64 * 0.01).ceil() as usize;
+                assert!(
+                    a.n >= mb && b.n >= mb,
+                    "node of {}: {} | {}",
+                    node.n,
+                    a.n,
+                    b.n
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_ctree_class_ties_take_the_first_class() {
+        // which.max: a 3-3 leaf predicts the first class.
+        let x = Array2::from_shape_fn((6, 1), |(i, _)| i as f64);
+        let y = Array1::from_vec(vec![1.0, 0.0, 1.0, 0.0, 1.0, 0.0]);
+        let r = ctree(x.view(), y.view(), &classification_config()).unwrap();
+        assert!(r.root.split.is_none());
+        assert_eq!(r.root.prediction, 0.0);
+    }
+
+    #[test]
+    fn test_ctree_numeric_target_is_regression() {
+        // ML-87 (decision D5: the task comes from the target's type, as partykit). A numeric target
+        // with ten integer values was a classification tree.
+        let (x, y) = noisy_regression(200, 2, 4);
+        let y = y.mapv(|v| (v.clamp(-4.0, 13.0) / 2.0).round() + 2.0); // 0..=9
+        let r = ctree(x.view(), y.view(), &CtreeConfig::default()).unwrap();
+        assert!(!r.is_classification);
+        assert!(r.root.class_probs.is_none());
+        let mean = y.sum() / 200.0;
+        assert!((r.root.prediction - mean).abs() < 1e-12 * mean.abs());
+    }
+
+    #[test]
+    fn test_ctree_large_values_are_regression() {
+        // ML-29. `(v * 1e10) as i64` saturates above about 9.2e8, so every value of y in [1e9, 2e9]
+        // fell into one "class": a single node predicting 922337203.685.
+        let (x, y) = noisy_regression(200, 2, 9);
+        let y = y.mapv(|v| 1.5e9 + 2.0e7 * v);
+        let r = ctree(x.view(), y.view(), &CtreeConfig::default()).unwrap();
+        assert!(!r.is_classification);
+        assert!(r.n_nodes > 1, "a single node");
+        let (lo, hi) = (
+            y.iter().cloned().fold(f64::INFINITY, f64::min),
+            y.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
+        );
+        assert!(r.predictions.iter().all(|&p| p >= lo && p <= hi));
+    }
+
+    #[test]
+    fn test_ctree_classification_on_request() {
+        // Numeric codes with classification = true fit the tree of the same classes as text.
+        let ds = generated_dataset("ctree_cls_t4");
+        let text = run_ctree(&ds, "cls", &["x1", "x2", "x3"], &CtreeConfig::default()).unwrap();
+        let (x, code) = case_xy(&ds, &["x1", "x2", "x3"], "code");
+        let codes = ctree(x.view(), code.view(), &classification_config()).unwrap();
+        assert!(codes.is_classification);
+        let sig = |r: &CtreeResult| {
+            preorder(&r.root)
+                .iter()
+                .map(|n| {
+                    (
+                        n.n,
+                        n.split.as_ref().map(|s| (s.feature, s.threshold.to_bits())),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(sig(&codes), sig(&text));
+        assert_eq!(codes.predictions, text.predictions);
+        // A text target cannot be a regression.
+        let cfg = CtreeConfig {
+            classification: Some(false),
+            ..Default::default()
+        };
+        let e = run_ctree(&ds, "cls", &["x1", "x2", "x3"], &cfg)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("text, categorical or boolean"), "{e}");
+    }
+
+    #[test]
+    fn test_ctree_class_cap() {
+        // The C5.0 and CART cap max(2, min(1000, n / 2)): 15 classes in 30 rows fit, 16 do not.
+        let x = Array2::from_shape_fn((30, 1), |(i, _)| i as f64);
+        let fit = |k: usize| {
+            let y = Array1::from_shape_fn(30, |i| (i % k) as f64);
+            ctree(x.view(), y.view(), &classification_config())
+        };
+        assert!(fit(15).is_ok());
+        let e = fit(16).unwrap_err().to_string();
+        assert!(e.contains("at most 15 classes"), "{e}");
+    }
+
+    /// The Monte Carlo configuration of the `ctree_montecarlo_t4` case (`stump = TRUE`: the root only).
+    fn monte_carlo_config(seed: u64) -> CtreeConfig {
+        CtreeConfig {
+            testtype: "MonteCarlo".into(),
+            maxdepth: 1,
+            seed: Some(seed),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_validate_ctree_montecarlo_t4() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("ctree_montecarlo_t4");
+        let (x, y) = case_xy(&ds, &["x1", "x2"], "y");
+        let r = ctree(x.view(), y.view(), &monte_carlo_config(1)).unwrap();
+        Check::new(&case)
+            .vector("root_statistic", &r.root_statistics, Tol::stat(120))
+            .finish();
+        // p2a's and R's Monte Carlo p-values are two independent permutation estimates: each lies
+        // within 4 standard errors of their difference (plus 2 / B) of R's value.
+        let b = case.scalar("nresample");
+        for (j, &pr) in case.vector("root_p_mc").iter().enumerate() {
+            let allowed = 4.0 * (2.0 * pr * (1.0 - pr) / b).sqrt() + 2.0 / b;
+            let p = r.root_p_values[j];
+            assert!(
+                (p - pr).abs() <= allowed,
+                "x{}: p {p} vs R {pr} (allowed {allowed})",
+                j + 1
+            );
+            // MonteCarlo p-values are not adjusted (partykit).
+            assert_eq!(r.root_p_values_adjusted[j].to_bits(), p.to_bits());
+            // A count of permutations out of B.
+            assert_eq!((p * b).round() / b, p);
+        }
+    }
+
+    #[test]
+    fn test_ctree_montecarlo_is_reproducible_and_seeded() {
+        let ds = generated_dataset("ctree_montecarlo_t4");
+        let (x, y) = case_xy(&ds, &["x1", "x2"], "y");
+        let p = |seed: u64| {
+            ctree(x.view(), y.view(), &monte_carlo_config(seed))
+                .unwrap()
+                .root_p_values
+        };
+        assert_eq!(p(7), p(7));
+        assert_ne!(p(7), p(8));
+    }
+
+    #[test]
+    fn test_ctree_montecarlo_counts_tied_permutations() {
+        // A binary input: shuffling the responses within each input group leaves the statistic
+        // mathematically unchanged, so the identity and every within-group shuffle must count as
+        // reaching the observed statistic, whatever order their sums accumulate in.
+        let x: Vec<f64> = (0..40).map(|i| f64::from(i % 2 == 0)).collect();
+        let yv: Vec<f64> = (0..40)
+            .map(|i| 0.1 * f64::from(i) + 0.37 * f64::from((i * 7) % 11) + 0.3 * x[i as usize])
+            .collect();
+        let y = Array1::from_vec(yv);
+        let classes: Vec<usize> = (0..40).map(|i| (i * 5 + i / 3) % 3).collect();
+        let indices: Vec<usize> = (0..40).collect();
+        let groups: [Vec<usize>; 2] = [
+            (0..40).filter(|&i| x[i] == 0.0).collect(),
+            (0..40).filter(|&i| x[i] == 1.0).collect(),
+        ];
+        let responses = [
+            Response::Regression(y.view()),
+            Response::Classes {
+                class: &classes,
+                k: 3,
+            },
+        ];
+        for response in &responses {
+            for teststat in [CtreeTestStat::Quadratic, CtreeTestStat::Maximum] {
+                let test = LinearTest::new(response, &indices, teststat);
+                let input = CentredInput::new(x.iter().copied());
+                assert!(test.testable(&input));
+                let mut sums = test.scratch();
+                let observed = test.statistic(&input, None, &mut sums);
+                let identity: Vec<usize> = (0..40).collect();
+                assert!(exceeds(
+                    test.statistic(&input, Some(&identity), &mut sums),
+                    observed
+                ));
+                for b in 0..200u64 {
+                    let mut rng = ChaCha8Rng::seed_from_u64(b);
+                    let mut perm = identity.clone();
+                    for group in &groups {
+                        let mut targets = group.clone();
+                        targets.shuffle(&mut rng);
+                        for (&from, &to) in group.iter().zip(&targets) {
+                            perm[from] = to;
+                        }
+                    }
+                    let permuted = test.statistic(&input, Some(&perm), &mut sums);
+                    assert!(
+                        exceeds(permuted, observed),
+                        "shuffle {b}: {permuted} vs {observed}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_ctree_montecarlo_honours_cancellation() {
+        let (x, y, _) = rpart_reference_data();
+        let err = with_budget(cancelled_budget(), || {
+            ctree(x.view(), y.view(), &monte_carlo_config(1))
+        })
+        .unwrap_err();
+        assert!(matches!(err, EconError::Cancelled(_)), "{err}");
+    }
+
+    /// The default configuration for a classification of numeric class codes.
+    fn classification_config() -> CtreeConfig {
+        CtreeConfig {
+            classification: Some(true),
+            ..Default::default()
+        }
     }
 
     fn cancelled_budget() -> Budget {
@@ -1313,25 +1938,6 @@ mod tests {
     }
 
     #[test]
-    fn test_midranks_averages_ties() {
-        assert_eq!(
-            midranks(&[2.0, 1.0, 2.0, 3.0]).unwrap(),
-            vec![2.5, 1.0, 2.5, 4.0]
-        );
-        assert_eq!(midranks(&[5.0]).unwrap(), vec![1.0]);
-    }
-
-    #[test]
-    fn test_midranks_rejects_non_finite() {
-        // ML-2. Before the fix the tie loop never advances on a non-finite value:
-        // "attempt to subtract with overflow" in debug, an endless loop in release.
-        for bad in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
-            let err = midranks(&[3.0, bad, 1.0, 2.0]).unwrap_err().to_string();
-            assert!(err.contains("non-finite"), "{bad}: {err}");
-        }
-    }
-
-    #[test]
     fn test_ctree_rejects_non_finite_inputs() {
         let (x, y, _) = rpart_reference_data();
         let cfg = CtreeConfig {
@@ -1395,42 +2001,6 @@ mod tests {
         })
         .unwrap_err();
         assert!(matches!(err, EconError::Cancelled(_)), "{err}");
-    }
-
-    #[test]
-    fn test_ctree_fit_is_unchanged() {
-        let fold = |v: &[f64]| v.iter().fold(0u64, |h, p| h.rotate_left(5) ^ p.to_bits());
-        let (x, y) = noisy_regression(300, 3, 21);
-        let r = ctree(x.view(), y.view(), &CtreeConfig::default()).unwrap();
-        let (xc, _, yc) = rpart_reference_data();
-        let c = ctree(
-            xc.view(),
-            yc.view(),
-            &CtreeConfig {
-                minsplit: 10,
-                minbucket: 5,
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        let got = (
-            r.n_nodes,
-            r.depth,
-            fold(r.predictions.as_slice()),
-            c.n_nodes,
-            c.depth,
-            fold(c.predictions.as_slice()),
-        );
-        // Captured from the pre-change split search.
-        let expected = (
-            47usize,
-            5usize,
-            6050330675744206437u64,
-            5usize,
-            2usize,
-            18321768893326516225u64,
-        );
-        assert_eq!(got, expected);
     }
 
     #[test]
@@ -1512,6 +2082,7 @@ mod tests {
             minsplit: 4,
             minbucket: 2,
             maxdepth: 5,
+            classification: Some(true),
             ..Default::default()
         };
 
@@ -1689,246 +2260,109 @@ mod tests {
         assert_eq!(config.maxdepth, 0);
         assert_eq!(config.teststat, "quadratic");
         assert_eq!(config.testtype, "bonferroni");
+        assert_eq!(config.classification, None);
+        assert_eq!(config.nresample, 9999);
     }
 
-    /// The split search as it was before ML-85 (index copies and a full
-    /// variance or entropy pass per candidate), kept as the reference the
-    /// running-sum scan must reproduce.
+    /// partykit's two-sample statistic of every admissible cut computed from scratch, the
+    /// reference the running-sum scan of `find_best_split` must reproduce.
     fn find_best_split_reference(
         x: &ArrayView2<f64>,
-        y: &ArrayView1<f64>,
+        response: &Response<'_>,
         indices: &[usize],
         feature: usize,
-        is_classification: bool,
-        classes: Option<&[f64]>,
-        config: &CtreeConfig,
+        mb: usize,
     ) -> Option<(f64, Vec<usize>, Vec<usize>)> {
         let n = indices.len();
-        if n < config.minbucket.saturating_mul(2) {
-            return None;
-        }
-
-        // Sort indices by feature value
+        let mb = mb.max(1);
         let mut sorted: Vec<(f64, usize)> = indices.iter().map(|&i| (x[[i, feature]], i)).collect();
         sorted.sort_by(|a, b| a.0.total_cmp(&b.0));
-
-        // Try all possible split points
-        let mut best_stat = f64::NEG_INFINITY;
-        let mut best_threshold = None;
-        let mut best_split_pos = 0;
-
-        for split_pos in config.minbucket..(n - config.minbucket + 1) {
-            // Check if this is a valid split point (different x values)
-            if (sorted[split_pos - 1].0 - sorted[split_pos].0).abs() < 1e-10 {
+        let mut best: Option<(f64, usize)> = None;
+        for pos in mb..(n + 1).saturating_sub(mb) {
+            if sorted[pos - 1].0 == sorted[pos].0 {
                 continue;
             }
-
-            let threshold = (sorted[split_pos - 1].0 + sorted[split_pos].0) / 2.0;
-
-            // Compute test statistic for this split
-            // Create binary indicator for split
-            let left_indices: Vec<usize> = sorted[..split_pos].iter().map(|(_, i)| *i).collect();
-            let right_indices: Vec<usize> = sorted[split_pos..].iter().map(|(_, i)| *i).collect();
-
-            // Compute improvement: difference in within-node variance
-            let stat = compute_split_statistic_reference(
-                y,
-                &left_indices,
-                &right_indices,
-                is_classification,
-                classes,
-            );
-
-            if stat > best_stat {
-                best_stat = stat;
-                best_threshold = Some(threshold);
-                best_split_pos = split_pos;
+            let left = &sorted[..pos];
+            let stat = match response {
+                Response::Regression(y) => {
+                    let mean = indices.iter().map(|&i| y[i]).sum::<f64>() / n as f64;
+                    let mut s = 0.0;
+                    for &(_, i) in left {
+                        s += y[i] - mean;
+                    }
+                    s * s / (pos as f64 * (n - pos) as f64)
+                }
+                Response::Classes { class, k } => {
+                    let mut lc = vec![0usize; *k];
+                    let mut tc = vec![0usize; *k];
+                    for &(_, i) in left {
+                        lc[class[i]] += 1;
+                    }
+                    for &(_, i) in &sorted {
+                        tc[class[i]] += 1;
+                    }
+                    pearson_split_statistic(&lc, &tc, pos, n as f64)
+                }
+            };
+            if best.is_none_or(|(b, _)| stat > b) {
+                best = Some((stat, pos));
             }
         }
-
-        best_threshold.map(|threshold| {
-            let left_indices: Vec<usize> =
-                sorted[..best_split_pos].iter().map(|(_, i)| *i).collect();
-            let right_indices: Vec<usize> =
-                sorted[best_split_pos..].iter().map(|(_, i)| *i).collect();
-            (threshold, left_indices, right_indices)
-        })
-    }
-
-    /// Compute split quality statistic (improvement in criterion).
-    fn compute_split_statistic_reference(
-        y: &ArrayView1<f64>,
-        left_indices: &[usize],
-        right_indices: &[usize],
-        is_classification: bool,
-        classes: Option<&[f64]>,
-    ) -> f64 {
-        let n_left = left_indices.len() as f64;
-        let n_right = right_indices.len() as f64;
-        let n_total = n_left + n_right;
-
-        if n_left < 1.0 || n_right < 1.0 {
-            return f64::NEG_INFINITY;
-        }
-
-        if is_classification && classes.is_some() {
-            // Information gain (reduction in entropy)
-            let cls = classes.unwrap();
-
-            let parent_entropy =
-                compute_entropy_reference(y, &[left_indices, right_indices].concat(), cls);
-            let left_entropy = compute_entropy_reference(y, left_indices, cls);
-            let right_entropy = compute_entropy_reference(y, right_indices, cls);
-
-            let weighted_child = (n_left * left_entropy + n_right * right_entropy) / n_total;
-            parent_entropy - weighted_child
-        } else {
-            // Variance reduction (regression)
-            let parent_var = compute_variance_reference(y, &[left_indices, right_indices].concat());
-            let left_var = compute_variance_reference(y, left_indices);
-            let right_var = compute_variance_reference(y, right_indices);
-
-            let weighted_child = (n_left * left_var + n_right * right_var) / n_total;
-            parent_var - weighted_child
-        }
-    }
-
-    /// Compute entropy for a set of indices.
-    fn compute_entropy_reference(y: &ArrayView1<f64>, indices: &[usize], classes: &[f64]) -> f64 {
-        if indices.is_empty() {
-            return 0.0;
-        }
-
-        let n = indices.len() as f64;
-        let mut entropy = 0.0;
-
-        for &c in classes {
-            let count = indices
-                .iter()
-                .filter(|&&i| (y[i] - c).abs() < 1e-10)
-                .count() as f64;
-            if count > 0.0 {
-                let p = count / n;
-                entropy -= p * p.ln();
-            }
-        }
-
-        entropy
-    }
-
-    /// Compute variance for a set of indices.
-    fn compute_variance_reference(y: &ArrayView1<f64>, indices: &[usize]) -> f64 {
-        if indices.len() < 2 {
-            return 0.0;
-        }
-
-        let sum: f64 = indices.iter().map(|&i| y[i]).sum();
-        let mean = sum / indices.len() as f64;
-        indices.iter().map(|&i| (y[i] - mean).powi(2)).sum::<f64>() / indices.len() as f64
-    }
-
-    #[test]
-    fn test_validate_ctree_split_matches_rpart() {
-        // R reference: the rpart script above (minbucket = 5, one variable at a time).
-        let (x, y_reg, y_cls) = rpart_reference_data();
-        let cfg = CtreeConfig {
-            minbucket: 5,
-            ..Default::default()
-        };
-        let idx: Vec<usize> = (0..40).collect();
-        let classes = [0.0, 1.0, 2.0];
-        for (f, thr, n_left) in [(0, 5.125, 21), (1, 3.5, 17), (2, 2.75, 35)] {
-            let (t, l, r) =
-                find_best_split(&x.view(), &y_reg.view(), &idx, f, false, None, &cfg).unwrap();
-            assert!((t - thr).abs() < 1e-12, "anova x{}: {t}", f + 1);
-            assert_eq!((l.len(), r.len()), (n_left, 40 - n_left));
-        }
-        for (f, thr, n_left) in [(0, 5.125, 21), (1, 6.1, 29), (2, 2.75, 35)] {
-            let (t, l, r) = find_best_split(
-                &x.view(),
-                &y_cls.view(),
-                &idx,
-                f,
-                true,
-                Some(&classes),
-                &cfg,
+        best.map(|(_, pos)| {
+            (
+                sorted[pos - 1].0,
+                sorted[..pos].iter().map(|(_, i)| *i).collect(),
+                sorted[pos..].iter().map(|(_, i)| *i).collect(),
             )
-            .unwrap();
-            assert!((t - thr).abs() < 1e-12, "information x{}: {t}", f + 1);
-            assert_eq!((l.len(), r.len()), (n_left, 40 - n_left));
-        }
+        })
     }
 
     #[test]
     fn test_ctree_split_matches_naive_reference() {
-        let classes = [0.0, 1.0, 2.0];
         for seed in 0..20u64 {
             let n = 20 + 7 * seed as usize;
             let (mut x, y) = noisy_regression(n, 2, seed);
             for i in 0..n {
                 x[[i, 1]] = x[[i, 1]].round() / 2.0; // tie-heavy feature
             }
-            let y_cls = y.mapv(|v| {
-                if v < 3.0 {
-                    0.0
-                } else if v < 9.0 {
-                    1.0
-                } else {
-                    2.0
-                }
-            });
+            let class: Vec<usize> = y
+                .iter()
+                .map(|&v| {
+                    if v < 3.0 {
+                        0
+                    } else if v < 9.0 {
+                        1
+                    } else {
+                        2
+                    }
+                })
+                .collect();
             let indices: Vec<usize> = (0..n).filter(|i| i % 5 != 2).collect();
-            for minbucket in [1usize, 3, 7] {
-                let cfg = CtreeConfig {
-                    minbucket,
-                    ..Default::default()
-                };
+            let responses = [
+                Response::Regression(y.view()),
+                Response::Classes {
+                    class: &class,
+                    k: 3,
+                },
+            ];
+            for mb in [1usize, 3, 7] {
                 for f in 0..2 {
-                    let key = |o: Option<(f64, Vec<usize>, Vec<usize>)>| {
-                        o.map(|(t, l, r)| (t.to_bits(), l, r))
-                    };
-                    assert_eq!(
-                        key(find_best_split(
-                            &x.view(),
-                            &y.view(),
-                            &indices,
-                            f,
-                            false,
-                            None,
-                            &cfg
-                        )),
-                        key(find_best_split_reference(
-                            &x.view(),
-                            &y.view(),
-                            &indices,
-                            f,
-                            false,
-                            None,
-                            &cfg
-                        )),
-                        "anova seed {seed} minbucket {minbucket} feature {f}"
-                    );
-                    assert_eq!(
-                        key(find_best_split(
-                            &x.view(),
-                            &y_cls.view(),
-                            &indices,
-                            f,
-                            true,
-                            Some(&classes),
-                            &cfg
-                        )),
-                        key(find_best_split_reference(
-                            &x.view(),
-                            &y_cls.view(),
-                            &indices,
-                            f,
-                            true,
-                            Some(&classes),
-                            &cfg
-                        )),
-                        "information seed {seed} minbucket {minbucket} feature {f}"
-                    );
+                    for (kind, response) in responses.iter().enumerate() {
+                        let key = |o: Option<(f64, Vec<usize>, Vec<usize>)>| {
+                            o.map(|(t, l, r)| (t.to_bits(), l, r))
+                        };
+                        assert_eq!(
+                            key(find_best_split(&x.view(), response, &indices, f, mb)),
+                            key(find_best_split_reference(
+                                &x.view(),
+                                response,
+                                &indices,
+                                f,
+                                mb
+                            )),
+                            "response {kind} seed {seed} mb {mb} feature {f}"
+                        );
+                    }
                 }
             }
         }
@@ -1936,58 +2370,19 @@ mod tests {
 
     #[test]
     fn test_ctree_minbucket_zero_acts_as_one() {
-        // ML-28. The old candidate loop started at split_pos = minbucket, so
-        // minbucket = 0 read sorted[split_pos - 1] at split_pos = 0: "attempt to
-        // subtract with overflow" in debug builds. A child needs at least one
-        // row, so 0 now gives exactly the splits of minbucket = 1.
-        let (x, y_reg, y_cls) = rpart_reference_data();
-        let idx: Vec<usize> = (0..40).collect();
-        let classes = [0.0, 1.0, 2.0];
-        let zero = CtreeConfig {
-            minbucket: 0,
-            ..Default::default()
+        // ML-28. A child needs at least one row, so minbucket = 0 gives the node minimum of
+        // minbucket = 1 and the same tree.
+        assert_eq!(node_minimum(40, 0), node_minimum(40, 1));
+        let (x, y_reg, _) = rpart_reference_data();
+        let fit = |mb: usize| {
+            let cfg = CtreeConfig {
+                minsplit: 2,
+                minbucket: mb,
+                ..Default::default()
+            };
+            ctree(x.view(), y_reg.view(), &cfg).unwrap().predictions
         };
-        let one = CtreeConfig {
-            minbucket: 1,
-            ..Default::default()
-        };
-        for f in 0..3 {
-            assert_eq!(
-                find_best_split(&x.view(), &y_reg.view(), &idx, f, false, None, &zero),
-                find_best_split_reference(&x.view(), &y_reg.view(), &idx, f, false, None, &one),
-                "anova x{}",
-                f + 1
-            );
-            assert_eq!(
-                find_best_split(
-                    &x.view(),
-                    &y_cls.view(),
-                    &idx,
-                    f,
-                    true,
-                    Some(&classes),
-                    &zero
-                ),
-                find_best_split_reference(
-                    &x.view(),
-                    &y_cls.view(),
-                    &idx,
-                    f,
-                    true,
-                    Some(&classes),
-                    &one
-                ),
-                "information x{}",
-                f + 1
-            );
-        }
-        let cfg = CtreeConfig {
-            minsplit: 2,
-            minbucket: 0,
-            ..Default::default()
-        };
-        assert!(ctree(x.view(), y_reg.view(), &cfg).is_ok());
-        assert!(ctree(x.view(), y_cls.view(), &cfg).is_ok());
+        assert_eq!(fit(0), fit(1));
     }
 
     #[test]
@@ -2036,7 +2431,7 @@ mod tests {
             CtreeTestType::Bonferroni
         );
         let (x, y, y_cls) = rpart_reference_data();
-        let run = |ts: &str, tt: &str, y: &Array1<f64>| {
+        let run = |ts: &str, tt: &str, y: &Array1<f64>, classification: bool| {
             ctree(
                 x.view(),
                 y.view(),
@@ -2045,24 +2440,41 @@ mod tests {
                     minbucket: 5,
                     teststat: ts.into(),
                     testtype: tt.into(),
+                    classification: Some(classification),
                     ..Default::default()
                 },
             )
         };
         assert!(
-            run("qs2", "bonferroni", &y)
+            run("qs2", "bonferroni", &y, false)
                 .unwrap_err()
                 .to_string()
                 .contains("quadratic")
         );
         assert!(
-            run("quadratic", "MonteCarlo", &y)
+            run("quadratic", "Teststatistic", &y, false)
                 .unwrap_err()
                 .to_string()
                 .contains("not implemented")
         );
+        assert!(run("quadratic", "MonteCarlo", &y, false).is_ok());
+        assert_eq!(
+            "MonteCarlo".parse::<CtreeTestType>().unwrap(),
+            CtreeTestType::MonteCarlo
+        );
+        let none = CtreeConfig {
+            testtype: "montecarlo".into(),
+            nresample: 0,
+            ..Default::default()
+        };
+        let e = ctree(x.view(), y.view(), &none).unwrap_err();
         assert!(
-            run("maximum", "bonferroni", &y_cls)
+            matches!(e, EconError::InvalidSpecification { .. })
+                && e.to_string().contains("nresample"),
+            "{e}"
+        );
+        assert!(
+            run("maximum", "bonferroni", &y_cls, true)
                 .unwrap_err()
                 .to_string()
                 .contains("regression")
@@ -2097,11 +2509,12 @@ mod tests {
 
     #[test]
     fn test_ctree_class_rule_message_states_the_rounded_bound() {
-        // T2 leftover minor (T2-WP17 #0, plan sync 2026-11-01). The rule is n_unique < n / 2 with integer
-        // division, but the refusal said "fewer classes than half the rows": 2 classes in 5 rows were refused
-        // although 2 < 2.5. Property test of p2a's own rule; no number is compared with partykit.
+        // T2 leftover minor (T2-WP17 #0). The class cap is max(2, min(1000, n / 2)) with integer division:
+        // 3 classes in 5 rows are refused, and the refusal states the rounded bound. Property test of p2a's
+        // own rule; no number is compared with partykit (test_na_ctree_class_labels asserts the 15-class
+        // message of a 30-row fixture).
         let df = polars::prelude::df! {
-            "lab" => ["a", "b", "a", "b", "a"],
+            "lab" => ["a", "b", "c", "b", "a"],
             "x" => [0.1, 0.7, 0.3, 0.9, 0.2],
         }
         .unwrap();
@@ -2113,7 +2526,7 @@ mod tests {
         )
         .unwrap_err()
         .to_string();
-        assert!(e.contains("at most 10 classes"), "{e}"); // test_na_ctree_class_labels asserts this substring
+        assert!(e.contains("at most 2 classes"), "{e}");
         assert!(e.contains("n / 2 rounded down (2 for 5 rows)"), "{e}");
         assert!(!e.contains("half the rows"), "{e}");
     }

@@ -153,8 +153,8 @@ mod tests {
         out
     }
 
-    /// The fixture plus y_inf (y with +Inf in row 2) and lab12 (12 text levels) for the
-    /// error cases.
+    /// The fixture plus y_inf (y with +Inf in row 2), lab12 (12 text levels) and lab16 (16 text
+    /// levels) for the error cases.
     fn ml_dataset() -> Dataset {
         let mut df = DataLoader::from_csv_string(&fixture_csv(&[])).unwrap();
         // na-ok: test fixture without nulls
@@ -171,8 +171,10 @@ mod tests {
             .map(|(i, &v)| if i == 2 { f64::INFINITY } else { v })
             .collect();
         let lab12: Vec<String> = (0..30).map(|i| format!("c{:02}", i % 12)).collect();
+        let lab16: Vec<String> = (0..30).map(|i| format!("c{:02}", i % 16)).collect();
         df.with_column(Series::new("y_inf".into(), y_inf)).unwrap();
         df.with_column(Series::new("lab12".into(), lab12)).unwrap();
+        df.with_column(Series::new("lab16".into(), lab16)).unwrap();
         Dataset::new(df)
     }
 
@@ -564,7 +566,13 @@ mod tests {
             seed: Some(7),
             ..Default::default()
         };
-        let codes = run_ctree(&d, "cls", &X, &cfg).unwrap();
+        // Numeric class codes are a classification only on request (the task comes from the
+        // target's type, as partykit).
+        let codes_cfg = CtreeConfig {
+            classification: Some(true),
+            ..cfg.clone()
+        };
+        let codes = run_ctree(&d, "cls", &X, &codes_cfg).unwrap();
         let r = run_ctree(&d, "lab", &X, &cfg).unwrap();
         assert!(r.is_classification && codes.is_classification);
         assert_eq!(bits(&r.predictions), bits(&codes.predictions));
@@ -574,12 +582,13 @@ mod tests {
             Some(vec!["no".to_string(), "yes".to_string()])
         );
         assert!(r.to_string().contains("Class labels: 0 = no, 1 = yes"));
-        // 12 classes: ctree's heuristic (at most 10 classes, fewer than n/2) would fit a
-        // regression on the codes
-        let e = run_ctree(&d, "lab12", &X, &cfg).unwrap_err();
+        // The class cap of C5.0 and CART, max(2, min(1000, n / 2)): 15 for these 30 rows.
+        let r12 = run_ctree(&d, "lab12", &X, &cfg).unwrap();
+        assert!(r12.is_classification && r12.n_classes == Some(12));
+        let e = run_ctree(&d, "lab16", &X, &cfg).unwrap_err();
         assert!(
             matches!(&e, EconError::InvalidSpecification { message }
-                if message.contains("at most 10 classes")),
+                if message.contains("at most 15 classes")),
             "{e}"
         );
     }

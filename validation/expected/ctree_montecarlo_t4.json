@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "id": "ctree_montecarlo_t4",
+  "area": "ml/ctree",
+  "method": "partykit::ctree root p-values, testtype = 'MonteCarlo' (nresample 9999)",
+  "reference": "partykit::ctree(testtype = 'MonteCarlo', nresample = 9999, stump = TRUE), set.seed(1); Monte Carlo p-values, unadjusted as partykit leaves them for this testtype (R RNG: compare within Monte Carlo error)",
+  "call": "ctree(y ~ x1 + x2, control = ctree_control(testtype = 'MonteCarlo', nresample = 9999, stump = TRUE))",
+  "dataset": "validation/datasets/generated/ctree_montecarlo_t4.csv",
+  "datasets": ["validation/datasets/generated/ctree_montecarlo_t4.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "partykit": "1.3.1",
+    "libcoin": "1.0.13"
+  },
+  "values": {
+    "root_statistic": [11.679623296528209, 0.080290819086412515],
+    "root_p_asymptotic": [0.00063188325518505101, 0.77690368806705423],
+    "root_p_mc": [0.00030003000300030005, 0.77927792779277927],
+    "nresample": 9999
+  }
+}

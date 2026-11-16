@@ -2,81 +2,131 @@
 
 ## Method
 
-Conditional inference trees use permutation-based statistical tests to select splitting variables, avoiding variable selection bias of traditional CART. Splits on the most significant variable using p-value based criterion.
+`ctree` follows `partykit::ctree` (Hothorn, Hornik & Zeileis 2006; partykit 1.3.1, libcoin 1.0.13) for numeric
+inputs. At each node of `n` rows:
+
+1. **Variable tests.** Each input is tested for independence from the response with the conditional linear
+   statistic of Strasser and Weber (numeric input untransformed; for the response `h(y) = y`, or class indicators
+   for a classification). `quadratic`: `(n - 1) r^2` for a regression (1 df) and `(n - 1) SSB / Sxx` for a
+   classification (df = classes present in the node - 1), with asymptotic chi-squared p-values. `maximum`
+   (regression only): `|z|` with a two-sided normal p-value.
+2. **Untestable inputs.** An input whose statistic has variance below `sqrt(eps)` (partykit's absolute tolerance,
+   copied as is) is not tested: its statistic and p-values are NaN (`null` in JSON), and it does not count in `m`.
+3. **P-values.** `bonferroni`: partykit's adjustment on the log scale, `1 - (1 - p)^m` over the `m` tested
+   inputs (`min(1, m p)` differs from it). `univariate`: no adjustment. `montecarlo`: the share of `nresample`
+   (default 9,999) permutations of the response whose statistic reaches the observed one, unadjusted, as partykit
+   does when `testtype = "MonteCarlo"` alone. Each permutation draws from a ChaCha8 stream derived from the seed
+   (42 when none is given), the node and the permutation index.
+4. **Selection and stopping.** The input with the smallest adjusted p-value (on an exact tie the larger statistic,
+   then the first). A node is a leaf when no adjusted p-value is below `1 - mincriterion`, when it has fewer than
+   `minsplit` rows, or at `maxdepth`. There is no `n <= 2 minbucket` stop.
+5. **Node minimum.** Each child keeps at least `max(minbucket, ceil(0.01 n))` rows (`minprob = 0.01`).
+6. **Split point.** The observed value `u` of the selected input (left: `x <= u`, not a midpoint) that maximises
+   the two-sample statistic of `I(x <= u)`: the variance-reduction cut for a regression, Pearson's X^2 for a
+   classification; the first cut on ties. When the selected input has no admissible cut, the next significant
+   input is tried (`splittry = 2`).
+7. **Leaves.** The mean, or the class with the largest share (the first on ties, as `which.max`).
 
 ## R Package Reference
 
-- **Package**: `partykit` / `party`
+- **Package**: `partykit` 1.3.1 (libcoin 1.0.13)
 - **Function**: `ctree(formula, data, control = ctree_control())`
-- **CRAN**: https://cran.r-project.org/package=partykit
-
-## Illustrative R code (not run; no number is compared with partykit)
-
-partykit is installed on the validation machine, but p2a's node statistics are known to differ from it (ML-26,
-ML-27), so a pin would record those differences. party and coin are not installed.
-
-```r
-library(partykit)
-set.seed(42)
-n <- 200
-x1 <- runif(n); x2 <- runif(n); x3 <- runif(n) - 0.5
-y <- 2 * x1 + 0.5 * x2 + rnorm(n, 0, 0.3)
-df <- data.frame(y, x1, x2, x3)
-
-model <- ctree(y ~ x1 + x2 + x3, data = df,
-               control = ctree_control(mincriterion = 0.95, minsplit = 20))
-pred <- predict(model, df)
-cat("R²:", 1 - sum((y - pred)^2) / sum((y - mean(y))^2), "\n")
-varimp(model)
-```
+- **Cases**: `validation/r/cases/ml_trees_t4.R` (`ctree_reg_t4`, `ctree_cls_t4`, `ctree_null_root_t4`,
+  `ctree_montecarlo_t4`) and `validation/r/cases/numeric_ctree.R` (`tail_ctree_root`)
 
 ## What is pinned
 
-- The split point against rpart: `test_validate_ctree_split_matches_rpart` (`crates/p2a-core/src/ml/ctree.rs`).
-- Parameter validation: `test_ctree_rejects_minsplit_below_twice_minbucket`, `test_ctree_minbucket_zero_acts_as_one`,
-  `test_ctree_options_parse_aliases_and_reject_unknown`, `test_ctree_maximum_teststat_is_not_the_quadratic_one`.
-  `minsplit` below `2 * minbucket` is refused, because no node of that size can be split into two children of
-  `minbucket` rows. `teststat = maximum` with a classification target is refused until ML-26 and ML-27 fix the
-  statistic. The `MonteCarlo` and `Teststatistic` test types are not implemented and are refused.
+R-pinned (registry `validation/methods/ml_trees_t4.json`):
 
-- The root's variable-selection statistic and its p-values below 1e-16 (registry entry
-  `ctree_root_statistics` in `validation/methods/numeric_hygiene.json`; case `tail_ctree_root`,
-  `validation/r/cases/numeric_ctree.R`). partykit is not installed, so the case writes out the quadratic rank
-  statistic, `(n - 1) cor(rank(x), y)^2`, and `pchisq(lower.tail = FALSE)`. Two of the three root p-values are
-  below 1e-16 (1.73e-19 and 9.92e-47), where `1 - cdf` returned 0 for both and the choice between them fell to
-  column order; the tail is now computed directly, so the variable with the larger statistic is chosen.
-  Test: `test_validate_ctree_root_tail_tie_break`.
+- `ctree_partykit_trees`: `test_validate_ctree_regression_tree_t4`, `test_validate_ctree_classification_tree_t4`
+  and `test_validate_ctree_null_root_t4` pin the tree shape, node sizes, split variables and breaks, split
+  statistics and adjusted p-values, terminal predictions and class probabilities, the root statistics with raw and
+  adjusted p-values, and the fitted values and classes.
+- `ctree_montecarlo_pvalues`: `test_validate_ctree_montecarlo_t4` pins the root statistics, and the Monte Carlo
+  p-values within Monte Carlo error (two independent permutation draws).
+- `ctree_root_statistics` (`validation/methods/numeric_hygiene.json`, case `tail_ctree_root`): root p-values
+  below 1e-16 and the choice between them, `test_validate_ctree_root_tail_tie_break`.
+
+Properties: `test_ctree_classification_statistic_is_the_anova_quadratic_form`, `test_ctree_null_root_split_rate`,
+`test_ctree_constant_input_is_not_tested`, `test_ctree_splits_a_node_of_twice_minbucket`,
+`test_ctree_minprob_raises_the_node_minimum`, `test_ctree_class_ties_take_the_first_class`,
+`test_ctree_split_matches_naive_reference`, `test_ctree_montecarlo_is_reproducible_and_seeded`,
+`test_ctree_montecarlo_honours_cancellation`, and parameter validation
+(`test_ctree_rejects_minsplit_below_twice_minbucket`, `test_ctree_minbucket_zero_acts_as_one`,
+`test_ctree_options_parse_aliases_and_reject_unknown`, `test_ctree_maximum_teststat_is_not_the_quadratic_one`).
+`minsplit` below `2 * minbucket` is refused, because no node of that size can be split into two children of
+`minbucket` rows.
 
 ## What is not R parity
 
-- The node statistics and p-values (ML-26, ML-27). No statistic or p-value is compared with partykit output.
-- The importance definition: `Sum(1 - p)` over the splits on a feature, not partykit's `varimp`.
+- Variable importance: `Sum(1 - adjusted p)` over the splits on each input, not partykit's permutation `varimp`.
+- Refused: `testtype = "Teststatistic"`, and `teststat = "maximum"` for a classification (it needs `pmvnorm`).
+- Not supported: categorical inputs, surrogate splits, missing values in the inputs, and partykit's MIA.
 
 ## DGP property tests
 
 `test_ctree_regression_properties`, `test_ctree_classification_properties` and `test_ctree_predict_properties`
-(`crates/p2a-core/tests/validation_ml_advanced.rs`) check DGP recovery by thresholds, despite their names: they are
-property tests, not R parity, and they will be renamed (X-10).
-
-- Regression R²: > 0.50 (typically > 0.90)
-- Classification accuracy: > 0.75
-- Root p-values: x1 significant (< 0.05), x3 non-significant
+(`crates/p2a-core/tests/validation_ml_advanced.rs`) check DGP recovery by thresholds; they are property tests, not
+R parity (X-10).
 
 ## Target types and missing values
 
-- **Target.** `run_ctree` (and `ml_ctree`) takes a numeric target (integer and decimal
-  columns): it fits a classification tree when the target has at most 10 distinct values
-  and fewer than n / 2, rounded down, otherwise a regression tree (unchanged; an override is
-  ML-87, Tier 4). A text, categorical or boolean target becomes the class codes 0..K-1 in
-  R `factor()` order, reported in `CtreeResult::class_names` (JSON `class_names`) and a
-  "Class labels:" line of the Display. A text target that the rule would fit as a
-  regression (more than 10 classes, or not fewer classes than n / 2, rounded down) is refused
-  with an explicit error instead of fitting a regression on the codes.
-- **Missing values.** A missing value (null or NaN) in the target or a feature is an
-  error naming the column (Fail; no surrogate splits). `±Inf` is refused as well.
-- **Tests.** `test_na_ctree_class_labels`, `test_na_ml_wrappers_int64_target_equals_float64`
-  and `test_na_ml_wrappers_refuse_missing_values` (`crates/p2a-core/src/ml/extract.rs`),
-  `test_ctree_classifies_rule` (`crates/p2a-core/src/ml/ctree.rs`),
-  `test_na_mcp_tree_tools_integer_and_missing_targets` and
-  `test_mcp_c50_ctree_text_targets` (`crates/p2a-mcp/src/tools/handlers/ml.rs`). They
-  compare p2a with p2a and pin no R number.
+- **Target.** The task comes from the target, as in partykit. A numeric target (integer and decimal columns) fits a
+  regression tree unless `classification = true` (`CtreeConfig::classification = Some(true)`; R: `factor(y)`),
+  when its distinct values are the classes. A text, categorical or boolean target always fits a classification
+  tree, with the class codes 0..K-1 in R `factor()` order reported in `CtreeResult::class_names` (JSON
+  `class_names`); `classification = false` is refused for it. A classification has at most
+  `max(2, min(1000, n / 2))` classes, `n / 2` rounded down (the cap of C5.0 and CART).
+- **Missing values.** A missing value (null or NaN) in the target or a feature is an error naming the column (Fail;
+  no surrogate splits). `±Inf` is refused as well.
+- **Tests.** `test_ctree_numeric_target_is_regression`, `test_ctree_large_values_are_regression`,
+  `test_ctree_classification_on_request`, `test_ctree_class_cap`,
+  `test_ctree_class_rule_message_states_the_rounded_bound` (`crates/p2a-core/src/ml/ctree.rs`),
+  `test_na_ctree_class_labels`, `test_na_ml_wrappers_int64_target_equals_float64` and
+  `test_na_ml_wrappers_refuse_missing_values` (`crates/p2a-core/src/ml/extract.rs`),
+  `test_na_mcp_tree_tools_integer_and_missing_targets`, `test_mcp_c50_ctree_text_targets` and
+  `test_mcp_ctree_numeric_target_and_classification_flag` (`crates/p2a-mcp/src/tools/handlers/ml.rs`).
+
+## Timing
+
+Against v0.5.0 (`f80b0131`), lane timing (preliminary): release builds, `--no-default-features --features ci`, one
+core (`taskset`, `RAYON_NUM_THREADS=1`), 9 interleaved processes per side, each the median of 21-201 fits after 5
+warm-ups, median of medians; machine load average 6-13 on 12 cores. Inputs: p = 5 uniform on [0, 10); regression
+`y = 3 (x1 > 5) + 0.5 x2 + U(-1, 1)`; classification K = 3 from x1 and x2 with 15% label noise. Defaults
+(Bonferroni, quadratic). Nodes are the nodes of the fitted tree; per node is the fit time divided by them.
+
+| Fit | n | v0.5.0 | nodes | now | nodes | per fit | per node | R `partykit::ctree` (nodes) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| regression | 100 | 0.142 ms | 13 | 0.050 ms | 13 | 0.36x | 0.36x | 38 ms (15) |
+| regression | 1,000 | 2.77 ms | 33 | 0.729 ms | 35 | 0.26x | 0.25x | 108 ms (31) |
+| regression | 10,000 | 33.3 ms | 67 | 8.35 ms | 67 | 0.25x | 0.25x | 364 ms (75) |
+| classification | 100 | 0.182 ms | 7 | 0.051 ms | 5 | 0.28x | 0.39x | 29 ms (5) |
+| classification | 1,000 | 1.71 ms | 5 | 0.415 ms | 5 | 0.24x | 0.24x | 40 ms (5) |
+| classification | 10,000 | 23.3 ms | 9 | 5.15 ms | 5 | 0.22x | 0.40x | 179 ms (7) |
+
+v0.5.0 fitted the classification rows as classification trees too (integer class codes), with its own tests and
+splits; the R column uses R's generator on the same design, so its trees differ.
+
+Monte Carlo p-values (`testtype = montecarlo`, new, no base; regression design; median of 3-5 processes):
+
+| n | nresample = 999 | nodes | nresample = 9,999 (default) | nodes | R, nresample = 999 |
+|---:|---:|---:|---:|---:|---:|
+| 100 | 10.2 ms | 13 | 98 ms | 13 | 79 ms |
+| 1,000 | 147 ms | 39 | 1.24 s | 39 | 0.78 s |
+| 10,000 | 1.90 s | 109 | 18.6 s | 111 | 4.58 s |
+
+At n = 10,000 the default 9,999 permutations take 18.6 s, inside the hosted 60 s deadline; the call is
+interruptible at every permutation. Peak RSS of a process fitting twice at n = 10,000: regression 4.0 MB (v0.5.0)
+and 3.7 MB (now), classification 3.9 MB and 3.9 MB, Monte Carlo (999) 4.2 MB.
+
+## Release notes
+
+- The node statistics, p-values, split variables and break points now follow partykit: the conditional linear
+  statistic replaces the rank statistic, the Bonferroni adjustment is `1 - (1 - p)^m`, breaks are observed values
+  instead of midpoints, the node minimum includes `minprob`, a node of exactly `2 minbucket` rows can split, and
+  class ties go to the first class. Trees fitted before differ.
+- A numeric target is now a regression tree; `classification: true` restores a classification on class codes.
+  Text targets with up to `max(2, min(1000, n / 2))` classes are accepted (before: at most 10).
+- `testtype = "montecarlo"` is available (`n_permutations` through MCP).
+- The root tests of every input are reported (`root_statistics`, `root_p_values`, `root_p_values_adjusted`; JSON
+  `root_tests`).

@@ -358,9 +358,21 @@ pub struct CtreeRequest {
 
     /// Target column name
     #[schemars(
-        description = "Name of the target column (Y variable). Can be numeric (regression) or categorical (classification)."
+        description = "Name of the target column (Y variable). A numeric target fits a regression tree (unless classification = true); a text, categorical or boolean target fits a classification tree."
     )]
     pub target: String,
+
+    /// Whether a numeric target's distinct values are classes
+    #[schemars(
+        description = "Treat a numeric target's distinct values as classes (R: factor(y)). Default: from the column type; a text, categorical or boolean target is always a classification."
+    )]
+    pub classification: Option<bool>,
+
+    /// Permutations per Monte Carlo test
+    #[schemars(
+        description = "Permutations per test for testtype 'montecarlo' (partykit's nresample). Default 9999."
+    )]
+    pub n_permutations: Option<usize>,
 
     /// Criterion for splitting (1 - p-value threshold), default: 0.95 meaning p < 0.05
     #[schemars(
@@ -384,19 +396,19 @@ pub struct CtreeRequest {
 
     /// Test statistic type: "quadratic" or "max"
     #[schemars(
-        description = "Test statistic: 'quadratic' (default; chi-squared) or 'maximum' (also 'max'; regression trees only for now). Case-insensitive; anything else is an error."
+        description = "Test statistic: 'quadratic' (default; chi-squared) or 'maximum' (also 'max'; maximum: regression trees only). Case-insensitive; anything else is an error."
     )]
     pub teststat: Option<String>,
 
     /// P-value adjustment: "bonferroni", "univariate", or "none"
     #[schemars(
-        description = "P-value adjustment: 'bonferroni' (default) or 'univariate' (no multiplicity adjustment; also 'none'). partykit's 'MonteCarlo' and 'Teststatistic' are not implemented and are refused. Case-insensitive."
+        description = "P-values: 'bonferroni' (default; asymptotic p-values adjusted as partykit does, 1 - (1 - p)^m over the m tested inputs), 'univariate' (no multiplicity adjustment; also 'none') or 'montecarlo' (Monte Carlo permutation p-values from n_permutations permutations, unadjusted as in partykit). partykit's 'Teststatistic' is not implemented and is refused. Case-insensitive."
     )]
     pub testtype: Option<String>,
 
     /// Random seed for reproducibility
     #[schemars(
-        description = "Accepted for compatibility; ctree's Bonferroni and univariate tests have no random component, so the seed does not change the fit."
+        description = "Random seed, used by testtype 'montecarlo' (the permutations); the other test types have no random component."
     )]
     pub seed: Option<u64>,
 }
@@ -419,7 +431,7 @@ pub struct C50Request {
 
     /// Number of boosting trials (default: 1 = no boosting)
     #[schemars(
-        description = "Number of boosting iterations. Default is 1 (no boosting). Set > 1 for AdaBoost.M1 ensemble."
+        description = "Number of boosting iterations, 1 to 100. Default is 1 (no boosting). Values > 1 boost with AdaBoost.M1 case weights."
     )]
     pub trials: Option<usize>,
 
@@ -431,7 +443,7 @@ pub struct C50Request {
 
     /// Enable feature winnowing (default: false)
     #[schemars(
-        description = "If true, perform feature selection to remove uninformative predictors. Default is false."
+        description = "If true, keep the features above the 25th percentile of a first tree's importance (a heuristic, not C5.0's winnowing). Default is false."
     )]
     pub winnow: Option<bool>,
 
@@ -441,7 +453,7 @@ pub struct C50Request {
 
     /// Confidence factor for pruning (default: 0.25)
     #[schemars(
-        description = "Confidence factor for pessimistic error pruning (0-1). Lower = more pruning. Default is 0.25."
+        description = "Confidence factor for pessimistic error pruning, in (0, 1), exclusive. Lower = more pruning. Default is 0.25."
     )]
     pub cf: Option<f64>,
 
@@ -542,7 +554,7 @@ pub struct CubistRequest {
 
     /// Number of neighbors for instance-based correction (default: 0)
     #[schemars(
-        description = "Number of nearest neighbors for prediction adjustment. Default is 0 (no adjustment). Higher values add k-NN smoothing."
+        description = "0-9: adjust each prediction by the mean residual of the k nearest training cases (R's Cubist). Default 0 (no adjustment)."
     )]
     pub neighbors: Option<usize>,
 

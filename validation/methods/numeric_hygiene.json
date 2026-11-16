@@ -69,9 +69,9 @@
     },
     {
       "id": "ctree_root_statistics",
-      "name": "ctree variable-selection statistics and p-values below 1e-16",
+      "name": "ctree root statistics and p-values below 1e-16",
       "category": "ml",
-      "reference": "quadratic rank statistic written out in R (partykit not installed): (n - 1) cor(rank(x), y)^2, pchisq(lower.tail = FALSE)",
+      "reference": "partykit::ctree 1.3.1 root criterion (stump = TRUE); p = pchisq(statistic, 1, lower.tail = FALSE)",
       "doc": "validation/ml/ctree.md",
       "cases": [
         "tail_ctree_root"
@@ -80,10 +80,10 @@
         "p2a-core::ml::ctree::tests::test_validate_ctree_root_tail_tie_break"
       ],
       "quantities": [
-        "root p-values",
+        "root statistics",
+        "raw and adjusted p-values",
         "chosen variable",
-        "its statistic",
-        "its Bonferroni p"
+        "its split point"
       ],
       "tolerance": "validation/README.md, n = 300 (relative only for p)",
       "deviations": [],
