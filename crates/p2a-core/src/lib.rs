@@ -935,6 +935,7 @@ pub use forecasting::{
     CostFunction,
     // Cumulative periodogram
     CpgramResult,
+    DEFAULT_BINSEG_MAX_CHANGEPOINTS,
     DecomposeConfig,
     // Classical decomposition
     DecomposeResult,
@@ -1440,6 +1441,7 @@ pub use spatial::{
     // Local Moran's I (LISA)
     LisaCluster,
     LmTestResult,
+    LocalMoranConfig,
     LocalMoranObs,
     LocalMoranResult,
     MoranAlternative,
@@ -1454,6 +1456,7 @@ pub use spatial::{
     WeightStyle,
     geary_test,
     localmoran,
+    localmoran_with,
     moran_test,
     moran_test_residuals,
     spatial_lm_tests,

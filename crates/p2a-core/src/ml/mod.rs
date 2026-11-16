@@ -359,6 +359,7 @@ pub use advanced_clustering_mod::{
     // Batch 2: Additional clustering methods
     flexmix,
     fuzzy_cmeans,
+    fuzzy_cmeans_from_centers,
     gaussian_mixture,
     hdbscan,
     kmedoids,

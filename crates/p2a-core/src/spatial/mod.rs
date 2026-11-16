@@ -62,6 +62,7 @@ pub use diagnostics::{
     // Local Moran's I (LISA)
     LisaCluster,
     LmTestResult,
+    LocalMoranConfig,
     LocalMoranObs,
     LocalMoranResult,
     MoranAlternative,
@@ -69,6 +70,7 @@ pub use diagnostics::{
     SpatialLmTests,
     geary_test,
     localmoran,
+    localmoran_with,
     moran_test,
     moran_test_residuals,
     spatial_lm_tests,

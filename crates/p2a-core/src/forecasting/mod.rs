@@ -137,8 +137,8 @@ pub use causal_impact::{
     CausalImpactSummary, CausalInference, causal_impact, run_causal_impact,
 };
 pub use changepoint::{
-    ChangepointResult, CostFunction, SegmentStats, binary_segmentation, detect_changepoints,
-    run_binary_segmentation, run_changepoint,
+    ChangepointResult, CostFunction, DEFAULT_BINSEG_MAX_CHANGEPOINTS, SegmentStats,
+    binary_segmentation, detect_changepoints, run_binary_segmentation, run_changepoint,
 };
 pub use cpgram::{CpgramResult, cpgram, run_cpgram, white_noise_test};
 pub use decompose::{
