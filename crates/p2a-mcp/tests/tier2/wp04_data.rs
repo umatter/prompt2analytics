@@ -41,7 +41,7 @@ async fn test_mcp_data_quality_profile_counts_nan() {
     let t = text(&r);
     assert!(r.success, "{t}");
     assert!(
-        t.contains("Null: 3 (60.0%)")
+        t.contains("Missing (null or NaN): 3 (60.0%)")
             && t.contains("Median: 2.50")
             && t.contains("Completeness: 40.0%"),
         "{t}"

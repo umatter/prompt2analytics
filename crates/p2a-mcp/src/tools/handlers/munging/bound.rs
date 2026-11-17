@@ -24,7 +24,8 @@
 use std::collections::HashSet;
 
 use p2a_core::data::munging::{
-    AggFn, AggSpec, FillStrategy, JoinShape, MutateExpr, parse_cast_dtype,
+    AggFn, AggSpec, FillStrategy, JoinShape, MutateExpr, join::concat_types, one_hot_levels,
+    parse_cast_dtype,
 };
 use p2a_core::polars::prelude::*;
 use rmcp::ErrorData as McpError;
@@ -619,11 +620,15 @@ pub(super) fn split(df: &DataFrame, column: &str, prefix: &str, parts: usize) ->
 /// exactly for a String or Binary column, see [`filled_text`]), a mode fill
 /// copies one of the column's values into each null of a String column (at
 /// most its longest value each), and any other fill keeps the column's type
-/// and width.
+/// and width. A forward or backward fill within groups (`grouped`) takes
+/// each null's value from its own group, which [`filled_text`]'s pass in
+/// row order does not see, so its String or Binary columns are charged as
+/// a mode fill is: at most the longest value per null.
 pub(super) fn fill_na(
     df: &DataFrame,
     columns: Option<&[&str]>,
     strategy: &FillStrategy,
+    grouped: bool,
 ) -> Result<Option<u64>, String> {
     let names: Vec<&str> = match columns {
         Some(names) => names.to_vec(),
@@ -655,6 +660,15 @@ pub(super) fn fill_na(
             }
             FillStrategy::Mean | FillStrategy::Median if dtype.is_primitive_numeric() => {
                 bound.fixed(name, 8);
+            }
+            FillStrategy::Forward | FillStrategy::Backward
+                if grouped && matches!(dtype, DataType::String | DataType::Binary) =>
+            {
+                let series = column.as_materialized_series();
+                let nulls = column.null_count() as u64;
+                let text =
+                    text_bytes(series).saturating_add(nulls.saturating_mul(longest_value(series)));
+                bound.string(name, text);
             }
             FillStrategy::Forward | FillStrategy::Backward
                 if matches!(dtype, DataType::String | DataType::Binary) =>
@@ -782,26 +796,22 @@ pub(super) fn bin(df: &DataFrame, column: &str, longest_label: usize) -> Option<
     Some(bound.bytes())
 }
 
-/// `munge_one_hot_encode`: one Int32 column `{column}_{value}` per
-/// distinct value (each of them: which one `drop_first` drops depends
-/// on the order polars lists them in). Returns the bound and the number
-/// of distinct values.
+/// `munge_one_hot_encode`: one Int32 column `{column}_{level}` per level of
+/// the column, named as `p2a_core::data::munging::one_hot_encode` names them
+/// (each of them: `drop_first` drops one). Returns the bound and the number
+/// of levels.
 pub(super) fn one_hot(df: &DataFrame, column: &str) -> Result<Option<(u64, usize)>, String> {
-    let Ok(source) = df.column(column) else {
+    if df.column(column).is_err() {
+        return Ok(None);
+    }
+    // A column the core refuses is reported by the tool.
+    let Ok(levels) = one_hot_levels(&p2a_core::data::Dataset::new(df.clone()), column) else {
         return Ok(None);
     };
-    // polars refuses the column here as the tool will: it reports that.
-    let Ok(unique) = source.unique() else {
-        return Ok(None);
-    };
-    let mut names = Vec::with_capacity(unique.len());
-    for i in 0..unique.len() {
+    let mut names = Vec::with_capacity(levels.len());
+    for (i, level) in levels.iter().enumerate() {
         checkpoint(i)?;
-        let value = unique
-            .get(i)
-            .map(|v| format!("{v}"))
-            .unwrap_or_else(|_| "null".to_string());
-        names.push(format!("{column}_{value}"));
+        names.push(format!("{column}_{level}"));
     }
     let replaced: Vec<&str> = names.iter().map(String::as_str).collect();
     let mut bound = Bound::keeping(df, &replaced);
@@ -812,15 +822,32 @@ pub(super) fn one_hot(df: &DataFrame, column: &str) -> Result<Option<(u64, usize
 }
 
 /// `munge_concat`: the frames row-bound, each column of the union of
-/// their columns as each frame holds it, or filled with nulls in a frame
-/// that lacks it.
+/// their columns as each frame holds it, at the width of the column's
+/// common type when that is wider (an integer bound with a float), or
+/// filled with nulls in a frame that lacks it. A String or Binary column
+/// with any null in the result is charged a validity bitmap for every
+/// frame's part.
 pub(super) fn concat(frames: &[&DataFrame]) -> u64 {
-    let mut schema: Vec<(&str, &DataType)> = Vec::new();
+    let mut schema: Vec<(&str, DataType)> = Vec::new();
     let mut seen = HashSet::new();
     for df in frames {
         for column in df.get_columns() {
             if seen.insert(column.name().as_str()) {
-                schema.push((column.name().as_str(), column.dtype()));
+                schema.push((column.name().as_str(), column.dtype().clone()));
+            }
+        }
+    }
+    // The common types, as the core binds them; a bind the core refuses
+    // keeps each frame's own types (the tool reports the refusal).
+    let datasets: Vec<p2a_core::data::Dataset> = frames
+        .iter()
+        .map(|df| p2a_core::data::Dataset::new((*df).clone()))
+        .collect();
+    let refs: Vec<&p2a_core::data::Dataset> = datasets.iter().collect();
+    if let Ok(types) = concat_types(&refs) {
+        for (name, dtype) in &mut schema {
+            if let Some((_, t)) = types.iter().find(|(n, _)| n == name) {
+                *dtype = t.clone();
             }
         }
     }
@@ -834,11 +861,28 @@ pub(super) fn concat(frames: &[&DataFrame]) -> u64 {
     for (name, _) in &schema {
         bound.column(name, 0);
     }
-    for df in frames {
-        for (name, dtype) in &schema {
+    for (name, dtype) in &schema {
+        let text_like = matches!(dtype, DataType::String | DataType::Binary);
+        let gains_nulls = text_like
+            && frames
+                .iter()
+                .any(|df| !df.column(name).is_ok_and(|c| c.null_count() == 0));
+        for df in frames {
+            let height = df.height() as u64;
             match df.column(name) {
-                Ok(column) => bound.add(session::series_bytes(column.as_materialized_series())),
-                Err(_) => bound.add(null_values(dtype, df.height() as u64, 1)),
+                Ok(column) => {
+                    let own = session::series_bytes(column.as_materialized_series());
+                    let widened = if column.dtype() != dtype {
+                        fixed_values(dtype, height, column.n_chunks() as u64).unwrap_or(0)
+                    } else {
+                        0
+                    };
+                    bound.add(own.max(widened));
+                    if gains_nulls {
+                        bound.add(validity(height, column.n_chunks() as u64));
+                    }
+                }
+                Err(_) => bound.add(null_values(dtype, height, 1)),
             }
         }
     }
@@ -1311,7 +1355,7 @@ mod tests {
         let strategy = FillStrategy::Constant(long.to_string());
         let filled = core_fill(&ds, Some(&["c"]), strategy.clone()).unwrap();
         let charged = session::datasets_bytes_of([("", &filled)]);
-        let bound = fill_na(&df, Some(&["c"]), &strategy)
+        let bound = fill_na(&df, Some(&["c"]), &strategy, false)
             .unwrap()
             .expect("a bound");
         assert!(bound >= charged, "fill: bound {bound} < charged {charged}");

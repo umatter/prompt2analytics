@@ -42,7 +42,7 @@ pub struct CompareDatasetRequest {
 
     /// Type of comparison
     #[schemars(
-        description = "Comparison type: 'summary' (side-by-side stats, the default), 'correlation' (correlation differences), or 'distribution' (distribution comparison); case-insensitive; anything else is an error."
+        description = "Comparison type: 'summary' (side-by-side stats, the default), 'correlation' (the correlation matrices of the columns and the difference of the first two datasets), or 'distribution' (distribution comparison); case-insensitive; anything else is an error."
     )]
     pub comparison_type: Option<String>,
 }
@@ -183,7 +183,9 @@ pub struct JoinDatasetsRequest {
     pub right_on: Option<Vec<String>>,
 
     /// Type of join
-    #[schemars(description = "Join type: 'left', 'right', 'inner', or 'full'. Default is 'left'.")]
+    #[schemars(
+        description = "Join type: 'left', 'right', 'inner', or 'full'. Default is 'left'. A full join has one key column; missing keys match each other, as in dplyr and base::merge."
+    )]
     pub join_type: Option<String>,
 
     /// Suffix for duplicate column names
@@ -193,7 +195,9 @@ pub struct JoinDatasetsRequest {
     pub suffix: Option<String>,
 
     /// Optional name for the resulting dataset
-    #[schemars(description = "Optional name for the joined result.")]
+    #[schemars(
+        description = "Optional name for the result. Default '{left}_{right}'; a dataset of that name is replaced."
+    )]
     pub result_name: Option<String>,
 }
 
@@ -202,11 +206,15 @@ pub struct JoinDatasetsRequest {
 #[serde(deny_unknown_fields)]
 pub struct ConcatDatasetsRequest {
     /// Names/IDs of datasets to concatenate
-    #[schemars(description = "List of dataset names to concatenate vertically (row-bind).")]
+    #[schemars(
+        description = "List of dataset names to concatenate vertically (row-bind, as dplyr::bind_rows): a column missing from a dataset is filled with missing values; integer and float columns of one name combine as float; text and numbers do not."
+    )]
     pub datasets: Vec<String>,
 
     /// Optional name for the resulting dataset
-    #[schemars(description = "Optional name for the concatenated result.")]
+    #[schemars(
+        description = "Optional name for the result. Default 'concatenated'; a dataset of that name is replaced."
+    )]
     pub result_name: Option<String>,
 }
 
@@ -229,7 +237,9 @@ pub struct GroupByRequest {
     pub aggs: Vec<Vec<String>>,
 
     /// Optional name for the resulting dataset
-    #[schemars(description = "Optional name for the grouped result.")]
+    #[schemars(
+        description = "Optional name for the result. Default '{dataset}_grouped'; a dataset of that name is replaced."
+    )]
     pub result_name: Option<String>,
 }
 
@@ -252,7 +262,9 @@ pub struct ValueCountsRequest {
     pub normalize: Option<bool>,
 
     /// Optional name for the resulting dataset
-    #[schemars(description = "Optional name for the result.")]
+    #[schemars(
+        description = "Optional name for the result. Default '{column}_value_counts'; a dataset of that name is replaced."
+    )]
     pub result_name: Option<String>,
 }
 
@@ -277,7 +289,9 @@ pub struct PivotDatasetRequest {
     pub values: String,
 
     /// Optional name for the resulting dataset
-    #[schemars(description = "Optional name for the pivoted result.")]
+    #[schemars(
+        description = "Optional name for the result. Default '{dataset}_pivoted'; a dataset of that name is replaced."
+    )]
     pub result_name: Option<String>,
 }
 
@@ -306,7 +320,9 @@ pub struct MeltDatasetRequest {
     pub value_name: Option<String>,
 
     /// Optional name for the resulting dataset
-    #[schemars(description = "Optional name for the melted result.")]
+    #[schemars(
+        description = "Optional name for the result. Default '{dataset}_melted'; a dataset of that name is replaced."
+    )]
     pub result_name: Option<String>,
 }
 
@@ -331,7 +347,9 @@ pub struct DropNaRequest {
     pub how: Option<String>,
 
     /// Optional name for the resulting dataset
-    #[schemars(description = "Optional name for the result.")]
+    #[schemars(
+        description = "Optional name for the result. If not provided, overwrites the source dataset."
+    )]
     pub result_name: Option<String>,
 }
 
@@ -359,8 +377,17 @@ pub struct FillNaRequest {
     )]
     pub value: Option<String>,
 
+    /// Columns to group by (forward and backward fills)
+    #[schemars(
+        description = "Optional group-by columns for panel data: a forward or backward fill stays within each group, in row order (tidyr::fill on a grouped frame). Only with strategy 'forward' or 'backward'."
+    )]
+    #[serde(default)]
+    pub group_by: Option<Vec<String>>,
+
     /// Optional name for the resulting dataset
-    #[schemars(description = "Optional name for the result.")]
+    #[schemars(
+        description = "Optional name for the result. If not provided, overwrites the source dataset."
+    )]
     pub result_name: Option<String>,
 }
 
@@ -385,7 +412,9 @@ pub struct DeduplicateRequest {
     pub keep: Option<String>,
 
     /// Optional name for the resulting dataset
-    #[schemars(description = "Optional name for the result.")]
+    #[schemars(
+        description = "Optional name for the result. If not provided, overwrites the source dataset."
+    )]
     pub result_name: Option<String>,
 }
 
@@ -402,7 +431,9 @@ pub struct TrimRequest {
     pub columns: Option<Vec<String>>,
 
     /// Optional name for the resulting dataset
-    #[schemars(description = "Optional name for the result.")]
+    #[schemars(
+        description = "Optional name for the result. If not provided, overwrites the source dataset."
+    )]
     pub result_name: Option<String>,
 }
 
@@ -419,7 +450,9 @@ pub struct ToLowercaseRequest {
     pub column: String,
 
     /// Optional name for the resulting dataset
-    #[schemars(description = "Optional name for the result.")]
+    #[schemars(
+        description = "Optional name for the result. If not provided, overwrites the source dataset."
+    )]
     pub result_name: Option<String>,
 }
 
@@ -436,7 +469,9 @@ pub struct ToUppercaseRequest {
     pub column: String,
 
     /// Optional name for the resulting dataset
-    #[schemars(description = "Optional name for the result.")]
+    #[schemars(
+        description = "Optional name for the result. If not provided, overwrites the source dataset."
+    )]
     pub result_name: Option<String>,
 }
 
@@ -463,7 +498,9 @@ pub struct ReplaceValueRequest {
     pub new_value: Option<String>,
 
     /// Optional name for the resulting dataset
-    #[schemars(description = "Optional name for the result.")]
+    #[schemars(
+        description = "Optional name for the result. If not provided, overwrites the source dataset."
+    )]
     pub result_name: Option<String>,
 }
 
@@ -488,7 +525,9 @@ pub struct RegexReplaceRequest {
     pub replacement: String,
 
     /// Optional name for the resulting dataset
-    #[schemars(description = "Optional name for the result.")]
+    #[schemars(
+        description = "Optional name for the result. If not provided, overwrites the source dataset."
+    )]
     pub result_name: Option<String>,
 }
 
@@ -521,7 +560,9 @@ pub struct RegexExtractRequest {
     pub group: Option<usize>,
 
     /// Optional name for the resulting dataset
-    #[schemars(description = "Optional name for the result.")]
+    #[schemars(
+        description = "Optional name for the result. If not provided, overwrites the source dataset."
+    )]
     pub result_name: Option<String>,
 }
 
@@ -546,7 +587,9 @@ pub struct RegexCountRequest {
     pub new_column: String,
 
     /// Optional name for the resulting dataset
-    #[schemars(description = "Optional name for the result.")]
+    #[schemars(
+        description = "Optional name for the result. If not provided, overwrites the source dataset."
+    )]
     pub result_name: Option<String>,
 }
 
@@ -579,7 +622,9 @@ pub struct StrSplitRequest {
     pub prefix: String,
 
     /// Optional name for the resulting dataset
-    #[schemars(description = "Optional name for the result.")]
+    #[schemars(
+        description = "Optional name for the result. If not provided, overwrites the source dataset."
+    )]
     pub result_name: Option<String>,
 }
 
@@ -604,7 +649,9 @@ pub struct StrConcatRequest {
     pub separator: Option<String>,
 
     /// Optional name for the resulting dataset
-    #[schemars(description = "Optional name for the result.")]
+    #[schemars(
+        description = "Optional name for the result. If not provided, overwrites the source dataset."
+    )]
     pub result_name: Option<String>,
 }
 
@@ -625,7 +672,9 @@ pub struct StrLengthRequest {
     pub new_column: String,
 
     /// Optional name for the resulting dataset
-    #[schemars(description = "Optional name for the result.")]
+    #[schemars(
+        description = "Optional name for the result. If not provided, overwrites the source dataset."
+    )]
     pub result_name: Option<String>,
 }
 
@@ -650,7 +699,9 @@ pub struct StrSubstringRequest {
     pub length: Option<usize>,
 
     /// Optional name for the resulting dataset
-    #[schemars(description = "Optional name for the result.")]
+    #[schemars(
+        description = "Optional name for the result. If not provided, overwrites the source dataset."
+    )]
     pub result_name: Option<String>,
 }
 
@@ -674,16 +725,27 @@ pub struct LagLeadRequest {
 
     /// Direction: 'lag' or 'lead'
     #[schemars(
-        description = "Direction: 'lag' (shift forward) or 'lead' (shift backward). Default is 'lag'."
+        description = "Direction: 'lag' (past values) or 'lead' (future values). Without it the sign of periods decides: positive is a lag, negative a lead. A direction that contradicts the sign is an error."
     )]
     pub direction: Option<String>,
 
     /// Columns to group by (for panel data)
-    #[schemars(description = "Optional group-by columns for panel data (e.g., ['firm_id']).")]
+    #[schemars(
+        description = "Optional group-by columns for panel data (e.g., ['firm_id']): the shift stays within each group."
+    )]
     pub group_by: Option<Vec<String>>,
 
+    /// Time index (for panel data with gaps)
+    #[schemars(
+        description = "Optional integer time column (a year or period number). With it, the lag of period t is the value of period t - k of the same group, missing when that period is not in the data (plm::lag); rows keep their order. Without it the shift is by row position within groups, so the rows must be sorted by time within each group with no gaps."
+    )]
+    #[serde(default)]
+    pub time: Option<String>,
+
     /// Optional name for the resulting dataset
-    #[schemars(description = "Optional name for the result.")]
+    #[schemars(
+        description = "Optional name for the result. If not provided, overwrites the source dataset."
+    )]
     pub result_name: Option<String>,
 }
 
@@ -706,7 +768,9 @@ pub struct StandardizeRequest {
     pub method: Option<String>,
 
     /// Optional name for the resulting dataset
-    #[schemars(description = "Optional name for the result.")]
+    #[schemars(
+        description = "Optional name for the result. If not provided, overwrites the source dataset."
+    )]
     pub result_name: Option<String>,
 }
 
@@ -751,7 +815,9 @@ pub struct BinColumnRequest {
     pub include_lowest: Option<bool>,
 
     /// Optional name for the resulting dataset
-    #[schemars(description = "Optional name for the result.")]
+    #[schemars(
+        description = "Optional name for the result. If not provided, overwrites the source dataset."
+    )]
     pub result_name: Option<String>,
 }
 
@@ -769,12 +835,14 @@ pub struct OneHotEncodeRequest {
 
     /// Whether to drop the first category
     #[schemars(
-        description = "If true, drop first category to avoid multicollinearity. Default is false."
+        description = "If true, drop the first level (R's factor order: numbers ascending, text by bytes, FALSE before TRUE), as a treatment contrast does, to avoid multicollinearity. Default is false."
     )]
     pub drop_first: Option<bool>,
 
     /// Optional name for the resulting dataset
-    #[schemars(description = "Optional name for the result.")]
+    #[schemars(
+        description = "Optional name for the result. If not provided, overwrites the source dataset."
+    )]
     pub result_name: Option<String>,
 }
 
@@ -791,7 +859,7 @@ pub struct DiffRequest {
     pub column: String,
 
     /// Number of periods
-    #[schemars(description = "Number of periods for difference. Default is 1.")]
+    #[schemars(description = "Number of periods for the difference, at least 1. Default is 1.")]
     pub periods: Option<i64>,
 
     /// Type of difference
@@ -801,11 +869,22 @@ pub struct DiffRequest {
     pub diff_type: Option<String>,
 
     /// Columns to group by (for panel data)
-    #[schemars(description = "Optional group-by columns for panel data.")]
+    #[schemars(
+        description = "Optional group-by columns for panel data: differences stay within each group."
+    )]
     pub group_by: Option<Vec<String>>,
 
+    /// Time index (for panel data with gaps)
+    #[schemars(
+        description = "Optional integer time column (a year or period number). With it, the difference at period t is with period t - k of the same group, missing when that period is not in the data (plm's diff); rows keep their order. Without it the difference is by row position within groups."
+    )]
+    #[serde(default)]
+    pub time: Option<String>,
+
     /// Optional name for the resulting dataset
-    #[schemars(description = "Optional name for the result.")]
+    #[schemars(
+        description = "Optional name for the result. If not provided, overwrites the source dataset."
+    )]
     pub result_name: Option<String>,
 }
 
@@ -830,7 +909,9 @@ pub struct SampleDatasetRequest {
     pub seed: Option<u64>,
 
     /// Optional name for the resulting dataset
-    #[schemars(description = "Optional name for the result.")]
+    #[schemars(
+        description = "Optional name for the result. Default '{dataset}_sample'; a dataset of that name is replaced."
+    )]
     pub result_name: Option<String>,
 }
 
@@ -906,6 +987,8 @@ pub struct MutateColumnRequest {
     pub right: Option<String>,
 
     /// Optional name for the resulting dataset
-    #[schemars(description = "Optional name for the result.")]
+    #[schemars(
+        description = "Optional name for the result. If not provided, overwrites the source dataset."
+    )]
     pub result_name: Option<String>,
 }

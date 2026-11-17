@@ -56,7 +56,7 @@ impl AnalyticsServer {
         for col in &profile.columns {
             result.push_str(&format!("\n## {} ({})\n", col.name, col.dtype));
             result.push_str(&format!(
-                "  - Null: {} ({:.1}%)\n",
+                "  - Missing (null or NaN): {} ({:.1}%)\n",
                 col.null_count,
                 col.null_pct * 100.0
             ));
