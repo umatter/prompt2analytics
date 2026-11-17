@@ -22,18 +22,32 @@ fn assert_only_intended_lines(script: &str, expected_commands: usize) {
         if t.is_empty() || t.starts_with('#') {
             continue;
         }
-        if t.starts_with("p2a --session \"$SESSION_FILE\" ") {
+        if t.starts_with("\"$P2A\" --session \"$SESSION_FILE\" ") {
             commands += 1;
             continue;
         }
+        // P2A_RECORDED_DIR=<one quoted word>: bare, '...' or $'...' without a line break
+        let recorded_dir = t.strip_prefix("P2A_RECORDED_DIR=").is_some_and(|w| {
+            !w.is_empty()
+                && (w
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "_./:=@%+-".contains(c))
+                    || (w.starts_with('\'') && w.ends_with('\'') && w.len() >= 2)
+                    || (w.starts_with("$'") && w.ends_with('\'') && w.len() >= 3))
+        });
         assert!(
-            matches!(
-                t,
-                "set -euo pipefail"
-                    | "rm -f \"$SESSION_FILE\""
-                    | "rm -rf -- \"$SESSION_FILE.datasets\""
-                    | "echo \"Script completed successfully\""
-            ) || t.starts_with("SESSION_FILE=\".p2a_session_"),
+            recorded_dir
+                || matches!(
+                    t,
+                    "set -euo pipefail"
+                        | "P2A=\"${P2A:-p2a}\""
+                        | "P2A_WORKDIR=\"${P2A_WORKDIR:-$P2A_RECORDED_DIR}\""
+                        | "P2A_REPLAY_DIR=\"$(mktemp -d \"${TMPDIR:-/tmp}/p2a_replay.XXXXXX\")\""
+                        | "trap 'rm -rf -- \"$P2A_REPLAY_DIR\"' EXIT"
+                        | "SESSION_FILE=\"$P2A_REPLAY_DIR/session.json\""
+                        | "cd -- \"$P2A_WORKDIR\""
+                        | "echo \"Script completed successfully\""
+                ),
             "unexpected executable line {line:?} in:\n{script}"
         );
     }
@@ -62,6 +76,8 @@ fn replay_with_stub(dir: &std::path::Path, script: &std::path::Path) -> Vec<Stri
     let status = std::process::Command::new("bash")
         .arg(script)
         .current_dir(dir)
+        .env_remove("P2A")
+        .env_remove("P2A_WORKDIR")
         .env("PATH", path)
         .env("P2A_STUB_LOG", &log)
         .status()
@@ -349,6 +365,7 @@ fn test_session_records_and_exports() {
     let script_path = temp_dir.path().join("out.sh");
 
     p2a()
+        .current_dir(temp_dir.path())
         .args([
             "--session",
             session_path.to_str().unwrap(),
@@ -361,6 +378,7 @@ fn test_session_records_and_exports() {
         .assert()
         .success();
     p2a()
+        .current_dir(temp_dir.path())
         .args([
             "--session",
             session_path.to_str().unwrap(),
@@ -372,6 +390,7 @@ fn test_session_records_and_exports() {
         .success();
 
     p2a()
+        .current_dir(temp_dir.path())
         .args([
             "script",
             "export",
@@ -404,6 +423,8 @@ fn test_session_records_and_exports() {
         let out = std::process::Command::new("bash")
             .arg(&script_path)
             .current_dir(temp_dir.path())
+            .env_remove("P2A")
+            .env_remove("P2A_WORKDIR")
             .env("PATH", path)
             .output()
             .unwrap();
@@ -428,6 +449,7 @@ fn test_script_export_keeps_newline_argument_inert() {
     let script = tmp.path().join("out.sh");
     let payload = "nodata\ntouch injected_marker #";
     p2a()
+        .current_dir(tmp.path())
         .args([
             "--session",
             session.to_str().unwrap(),
@@ -437,25 +459,39 @@ fn test_script_export_keeps_newline_argument_inert() {
         ])
         .assert()
         .failure(); // unknown dataset; still recorded
-    p2a()
-        .args([
-            "script",
-            "export",
-            session.to_str().unwrap(),
-            "-o",
-            script.to_str().unwrap(),
-        ])
-        .assert()
-        .success();
-    let text = std::fs::read_to_string(&script).unwrap();
-    assert_only_intended_lines(&text, 1);
+    let export = |extra: &[&str]| {
+        p2a()
+            .current_dir(tmp.path())
+            .args([
+                "script",
+                "export",
+                session.to_str().unwrap(),
+                "-o",
+                script.to_str().unwrap(),
+            ])
+            .args(extra)
+            .assert()
+            .success();
+        std::fs::read_to_string(&script).unwrap()
+    };
+    // the failed command is named, escaped, and not replayed
+    let text = export(&[]);
+    assert_only_intended_lines(&text, 0);
+    assert!(
+        text.contains(
+            "# not replayed (failed when recorded): data describe 'nodata\\ntouch injected_marker #'\n"
+        ),
+        "{text}"
+    );
+    // --include-failed replays it, the argument still one quoted word
+    let text = export(&["--include-failed"]);
     assert!(
         text.contains("# data describe 'nodata\\ntouch injected_marker #'\n"),
         "{text}"
     );
     assert!(
         text.contains(
-            "p2a --session \"$SESSION_FILE\" data describe $'nodata\\ntouch injected_marker #'\n"
+            "\"$P2A\" --session \"$SESSION_FILE\" data describe $'nodata\\ntouch injected_marker #' || true\n"
         ),
         "{text}"
     );
@@ -476,7 +512,7 @@ fn test_script_export_neutralises_crafted_session_fields() {
     let json = serde_json::json!({
         "id": "crafted", "title": "t\ntouch injected_title",
         "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
-        "working_dir": "/tmp", "datasets": {}, "version": "0.1.3\ntouch injected_version",
+        "working_dir": tmp.path(), "datasets": {}, "version": "0.1.3\ntouch injected_version",
         "commands": [{
             "id": "c1", "timestamp": "2026-01-01T00:00:00Z",
             "command_line": "legacy\ntouch injected_comment",
@@ -503,7 +539,7 @@ fn test_script_export_neutralises_crafted_session_fields() {
     assert!(text.contains("# legacy\\ntouch injected_comment\n"));
     assert!(
         text.contains(
-            "p2a --session \"$SESSION_FILE\" 'data;touch injected_category;' describe $'d\\ntouch injected_arg'\n"
+            "\"$P2A\" --session \"$SESSION_FILE\" 'data;touch injected_category;' describe $'d\\ntouch injected_arg'\n"
         ),
         "{text}"
     );

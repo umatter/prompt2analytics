@@ -100,3 +100,167 @@ fn test_cli_session_works_from_another_directory() {
     assert!(out.status.success(), "{stderr}");
     assert!(!stderr.contains("Warning"), "{stderr}");
 }
+
+/// `p2a script export <session> -o <out> <extra…>` (asserts success).
+fn export(session: &Path, out: &Path, extra: &[&str]) {
+    let o = p2a()
+        .args(["script", "export"])
+        .arg(session)
+        .arg("-o")
+        .arg(out)
+        .args(extra)
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{o:?}");
+}
+
+/// A PATH with only the system directories: no `p2a` on it.
+const SYSTEM_PATH: &str = "/usr/bin:/bin";
+
+/// `bash <script>` in `cwd` with `P2A` set to this build's binary, a system PATH and
+/// `TMPDIR` = `tmp`; `extra` adds environment variables.
+#[cfg(unix)]
+fn replay(script: &Path, cwd: &Path, tmp: &Path, extra: &[(&str, &Path)]) -> std::process::Output {
+    let mut c = Command::new("bash");
+    c.arg(script)
+        .current_dir(cwd)
+        .env_remove("P2A_WORKDIR")
+        .env("P2A", env!("CARGO_BIN_EXE_p2a"))
+        .env("PATH", SYSTEM_PATH)
+        .env("TMPDIR", tmp);
+    for (k, v) in extra {
+        c.env(k, v);
+    }
+    c.output().unwrap()
+}
+
+fn entries(dir: &Path) -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    v.sort();
+    v
+}
+
+#[cfg(unix)]
+#[test]
+fn test_cli_replay_skips_failed_commands() {
+    let s = temp_session();
+    noisy_csv(&s.dir().join("d.csv"), 14);
+    s.ok(&["data", "load", "d.csv", "--name", "d"]);
+    s.err(&["reg", "ols", "d", "-y", "y", "-x", "xx"]);
+    s.ok(&["reg", "ols", "d", "-y", "y", "-x", "x"]);
+    let script = s.dir().join("r.sh");
+    export(s.path(), &script, &[]);
+    let tmp = tempfile::tempdir().unwrap();
+    let out = replay(&script, s.dir(), tmp.path(), &[]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{stdout}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(text_table(&stdout).names, ["(Intercept)", "x"], "{stdout}");
+    assert!(
+        stdout.ends_with("Script completed successfully\n"),
+        "{stdout}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_cli_replay_runs_in_the_recorded_directory() {
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    noisy_csv(&a.path().join("d.csv"), 12);
+    let session = a.path().join("s.json");
+    for args in [
+        &["data", "load", "d.csv", "--name", "d"][..],
+        &["data", "head", "d", "-n", "2"][..],
+    ] {
+        let o = p2a()
+            .arg("--session")
+            .arg(&session)
+            .args(args)
+            .current_dir(a.path())
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{o:?}");
+    }
+    let script = b.path().join("r.sh");
+    export(&session, &script, &[]);
+    let out = replay(&script, b.path(), tmp.path(), &[]);
+    assert!(out.status.success(), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("Rows: 12"),
+        "{out:?}"
+    );
+
+    // P2A_WORKDIR: a copy of the directory, with its own data, is read instead
+    let copy = tempfile::tempdir().unwrap();
+    std::fs::write(
+        copy.path().join("d.csv"),
+        "x,y\n1.5,3.25\n2.5,5.75\n3.5,7.5\n",
+    )
+    .unwrap();
+    std::fs::remove_file(a.path().join("d.csv")).unwrap();
+    let out = replay(
+        &script,
+        b.path(),
+        tmp.path(),
+        &[("P2A_WORKDIR", copy.path())],
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{stdout}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(stdout.contains("Rows: 3"), "{stdout}");
+    assert_eq!(entries(tmp.path()), Vec::<String>::new());
+}
+
+#[cfg(unix)]
+#[test]
+fn test_cli_replay_uses_the_p2a_variable() {
+    let s = temp_session();
+    noisy_csv(&s.dir().join("d.csv"), 8);
+    s.ok(&["data", "load", "d.csv", "--name", "d"]);
+    let script = s.dir().join("r.sh");
+    export(s.path(), &script, &[]);
+    let tmp = tempfile::tempdir().unwrap();
+    let out = replay(&script, s.dir(), tmp.path(), &[]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_cli_failed_replay_leaves_nothing() {
+    let s = temp_session();
+    noisy_csv(&s.dir().join("a.csv"), 10);
+    noisy_csv(&s.dir().join("b.csv"), 10);
+    s.ok(&["data", "load", "a.csv", "--name", "a"]);
+    s.ok(&[
+        "munge", "filter", "a", "-c", "x", "-o", "gt", "-v", "1", "-n", "sub",
+    ]);
+    s.ok(&["data", "load", "b.csv", "--name", "b"]);
+    let script = s.dir().join("r.sh");
+    export(s.path(), &script, &[]);
+    std::fs::remove_file(s.dir().join("b.csv")).unwrap();
+    let before = entries(s.dir());
+    let tmp = tempfile::tempdir().unwrap();
+    let out = replay(&script, s.dir(), tmp.path(), &[]);
+    assert!(!out.status.success(), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("Created dataset 'sub'"),
+        "{out:?}"
+    );
+    assert_eq!(entries(tmp.path()), Vec::<String>::new());
+    assert_eq!(entries(s.dir()), before);
+}

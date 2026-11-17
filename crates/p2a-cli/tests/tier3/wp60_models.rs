@@ -1484,7 +1484,8 @@ fn test_cli_munge_bin_and_cast_print_one_json_document() {
 }
 
 /// CLI-29 / CLI-4: a session with a munge step exports a script that replays from another working
-/// directory and fits the same model; the replay leaves nothing behind there.
+/// directory and fits the same model; the replay leaves nothing behind there, nor in its
+/// temporary directory (the EXIT trap removes the replay session and its derived datasets).
 #[cfg(unix)]
 #[test]
 fn test_validate_cli_exported_script_with_munge_runs() {
@@ -1533,9 +1534,10 @@ fn test_validate_cli_exported_script_with_munge_runs() {
     assert!(
         std::fs::read_to_string(&script)
             .unwrap()
-            .contains("rm -rf -- \"$SESSION_FILE.datasets\"")
+            .contains("trap 'rm -rf -- \"$P2A_REPLAY_DIR\"' EXIT\n")
     );
     let other = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
     let bin = std::path::Path::new(env!("CARGO_BIN_EXE_p2a"))
         .parent()
         .unwrap()
@@ -1548,6 +1550,9 @@ fn test_validate_cli_exported_script_with_munge_runs() {
     let out = std::process::Command::new("bash")
         .arg(&script)
         .current_dir(other.path())
+        .env_remove("P2A")
+        .env_remove("P2A_WORKDIR")
+        .env("TMPDIR", scratch.path())
         .env("PATH", path)
         .output()
         .unwrap();
@@ -1557,6 +1562,11 @@ fn test_validate_cli_exported_script_with_munge_runs() {
         "replay failed:\n{stdout}\n{}",
         String::from_utf8_lossy(&out.stderr)
     );
+    let tmp_left: Vec<_> = std::fs::read_dir(scratch.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert!(tmp_left.is_empty(), "left in TMPDIR: {tmp_left:?}");
     assert!(
         stdout.contains(&format!("Created dataset 'post' ({n} rows x 5 columns)"))
             && stdout.contains("Script completed successfully"),
