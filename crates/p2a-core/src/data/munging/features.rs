@@ -102,7 +102,47 @@ fn shift_expr(
     })
 }
 
-/// `df` with the column `name` computed by `make` from the shifted values of `column`
+/// What a shift computes from the shifted values of a column: the values themselves (a lag
+/// or a lead), the difference, or the fractional change in Float64 (an integer column
+/// would floor-divide).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ShiftOp {
+    Value,
+    Diff,
+    PctChange,
+}
+
+impl ShiftOp {
+    /// The result as an expression on the frame, from `lagged`, the shifted values.
+    fn expr(self, column: &str, lagged: Expr) -> Expr {
+        match self {
+            ShiftOp::Value => lagged,
+            ShiftOp::Diff => col(column) - lagged,
+            ShiftOp::PctChange => {
+                let lagged = lagged.cast(DataType::Float64);
+                (col(column).cast(DataType::Float64) - lagged.clone()) / lagged
+            }
+        }
+    }
+
+    /// The same result computed on the columns directly, for a shift by row position over the
+    /// whole frame, which needs no query plan. `None` for a column type whose difference the
+    /// expression path defines (dates, durations, decimals).
+    fn eager(self, source: &Column, lagged: Column) -> MungeResult<Option<Column>> {
+        Ok(Some(match self {
+            ShiftOp::Value => lagged,
+            ShiftOp::Diff if source.dtype().is_primitive_numeric() => (source - &lagged)?,
+            ShiftOp::Diff => return Ok(None),
+            ShiftOp::PctChange => {
+                let lagged = lagged.cast(&DataType::Float64)?;
+                let change = (&source.cast(&DataType::Float64)? - &lagged)?;
+                (&change / &lagged)?
+            }
+        }))
+    }
+}
+
+/// `df` with the column `name` computed by `op` from the shifted values of `column`
 /// (`shifted`: the expression [`shift_expr`] gives).
 fn with_shifted(
     df: &DataFrame,
@@ -110,8 +150,18 @@ fn with_shifted(
     periods: i64,
     opts: &ShiftOptions,
     name: &str,
-    make: impl FnOnce(Expr) -> Expr,
+    op: ShiftOp,
 ) -> MungeResult<Dataset> {
+    let positional = opts.time.is_none() && opts.group_by.is_none_or(|g| g.is_empty());
+    if positional {
+        check_shift_columns(df, column, opts)?;
+        let source = df.column(column)?;
+        if let Some(values) = op.eager(source, source.shift(periods))? {
+            let mut result = df.clone();
+            result.with_column(values.with_name(name.into()))?;
+            return Ok(Dataset::new(result));
+        }
+    }
     let (extra, shifted) = shift_expr(df, column, periods, opts)?;
     let mut base = df.clone();
     if let Some(extra) = extra {
@@ -119,7 +169,7 @@ fn with_shifted(
     }
     let mut result = base
         .lazy()
-        .with_column(make(shifted).alias(name))
+        .with_column(op.expr(column, shifted).alias(name))
         .collect()
         .map_err(|e| MungeError::FeatureError(e.to_string()))?;
     if result.column(SHIFTED).is_ok() && name != SHIFTED {
@@ -320,7 +370,7 @@ pub fn lag_with(
         signed_periods(periods)?,
         opts,
         &name,
-        |e| e,
+        ShiftOp::Value,
     )
 }
 
@@ -373,7 +423,7 @@ pub fn lead_with(
 ) -> MungeResult<Dataset> {
     let name = format!("{column}_lead{periods}");
     let shift = -signed_periods(periods)?;
-    with_shifted(dataset.df(), column, shift, opts, &name, |e| e)
+    with_shifted(dataset.df(), column, shift, opts, &name, ShiftOp::Value)
 }
 
 /// The refusal of a difference over 0 periods, as R's `diff(x, lag = 0)`.
@@ -423,9 +473,7 @@ pub fn diff_with(
 ) -> MungeResult<Dataset> {
     let name = format!("{column}_diff{periods}");
     let shift = positive_periods(periods)?;
-    with_shifted(dataset.df(), column, shift, opts, &name, |lagged| {
-        col(column) - lagged
-    })
+    with_shifted(dataset.df(), column, shift, opts, &name, ShiftOp::Diff)
 }
 
 /// Calculate percentage change between consecutive values.
@@ -468,11 +516,7 @@ pub fn pct_change_with(
     super::require_numeric(df, column, false)?;
     let name = format!("{column}_pct_change{periods}");
     let shift = positive_periods(periods)?;
-    // In Float64: an integer column would floor-divide
-    with_shifted(df, column, shift, opts, &name, |lagged| {
-        let lagged = lagged.cast(DataType::Float64);
-        (col(column).cast(DataType::Float64) - lagged.clone()) / lagged
-    })
+    with_shifted(df, column, shift, opts, &name, ShiftOp::PctChange)
 }
 
 /// Standardize columns to have mean 0 and standard deviation 1.
@@ -544,22 +588,26 @@ pub fn normalize(dataset: &Dataset, columns: &[&str]) -> MungeResult<Dataset> {
         super::require_numeric(df, col_name, false)?;
     }
 
-    // Build expressions for normalization, in Float64: an integer column would floor-divide
-    let mut exprs: Vec<Expr> = Vec::new();
+    // In Float64: an integer column would floor-divide. Computed on the columns directly (no
+    // query plan); min and max skip missing values and NaN, as polars' expressions do.
+    let mut normalized: Vec<Column> = Vec::with_capacity(columns.len());
     for col_name in columns {
-        let normalized_name = format!("{}_normalized", col_name);
-        let c = col(*col_name).cast(DataType::Float64);
-        let min = c.clone().min();
-        let max = c.clone().max();
-        exprs.push(((c - min.clone()) / (max - min)).alias(&normalized_name));
+        let values = df.column(col_name)?.cast(&DataType::Float64)?;
+        let values = values.f64()?;
+        let scaled: Float64Chunked = match (values.min(), values.max()) {
+            (Some(min), Some(max)) => (values - min) / (max - min),
+            _ => Float64Chunked::full_null(PlSmallStr::EMPTY, values.len()),
+        };
+        normalized.push(
+            scaled
+                .with_name(format!("{col_name}_normalized").into())
+                .into_column(),
+        );
     }
-
-    let result = df
-        .clone()
-        .lazy()
-        .with_columns(exprs)
-        .collect()
-        .map_err(|e| MungeError::FeatureError(e.to_string()))?;
+    let mut result = df.clone();
+    for c in normalized {
+        result.with_column(c)?;
+    }
 
     Ok(Dataset::new(result))
 }
@@ -1193,24 +1241,46 @@ pub fn one_hot_encode_with(
         .map_err(feature_err)?;
     crate::resource::check_alloc::<i32>(cells, "one-hot dummy columns").map_err(feature_err)?;
 
-    let mut result = df.clone();
-    for (i, name) in names.iter().enumerate() {
+    // Every dummy starts at 0; one pass over the codes sets the 1s. A missing cell is missing
+    // in every dummy: they share one validity bitmap.
+    let mut values: Vec<Vec<i32>> = Vec::with_capacity(names.len());
+    for _ in &names {
         crate::resource::checkpoint().map_err(feature_err)?;
-        let level = (start + i) as u32;
-        let dummy: Int32Chunked = codes
-            .iter()
-            .map(|c| c.map(|c| i32::from(c == level)))
-            .collect();
-        result
-            .with_column(dummy.with_name(name.as_str().into()).into_column())
-            .map_err(|e| MungeError::FeatureError(e.to_string()))?;
+        values.push(
+            crate::resource::try_vec(height, 0i32, "one-hot dummy column").map_err(feature_err)?,
+        );
     }
+    let start_code = start as u32;
+    for (row, code) in codes.iter().enumerate() {
+        if let Some(code) = *code
+            && code >= start_code
+        {
+            values[(code - start_code) as usize][row] = 1;
+        }
+    }
+    let n_missing = codes.iter().filter(|c| c.is_none()).count();
+    let present: Option<BooleanChunked> =
+        (n_missing > 0).then(|| codes.iter().map(Option::is_some).collect());
+    let validity = present
+        .as_ref()
+        .and_then(|p| p.downcast_iter().next().map(|a| a.values().clone()));
+    let dummies: Vec<Column> = names
+        .iter()
+        .zip(values)
+        .map(|(name, v)| {
+            Int32Chunked::from_vec_validity(name.as_str().into(), v, validity.clone()).into_column()
+        })
+        .collect();
+    let mut result = df.clone();
+    result
+        .hstack_mut(&dummies)
+        .map_err(|e| MungeError::FeatureError(e.to_string()))?;
 
     Ok(OneHotOutcome {
         dataset: Dataset::new(result),
         columns: names,
         dropped,
-        n_missing: codes.iter().filter(|c| c.is_none()).count(),
+        n_missing,
     })
 }
 
@@ -2140,6 +2210,99 @@ mod tests {
         // Second value should be (110 - 100) / 100 = 0.1
         let val = pct_col.f64().unwrap().get(1).unwrap();
         assert!((val - 0.1).abs() < 0.001);
+    }
+
+    /// The direct path of a positional shift and of normalize gives what the expressions give,
+    /// on noisy Float64, Int64 and Float32 columns with nulls and NaN.
+    #[test]
+    fn direct_shift_and_normalize_match_the_expressions() {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(31);
+        let n = 200;
+        let f: Vec<Option<f64>> = (0..n)
+            .map(|i| match i % 17 {
+                3 => None,
+                5 => Some(f64::NAN),
+                _ => Some(rng.gen_range(-50.0..50.0)),
+            })
+            .collect();
+        let k: Vec<Option<i64>> = (0..n)
+            .map(|i| (i % 13 != 4).then(|| rng.gen_range(-9..40)))
+            .collect();
+        let h: Vec<Option<f32>> = (0..n)
+            .map(|i| (i % 11 != 2).then(|| rng.gen_range(0.5f32..9.5)))
+            .collect();
+        let df = DataFrame::new(vec![
+            Column::new("f".into(), f),
+            Column::new("k".into(), k),
+            Column::new("h".into(), h),
+            Column::new("d".into(), (0..n as i32).collect::<Vec<_>>())
+                .cast(&DataType::Date)
+                .unwrap(),
+        ])
+        .unwrap();
+        let ds = Dataset::new(df.clone());
+        let lazy = |e: Expr, name: &str| -> Column {
+            df.clone()
+                .lazy()
+                .select([e.alias(name)])
+                .collect()
+                .unwrap()
+                .column(name)
+                .unwrap()
+                .clone()
+        };
+        let same = |got: &Dataset, name: &str, want: Column| {
+            let got = got.df().column(name).unwrap();
+            assert_eq!(got.dtype(), want.dtype(), "{name}");
+            assert!(
+                got.as_materialized_series()
+                    .equals_missing(want.as_materialized_series()),
+                "{name}"
+            );
+        };
+        for c in ["f", "k", "h", "d"] {
+            for p in [1usize, 3] {
+                let shifted = col(c).shift(lit(p as i64));
+                same(
+                    &lag(&ds, c, p, None).unwrap(),
+                    &format!("{c}_lag{p}"),
+                    lazy(shifted.clone(), "x"),
+                );
+                let led = col(c).shift(lit(-(p as i64)));
+                same(
+                    &lead(&ds, c, p, None).unwrap(),
+                    &format!("{c}_lead{p}"),
+                    lazy(led, "x"),
+                );
+                same(
+                    &diff(&ds, c, p).unwrap(),
+                    &format!("{c}_diff{p}"),
+                    lazy(col(c) - shifted.clone(), "x"),
+                );
+                if c != "d" {
+                    let l = shifted.cast(DataType::Float64);
+                    same(
+                        &pct_change(&ds, c, p).unwrap(),
+                        &format!("{c}_pct_change{p}"),
+                        lazy((col(c).cast(DataType::Float64) - l.clone()) / l, "x"),
+                    );
+                }
+            }
+        }
+        let normalized = normalize(&ds, &["f", "k", "h"]).unwrap();
+        for c in ["f", "k", "h"] {
+            let e = col(c).cast(DataType::Float64);
+            let (lo, hi) = (e.clone().min(), e.clone().max());
+            same(
+                &normalized,
+                &format!("{c}_normalized"),
+                lazy((e - lo.clone()) / (hi - lo), "x"),
+            );
+        }
+        // an all-missing column normalizes to missing values
+        let empty = Dataset::new(df!("z" => [None::<f64>, None]).unwrap());
+        let z = normalize(&empty, &["z"]).unwrap();
+        assert_eq!(z.df().column("z_normalized").unwrap().null_count(), 2);
     }
 
     #[test]

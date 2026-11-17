@@ -761,6 +761,22 @@ pub fn concat(datasets: &[&Dataset]) -> MungeResult<Dataset> {
         return Ok(datasets[0].clone());
     }
 
+    // Frames with one schema (the common case) bind as they are.
+    let first = datasets[0].df();
+    let same_schema = datasets[1..].iter().all(|ds| {
+        let df = ds.df();
+        df.width() == first.width()
+            && df
+                .get_columns()
+                .iter()
+                .zip(first.get_columns())
+                .all(|(a, b)| a.name() == b.name() && a.dtype() == b.dtype())
+    });
+    if same_schema {
+        let dfs: Vec<DataFrame> = datasets.iter().map(|ds| ds.df().clone()).collect();
+        return Ok(Dataset::new(polars::functions::concat_df_diagonal(&dfs)?));
+    }
+
     let types = concat_types(datasets)?;
 
     // Cast only the columns whose type differs from the common one.

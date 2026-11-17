@@ -252,13 +252,10 @@ pub fn drop_na(dataset: &Dataset, columns: Option<&[&str]>, how: &str) -> MungeR
 
     for col_name in &cols_to_check {
         let col = df.column(col_name)?;
-        let is_missing = if col.dtype().is_float() {
-            // na-ok: NaN mask, not extraction; the null part comes from is_null
-            col.is_null()
-                | col
-                    .as_materialized_series()
-                    .is_nan()?
-                    .fill_null_with_values(false)?
+        // A float column without NaN (the raw scan is cheap; NaN in a null slot only sends it
+        // to the exact mask) needs the null mask alone.
+        let is_missing = if col.dtype().is_float() && has_nan(col)? {
+            col.is_null() | nan_mask(col)?
         } else {
             col.is_null()
         };
@@ -278,6 +275,45 @@ pub fn drop_na(dataset: &Dataset, columns: Option<&[&str]>, how: &str) -> MungeR
 
     let filtered = df.filter(&keep_mask)?;
     Ok(Dataset::new(filtered))
+}
+
+/// Whether a Float64 or Float32 column holds a NaN value, null slots included (a value under
+/// a null is never read as data, so a NaN there only costs the exact mask). Other types: false.
+fn has_nan(col: &Column) -> MungeResult<bool> {
+    Ok(match col.dtype() {
+        // In blocks without early exit inside one, so the scan vectorises.
+        DataType::Float64 => {
+            // na-ok: a scan of the raw values for NaN, not an extraction
+            let ca = col.f64()?;
+            ca.downcast_iter().any(|a| {
+                a.values()
+                    .chunks(64)
+                    .any(|b| b.iter().fold(false, |nan, v| nan | v.is_nan()))
+            })
+        }
+        DataType::Float32 => {
+            let ca = col.f32()?;
+            ca.downcast_iter().any(|a| {
+                a.values()
+                    .chunks(64)
+                    .any(|b| b.iter().fold(false, |nan, v| nan | v.is_nan()))
+            })
+        }
+        _ => false,
+    })
+}
+
+/// The NaN cells of a float column (false where the cell is null): NaN is the one value
+/// that is not `<= inf`. polars' comparison kernel builds this mask faster than its
+/// `is_nan`.
+fn nan_mask(col: &Column) -> MungeResult<BooleanChunked> {
+    let below_inf = match col.dtype() {
+        // na-ok: a comparison mask, not an extraction; nulls compare as not NaN
+        DataType::Float64 => col.f64()?.lt_eq(f64::INFINITY),
+        DataType::Float32 => col.f32()?.lt_eq(f32::INFINITY),
+        _ => return Ok(BooleanChunked::full(col.name().clone(), false, col.len())),
+    };
+    Ok(!below_inf.fill_null_with_values(true)?)
 }
 
 /// Fill missing values in specified columns.
@@ -1480,10 +1516,17 @@ fn replace_column(col: &Column, old: &str, new: Option<&str>) -> MungeResult<(Co
             let (days, n) = replace_values(col.date()?.physical(), |v| v == old_v, new_v);
             (days.into_date().into_column(), n)
         }
-        DataType::Categorical(..) | DataType::Enum(..) => {
-            // Each category's text once: no row holds `old`, nothing changes.
-            let labels = col.unique()?.cast(&DataType::String)?;
-            if !labels.str()?.iter().flatten().any(|v| v == old) {
+        DataType::Categorical(_, mapping) | DataType::Enum(_, mapping) => {
+            // A label the column's mapping does not know, or whose code no row holds: nothing
+            // changes. The codes are compared as integers, without rebuilding the text.
+            let held = match mapping.get_cat(old) {
+                None => false,
+                Some(code) => {
+                    let codes = col.to_physical_repr().cast(&DataType::UInt32)?;
+                    codes.u32()?.iter().any(|c| c == Some(code))
+                }
+            };
+            if !held {
                 return Ok((col.clone(), 0));
             }
             let text = col.cast(&DataType::String)?;
@@ -2505,6 +2548,129 @@ mod tests {
         let ds = test_dataset_with_nulls();
         let clean = drop_na(&ds, None, "any").unwrap();
         assert_eq!(clean.nrows(), 1); // Only row 1 (id=1) has no nulls in any column
+    }
+
+    #[test]
+    fn test_drop_na_nan_mask_every_float_value() {
+        // NaN is missing; inf, -inf and numbers are not; Float32 as Float64; a column
+        // without NaN takes the null mask alone
+        let ds = Dataset::new(
+            DataFrame::new(vec![
+                Column::new(
+                    "a".into(),
+                    [
+                        Some(f64::INFINITY),
+                        Some(f64::NEG_INFINITY),
+                        Some(f64::NAN),
+                        None,
+                        Some(1.5),
+                        Some(-0.0),
+                    ],
+                ),
+                Column::new(
+                    "b".into(),
+                    [
+                        Some(f32::NEG_INFINITY),
+                        Some(2.5f32),
+                        Some(1.0),
+                        Some(3.0),
+                        Some(f32::NAN),
+                        Some(f32::INFINITY),
+                    ],
+                ),
+                Column::new(
+                    "c".into(),
+                    [
+                        Some(1.0f64),
+                        Some(2.0),
+                        Some(3.0),
+                        Some(4.0),
+                        Some(5.0),
+                        None,
+                    ],
+                ),
+            ])
+            .unwrap(),
+        );
+        let ids = |cols: Option<&[&str]>, how: &str| -> Vec<Option<f64>> {
+            drop_na(&ds, cols, how)
+                .unwrap()
+                .df()
+                .column("c")
+                .unwrap()
+                .f64()
+                .unwrap()
+                .into_iter()
+                .collect()
+        };
+        assert_eq!(
+            ids(Some(&["a"]), "any"),
+            [Some(1.0), Some(2.0), Some(5.0), None]
+        );
+        assert_eq!(
+            ids(Some(&["b"]), "any"),
+            [Some(1.0), Some(2.0), Some(3.0), Some(4.0), None]
+        );
+        assert_eq!(ids(None, "any"), [Some(1.0), Some(2.0)]);
+        assert_eq!(
+            ids(Some(&["a", "b"]), "all"),
+            [Some(1.0), Some(2.0), Some(3.0), Some(4.0), Some(5.0), None]
+        );
+        assert_eq!(
+            ids(Some(&["c"]), "any"),
+            [Some(1.0), Some(2.0), Some(3.0), Some(4.0), Some(5.0)]
+        );
+        let a = ds.df().column("a").unwrap();
+        assert!(has_nan(a).unwrap());
+        assert!(!has_nan(ds.df().column("c").unwrap()).unwrap());
+        let mask: Vec<Option<bool>> = nan_mask(a).unwrap().into_iter().collect();
+        assert_eq!(
+            mask,
+            [
+                Some(false),
+                Some(false),
+                Some(true),
+                Some(false),
+                Some(false),
+                Some(false)
+            ]
+        );
+    }
+
+    #[test]
+    fn test_replace_categorical_uses_the_codes() {
+        // a label of the global categories that this column does not hold changes nothing;
+        // one it holds is replaced
+        let cat = DataType::from_categories(Categories::global());
+        let other = Column::new("o".into(), ["only elsewhere"])
+            .cast(&cat)
+            .unwrap();
+        assert_eq!(other.len(), 1);
+        let ds = Dataset::new(
+            DataFrame::new(vec![
+                Column::new("c".into(), [Some("a"), None, Some("b"), Some("a")])
+                    .cast(&cat)
+                    .unwrap(),
+            ])
+            .unwrap(),
+        );
+        let opts = ReplaceOptions::default();
+        let none = replace_with(&ds, "c", "only elsewhere", Some("z"), &opts).unwrap();
+        assert_eq!(none.n_replaced, 0);
+        assert!(none.dataset.df().equals_missing(ds.df()));
+        let absent = replace_with(&ds, "c", "never seen anywhere", Some("z"), &opts).unwrap();
+        assert_eq!(absent.n_replaced, 0);
+        let some = replace_with(&ds, "c", "a", Some("z"), &opts).unwrap();
+        assert_eq!(some.n_replaced, 2);
+        assert_eq!(
+            text_cells(&some.dataset, "c"),
+            [
+                Some("z".to_string()),
+                None,
+                Some("b".to_string()),
+                Some("z".to_string())
+            ]
+        );
     }
 
     #[test]
