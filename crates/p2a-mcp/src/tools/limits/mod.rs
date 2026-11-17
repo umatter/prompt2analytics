@@ -39,8 +39,8 @@
 //! - [`Limits::check_arima_fit`] and [`Limits::check_arima_series`] let the ARIMA handlers
 //!   bound a fit's cost before it starts: they refuse one whose work exceeds
 //!   [`Limits::arima_fit_work`], and one whose series holds a nonzero value below
-//!   [`ARIMA_MIN_MAGNITUDE`], small enough that the fit's arithmetic on it can become subnormal
-//!   and much slower. The fit itself checks the call's budget every iteration and every few
+//!   [`ARIMA_MIN_MAGNITUDE`], a floor with a wide margin above the values whose differences,
+//!   products and squares in the fit would be subnormal and much slower to compute. The fit itself checks the call's budget every iteration and every few
 //!   thousand rows of a pass, so the deadline stops it as well; the check up front refuses a fit
 //!   whose work could not fit the deadline instead of starting it.
 //!
@@ -212,7 +212,7 @@ families! {
     /// [`Family::PowerSampleSize`], p2a-core's F quantile does bounded work at any group count,
     /// so the cap is kept as defense in depth, not as a cost bound, and can be raised with
     /// `P2A_LIMIT_OVERRIDES`. It is 100, as is the hosted [`Limits::max_groups`] budget of
-    /// groups compared pairwise: a cap of 10 refused legitimate designs with a few dozen groups.
+    /// groups compared pairwise, so designs with a few dozen groups are admitted.
     DesignGroups => "design_groups", 100;
     /// Missing-value markers a dataset is read with (`na_strings`), held to a few short markers.
     NaMarkers => "na_markers", 32;
@@ -282,9 +282,9 @@ const PROBIT_IMPACT_ROWS_HOSTED: u64 = 1_500;
 /// Hosted [`Limits::ensemble_bytes`]: 256 MiB, the hosted per-allocation ceiling
 /// (`P2A_MAX_ALLOC_MB`), so that one tree-ensemble fit grows the process by about as much as one
 /// allocation may, which the 700 MiB memory admission leaves room for on the 1 GiB machine.
-/// With four covariates it admits the defaults of `ml_causal_forest` on up to about 316,000 rows
-/// and those of `ml_bart_causal` on up to about 220,000 rows (both reach the 60 s deadline well
-/// before that), and 1.5 times each default setting on 18,000 and 162,000 rows.
+/// With four covariates it admits the defaults of `ml_causal_forest` on up to about 123,000 rows
+/// and those of `ml_bart_causal` on up to about 218,000 rows (both reach the 60 s deadline well
+/// before that), and 1.5 times each default setting on 34,000 and 161,000 rows.
 ///
 /// The bound counts every buffer a fit holds at once, and the fit allocates each at its exact
 /// length; only the allocator's own overhead and the dataset come on top. On a release build, a
@@ -1122,31 +1122,44 @@ fn below_min_tolerance(f: Option<f64>, min: f64) -> bool {
     }
 }
 
+/// What a magnitude refusal refuses: a scalar parameter ([`Rule::Max`]) or an element of an
+/// array ([`Rule::ArrayElemMax`]).
+#[derive(Clone, Copy)]
+enum Magnitude {
+    Value,
+    Element,
+}
+
 /// The refusal of the number `n` at `path`, which exceeds `cap` by magnitude: the wording of
-/// [`Rule::Max`] and [`Rule::ArrayElemMax`]. `subject` sits between the parameter and the verb:
-/// `"= {n}"` for a scalar, `"contains {n}, which"` for an element of an array. `plural` words
-/// the advice for the array's values.
+/// [`Rule::Max`] and [`Rule::ArrayElemMax`]. Between the parameter and the verb sits `"= {n}"`
+/// for a scalar and `"contains {n}, which"` for an element of an array, whose advice speaks of
+/// the array's values.
 fn magnitude_refusal(
     path: &str,
-    subject: &str,
     n: &serde_json::Number,
     cap: u64,
     key: &str,
     tool_echo: &str,
-    plural: bool,
+    kind: Magnitude,
 ) -> String {
+    let subject = match kind {
+        Magnitude::Value => format!("= {n}"),
+        Magnitude::Element => format!("contains {n}, which"),
+    };
     // The cap bounds the magnitude, so "smaller" would point a negative value the wrong way.
     if n.to_string().starts_with('-') {
-        let values = if plural { "values" } else { "a value" };
+        let values = match kind {
+            Magnitude::Element => "values",
+            Magnitude::Value => "a value",
+        };
         format!(
             "Parameter `{path}` {subject} is outside this server's limit of ±{cap} ({key}) for \
              `{tool_echo}`. Use {values} of smaller magnitude."
         )
     } else {
-        let values = if plural {
-            "smaller values"
-        } else {
-            "a smaller value"
+        let values = match kind {
+            Magnitude::Element => "smaller values",
+            Magnitude::Value => "a smaller value",
         };
         format!(
             "Parameter `{path}` {subject} exceeds this server's limit of {cap} ({key}) for \
@@ -1372,8 +1385,7 @@ impl Limits {
             }
         }
         let fit_rows = (bound(lo) <= limit && lo > 0).then_some(lo);
-        let bytes =
-            |b: u64| p2a_core::memory::format_bytes(usize::try_from(b).unwrap_or(usize::MAX));
+        let bytes = crate::session::fmt_bytes;
         let settings = settings();
         let EnsembleChange { tiers, parameters } = change();
         let tier = tiers.iter().find(|t| t.cheapest <= limit);
@@ -1953,8 +1965,7 @@ impl Limits {
                     return Ok(());
                 }
                 let key = family.key();
-                let subject = format!("= {n}");
-                let message = magnitude_refusal(path, &subject, n, cap, key, tool_echo, false);
+                let message = magnitude_refusal(path, n, cap, key, tool_echo, Magnitude::Value);
                 violation(n.to_string(), cap.to_string(), key, message)
             }
             Rule::ArrayLen(family) | Rule::UniqueList(family) => {
@@ -2000,9 +2011,8 @@ impl Limits {
                 let key = family.key();
                 for n in items.iter().filter_map(Value::as_number) {
                     if number_exceeds(n, cap) {
-                        let subject = format!("contains {n}, which");
                         let message =
-                            magnitude_refusal(path, &subject, n, cap, key, tool_echo, true);
+                            magnitude_refusal(path, n, cap, key, tool_echo, Magnitude::Element);
                         return violation(n.to_string(), cap.to_string(), key, message);
                     }
                 }
@@ -2956,6 +2966,49 @@ mod tests {
         move |rows| c.memory_bound(rows, 4)
     }
 
+    /// The four row counts in the doc of [`ENSEMBLE_BYTES_HOSTED`], rounded to the nearest
+    /// 1,000 rows as the doc gives them: both tools' defaults and 1.5 times each default
+    /// setting, four covariates.
+    #[test]
+    fn ensemble_budget_figures_in_the_docs_hold() {
+        let largest = |bound: &dyn Fn(usize) -> u64| {
+            let (mut lo, mut hi) = (0usize, 100_000_000usize);
+            while lo < hi {
+                let mid = lo + (hi - lo).div_ceil(2);
+                if bound(mid) <= ENSEMBLE_BYTES_HOSTED {
+                    lo = mid;
+                } else {
+                    hi = mid - 1;
+                }
+            }
+            lo
+        };
+        let rows = [
+            largest(&forest_bound(2_000, 10)),
+            largest(&bart_bound(200, 4, 100)),
+            largest(&forest_bound(3_000, 15)),
+            largest(&bart_bound(300, 6, 150)),
+        ];
+        let rounded = rows.map(|r| (r + 500) / 1_000 * 1_000);
+        assert_eq!(rounded, [123_000, 218_000, 34_000, 161_000], "{rows:?}");
+    }
+
+    /// The positive-scalar form of the magnitude refusal, pinned byte for byte.
+    #[test]
+    fn magnitude_refusal_of_a_scalar_keeps_its_wording() {
+        let v = Limits::hosted()
+            .check_tool_arguments(
+                "timeseries_arma_to_ma",
+                &json!({"lag_max": 10_000_000_000u64}),
+            )
+            .unwrap_err();
+        assert_eq!(
+            v.message,
+            "Parameter `lag_max` = 10000000000 exceeds this server's limit of 1000 (lags) for \
+             `timeseries_arma_to_ma`. Use a smaller value."
+        );
+    }
+
     /// An [`EnsembleChange`] of one tier, `advice` with its `cheapest` bound, setting
     /// `parameters`.
     fn one_tier(advice: &str, parameters: &'static str, cheapest: u64) -> EnsembleChange {
@@ -3036,7 +3089,7 @@ mod tests {
             ) && v
                 .message
                 .contains("(ensemble_bytes: its trees and the other buffers")
-                && v.message.contains("limit of 256.00 MB")
+                && v.message.contains("limit of 256.00 MiB")
                 && v.message.ends_with(&format!(
                     "Use a sample of at most {fit} rows at these settings, for example with \
                      munge_sample, or lower n_trees or max_depth."
@@ -3072,7 +3125,7 @@ mod tests {
             .unwrap();
         assert!(
             v.message.ends_with(&format!(
-                "above this server's limit of 256.00 MB. No values of n_trees, max_depth or \
+                "above this server's limit of 256.00 MiB. No values of n_trees, max_depth or \
                  n_bootstrap bring it within this limit on 1500000 rows. Use a sample of at \
                  most {fit} rows at these settings, for example with munge_sample."
             )) && !v.message.contains("lower"),

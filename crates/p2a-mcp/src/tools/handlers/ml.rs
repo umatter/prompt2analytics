@@ -2617,7 +2617,7 @@ mod tests {
                 t.starts_with(&format!(
                     "`{tool}` with {settings} on 5000 rows could hold up to "
                 )) && t.contains("(ensemble_bytes: ")
-                    && t.contains("limit of 256.00 MB")
+                    && t.contains("limit of 256.00 MiB")
                     && t.contains("Use a sample of at most "),
                 "{t}"
             );
