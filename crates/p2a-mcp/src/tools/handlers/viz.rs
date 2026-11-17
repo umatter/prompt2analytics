@@ -671,7 +671,7 @@ impl AnalyticsServer {
 
     /// Generate an interactive scatter plot with Plotly.js.
     #[tool(
-        description = "Generate an interactive scatter plot visualization using Plotly.js. Returns HTML that can be saved to a file and opened in a browser. Supports grouping data by a categorical column for colored traces. Interactive features include zoom, pan, and hover."
+        description = "Generate an interactive scatter plot visualization using Plotly.js. Returns HTML that can be saved to a file and opened in a browser. Supports grouping data by a categorical column for colored traces. Interactive features include zoom, pan, and hover. The HTML loads plotly.js 3.0.1 and MathJax from cdn.plot.ly and cdn.jsdelivr.net when opened, so viewing needs network access; values are kept in double precision; rows with a missing value in a plotted column are left out and counted."
     )]
     pub async fn viz_scatter_interactive(
         &self,
@@ -705,13 +705,14 @@ impl AnalyticsServer {
             config,
         ) {
             Ok(result) => {
-                let description = format!(
+                let mut description = format!(
                     "Interactive scatter plot generated successfully.\nX: {}\nY: {}\nPoints: {}\n\nHTML output ({} bytes) - save to a .html file and open in browser.",
                     request.x_column,
                     request.y_column,
                     result.n_points,
                     result.html.len()
                 );
+                append_missing_note(&mut description, &result.missing);
                 Ok(CallToolResult::success(vec![
                     Content::text(description),
                     Content::text(format!("```html\n{}\n```", result.html)),
@@ -726,7 +727,7 @@ impl AnalyticsServer {
 
     /// Generate an interactive histogram with Plotly.js.
     #[tool(
-        description = "Generate an interactive histogram visualization using Plotly.js. Returns HTML that can be saved to a file and opened in a browser. Supports grouping data by a categorical column for overlaid histograms. Interactive features include zoom, pan, and hover."
+        description = "Generate an interactive histogram visualization using Plotly.js. Returns HTML that can be saved to a file and opened in a browser. Supports grouping data by a categorical column for overlaid histograms. Interactive features include zoom, pan, and hover. The HTML loads plotly.js 3.0.1 and MathJax from cdn.plot.ly and cdn.jsdelivr.net when opened, so viewing needs network access; values are kept in double precision; rows with a missing value in a plotted column are left out and counted."
     )]
     pub async fn viz_histogram_interactive(
         &self,
@@ -759,12 +760,13 @@ impl AnalyticsServer {
             config,
         ) {
             Ok(result) => {
-                let description = format!(
+                let mut description = format!(
                     "Interactive histogram generated successfully.\nColumn: {}\nPoints: {}\n\nHTML output ({} bytes) - save to a .html file and open in browser.",
                     request.column,
                     result.n_points,
                     result.html.len()
                 );
+                append_missing_note(&mut description, &result.missing);
                 Ok(CallToolResult::success(vec![
                     Content::text(description),
                     Content::text(format!("```html\n{}\n```", result.html)),
@@ -779,7 +781,7 @@ impl AnalyticsServer {
 
     /// Generate an interactive line chart with Plotly.js.
     #[tool(
-        description = "Generate an interactive line chart visualization using Plotly.js. Returns HTML that can be saved to a file and opened in a browser. Interactive features include zoom, pan, and hover."
+        description = "Generate an interactive line chart visualization using Plotly.js. Returns HTML that can be saved to a file and opened in a browser. Interactive features include zoom, pan, and hover. The HTML loads plotly.js 3.0.1 and MathJax from cdn.plot.ly and cdn.jsdelivr.net when opened, so viewing needs network access; values are kept in double precision; rows with a missing value in a plotted column are left out and counted."
     )]
     pub async fn viz_line_interactive(
         &self,
@@ -807,13 +809,14 @@ impl AnalyticsServer {
 
         match line_interactive(dataset.df(), &request.x_column, &request.y_column, config) {
             Ok(result) => {
-                let description = format!(
+                let mut description = format!(
                     "Interactive line chart generated successfully.\nX: {}\nY: {}\nPoints: {}\n\nHTML output ({} bytes) - save to a .html file and open in browser.",
                     request.x_column,
                     request.y_column,
                     result.n_points,
                     result.html.len()
                 );
+                append_missing_note(&mut description, &result.missing);
                 Ok(CallToolResult::success(vec![
                     Content::text(description),
                     Content::text(format!("```html\n{}\n```", result.html)),
@@ -1656,5 +1659,52 @@ mod tests {
         );
         let t = text(&heatmap(&server, Some(vec!["v000", "v001", "v002"])));
         assert!(t.contains("Variables: v000, v001, v002"), "{t}");
+    }
+
+    /// The interactive charts count the rows they leave out.
+    #[test]
+    fn interactive_charts_report_dropped_rows() {
+        let server = server_with(vec![("d", missing_frame())]);
+        let note = "Missing values: 2 of 6 rows dropped because of missing values (x: 1, y: 1)";
+        let r = run(
+            Limits::off(),
+            server.viz_scatter_interactive(Parameters(ScatterInteractiveRequest {
+                dataset: "d".into(),
+                x_column: "x".into(),
+                y_column: "y".into(),
+                group_column: None,
+                title: None,
+            })),
+        );
+        assert!(
+            text(&r).contains("Points: 4") && text(&r).ends_with(note),
+            "{}",
+            text(&r)
+        );
+        let r = run(
+            Limits::off(),
+            server.viz_line_interactive(Parameters(LineInteractiveRequest {
+                dataset: "d".into(),
+                x_column: "x".into(),
+                y_column: "y".into(),
+                title: None,
+            })),
+        );
+        assert!(text(&r).ends_with(note), "{}", text(&r));
+        let r = run(
+            Limits::off(),
+            server.viz_histogram_interactive(Parameters(HistogramInteractiveRequest {
+                dataset: "d".into(),
+                column: "y".into(),
+                group_column: None,
+                title: None,
+            })),
+        );
+        assert!(
+            text(&r)
+                .ends_with("Missing values: 1 of 6 rows dropped because of missing values (y: 1)"),
+            "{}",
+            text(&r)
+        );
     }
 }

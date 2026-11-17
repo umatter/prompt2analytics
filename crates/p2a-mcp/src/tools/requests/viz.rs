@@ -132,7 +132,7 @@ pub struct ScatterInteractiveRequest {
 
     /// Group column for separate traces (optional)
     #[schemars(
-        description = "Optional column for grouping data points into separate traces with different colors."
+        description = "Optional column for grouping data points into separate traces with different colors, in factor order (numbers numerically, text in C order); a missing group is shown as \"NA\", last."
     )]
     pub group_column: Option<String>,
 
@@ -155,7 +155,7 @@ pub struct HistogramInteractiveRequest {
 
     /// Group column for separate traces (optional)
     #[schemars(
-        description = "Optional column for grouping data into separate overlaid histograms."
+        description = "Optional column for grouping data into separate overlaid histograms, in factor order; a missing group is shown as \"NA\", last."
     )]
     pub group_column: Option<String>,
 
