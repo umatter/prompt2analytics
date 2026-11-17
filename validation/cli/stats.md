@@ -6,7 +6,7 @@ The `stats` commands follow R's defaults and report R's statistics:
 
 | Command | Default or output | R reference |
 |---|---|---|
-| `stats acf`, `pacf` | `--lag-max` floor(10 log10 n), at most n - 1; `acf` is R's estimator (denominator n, no n/(n - k) factor) | `acf(x)`, `pacf(x)` |
+| `stats acf`, `pacf` | `--lag-max` floor(10 log10 n), at most n - 1; `acf` is R's estimator (denominator n, no n/(n - k) factor); pinned on `cli_stat_acf_int` (lags 1-5) and `stat_ts_acf_spline_t3` (n = 64, default lag.max 18) by `test_validate_cli_acf_pacf_int64` | `acf(x)`, `pacf(x)` |
 | `stats ccf` | `--lag-max` floor(10 log10(n / 2)), at most n - 1 | `ccf(x, y)` |
 | `stats box-test` | `--lag 1` | `Box.test(x)` |
 | `stats pp-test` | `--lshort true` (short truncation lag); `--lshort false` the long one | `PP.test(x)` |
@@ -27,7 +27,7 @@ without saying so.
 | `test_validate_cli_chisq_gof_observed_probs` | `stat_chisq_gof` | `p1_*`, `p2_*`: X-squared, p and expected counts of the tallied categorical column with two `--probs` | `Tol::stat/p_value(50)` |
 | `test_validate_cli_ts_default_lags` | `cli_stat_ts_defaults` | default lag counts and values of acf, pacf and ccf on a short series | `Tol::stat(n)`; lag counts exact |
 | `test_validate_cli_box_test_default_lag` | `cli_stat_ts_defaults` | Box-Pierce and Ljung-Box at the default lag 1, and Ljung-Box at `--lag 10`: statistic, df, p | `Tol::stat/p_value(n)` |
-| `test_validate_cli_viz_coefplot_ci` | `cli_viz_coefplot_ci` | interval limits at 95% (HC1) and 90% (HC1 and classical) | `Tol::coef/se(n)` |
+| `test_validate_cli_viz_coefplot_ci` | `cli_viz_coefplot_ci` | estimates (`coef`) and interval limits at 95% (HC1) and 90% (HC1 and classical) | `Tol::coef/se(n)` |
 
 `test_cli_chisq_gof_refusals` compares no R value: missing and negative counts, a `--probs` of the wrong length,
 probabilities that do not sum to 1 and neither or both of `--observed`/`--counts` are refused, naming the flags.
