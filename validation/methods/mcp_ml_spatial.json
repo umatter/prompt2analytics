@@ -109,9 +109,9 @@
       ],
       "quantities": [
         "individual error model (default): coefficients, their SEs, lambda and its SE",
-        "SARAR (lag true): rho, lambda and the SE of lambda",
-        "lag model (spatial_error none): rho, its SE and the x1 coefficient",
-        "random effects (b): coefficients, lambda, phi and sigma_mu"
+        "SARAR (lag true): rho, lambda and the SE of lambda, the coefficients and their SEs",
+        "lag model (spatial_error none): rho, its SE, the coefficients and their SEs",
+        "random effects (b): coefficients and their SEs, lambda, phi and sigma_mu"
       ],
       "tolerance": "MCP text at print precision (Tol::printed: 6 decimals; z 4 decimals); JSON blocks at validation/README.md for the case's n (Tol::coef; labels exact)",
       "deviations": [],

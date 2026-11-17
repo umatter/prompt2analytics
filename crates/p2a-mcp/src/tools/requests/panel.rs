@@ -264,31 +264,31 @@ pub struct PanelUnitRootRequest {
 
     /// Test type
     #[schemars(
-        description = "Test type: 'llc' (Levin-Lin-Chu, default; also 'levinlin'), 'ips' (Im-Pesaran-Shin), 'madwu' (Maddala-Wu; also 'fisher'), 'hadri' (stationarity null). Other values are an error."
+        description = "Test type: 'llc' (Levin-Lin-Chu, default; also 'levinlin'), 'ips' (Im-Pesaran-Shin), 'madwu' (Maddala-Wu; also 'fisher'), 'hadri' (stationarity null). Other values are an error. LLC and Hadri need a balanced panel."
     )]
     pub test: Option<String>,
 
     /// Model specification
     #[schemars(
-        description = "Model specification: 'none' (no deterministic terms), 'intercept' (individual intercepts, default; also 'drift'), 'trend' (individual intercepts and trends; also 'ct'). Other values are an error."
+        description = "Model specification: 'none' (no deterministic terms), 'intercept' (individual intercepts, default; also 'drift'), 'trend' (individual intercepts and trends; also 'ct'). Other values are an error. IPS and Hadri refuse 'none'."
     )]
     pub model: Option<String>,
 
     /// Number of lags for ADF regression
     #[schemars(
-        description = "Number of lags of every unit's ADF regression. If neither lags nor lag_selection is given, floor(T_max^(1/3)) lags for every unit. Not with lag_selection = aic | sic | hall (use pmax)."
+        description = "Number of lags of every unit's ADF regression. If neither lags nor lag_selection is given, floor(T_max^(1/3)) lags for every unit. Not with lag_selection = aic | sic | hall (use pmax). Refused for Hadri."
     )]
     pub lags: Option<usize>,
 
     /// Per-unit lag selection
     #[schemars(
-        description = "Per-unit lag selection as plm::purtest(lags =): 'aic', 'sic' (also 'bic') or 'hall' choose each unit's order up to pmax on a common sample; 'fixed' uses lags. Without it, lags (if given) or floor(T_max^(1/3)) lags for every unit. Not for 'hadri'."
+        description = "Per-unit lag selection as plm::purtest(lags =): 'aic', 'sic' (also 'bic') or 'hall' choose each unit's order up to pmax on a common sample; 'fixed' uses lags. Without it, lags (if given) or floor(T_max^(1/3)) lags for every unit. Refused for Hadri."
     )]
     pub lag_selection: Option<String>,
 
     /// Largest lag order considered by lag selection
     #[schemars(
-        description = "Largest lag order considered by lag_selection = aic | sic | hall (plm's pmax). Default 10. At least 1."
+        description = "Largest lag order considered by lag_selection = aic | sic | hall (plm's pmax). Default 10. At least 1. Refused for Hadri."
     )]
     pub pmax: Option<usize>,
 }
@@ -330,4 +330,36 @@ pub struct PanelHdfeRequest {
         description = "Standard error type: 'standard' (also 'classical'), 'hc0', 'hc1' (default), 'hc2' or 'hc3'. Other values are an error."
     )]
     pub se_type: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The unit-root fields say which tests refuse which settings (core
+    /// `check_lag_options` and the balanced-panel and model checks).
+    #[test]
+    fn test_mcp_panel_unit_root_descriptions_name_the_refusals() {
+        let schema = serde_json::to_value(schemars::schema_for!(PanelUnitRootRequest)).unwrap();
+        let description = |field: &str| {
+            schema["properties"][field]["description"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{field}: {schema}"))
+                .to_string()
+        };
+        let test = description("test");
+        assert!(
+            test.contains("'madwu' (Maddala-Wu; also 'fisher')"),
+            "{test}"
+        );
+        assert!(
+            test.contains("LLC and Hadri need a balanced panel"),
+            "{test}"
+        );
+        let model = description("model");
+        assert!(model.contains("IPS and Hadri refuse 'none'"), "{model}");
+        for field in ["lags", "lag_selection", "pmax"] {
+            assert!(description(field).contains("Refused for Hadri"), "{field}");
+        }
+    }
 }
