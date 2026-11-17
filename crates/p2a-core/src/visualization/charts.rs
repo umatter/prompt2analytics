@@ -55,7 +55,9 @@ pub struct HistogramResult {
     /// `hist()` does.
     pub counts: Vec<u32>,
     /// The `bins + 1` edges: `min + i * width` for `i < bins` and `max` last (R's
-    /// `seq(min, max, length.out = bins + 1)`); `min + i` (width 1) for constant data.
+    /// `seq(min, max, length.out = bins + 1)`); `min + i * width` for constant data, with width
+    /// 1, or `4 * f64::EPSILON * |min|` where that is larger (magnitudes above about 1.1e15), so
+    /// the breaks stay distinct.
     pub breaks: Vec<f64>,
 }
 
@@ -134,8 +136,15 @@ pub fn histogram(
 
     // Bin width; the breaks exist before anything is counted.
     let range = max_val - min_val;
-    let constant = range <= 4.0 * f64::EPSILON * min_val.abs().max(max_val.abs());
-    let bin_width = if constant { 1.0 } else { range / n_bins as f64 };
+    let magnitude = min_val.abs().max(max_val.abs());
+    let constant = range <= 4.0 * f64::EPSILON * magnitude;
+    // Constant data: width 1, or four ulps of the value where 1 is below the spacing of
+    // doubles, so the breaks stay distinct.
+    let bin_width = if constant {
+        (4.0 * f64::EPSILON * magnitude).max(1.0)
+    } else {
+        range / n_bins as f64
+    };
 
     let mut counts = resource::try_vec(n_bins, 0u32, "histogram bins").map_err(invalid_data)?;
     let n_edges = n_bins
@@ -147,7 +156,7 @@ pub fn histogram(
         *edge = min_val + i as f64 * bin_width;
     }
     breaks[n_bins] = if constant {
-        min_val + n_bins as f64
+        min_val + n_bins as f64 * bin_width
     } else {
         max_val
     };
@@ -1560,9 +1569,14 @@ pub fn residual_diagnostics_with(
             if let Some(p) = n_params
                 && p != p0
             {
+                let model = if p0 == 1 {
+                    "an intercept-only model: the fitted values are constant"
+                } else {
+                    "one regressor and an intercept"
+                };
                 return Err(VisualizationError::InvalidData(format!(
-                    "n_params = {p} needs the model's hat values (leverage); without them only a \
-                     model with one regressor and an intercept (p = 2) can be diagnosed"
+                    "n_params = {p} needs the model's hat values (leverage); without them only \
+                     p = {p0} ({model}) can be diagnosed"
                 )));
             }
             warnings.push(note.to_string());
@@ -2592,6 +2606,55 @@ mod tests {
         (0..n)
             .map(|i| (i as f64 * 0.37).sin() * 10.0 + i as f64)
             .collect()
+    }
+
+    #[test]
+    fn test_histogram_constant_data_at_large_magnitude() {
+        for (data, bins) in [
+            (vec![1e17, 1e17 + 16.0], Some(2)),
+            (vec![1e17, 1e17 + 16.0], None),
+            (vec![5.0; 3], Some(2)),
+            (vec![5.0; 3], None),
+        ] {
+            let r = histogram(&data, bins, ChartConfig::default()).unwrap();
+            assert!(
+                r.breaks.windows(2).all(|w| w[0] < w[1]),
+                "{data:?}: {:?}",
+                r.breaks
+            );
+            assert_eq!(r.counts[0] as usize, data.len(), "{data:?}: {:?}", r.counts);
+            assert_eq!(
+                r.counts.iter().map(|&c| c as usize).sum::<usize>(),
+                data.len()
+            );
+        }
+        // Below magnitude ~1e15 the width stays 1, as before.
+        let r = histogram(&[5.0; 3], Some(2), ChartConfig::default()).unwrap();
+        assert_eq!(r.breaks, [5.0, 6.0, 7.0]);
+    }
+
+    #[test]
+    fn test_residual_diagnostics_n_params_message() {
+        let resid = [0.3, -0.2, 0.1, -0.4, 0.25, -0.05];
+        let e = residual_diagnostics_with(&[2.0; 6], &resid, None, Some(2), ChartConfig::default())
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(
+            e.contains(
+                "without them only p = 1 (an intercept-only model: the fitted values are constant)"
+            ),
+            "{e}"
+        );
+        let fitted = [1.0, 2.5, 2.9, 4.2, 5.1, 6.3];
+        let e = residual_diagnostics_with(&fitted, &resid, None, Some(3), ChartConfig::default())
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(
+            e.contains("only p = 2 (one regressor and an intercept)"),
+            "{e}"
+        );
     }
 
     #[test]
