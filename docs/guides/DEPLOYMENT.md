@@ -13,7 +13,7 @@ stateful backend** that cannot run on Workers/Pages:
 | Piece | What it is | Where it runs |
 |-------|-----------|---------------|
 | **Frontend** | Dioxus → static WASM + assets | GitHub Pages (free, fits the qamelab pattern) |
-| **Backend** | `p2a-mcp` axum server (270 tools, SurrealDB/RocksDB, ~575 MB image) | An always-on host with HTTPS (VPS / Fly.io / Render / a box) |
+| **Backend** | `p2a-mcp` axum server (270 tools, SurrealDB (in-memory, or SurrealKV on disk), ~575 MB image) | An always-on host with HTTPS (VPS / Fly.io / Render / a box) |
 
 The frontend half mirrors how the other qamelab sites deploy. The backend is the
 genuinely new piece — it needs a real server, so it gets its own HTTPS endpoint
@@ -252,8 +252,9 @@ before they are deserialised, on the HTTP, LLM, websocket and stdio paths.
   bound (`"requested": "at least 10001"`).
 - **Named budgets.** Sizes the handlers compute while they run: image pixels,
   table cells, join output, generated data, export and file sizes, spatial
-  links, the work of an ARIMA fit, the memory of a tree-ensemble fit, SQL
-  results, the conversation store and the LLM context.
+  links, the work of an ARIMA fit, the memory of a tree-ensemble fit, the work
+  of an scpi call, of a ctree permutation test, and the rows of a SAR probit
+  with impacts, SQL results, the conversation store and the LLM context.
 - **Response size.** A tool's text and image output above `response_bytes`
   (16 MiB) is replaced by a refusal.
 
@@ -300,11 +301,19 @@ HTTP), and they never depend on the resource profile:
   `regression_bootstrap_cov` needs `n_boot` of at least 10; matching `ratio` is
   at most the number of controls; an exact null distribution requested for the
   Wilcoxon rank-sum or signed-rank test or the Ansari-Bradley test (and its
-  interval) is refused when it would take more than 2e9 steps (R's default
-  exact range, fewer than 50 values per sample, is far below that);
-- the C5.0, quantile random forest and Cubist tree builders stop at depth 512,
-  so no input can recurse deep enough to overflow a worker's stack; twang's
-  boosting trees take at most 512 splits (`interaction_depth`);
+  interval), the exact two-sided one-sample Kolmogorov-Smirnov distribution and
+  the exact two-sample Smirnov distribution is refused when it would take more
+  than 2e9 steps (R's default exact range, fewer than 50 values per sample, is
+  far below that; the one-sided one-sample exact p-value is linear in n and
+  needs no cap);
+- the CART-based random forest, gradient boosting (gbm), XGBoost, LightGBM,
+  C5.0, quantile random forest and Cubist tree builders stop at depth 512, so
+  no input can recurse deep enough to overflow a worker's stack; CART (rpart)
+  and mboost trees accept depth 1 to 30, rpart's limit; twang's boosting trees
+  take at most 512 splits (`interaction_depth`);
+- `arima_sim`'s default burn-in follows R's rule, p + q + ceiling(6 / log(min
+  root modulus)) (p + q without an AR part), and grows as the AR part nears a
+  unit root; the allocation ceiling and the deadline bound it;
 - staggered DiD `bootstrap` is 0 (analytic influence-function SEs) or at least
   50 replicates, and its joint pre-trend Wald test is computed for at most 2000
   pre-treatment cells (reported as not computed above that).
@@ -372,8 +381,8 @@ HTTP), and they never depend on the resource profile:
   `<data root>/sessions/<session id>/` (mode 0700). Other sessions' directories
   and the shared root are outside it and unreachable. The directory is removed
   with the session, and directories left by an earlier process are purged at
-  the first file access after a restart. With a RocksDB session store
-  (`P2A_DB_PATH`), the directories of stored sessions that can still be adopted
+  the first file access after a restart. With an on-disk session store
+  (SurrealKV, `P2A_DB_PATH`), the directories of stored sessions that can still be adopted
   (accessed within the session TTL; at most `P2A_MAX_SESSIONS` directories,
   those of the most recently used sessions that have one) are kept, so a
   returning client's files are there for the dataset reload. Such a directory
@@ -514,7 +523,7 @@ profile. For the timeout, watchdog, memory, data, allocation and eviction knobs
 | `--host` | `P2A_HOST` | `127.0.0.1` | same | a non-loopback bind needs a token or open mode |
 | `--port` | `P2A_PORT` | `8080` | same | |
 | `--cors-origins` | `P2A_CORS_ORIGINS` | none | same | comma-separated origins |
-| `--cors-permissive` | `P2A_CORS_PERMISSIVE` | false | same | development only; the env accepts only `true`/`false` |
+| `--cors-permissive` | `P2A_CORS_PERMISSIVE` | false | same | development only; the env accepts `1`/`true`/`yes`/`on` |
 | `--access-token` | `P2A_ACCESS_TOKEN` | none | same | selects Authenticated mode |
 | `--allow-unauthenticated` | `P2A_ALLOW_UNAUTHENTICATED` | off | same | selects OpenPublic mode; the env accepts `1`/`true`/`yes`/`on` |
 | `--expose-enumeration` | `P2A_EXPOSE_ENUMERATION` | off | same | Local mode only; the env accepts `1`/`true`/`yes`/`on` |
@@ -523,12 +532,12 @@ profile. For the timeout, watchdog, memory, data, allocation and eviction knobs
 | `--session-ttl-minutes` | `P2A_SESSION_TTL` | 60 | 60 | minutes since last use |
 | `--max-sessions` | `P2A_MAX_SESSIONS` | 100 | 100 | |
 | `--db-path` | `P2A_DB_PATH` | none (in-memory store) | same | feature `db`; must lie outside `P2A_DATA_ROOT` outside Local mode |
-| `--audit-log` | `P2A_AUDIT_LOG` | false | false | the env accepts only `true`/`false` |
+| `--audit-log` | `P2A_AUDIT_LOG` | false | false | the env accepts `1`/`true`/`yes`/`on` |
 | `--audit-path` | `P2A_AUDIT_PATH` | `p2a-audit.log` in the working directory | same | |
 | `--limits` | `P2A_LIMITS` | none (the mode decides) | same | `hosted` or `off`; `off` is refused in OpenPublic |
 | `--limit-override` | `P2A_LIMIT_OVERRIDES` | none | none | `key=value` list, see the next table |
 | `--worker-threads` | `P2A_WORKER_THREADS` | max(2, CPUs) | max(2, CPUs) | async runtime workers |
-| `--tool-concurrency` | `P2A_TOOL_CONCURRENCY` | CPUs | CPUs | tool calls at once, server-wide |
+| `--tool-concurrency` | `P2A_TOOL_CONCURRENCY` | CPUs | CPUs | tool calls at once, server-wide; calls share one rayon pool, so with a value above 1 a long parallel call can slow the others, and the server logs a warning at start-up |
 | `--session-concurrency` | `P2A_SESSION_CONCURRENCY` | CPUs | 1 | tool calls at once per session |
 | `--tool-queue-wait-secs` | `P2A_TOOL_QUEUE_WAIT_SECS` | 300 | 10 | wait for a slot before 429/503 |
 | `--tool-timeout-secs` | `P2A_TOOL_TIMEOUT_SECS` | none | 60 | per-call deadline |
@@ -544,7 +553,7 @@ profile. For the timeout, watchdog, memory, data, allocation and eviction knobs
 | env only | `P2A_DATA_ROOT` | working directory | same | must exist; resolved once, on first use |
 | env only | `P2A_LLM_ALLOWED_HOSTS` | none (any public host) | api.openai.com, api.anthropic.com, openrouter.ai | comma-separated bare hostnames |
 | env only | `P2A_AUDIT_MAX_MB` | 50 | 50 | audit log rotation size; `0` = never rotate; keeps 3 old files |
-| env only | `RUST_LOG` | `p2a_mcp=info` | same | log filter; logs go to stderr |
+| env only | `RUST_LOG` | `p2a_mcp=info,p2a_core=warn` | same | log filter; logs go to stderr |
 | env only | `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` | used for default endpoints | not used (`llm_server_keys=false`) | see the server-key rule above; leave unset on a public server |
 
 ### `P2A_LIMIT_OVERRIDES` keys
@@ -564,7 +573,7 @@ Families (Off: none):
 
 | Key | What it bounds (typical fields) | Hosted |
 |---|---|---|
-| `replications` | bootstrap and permutation counts (`n_boot`, `n_bootstrap`, `n_permutations`, `bootstrap`, gsynth and iv_mte `bootstrap_reps`) | 10,000 |
+| `replications` | bootstrap and permutation counts (`n_boot`, `n_bootstrap`, `n_permutations`, `bootstrap`, gsynth and iv_mte `bootstrap_reps`, scpi `sims`) | 10,000 |
 | `simulation_size` | Monte Carlo sizes (`n_simulations`, `n_samples`) | 100,000 |
 | `trees` | `n_trees`, `ntree`, `committees` | 5,000 |
 | `boosting_iterations` | `mstop`, `trials`, `nterms`, boosting `n_iter` | 10,000 |
@@ -894,8 +903,8 @@ lowering `pivot_cells` buys less.
    unset, as in `deploy/fly.toml`) the disk worst case is `P2A_MAX_SESSIONS` ×
    `session_disk_bytes`, 100 × 64 MiB = 6.25 GiB with the hosted defaults; keep
    that product within the disk the host has, and lower `session_disk_bytes`
-   with `P2A_LIMIT_OVERRIDES` if needed. With a RocksDB store (`P2A_DB_PATH`,
-   as `docker-compose.yml` sets it), a restart keeps the directories of up to
+   with `P2A_LIMIT_OVERRIDES` if needed. With an on-disk session store
+   (SurrealKV, `P2A_DB_PATH`, as `docker-compose.yml` sets it), a restart keeps the directories of up to
    `P2A_MAX_SESSIONS` stored sessions that can still come back (the most
    recently used that have one; sessions that never used files take no
    place), so the strict bound is twice that product, 2 × `P2A_MAX_SESSIONS` ×
@@ -908,6 +917,14 @@ lowering `pivot_cells` buys less.
    go as their sessions come back and end, or when the store's sweep deletes
    the rows of those that do not, about one session TTL (plus one sweep
    period) after their last use.
+
+   A store written by v0.5.0 or earlier (SurrealDB 2 on RocksDB) is moved
+   aside at start-up (the warning names the path it was moved to) and a new,
+   empty store is started; export the old one with SurrealDB 2's
+   `surreal export` if its conversations are needed. Compose volume users keep
+   the moved directory or remove it. An on-disk store caps SurrealKV's memtable
+   and block cache at about 64 MiB each. The hosted demo runs SurrealDB's
+   in-memory engine (no volume, `P2A_DB_PATH` unset), as `deploy/fly.toml` says.
 
 8. **Keep the session database outside the jail (`P2A_DB_PATH`).**
    File tools can write anywhere under `P2A_DATA_ROOT`, so the server refuses
