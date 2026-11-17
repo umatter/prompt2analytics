@@ -620,7 +620,8 @@ struct UnfinishedReply {
 
 #[cfg(feature = "db")]
 impl UnfinishedReply {
-    /// The chat ended; the route stores its outcome.
+    /// The chat ended and the route has stored its outcome. Called after that write, so a chat
+    /// dropped while the write waits still closes the reply.
     fn disarm(reply: Option<Self>) {
         if let Some(mut reply) = reply {
             reply.armed = false;
@@ -1153,19 +1154,18 @@ pub async fn llm_chat(
             // conversations are deleted with it when it was deleted or evicted).
             #[cfg(feature = "db")]
             {
-                UnfinishedReply::disarm(unfinished);
                 if let (Some(db), Some(msg_id)) = (&db, &message_id) {
                     store_reply(db, msg_id, "[Error: session gone]").await;
                 }
+                UnfinishedReply::disarm(unfinished);
             }
             return gone.into_response();
         }
     };
     let elapsed = start.elapsed();
 
-    // The chat ended: its outcome is stored below.
-    #[cfg(feature = "db")]
-    UnfinishedReply::disarm(unfinished);
+    // The chat ended: its outcome is stored, and only then is the guard disarmed, so a drop
+    // during the write still closes the reply.
     #[cfg(feature = "db")]
     if let (Some(db), Some(msg_id)) = (&db, &message_id) {
         match &result {
@@ -1173,6 +1173,8 @@ pub async fn llm_chat(
             Err(e) => store_reply(db, msg_id, &format!("[Error: {e}]")).await,
         }
     }
+    #[cfg(feature = "db")]
+    UnfinishedReply::disarm(unfinished);
 
     match result {
         Ok(response) => {
