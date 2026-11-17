@@ -28,6 +28,13 @@ dropped; +-Inf are counted and listed as outliers, as R; they are not drawn. A g
 its slot with n = 0 and NaN statistics, as R's `boxplot`. Case `viz_boxplot_groups`: e.g. `c(1, 7, 12, 15, 15, 16, 18, 18)`
 -> 1, 9.5, 15, 17, 18, no outliers. Test `test_validate_boxplot_stats_chart`: counts exact, statistics and outliers at the statistics tolerance.
 
+Through the MCP path, `viz_boxplot` prints each group's statistics at four decimals; the tier-3 test
+`test_validate_mcp_boxplot_groups` (registry `data_viz_t4.json`, `mcp_viz_boxplot_stats`) filters each
+group of the case's dataset with `munge_filter` and pins n, the five statistics (printed precision) and the
+outliers against the same case; a box plot whose only column has no values is refused. The chart tools
+read their columns with `data::columns`: a row missing a plotted value is left out and counted in a
+`Missing values:` line (each line-chart series and each box-plot column on its own).
+
 ## Histogram (`histogram()`)
 
 Default bin count `nclass.Sturges` = ceiling(log2(n) + 1). Bins have equal width from min to max,

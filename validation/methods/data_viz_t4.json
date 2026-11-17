@@ -21,6 +21,25 @@
       "tolerance": "validation/README.md n = 200 rows (CSV); 5e-4 relative (4 significant digits)",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_viz_boxplot_stats",
+      "name": "viz_boxplot statistics per group through the MCP path",
+      "category": "data",
+      "reference": "grDevices::boxplot.stats (coef = 1.5)",
+      "doc": "validation/visualization/charts.md",
+      "cases": [
+        "viz_boxplot_groups"
+      ],
+      "tests": [
+        "p2a-mcp::tier3::wp29_viz::test_validate_mcp_boxplot_groups"
+      ],
+      "quantities": [
+        "whiskers, hinges and median (printed at 4 decimals), n, the number of outliers and their values, per group"
+      ],
+      "tolerance": "printed precision (Tol::printed(4)); counts exact",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }
