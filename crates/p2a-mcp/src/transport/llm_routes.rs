@@ -1418,12 +1418,57 @@ pub struct ImageData {
 
 /// Streaming tool executor that sends progress events. Tool calls run
 /// through the governor, like [`SessionToolExecutor`].
+/// The events of one streamed chat, shared by the provider's text callback, the tool executor and
+/// the route. A text delta that does not fit in the full channel is held and sent with the next
+/// one, and any held text is sent before the next other event, so no text is lost and text stays
+/// ahead of the tool or end event that follows it. The held text is at most the text the model has
+/// streamed in this call, which the provider holds too.
+#[derive(Clone)]
+pub(crate) struct ChatEvents {
+    tx: tokio::sync::mpsc::Sender<ProgressEvent>,
+    pending: Arc<std::sync::Mutex<String>>,
+}
+
+impl ChatEvents {
+    pub(crate) fn new(tx: tokio::sync::mpsc::Sender<ProgressEvent>) -> Self {
+        Self {
+            tx,
+            pending: Arc::default(),
+        }
+    }
+
+    /// A text delta, from the synchronous stream callback: sent at once with any held text, or
+    /// held when the channel is full.
+    pub(crate) fn text(&self, delta: &str) {
+        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        pending.push_str(delta);
+        let text = std::mem::take(&mut *pending);
+        if let Err(tokio::sync::mpsc::error::TrySendError::Full(ProgressEvent::Content { text })) =
+            self.tx.try_send(ProgressEvent::Content { text })
+        {
+            *pending = text;
+        }
+    }
+
+    /// Send `event` after any held text; an error when the receiver is gone.
+    pub(crate) async fn send(
+        &self,
+        event: ProgressEvent,
+    ) -> Result<(), tokio::sync::mpsc::error::SendError<ProgressEvent>> {
+        let held = std::mem::take(&mut *self.pending.lock().unwrap_or_else(|e| e.into_inner()));
+        if !held.is_empty() {
+            self.tx.send(ProgressEvent::Content { text: held }).await?;
+        }
+        self.tx.send(event).await
+    }
+}
+
 pub struct StreamingToolExecutor {
     governor: Arc<ToolGovernor>,
     server: Arc<crate::server::AnalyticsServer>,
     chat: ChatSession,
     audit: Arc<AuditLogger>,
-    sender: tokio::sync::mpsc::Sender<ProgressEvent>,
+    events: ChatEvents,
     /// Where the tool calls and the datasets they load are recorded
     #[cfg(feature = "db")]
     store: ToolCallStore,
@@ -1444,10 +1489,17 @@ impl StreamingToolExecutor {
             server,
             chat,
             audit,
-            sender,
+            events: ChatEvents::new(sender),
             #[cfg(feature = "db")]
             store: ToolCallStore::default(),
         }
+    }
+
+    /// Report on `events`, which the route and the provider's text callback share, in place of
+    /// the sender given to [`Self::new`].
+    pub(crate) fn with_events(mut self, events: ChatEvents) -> Self {
+        self.events = events;
+        self
     }
 
     #[cfg(feature = "db")]
@@ -1817,7 +1869,7 @@ impl ToolExecutor for StreamingToolExecutor {
 
         // Send tool start event with arguments
         let _ = self
-            .sender
+            .events
             .send(ProgressEvent::ToolStart {
                 tool: name.to_string(),
                 arguments: arguments.clone(),
@@ -1869,7 +1921,7 @@ impl ToolExecutor for StreamingToolExecutor {
 
         // Send tool end event with result
         let _ = self
-            .sender
+            .events
             .send(ProgressEvent::ToolEnd {
                 tool: name.to_string(),
                 elapsed_ms: elapsed.as_millis() as u64,
@@ -1909,7 +1961,7 @@ impl ToolExecutor for StreamingToolExecutor {
                 // If there are images, send them to the frontend
                 if !images.is_empty() {
                     let _ = self
-                        .sender
+                        .events
                         .send(ProgressEvent::ToolResult {
                             tool: name.to_string(),
                             images,
@@ -2221,6 +2273,7 @@ async fn run_chat_stream(
     // messages are, below)
     // Only the db build reconfigures the executor below.
     let chat = ChatSession::new(state.session_manager.clone(), session.clone());
+    let events = ChatEvents::new(tx.clone());
     #[cfg_attr(not(feature = "db"), allow(unused_mut))]
     let mut tool_executor = StreamingToolExecutor::new(
         state.governor.clone(),
@@ -2228,7 +2281,8 @@ async fn run_chat_stream(
         chat.clone(),
         state.audit_logger.clone(),
         tx.clone(),
-    );
+    )
+    .with_events(events.clone());
 
     // Track whether we've set up the executor for persistence
     #[cfg(feature = "db")]
@@ -2323,12 +2377,13 @@ async fn run_chat_stream(
     let provider = build_provider(provider_config, &settings);
 
     // Create streaming callback that forwards content chunks
+    let callback_events = events.clone();
     let tx_for_callback = tx.clone();
     let stream_callback: Box<dyn Fn(StreamChunk) + Send + Sync> = Box::new(move |chunk| {
         match chunk {
             StreamChunk::Text { content } => {
-                // Use try_send for non-blocking send from sync callback
-                let _ = tx_for_callback.try_send(ProgressEvent::Content { text: content });
+                // Non-blocking from the sync callback; held when the channel is full.
+                callback_events.text(&content);
             }
             StreamChunk::Done => {
                 // Done is handled separately after chat_stream returns
@@ -2361,7 +2416,7 @@ async fn run_chat_stream(
             // Nothing is stored: the session's conversations, messages and
             // tool calls are deleted with it (the persistent manager's
             // removal listener).
-            let _ = tx
+            let _ = events
                 .send(ProgressEvent::Error {
                     error: gone.message().to_string(),
                     code: Some(gone.code()),
@@ -2386,7 +2441,7 @@ async fn run_chat_stream(
                 content_preview = %content_preview,
                 "Sending Done event with message content"
             );
-            let _ = tx.send(ProgressEvent::Done { message: response }).await;
+            let _ = events.send(ProgressEvent::Done { message: response }).await;
         }
         Err(e) => {
             // Update message with error content if persistence is enabled
@@ -2396,7 +2451,7 @@ async fn run_chat_stream(
                 let _ = db.update_message_content(msg_id, &error_content).await;
             }
 
-            let _ = tx
+            let _ = events
                 .send(ProgressEvent::Error {
                     error: e.to_string(),
                     code: Some(llm_error_code(&e)),
@@ -2767,6 +2822,45 @@ mod chat_tests {
     use crate::exec::ExecConfig;
     use crate::session::SessionManager;
     use crate::tools::limits::Limits;
+
+    /// LLM-26: 1,000 deltas into a channel of 4 that nobody reads while they arrive all reach the
+    /// client, in order, and before the event that follows them.
+    #[tokio::test]
+    async fn no_text_delta_is_lost_when_the_client_lags() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let events = ChatEvents::new(tx);
+        let deltas: Vec<String> = (0..1_000).map(|i| format!("d{i} ")).collect();
+        for d in &deltas {
+            events.text(d);
+        }
+        let reader = tokio::spawn(async move {
+            let mut text = String::new();
+            let mut last = None;
+            while let Some(event) = rx.recv().await {
+                match event {
+                    ProgressEvent::Content { text: t } => text.push_str(&t),
+                    other => {
+                        last = Some(other);
+                        break;
+                    }
+                }
+            }
+            (text, last)
+        });
+        events
+            .send(ProgressEvent::Status {
+                message: "end".into(),
+            })
+            .await
+            .unwrap();
+        drop(events);
+        let (text, last) = reader.await.unwrap();
+        assert_eq!(text, deltas.concat());
+        assert!(
+            matches!(last, Some(ProgressEvent::Status { ref message }) if message == "end"),
+            "{last:?}"
+        );
+    }
 
     /// An admitting governor and a chat on one live session.
     async fn admitting_parts() -> (Arc<ToolGovernor>, ChatSession) {
