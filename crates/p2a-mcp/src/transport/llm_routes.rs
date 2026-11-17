@@ -997,7 +997,7 @@ async fn build_chat_messages(
     drop_repeated_prompt(&mut history, &user_message);
     let dataset_context =
         governed_dataset_context(governor, session, settings.context_bytes).await?;
-    let system_prompt = get_system_prompt_with_context(dataset_context.as_deref(), tools);
+    let system_prompt = get_system_prompt_with_context(dataset_context.as_deref());
     let reserved_for_response = cfg.max_tokens.unwrap_or(4096) as usize;
     let processed = ContextManager::for_request(
         &cfg.model,
