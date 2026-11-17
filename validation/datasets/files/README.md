@@ -36,6 +36,11 @@ purpose, and commit the files and the JSON together. Never edit a fixture by han
 | `dta118_types.dta` | `write_dta(version = 14)`, columns narrowed | byte, int, long, float, double at their extremes; `.`, `.a`-`.z` |
 | `dta119_haven.dta` | `write_dta(version = 15)` | release 119: 4-byte `<K>` |
 | `dta119_msf.dta` | `dta119_haven.dta` in big-endian | MSF byte order |
+| `dta117_formats.dta` | `write_dta(version = 13, strl_threshold = 10)` | `%td`, `%tc`, `%tm` formats, value labels (integer and double codes), strL text (release 117 references 4/4) |
+| `dta118_formats.dta` | `write_dta(version = 14, strl_threshold = 10)` | the same in release 118 (strL references 2/6) |
+| `dta119_formats.dta` | `write_dta(version = 15, strl_threshold = 10)` | the same in release 119 |
+| `dta119_formats_msf.dta` | `dta119_formats.dta` in big-endian | MSF strL references, GSO headers and value-label tables |
+| `dta118_str1.dta` | `write_dta(version = 14)` of one `str1` column | a 1-byte row for the cell-check guard test |
 | `sas64_haven.sas7bdat` | `write_sas` | 64-bit, no header pad, UTF-8 (encoding 20), 1e308 |
 | `sas64_pad.sas7bdat` | `sas64_haven.sas7bdat`, header pad inserted | byte 35 = 0x33 on a 64-bit file |
 | `sas64_short.sas7bdat` | `sas64_haven.sas7bdat`, numeric widths 3, 4, 6, 7, 5, 8 | truncated doubles |
@@ -50,6 +55,16 @@ purpose, and commit the files and the JSON together. Never edit a fixture by han
 
 `data_readers_manifest.csv` lists the files with the `encoding` argument the case passes to
 `read_dta` (empty: the file's own) and their origin; it is the case's analysis dataset.
+
+The `*_formats.dta` files and `dta118_str1.dta` come from a second script,
+`validation/r/fixtures/data_readers_t4.R` (same rules), with the case `data_readers_formats_values`
+(`validation/r/cases/data_readers_t4.R`, which keeps the formats and labels haven reads) and the manifest
+`data_readers_t4_manifest.csv`:
+
+```
+Rscript validation/r/fixtures/data_readers_t4.R
+Rscript validation/r/run.R --write data_readers_formats_values
+```
 
 The tests patch fixed byte offsets of `sas64_haven.sas7bdat`, `sas32_iris.sas7bdat`,
 `sas64_wlatin1.sas7bdat`, `sas64_rle.sas7bdat`, `sas64_rdc.sas7bdat`, `dta118_haven.dta` and
