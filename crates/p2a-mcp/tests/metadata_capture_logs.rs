@@ -179,6 +179,24 @@ async fn the_capture_logs_counts_at_info_and_a_refused_save_as_a_warning() {
             .collect::<Vec<_>>()
             .join("\n")
     );
+    // The lines that repeat the result text and the dimensions line are at debug only.
+    for message in [
+        "First line of result",
+        "Parsing dataset name from first line",
+        "Dimensions line parts",
+    ] {
+        let at_info: Vec<_> = capture_lines(&wide, "INFO ")
+            .into_iter()
+            .filter(|line| line.contains(message))
+            .collect();
+        assert!(at_info.is_empty(), "{message} at info: {at_info:#?}");
+        assert!(
+            capture_lines(&wide, "DEBUG ")
+                .iter()
+                .any(|line| line.contains(message)),
+            "{message} not at debug"
+        );
+    }
     // Every line of every info event, the lines that continue one included.
     let named: Vec<_> = at(&wide, "INFO ")
         .into_iter()

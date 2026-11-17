@@ -1595,7 +1595,7 @@ impl StreamingToolExecutor {
         // Parse result to extract dataset info
         // Format: "Successfully loaded dataset 'name'\n\nDimensions: X rows x Y columns\n\nColumns:..."
         let first_line = result_text.lines().next();
-        tracing::info!(
+        tracing::debug!(
             first_line = ?first_line,
             "[METADATA_CAPTURE] First line of result"
         );
@@ -1603,7 +1603,7 @@ impl StreamingToolExecutor {
         let dataset_name = first_line.and_then(|line| {
             let start = line.find('\'');
             let end = line.rfind('\'');
-            tracing::info!(
+            tracing::debug!(
                 line = %line,
                 start_quote_pos = ?start,
                 end_quote_pos = ?end,
@@ -1637,7 +1637,7 @@ impl StreamingToolExecutor {
         let dimensions = dimensions_line.and_then(|line| {
             // "Dimensions: X rows x Y columns"
             let parts: Vec<&str> = line.split_whitespace().collect();
-            tracing::info!(
+            tracing::debug!(
                 parts = ?parts,
                 parts_len = parts.len(),
                 "[METADATA_CAPTURE] Dimensions line parts"
