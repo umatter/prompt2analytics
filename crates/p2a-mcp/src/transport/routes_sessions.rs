@@ -127,7 +127,7 @@ pub(crate) enum LookupError {
 }
 
 /// Look up a live session. With persistence, a stored session still within
-/// its TTL is adopted (a RocksDB server after a restart), subject to the
+/// its TTL is adopted (a persistent SurrealKV store after a restart), subject to the
 /// registry's capacity.
 pub(crate) async fn live_session(
     state: &AppState,
@@ -151,15 +151,17 @@ pub(crate) async fn live_session(
         .map_err(LookupError::Session)
 }
 
-/// The answer of the tool and chat routes when [`live_session`] finds no session: 404, 410, 503
-/// `capacity` (adoption found the registry full) or 500 `internal`.
+/// The answer of the tool and chat routes when [`live_session`] finds no session: 404
+/// `not_found`, 410 `session_expired`, 503 `capacity` (adoption found the registry full) or 500
+/// `internal`.
 pub(crate) fn lookup_error_response(error: LookupError) -> Response {
-    let plain = |status, text: &str| (status, Json(ApiResponse::<()>::error(text))).into_response();
     match error {
         LookupError::Session(SessionError::NotFound) => {
-            plain(StatusCode::NOT_FOUND, "Session not found")
+            error_with(StatusCode::NOT_FOUND, "Session not found", "not_found")
         }
-        LookupError::Session(SessionError::Expired) => plain(StatusCode::GONE, "Session expired"),
+        LookupError::Session(SessionError::Expired) => {
+            error_with(StatusCode::GONE, "Session expired", "session_expired")
+        }
         LookupError::Session(SessionError::MaxSessionsReached) => capacity_response(),
         LookupError::Internal => error_with(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -255,8 +257,10 @@ pub struct ListFilesResponse {
 /// List files in a directory.
 ///
 /// The path is validated against the process-wide data root jail (see
-/// `crate::path_jail`). Requests outside the jail return 403.
-pub(crate) async fn list_files(Query(query): Query<ListFilesQuery>) -> impl IntoResponse {
+/// `crate::path_jail`). Errors: 403 `forbidden` outside the jail, 400
+/// `invalid_arguments` for a path that cannot be read as a directory, 500
+/// `internal` when the data root cannot be resolved (the detail is logged).
+pub(crate) async fn list_files(Query(query): Query<ListFilesQuery>) -> Response {
     use crate::path_jail;
 
     // Default to the configured jail root when no path is provided.
@@ -269,25 +273,18 @@ pub(crate) async fn list_files(Query(query): Query<ListFilesQuery>) -> impl Into
         Some(requested) => match path_jail::validate_data_path(requested) {
             Ok(p) => p,
             Err(e) => {
-                return (
+                return error_with(
                     StatusCode::FORBIDDEN,
-                    Json(ApiResponse::<ListFilesResponse>::error(format!(
-                        "Path rejected by data root jail: {}",
-                        e
-                    ))),
+                    &format!("Path rejected by data root jail: {e}"),
+                    "forbidden",
                 );
             }
         },
         None => match path_jail::allowed_data_root() {
             Ok(root) => root,
             Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ApiResponse::<ListFilesResponse>::error(format!(
-                        "Cannot resolve data root: {}",
-                        e
-                    ))),
-                );
+                tracing::warn!(error = %e, "Cannot resolve the data root");
+                return data_root_error();
             }
         },
     };
@@ -332,12 +329,10 @@ pub(crate) async fn list_files(Query(query): Query<ListFilesQuery>) -> impl Into
             entries
         }
         Err(e) => {
-            return (
+            return error_with(
                 StatusCode::BAD_REQUEST,
-                Json(ApiResponse::<ListFilesResponse>::error(format!(
-                    "Cannot read directory: {}",
-                    e
-                ))),
+                &format!("Cannot read directory: {e}"),
+                "invalid_arguments",
             );
         }
     };
@@ -357,6 +352,17 @@ pub(crate) async fn list_files(Query(query): Query<ListFilesQuery>) -> impl Into
             parent,
             entries,
         })),
+    )
+        .into_response()
+}
+
+/// The file browser's answer when the data root cannot be resolved: a
+/// generic 500 `internal` (the detail is logged, not returned).
+fn data_root_error() -> Response {
+    error_with(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "Cannot resolve the data root",
+        "internal",
     )
 }
 
@@ -393,6 +399,84 @@ mod tests {
         for ext in p2a_core::DataLoader::supported_extensions() {
             assert!(super::is_loadable_data_file(&format!("x.{ext}")), "{ext}");
         }
+    }
+
+    async fn body_of(resp: axum::response::Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 16)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_tool_route_unknown_session_is_not_found_with_a_code() {
+        let (app, _state) = super::super::http::build_app(&crate::config::ServerConfig::default())
+            .await
+            .unwrap();
+        let body = serde_json::json!({
+            "session_id": uuid::Uuid::new_v4().to_string(),
+            "arguments": {}
+        });
+        let req = Request::post("/api/tools/load_dataset")
+            .header(header::HOST, "localhost")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let body = body_of(resp).await;
+        assert_eq!(body["code"], "not_found", "{body}");
+        assert_eq!(body["error"], "Session not found", "{body}");
+    }
+
+    /// The mapping the tool and chat routes use: an expired session is 410
+    /// `session_expired`, an unknown one 404 `not_found`.
+    #[tokio::test]
+    async fn lookup_errors_carry_codes() {
+        use super::{LookupError, lookup_error_response};
+        use crate::session::SessionError;
+        for (error, status, code) in [
+            (SessionError::Expired, StatusCode::GONE, "session_expired"),
+            (SessionError::NotFound, StatusCode::NOT_FOUND, "not_found"),
+        ] {
+            let resp = lookup_error_response(LookupError::Session(error));
+            assert_eq!(resp.status(), status);
+            assert_eq!(body_of(resp).await["code"], code);
+        }
+        let resp = lookup_error_response(LookupError::Internal);
+        assert_eq!(body_of(resp).await["code"], "internal");
+    }
+
+    #[tokio::test]
+    async fn test_list_files_errors_have_codes() {
+        use super::{ListFilesQuery, list_files};
+        use axum::extract::Query;
+        let outside = tempfile::tempdir().unwrap();
+        let resp = list_files(Query(ListFilesQuery {
+            path: Some(outside.path().to_str().unwrap().to_string()),
+        }))
+        .await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert_eq!(body_of(resp).await["code"], "forbidden");
+
+        let inside = tempfile::Builder::new()
+            .prefix(".p2a-wp31-")
+            .tempdir_in(crate::path_jail::allowed_data_root().unwrap())
+            .unwrap();
+        let file = inside.path().join("f.csv");
+        std::fs::write(&file, "x\n1\n").unwrap();
+        let resp = list_files(Query(ListFilesQuery {
+            path: Some(file.to_str().unwrap().to_string()),
+        }))
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(body_of(resp).await["code"], "invalid_arguments");
+
+        let resp = super::data_root_error();
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = body_of(resp).await;
+        assert_eq!(body["code"], "internal");
+        assert_eq!(body["error"], "Cannot resolve the data root");
     }
 
     /// Deleting a session that does not exist answers 404 with the code
