@@ -2222,7 +2222,7 @@ impl AnalyticsServer {
 
     /// Preview the first rows of a dataset.
     #[tool(
-        description = "Preview the first N rows of a loaded dataset (default: 5 rows). Returns data in a formatted table."
+        description = "Preview the first n rows of a loaded dataset (default 5, at most 1000) as a plain text table of every column, with each column's type; cells longer than 40 characters are cut."
     )]
     pub async fn head_dataset(
         &self,
@@ -2234,18 +2234,79 @@ impl AnalyticsServer {
 
         let n = request.n.unwrap_or(5);
         let df = dataset.df();
-        let preview = df.head(Some(n));
+        let shown = n.min(HEAD_MAX_ROWS).min(df.height());
+        let capped = if n > HEAD_MAX_ROWS {
+            format!("; n = {n} capped at {HEAD_MAX_ROWS}")
+        } else {
+            String::new()
+        };
 
         let result = format!(
-            "Dataset: {} (showing first {} of {} rows)\n\n{}",
+            "Dataset: {} (showing first {shown} of {} rows, {} columns{capped})\n\n{}",
             request.dataset,
-            n.min(df.height()),
             df.height(),
-            preview
+            df.width(),
+            render_head(df, n)
         );
 
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
+}
+
+/// Most rows a preview shows (`head_dataset`'s `n` is capped here).
+pub(crate) const HEAD_MAX_ROWS: usize = 1000;
+/// Characters a preview cell shows before it is cut with an ellipsis.
+pub(crate) const HEAD_CELL_CHARS: usize = 40;
+
+/// The first `rows` rows (at most [`HEAD_MAX_ROWS`]) of every column of `df` as a plain
+/// table: the column names, their types as polars prints them (`str`, `i64`, `f64`, ...), a
+/// rule, and one line per row. Cells are cut to [`HEAD_CELL_CHARS`] characters, a missing
+/// value prints `null`, and columns are aligned by characters, not bytes. Unlike polars'
+/// own display, no row or column is hidden.
+pub(crate) fn render_head(df: &DataFrame, rows: usize) -> String {
+    let rows = rows.min(HEAD_MAX_ROWS).min(df.height());
+    let columns = df.get_columns();
+    let mut table: Vec<Vec<String>> = Vec::with_capacity(columns.len());
+    for column in columns {
+        let mut cells = Vec::with_capacity(rows + 2);
+        cells.push(p2a_text::ellipsize(column.name().as_str(), HEAD_CELL_CHARS).into_owned());
+        cells.push(p2a_text::ellipsize(&column.dtype().to_string(), HEAD_CELL_CHARS).into_owned());
+        for i in 0..rows {
+            let text = match column.get(i) {
+                Ok(AnyValue::String(v)) => v.to_string(),
+                Ok(AnyValue::StringOwned(v)) => v.to_string(),
+                Ok(v) => v.to_string(),
+                Err(_) => "?".to_string(),
+            };
+            // a line break or tab inside a cell would break the table
+            let text = text.replace(|c: char| c.is_control(), " ");
+            cells.push(p2a_text::ellipsize(&text, HEAD_CELL_CHARS).into_owned());
+        }
+        table.push(cells);
+    }
+    let widths: Vec<usize> = table
+        .iter()
+        .map(|cells| cells.iter().map(|c| c.chars().count()).max().unwrap_or(0))
+        .collect();
+    let mut out = String::new();
+    for r in 0..rows + 2 {
+        if r == 2 {
+            let rule: Vec<String> = widths.iter().map(|&w| "-".repeat(w)).collect();
+            out.push_str(&rule.join("-+-"));
+            out.push('\n');
+        }
+        let cells: Vec<String> = widths
+            .iter()
+            .zip(&table)
+            .map(|(&w, column)| {
+                let c = &column[r];
+                format!("{c}{}", " ".repeat(w.saturating_sub(c.chars().count())))
+            })
+            .collect();
+        out.push_str(cells.join(" | ").trim_end());
+        out.push('\n');
+    }
+    out
 }
 
 /// Load `path` as `load_dataset` does: [`DataLoader::load`] without `na_strings`, or
@@ -3892,6 +3953,86 @@ mod tests {
             row_old.as_object_mut().unwrap().remove("s");
             assert_eq!(&row_new, row_old);
         }
+    }
+
+    fn head(rt: &tokio::runtime::Runtime, server: &AnalyticsServer, n: Option<usize>) -> String {
+        use crate::tools::common::test_support::text;
+        let req = HeadDatasetRequest {
+            dataset: "d".into(),
+            n,
+        };
+        let r = rt.block_on(server.head_dataset(Parameters(req))).unwrap();
+        assert_eq!(r.is_error, Some(false));
+        text(&r)
+    }
+
+    /// LLM-13: every requested row and every column is shown, and the header says so (polars'
+    /// display showed 10 rows and 8 columns whatever n asked for).
+    #[test]
+    fn test_head_dataset_shows_all_requested_rows_and_columns() {
+        use crate::tools::common::test_support::server_with;
+        let cols: Vec<Column> = (1..=12)
+            .map(|j| {
+                Column::new(
+                    format!("col{j}").into(),
+                    (0..30)
+                        .map(|i| i as f64 * 1.5 + j as f64)
+                        .collect::<Vec<f64>>(),
+                )
+            })
+            .collect();
+        let df = DataFrame::new(cols).unwrap();
+        let (rt, server) = server_with(vec![("d", df)]);
+        let t = head(&rt, &server, Some(25));
+        assert!(
+            t.starts_with("Dataset: d (showing first 25 of 30 rows, 12 columns)"),
+            "{t}"
+        );
+        let lines: Vec<&str> = t.lines().skip(2).collect();
+        // names, types, rule and 25 rows
+        assert_eq!(lines.len(), 28, "{t}");
+        for j in 1..=12 {
+            assert!(lines[0].contains(&format!("col{j}")), "{t}");
+        }
+        assert_eq!(lines[1].split(" | ").count(), 12, "{t}");
+        assert!(lines[1].starts_with("f64"), "{t}");
+        for row in &lines[3..] {
+            assert_eq!(row.split(" | ").count(), 12, "{row}");
+        }
+        assert!(!t.contains('…') && !t.contains("..."), "{t}");
+    }
+
+    /// LLM-13: n above the cap shows the cap and says so.
+    #[test]
+    fn test_head_dataset_caps_rows_and_says_so() {
+        use crate::tools::common::test_support::server_with;
+        let df = df!("x" => (0..5000).map(|i| i as f64 * 0.25).collect::<Vec<f64>>()).unwrap();
+        let (rt, server) = server_with(vec![("d", df)]);
+        let t = head(&rt, &server, Some(3000));
+        assert!(
+            t.starts_with(
+                "Dataset: d (showing first 1000 of 5000 rows, 1 columns; n = 3000 capped at 1000)"
+            ),
+            "{}",
+            &t[..200]
+        );
+        assert_eq!(t.lines().skip(2).count(), 3 + HEAD_MAX_ROWS);
+        let small = head(&rt, &server, None);
+        assert!(small.starts_with("Dataset: d (showing first 5 of 5000 rows, 1 columns)\n"));
+    }
+
+    /// LLM-13: a long multibyte cell is cut on a character boundary; a missing value is `null`.
+    #[test]
+    fn test_head_dataset_cells_are_cut_on_char_boundaries() {
+        let long = "é".repeat(200);
+        let df = df!("s" => [Some(long.as_str()), None, Some("a\nb")]).unwrap();
+        let t = render_head(&df, 3);
+        let lines: Vec<&str> = t.lines().collect();
+        assert_eq!(lines.len(), 6, "{t}");
+        assert_eq!(lines[3].chars().count(), HEAD_CELL_CHARS, "{t}");
+        assert!(lines[3].starts_with("ééé"), "{t}");
+        assert_eq!(lines[4].trim_end(), "null", "{t}");
+        assert_eq!(lines[5].trim_end(), "a b", "{t}");
     }
 
     /// The (dtype, null count) of `column` in the server's dataset `name`.
