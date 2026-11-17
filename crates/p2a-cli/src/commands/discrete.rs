@@ -20,7 +20,7 @@ use p2a_core::{
 use crate::output::{
     CoefRow, FitLine, OutputFormat, RegressionReport, StatKind, add_notes, add_result_notes,
     format_regression_report, missing_json, print_error, print_json, print_missing_note,
-    print_notes, print_result_notes,
+    print_notes, print_result_notes, regression_report_json,
 };
 use crate::session::SessionManager;
 
@@ -538,10 +538,9 @@ fn print_binary(
         // the notes carry the warnings (text: after the log-likelihoods; JSON: merged below)
         warnings: &[],
     };
-    let text = format_regression_report(&report, format);
     match format {
         OutputFormat::Json => {
-            let mut json: serde_json::Value = serde_json::from_str(&text)?;
+            let mut json = regression_report_json(&report);
             if let Some(m) = missing_json(&result.missing) {
                 json["missing"] = m;
             }
@@ -549,7 +548,7 @@ fn print_binary(
             print_json(&json)?;
         }
         _ => {
-            print!("{text}");
+            print!("{}", format_regression_report(&report, format));
             println!("\nLog-likelihood: {:.4}", result.log_likelihood);
             println!("Null log-likelihood: {:.4}", result.log_likelihood_null);
             print_result_notes(result, format);
@@ -637,7 +636,6 @@ fn execute_probit(
     Ok(())
 }
 
-/// o-logit / o-probit: `run_ordered_model_with` with the given link and `--levels`.
 /// Whether a failed ordered fit on an outcome of this type should ask for `--levels`: core
 /// orders numbers, booleans, dates and an Enum's declared categories itself and needs the
 /// order only for a text or categorical outcome.
@@ -648,6 +646,7 @@ fn wants_levels_hint(dtype: &polars::prelude::DataType) -> bool {
     )
 }
 
+/// o-logit / o-probit: `run_ordered_model_with` with the given link and `--levels`.
 fn execute_ordered(
     dataset_name: &str,
     dep_var: &str,

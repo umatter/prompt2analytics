@@ -16,7 +16,8 @@ use p2a_core::{
 use std::path::PathBuf;
 
 use crate::output::{
-    OutputFormat, missing_json, print_error, print_message, print_missing_note, se_label,
+    OutputFormat, missing_json, print_error, print_json, print_message, print_missing_note,
+    se_label,
 };
 use crate::output::{add_result_notes, print_result_notes};
 use crate::session::SessionManager;
@@ -1201,8 +1202,8 @@ fn execute_coefplot(
                         }
                     };
 
-                    // 0.9 -> "90", 0.975 -> "97.5"
-                    let pct = (conf_level * 1000.0).round() / 10.0;
+                    // 0.9 -> "90", 0.975 -> "97.5", 0.9999 -> "99.99"
+                    let pct = p2a_core::econometrics::survival::conf_percent(conf_level);
                     let se_name = cov.short_label();
                     let chart_title = title.map(|s| s.to_string()).unwrap_or_else(|| {
                         format!("Coefficients: {dep_var}, {pct}% CIs ({se_name} standard errors)")
@@ -1249,7 +1250,7 @@ fn execute_coefplot(
                                         if let Some(m) = missing_json(&missing) {
                                             json["missing"] = m;
                                         }
-                                        println!("{json}");
+                                        print_json(&json)?;
                                     }
                                     _ => print_saved(&message, &missing, format),
                                 }
@@ -1812,6 +1813,8 @@ fn execute_line_interactive(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use p2a_validation::{Case, Check, Tol};
 
     #[test]
     fn png_extension_warning_names_non_png_files() {
@@ -1836,8 +1839,6 @@ mod tests {
         write_chart(&ok, b"x").unwrap();
         assert_eq!(std::fs::read(&ok).unwrap(), b"x");
     }
-    use super::*;
-    use p2a_validation::{Case, Check, Tol};
 
     /// The coefficient plot's limits follow --conf-level with R's t quantile (confint.lm); a
     /// fixed 1.96 ignored the option.

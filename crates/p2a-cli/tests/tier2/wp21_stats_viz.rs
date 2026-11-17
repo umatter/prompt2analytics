@@ -1722,7 +1722,7 @@ fn test_validate_cli_viz_coefplot_ci() {
     let base = [
         "viz", "coefplot", "ivw", "-y", "y", "-x", "x", "w", "-f", png,
     ];
-    let limits = |v: &Value| -> (Vec<String>, Vec<f64>, Vec<f64>) {
+    let limits = |v: &Value| -> (Vec<String>, Vec<f64>, Vec<f64>, Vec<f64>) {
         let rows = v["coefficients"].as_array().unwrap();
         (
             rows.iter()
@@ -1730,6 +1730,7 @@ fn test_validate_cli_viz_coefplot_ci() {
                 .collect(),
             rows.iter().map(|r| num(r, "lower")).collect(),
             rows.iter().map(|r| num(r, "upper")).collect(),
+            rows.iter().map(|r| num(r, "estimate")).collect(),
         )
     };
     for (extra, key, se_type) in [
@@ -1745,8 +1746,9 @@ fn test_validate_cli_viz_coefplot_ci() {
         a.extend_from_slice(extra);
         let v = s.json(&a);
         assert_eq!(v["se_type"], se_type, "{v}");
-        let (names, lo, hi) = limits(&v);
+        let (names, lo, hi, est) = limits(&v);
         Check::new(&case)
+            .named("coef", &names, &est, Tol::coef(n))
             .named(&format!("{key}_lower"), &names, &lo, Tol::se(n))
             .named(&format!("{key}_upper"), &names, &hi, Tol::se(n))
             .finish();
@@ -1756,6 +1758,13 @@ fn test_validate_cli_viz_coefplot_ci() {
     assert!(title.contains("HC1") && title.contains("90%"), "{title}");
     let text = s.ok(&base);
     assert!(text.contains("95% intervals, HC1"), "{text}");
+    // the label is the level as typed, not rounded to one decimal (0.9999 was "100%")
+    let v = s.json(&argv_ext(&base, &["--conf-level", "0.9999"]));
+    let title = v["title"].as_str().unwrap();
+    assert!(title.contains("99.99%"), "{title}");
+    // one pretty-printed JSON document, as every other command prints
+    let raw = s.ok(&argv_ext(&["-F", "json"], &base));
+    assert!(raw.trim_end().lines().count() > 1, "{raw}");
 }
 
 /// `base` followed by `extra`.

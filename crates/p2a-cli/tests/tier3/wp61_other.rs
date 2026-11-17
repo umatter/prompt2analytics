@@ -2080,7 +2080,7 @@ fn test_cli_svm_counts_by_label_and_ml_notes() {
     );
     assert!(text.contains(&want), "{want}\n{text}");
 
-    let t = s.json(&[
+    let tsne = [
         "ml",
         "tsne",
         "emp",
@@ -2093,9 +2093,25 @@ fn test_cli_svm_counts_by_label_and_ml_notes() {
         "1",
         "--perplexity",
         "5",
-    ]);
-    // t-SNE has no convergence record; its warnings (if any) are a JSON array
-    assert!(t.get("warnings").is_none_or(|w| w.is_array()), "{t}");
+    ];
+    let t = s.json(&tsne);
+    // t-SNE has no convergence record; its notes are always a `warnings` array
+    let warnings: Vec<&str> = t["warnings"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no warnings array\n{t}"))
+        .iter()
+        .map(|w| w.as_str().unwrap())
+        .collect();
+    // the text ends with the same notes: a `Warnings:` block, one `  - ` line each
+    let text = s.ok(&tsne);
+    let lines: Vec<&str> = text.lines().filter(|l| !l.is_empty()).collect();
+    if warnings.is_empty() {
+        assert!(!text.contains("Warnings:"), "{text}");
+    } else {
+        let tail: Vec<String> = warnings.iter().map(|w| format!("  - {w}")).collect();
+        assert_eq!(lines[lines.len() - tail.len() - 1], "Warnings:", "{text}");
+        assert_eq!(lines[lines.len() - tail.len()..], tail[..], "{text}");
+    }
 
     let help = |cmd: &str| {
         let out = p2a().args(["ml", cmd, "--help"]).output().unwrap();
@@ -2161,4 +2177,36 @@ fn test_validate_cli_stl_s_window() {
         .unwrap();
     let h = String::from_utf8_lossy(&out.stdout);
     assert!(!h.contains("Bayesian"), "{h}");
+    // the inference lines name the normal approximation, not a posterior (y = 2 x + level +
+    // noise with an effect from t = 81; case ts_statespace_t4's generated series)
+    s.load_as(
+        &repo_path("validation/datasets/generated/causal_impact_control_t4.csv"),
+        "ci",
+        &[],
+    );
+    let text = s.ok(&[
+        "ts",
+        "causal-impact",
+        "ci",
+        "--response",
+        "y",
+        "--time",
+        "t",
+        "--pre-start",
+        "1",
+        "--pre-end",
+        "80",
+        "--post-start",
+        "81",
+        "--post-end",
+        "100",
+        "--controls",
+        "x",
+    ]);
+    assert!(!text.contains("Posterior"), "{text}");
+    assert!(
+        text.lines()
+            .any(|l| l.starts_with("P(effect > 0), normal approximation: ")),
+        "{text}"
+    );
 }

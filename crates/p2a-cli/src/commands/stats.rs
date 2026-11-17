@@ -713,8 +713,12 @@ pub fn execute(
                     column: col,
                     labels: labels.as_deref(),
                 },
-                // clap's ArgGroup requires exactly one of them
-                (None, None) => unreachable!("--observed or --counts is required"),
+                // clap's ArgGroup requires one of them; a caller that builds the command
+                // without clap gets the same refusal instead of a panic
+                (None, None) => {
+                    print_error("chisq-gof needs --observed or --counts", format);
+                    return Ok(());
+                }
             };
             execute_chisq_gof(
                 dataset,
@@ -2751,5 +2755,25 @@ mod ccf_lag_tests {
         assert_eq!(ccf_default_lag(3), 1);
         assert_eq!(ccf_default_lag(1), 0);
         assert_eq!(ccf_default_lag(0), 0);
+    }
+}
+
+#[cfg(test)]
+mod chisq_gof_tests {
+    use super::{OutputFormat, StatsCommands, execute};
+
+    /// A chisq-gof built without clap's ArgGroup (neither --observed nor --counts) is refused
+    /// with an error, not a panic.
+    #[test]
+    fn chisq_gof_without_a_source_is_refused_not_a_panic() {
+        let cmd = StatsCommands::ChisqGof {
+            dataset: "d".to_string(),
+            observed: None,
+            counts: None,
+            labels: None,
+            probs: None,
+            rescale_p: false,
+        };
+        assert!(execute(&cmd, &OutputFormat::Json, true, None).is_ok());
     }
 }

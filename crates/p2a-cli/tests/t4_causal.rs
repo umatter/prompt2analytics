@@ -306,7 +306,27 @@ fn test_validate_cli_gsynth_defaults() {
         Check::new(&case)
             .scalar(&format!("{tag}_r{r}_att_avg"), number(&j, "att"), tol)
             .finish();
+        assert!(
+            j["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|w| !w.as_str().unwrap().contains("--r-max")),
+            "{j}"
+        );
     }
+    // --r-max with a fixed --n-factors has no effect, and the output says so
+    let fixed = argv(&base, &["--n-factors", "1", "--r-max", "3"]);
+    let j = s.json(&fixed);
+    let warnings = j["warnings"].as_array().unwrap();
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.as_str().unwrap().contains("--r-max 3 has no effect")),
+        "{j}"
+    );
+    let text = s.ok(&fixed);
+    assert!(text.contains("--r-max 3 has no effect"), "{text}");
 }
 
 /// causal staggered-did takes did's base_period (--base-period-type universal), passes
@@ -378,14 +398,12 @@ fn test_validate_cli_staggered_universal_simple() {
         )
         .finish();
     // a cell minimum above every cell's size leaves no cell to estimate
+    // (core's refusal, quoting its skip reason: the flag reached the estimator)
     let out = s.run(&argv(&base, &["--min-obs-per-cell", "100000"]));
-    let all = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{err}");
     assert!(
-        !out.status.success() || all.contains("min_obs_per_cell") || all.contains("cell"),
-        "{all}"
+        err.contains("No valid group-time ATT estimates") && err.contains("small cell size"),
+        "{err}"
     );
 }

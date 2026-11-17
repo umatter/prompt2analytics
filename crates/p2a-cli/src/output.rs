@@ -517,6 +517,44 @@ pub(crate) fn stars(p: f64) -> &'static str {
     }
 }
 
+/// The JSON document of a [`RegressionReport`], as [`format_regression_report`] prints it,
+/// for commands that add keys before printing it with [`print_json`].
+pub(crate) fn regression_report_json(report: &RegressionReport<'_>) -> serde_json::Value {
+    let stat_key = report.statistic.json_key();
+    let coefficients: Vec<serde_json::Value> = report
+        .coefficients
+        .iter()
+        .map(|c| {
+            sorted_object([
+                ("name".to_string(), c.name.clone().into()),
+                ("coefficient".to_string(), c.estimate.into()),
+                ("std_error".to_string(), c.std_error.into()),
+                (stat_key.to_string(), c.statistic.into()),
+                ("p_value".to_string(), c.p_value.into()),
+            ])
+        })
+        .collect();
+    let mut pairs: Vec<(String, serde_json::Value)> = vec![
+        ("method".to_string(), report.method.into()),
+        ("coefficients".to_string(), coefficients.into()),
+        ("n_observations".to_string(), report.n_obs.into()),
+        ("se_type".to_string(), report.se_type_json.into()),
+        ("r_squared_type".to_string(), report.r_squared_type.into()),
+        ("statistic".to_string(), report.statistic.json_name().into()),
+    ];
+    pairs.extend(
+        report
+            .fit_lines
+            .iter()
+            .map(|f| (f.json_key.to_string(), f.value.into())),
+    );
+    if !report.warnings.is_empty() {
+        pairs.push(("warnings".to_string(), report.warnings.to_vec().into()));
+    }
+    pairs.extend(report.extra_json.clone());
+    sorted_object(pairs)
+}
+
 /// Format a [`RegressionReport`].
 ///
 /// Text and Table: the coefficient table (`t-value` or `z-value` column), the
@@ -528,42 +566,8 @@ pub(crate) fn stars(p: f64) -> &'static str {
 /// clash); non-finite numbers are `null`.
 pub fn format_regression_report(report: &RegressionReport<'_>, format: &OutputFormat) -> String {
     match format {
-        OutputFormat::Json => {
-            let stat_key = report.statistic.json_key();
-            let coefficients: Vec<serde_json::Value> = report
-                .coefficients
-                .iter()
-                .map(|c| {
-                    sorted_object([
-                        ("name".to_string(), c.name.clone().into()),
-                        ("coefficient".to_string(), c.estimate.into()),
-                        ("std_error".to_string(), c.std_error.into()),
-                        (stat_key.to_string(), c.statistic.into()),
-                        ("p_value".to_string(), c.p_value.into()),
-                    ])
-                })
-                .collect();
-            let mut pairs: Vec<(String, serde_json::Value)> = vec![
-                ("method".to_string(), report.method.into()),
-                ("coefficients".to_string(), coefficients.into()),
-                ("n_observations".to_string(), report.n_obs.into()),
-                ("se_type".to_string(), report.se_type_json.into()),
-                ("r_squared_type".to_string(), report.r_squared_type.into()),
-                ("statistic".to_string(), report.statistic.json_name().into()),
-            ];
-            pairs.extend(
-                report
-                    .fit_lines
-                    .iter()
-                    .map(|f| (f.json_key.to_string(), f.value.into())),
-            );
-            if !report.warnings.is_empty() {
-                pairs.push(("warnings".to_string(), report.warnings.to_vec().into()));
-            }
-            pairs.extend(report.extra_json.clone());
-            serde_json::to_string_pretty(&sorted_object(pairs))
-                .unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}"))
-        }
+        OutputFormat::Json => serde_json::to_string_pretty(&regression_report_json(report))
+            .unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}")),
         OutputFormat::Table | OutputFormat::Text => {
             let rule = "-".repeat(60);
             let mut out = String::new();

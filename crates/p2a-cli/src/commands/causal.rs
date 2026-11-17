@@ -634,7 +634,7 @@ EXAMPLES:
 
         /// Largest number of factors the cross-validation tries (gsynth's r = c(0, r.max);
         /// default 5, as gsynth)
-        #[arg(long, default_value = "5")]
+        #[arg(long, default_value_t = GSYNTH_DEFAULT_R_MAX)]
         r_max: usize,
 
         /// Fixed effects (gsynth force): unit (default, as gsynth; also individual), none, time
@@ -2184,6 +2184,9 @@ fn execute_tmle(
     Ok(())
 }
 
+/// gsynth's default r.max, the default of `--r-max`.
+const GSYNTH_DEFAULT_R_MAX: usize = 5;
+
 fn execute_gsynth(
     dataset_name: &str,
     outcome: &str,
@@ -2220,6 +2223,17 @@ fn execute_gsynth(
             config.estimator = gsynth_estimator;
             config.bootstrap_se = bootstrap_se;
             config.n_bootstrap = n_bootstrap;
+
+            // --r-max bounds the cross-validation, which a fixed --n-factors turns off
+            let cli_warnings: Vec<String> = (n_factors > 0 && r_max != GSYNTH_DEFAULT_R_MAX)
+                .then(|| {
+                    format!(
+                        "--r-max {r_max} has no effect: it applies only with --n-factors 0 \
+                         (cross-validation); {n_factors} factors were fitted"
+                    )
+                })
+                .into_iter()
+                .collect();
 
             match run_gsynth(
                 ds, outcome, treatment, unit_col, time_col, &cov_refs, config,
@@ -2262,11 +2276,13 @@ fn execute_gsynth(
                                 })
                             }).collect::<Vec<_>>(),
                         });
+                        add_notes(&mut json, None, &cli_warnings);
                         add_result_notes(&mut json, &result);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
                         println!("{}", result);
+                        print_notes(None, &cli_warnings, format);
                     }
                 },
                 Err(e) => print_error(&format!("gsynth failed: {}", e), format),

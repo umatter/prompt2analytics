@@ -1298,13 +1298,6 @@ fn execute_join(
     }
 }
 
-/// The key refusal of `munge join` in the CLI's own terms, or `None` when the
-/// keys are usable.
-///
-/// The core checks the same things in the same order (every `--on` name in
-/// the left dataset, every right key in the right one, then equal key counts),
-/// but its text names its `left_on`/`right_on` parameters and "the left/right
-/// dataset". This names the flags and the datasets the user typed instead.
 /// `"1 column"`, `"2 columns"`.
 fn plural(n: usize, noun: &str) -> String {
     if n == 1 {
@@ -1314,6 +1307,13 @@ fn plural(n: usize, noun: &str) -> String {
     }
 }
 
+/// The key refusal of `munge join` in the CLI's own terms, or `None` when the
+/// keys are usable.
+///
+/// The core checks the same things in the same order (every `--on` name in
+/// the left dataset, every right key in the right one, then equal key counts),
+/// but its text names its `left_on`/`right_on` parameters and "the left/right
+/// dataset". This names the flags and the datasets the user typed instead.
 fn join_key_refusal(
     left: &str,
     left_ds: &Dataset,

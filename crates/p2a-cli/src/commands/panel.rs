@@ -941,10 +941,6 @@ fn theta_range(result: &PanelResult) -> Option<(f64, f64)> {
     ))
 }
 
-/// The F line after a panel table. Classical: `F-statistic: F (p-value: p)`.
-/// Under the entity-clustered covariance the statistic is a Wald F on
-/// (K, G - 1) degrees of freedom, as plm, and the line says so. A NaN F (a
-/// singular clustered covariance) prints nothing.
 /// The JSON keys fe and re add to their report: the F test's degrees of freedom
 /// (`f_df1`, `f_df2`, as [`PanelResult::f_df`]) and `missing` when rows were dropped.
 fn insert_f_df_and_missing(
@@ -959,6 +955,10 @@ fn insert_f_df_and_missing(
     }
 }
 
+/// The F line after a panel table. Classical: `F-statistic: F (p-value: p)`.
+/// Under the entity-clustered covariance the statistic is a Wald F on
+/// (K, G - 1) degrees of freedom, as plm, and the line says so. A NaN F (a
+/// singular clustered covariance) prints nothing.
 fn print_panel_f_line(result: &PanelResult) {
     if result.f_stat.is_nan() {
         return;

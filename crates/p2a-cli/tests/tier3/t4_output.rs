@@ -307,6 +307,45 @@ fn test_cli_print_convergence_warnings_block() {
     assert!(lines[at + 1].starts_with("  - "), "{out}");
 }
 
+/// R's `.` mark for 0.05 <= p < 0.1 in a coefficient table whose marks used to stop at `*`.
+/// `discrete poisson zeroinfl -y y -x x1 x2`: the intercept's p-value is 0.0827 (R:
+/// `glm(y ~ x1 + x2, poisson)`), so its row ends in ` .`; before, it ended in a blank.
+#[test]
+fn test_cli_marks_weak_significance_with_a_dot() {
+    let s = session(&["validation/datasets/generated/zeroinfl.csv"]);
+    let args = [
+        "discrete", "poisson", "zeroinfl", "-y", "y", "-x", "x1", "x2",
+    ];
+    let mut json_args = vec!["-F", "json"];
+    json_args.extend_from_slice(&args);
+    let j: serde_json::Value = serde_json::from_str(&s.ok(&json_args)).unwrap();
+    let names: Vec<&str> = j["variables"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no variables\n{j}"))
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    let p: Vec<f64> = j["p_values"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no p_values\n{j}"))
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    let weak: Vec<&str> = names
+        .iter()
+        .zip(&p)
+        .filter(|&(_, &p)| (0.05..0.1).contains(&p))
+        .map(|(n, _)| *n)
+        .collect();
+    assert_eq!(weak.len(), 1, "one coefficient with 0.05 <= p < 0.1\n{j}");
+    let text = s.ok(&args);
+    let row = text
+        .lines()
+        .find(|l| l.split_whitespace().next() == Some(weak[0]))
+        .unwrap_or_else(|| panic!("no row for {}\n{text}", weak[0]));
+    assert!(row.ends_with(" ."), "{row:?}\n{text}");
+}
+
 /// `data head -F json` prints typed cells: integers and floats as numbers, a missing cell as
 /// null, text as a string, booleans as booleans and dates as ISO strings.
 #[test]
