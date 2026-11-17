@@ -29,7 +29,7 @@ use super::CHECKPOINT_EVERY;
 use super::error::{MungeError, MungeResult};
 use crate::data::Dataset;
 use polars::prelude::*;
-use polars_ops::prelude::RankOptions;
+use polars_ops::prelude::{RankMethod, RankOptions};
 use serde::{Deserialize, Serialize};
 
 /// Grouping and time index of a shift: [`lag_with`], [`lead_with`], [`diff_with`],
@@ -1075,13 +1075,69 @@ fn quantile_edges(ca: &Float64Chunked, column: &str, n: usize) -> MungeResult<Ve
     Ok(edges)
 }
 
+/// What [`one_hot_encode_with`] did.
+#[derive(Clone)]
+pub struct OneHotOutcome {
+    pub dataset: Dataset,
+    /// The dummy columns added, in level order.
+    pub columns: Vec<String>,
+    /// The level `drop_first` dropped (the baseline of a treatment contrast).
+    pub dropped: Option<String>,
+    /// Rows whose value is missing: missing in every dummy.
+    pub n_missing: usize,
+}
+
+/// The column's levels, as [`crate::data::columns::factor_options`] gives them: R's
+/// `factor()` order (numbers ascending, text by bytes, FALSE before TRUE, dates in order)
+/// and labels (`3`, `1.5`, `TRUE`, `2024-01-31`); missing values are no level.
+fn factor_levels(df: &DataFrame, column: &str) -> MungeResult<(Vec<Option<u32>>, Vec<String>)> {
+    use crate::errors::EconError;
+    crate::data::columns::factor_options(df, column).map_err(|e| match e {
+        EconError::ColumnNotFound { column, .. } => MungeError::ColumnNotFound(column),
+        EconError::NonNumericColumn { column } => {
+            let found = df
+                .column(column.as_str())
+                .map(|c| c.dtype().to_string())
+                .unwrap_or_default();
+            MungeError::TypeMismatch {
+                column,
+                expected: "a text, categorical, integer, float, boolean or date column".to_string(),
+                found,
+            }
+        }
+        other => MungeError::FeatureError(other.to_string()),
+    })
+}
+
+/// The level labels [`one_hot_encode`] makes dummies of, in order (the dummy of level `l`
+/// is `{column}_{l}`).
+///
+/// # Errors
+///
+/// [`MungeError::ColumnNotFound`]; an error for a column type that has no levels (a list,
+/// a binary column).
+pub fn one_hot_levels(dataset: &Dataset, column: &str) -> MungeResult<Vec<String>> {
+    factor_levels(dataset.df(), column).map(|(_, levels)| levels)
+}
+
 /// Create one-hot encoded dummy variables from a categorical column.
+///
+/// One Int32 column `{column}_{level}` per level, 1 where the row has that level and 0
+/// elsewhere, as R's `model.matrix(~ 0 + column)`: levels in R's factor order with R's
+/// labels (`region_west`, `g_1.5`, `g_3`, `b_TRUE`). A missing value (null, or NaN in a
+/// float column) gets no dummy: its row is missing in every dummy, as `model.matrix` under
+/// `na.action = na.pass`. `drop_first` drops the first level, the baseline of R's
+/// treatment contrasts.
 ///
 /// # Arguments
 ///
 /// * `dataset` - Dataset containing the column
 /// * `column` - Categorical column to encode
 /// * `drop_first` - Whether to drop the first category (to avoid multicollinearity)
+///
+/// # Errors
+///
+/// As [`one_hot_encode_with`].
 ///
 /// # Example
 ///
@@ -1091,86 +1147,66 @@ fn quantile_edges(ca: &Float64Chunked, column: &str, n: usize) -> MungeResult<Ve
 /// let encoded = one_hot_encode(&data, "region", true)?;
 /// ```
 pub fn one_hot_encode(dataset: &Dataset, column: &str, drop_first: bool) -> MungeResult<Dataset> {
+    one_hot_encode_with(dataset, column, drop_first).map(|o| o.dataset)
+}
+
+/// [`one_hot_encode`], reporting the dummy columns, the dropped level and the missing rows.
+///
+/// # Errors
+///
+/// [`MungeError::ColumnNotFound`]; [`MungeError::InvalidExpression`] when a dummy's name is
+/// that of an existing column (rename it first); a resource error when the dummies would not
+/// fit the allocation ceiling; an error for a column type that has no levels.
+pub fn one_hot_encode_with(
+    dataset: &Dataset,
+    column: &str,
+    drop_first: bool,
+) -> MungeResult<OneHotOutcome> {
     let df = dataset.df();
+    let (codes, levels) = factor_levels(df, column)?;
 
-    // Validate column exists
-    let col_data = df
-        .column(column)
-        .map_err(|_| MungeError::ColumnNotFound(column.to_string()))?;
-
-    // Get unique values as strings
-    let unique = col_data
-        .unique()
-        .map_err(|e| MungeError::FeatureError(e.to_string()))?;
-
-    // Convert to string representation
-    let unique_str: Vec<String> = (0..unique.len())
-        .map(|i| {
-            unique
-                .get(i)
-                .map(|v| format!("{}", v))
-                .unwrap_or_else(|_| "null".to_string())
-        })
+    let start = usize::from(drop_first && !levels.is_empty());
+    let dropped = if start == 1 {
+        Some(levels[0].clone())
+    } else {
+        None
+    };
+    let names: Vec<String> = levels[start..]
+        .iter()
+        .map(|level| format!("{column}_{level}"))
         .collect();
-
-    // Skip first category if drop_first is true
-    let start_idx = if drop_first { 1 } else { 0 };
+    if let Some(name) = names.iter().find(|n| df.column(n.as_str()).is_ok()) {
+        return Err(MungeError::InvalidExpression(format!(
+            "the dummy column '{name}' would replace an existing column of that name; rename it \
+             first"
+        )));
+    }
 
     // The k x n dummy cells, checked before anything is built
     let height = df.height();
-    let n_dummies = unique_str.len().saturating_sub(start_idx);
-    let cells = crate::resource::checked_len(&[n_dummies, height], "one-hot dummy columns")
+    let cells = crate::resource::checked_len(&[names.len(), height], "one-hot dummy columns")
         .map_err(feature_err)?;
     crate::resource::check_alloc::<i32>(cells, "one-hot dummy columns").map_err(feature_err)?;
 
-    // Each distinct display string maps to the index of its first occurrence,
-    // so categories whose display strings coincide get the same dummy values,
-    // as with the per-cell string comparison.
-    let mut category_ids: std::collections::HashMap<&str, u32> =
-        std::collections::HashMap::with_capacity(unique_str.len());
-    for (i, cat) in unique_str.iter().enumerate() {
-        // u32::MAX marks a row without a category below.
-        let id = u32::try_from(i)
-            .ok()
-            .filter(|&id| id != u32::MAX)
-            .ok_or_else(|| {
-                MungeError::FeatureError(format!(
-                    "column `{column}` has too many distinct values to one-hot encode"
-                ))
-            })?;
-        category_ids.entry(cat.as_str()).or_insert(id);
-    }
-
-    // Format every cell once and record its category (u32::MAX if none)
-    let mut row_ids: Vec<u32> =
-        crate::resource::try_with_capacity(height, "one-hot row categories")
-            .map_err(feature_err)?;
-    for row_idx in 0..height {
-        if row_idx.is_multiple_of(CHECKPOINT_EVERY) {
-            crate::resource::checkpoint().map_err(feature_err)?;
-        }
-        let val = col_data
-            .get(row_idx)
-            .map(|v| format!("{}", v))
-            .unwrap_or_else(|_| "null".to_string());
-        row_ids.push(category_ids.get(val.as_str()).copied().unwrap_or(u32::MAX));
-    }
-
     let mut result = df.clone();
-
-    for cat in unique_str.iter().skip(start_idx) {
+    for (i, name) in names.iter().enumerate() {
         crate::resource::checkpoint().map_err(feature_err)?;
-        let id = category_ids[cat.as_str()];
-        let dummy_name = format!("{}_{}", column, cat);
-        let dummy_values: Vec<i32> = row_ids.iter().map(|&r| i32::from(r == id)).collect();
-
-        let dummy_col = Column::new(dummy_name.into(), dummy_values);
+        let level = (start + i) as u32;
+        let dummy: Int32Chunked = codes
+            .iter()
+            .map(|c| c.map(|c| i32::from(c == level)))
+            .collect();
         result
-            .with_column(dummy_col)
+            .with_column(dummy.with_name(name.as_str().into()).into_column())
             .map_err(|e| MungeError::FeatureError(e.to_string()))?;
     }
 
-    Ok(Dataset::new(result))
+    Ok(OneHotOutcome {
+        dataset: Dataset::new(result),
+        columns: names,
+        dropped,
+        n_missing: codes.iter().filter(|c| c.is_none()).count(),
+    })
 }
 
 /// Calculate cumulative sum of a column.
@@ -1237,6 +1273,10 @@ pub fn cumprod(dataset: &Dataset, column: &str, reverse: bool) -> MungeResult<Da
 
 /// Rank values in a column.
 ///
+/// Adds `{column}_rank`, Float64: tied values get the average of their ranks and a missing
+/// value stays missing, as R's `rank(x, ties.method = "average", na.last = "keep")` (and
+/// pandas' default); `descending` ranks the largest value 1, as `rank(-x)`.
+///
 /// # Arguments
 ///
 /// * `dataset` - Dataset containing the column
@@ -1253,8 +1293,8 @@ pub fn rank(dataset: &Dataset, column: &str, descending: bool) -> MungeResult<Da
     let rank_name = format!("{}_rank", column);
 
     let opts = RankOptions {
+        method: RankMethod::Average,
         descending,
-        ..Default::default()
     };
 
     let result = df
@@ -1947,29 +1987,18 @@ mod tests {
 
     /// The pre-fix algorithm, verbatim, as the reference (formats every cell
     /// once per category).
+    /// The dummies by the definition, cell by cell: level `l` of R's factor order is 1 where the
+    /// cell's code is `l`, 0 elsewhere, and missing in every dummy where the cell is missing.
     fn one_hot_reference(ds: &Dataset, column: &str, drop_first: bool) -> DataFrame {
         let df = ds.df();
-        let col_data = df.column(column).unwrap();
-        let unique = col_data.unique().unwrap();
-        let unique_str: Vec<String> = (0..unique.len())
-            .map(|i| {
-                unique
-                    .get(i)
-                    .map(|v| format!("{}", v))
-                    .unwrap_or_else(|_| "null".to_string())
-            })
-            .collect();
+        let (codes, levels) = crate::data::columns::factor_options(df, column).unwrap();
         let mut result = df.clone();
         let start_idx = if drop_first { 1 } else { 0 };
-        for cat in unique_str.iter().skip(start_idx) {
-            let dummy_name = format!("{}_{}", column, cat);
-            let mut dummy_values: Vec<i32> = Vec::with_capacity(df.height());
-            for row_idx in 0..df.height() {
-                let val = col_data
-                    .get(row_idx)
-                    .map(|v| format!("{}", v))
-                    .unwrap_or_else(|_| "null".to_string());
-                dummy_values.push(if val == *cat { 1 } else { 0 });
+        for (l, level) in levels.iter().enumerate().skip(start_idx) {
+            let dummy_name = format!("{}_{}", column, level);
+            let mut dummy_values: Vec<Option<i32>> = Vec::with_capacity(df.height());
+            for code in &codes {
+                dummy_values.push(code.map(|c| if c as usize == l { 1 } else { 0 }));
             }
             let dummy_col = Column::new(dummy_name.into(), dummy_values);
             result.with_column(dummy_col).unwrap();
@@ -1988,25 +2017,25 @@ mod tests {
             .unwrap(),
         );
         for col in ["region", "g", "h"] {
-            let got = one_hot_encode(&ds, col, false).unwrap();
-            let want = one_hot_reference(&ds, col, false);
-            assert_eq!(got.df().width(), want.width(), "{col}");
-            for c in want.get_columns() {
-                let g = got.df().column(c.name().as_str()).unwrap();
-                assert!(
-                    g.as_materialized_series()
-                        .equals_missing(c.as_materialized_series()),
-                    "{col}: {}",
-                    c.name()
-                );
+            for drop_first in [false, true] {
+                let got = one_hot_encode(&ds, col, drop_first).unwrap();
+                let want = one_hot_reference(&ds, col, drop_first);
+                assert_eq!(got.df().width(), want.width(), "{col}");
+                for c in want.get_columns() {
+                    let g = got.df().column(c.name().as_str()).unwrap();
+                    assert!(
+                        g.as_materialized_series()
+                            .equals_missing(c.as_materialized_series()),
+                        "{col}: {}",
+                        c.name()
+                    );
+                }
             }
         }
-        // 5 levels including null; drop_first removes one (which one depends
-        // on polars' unique order).
-        assert_eq!(
-            one_hot_encode(&ds, "region", true).unwrap().df().width(),
-            3 + 4
-        );
+        // 4 levels (no NA level); drop_first removes the first, east
+        let out = one_hot_encode(&ds, "region", true).unwrap();
+        assert_eq!(out.df().width(), 3 + 3);
+        assert!(out.df().column("region_east").is_err());
     }
 
     #[test]
@@ -2171,8 +2200,7 @@ mod tests {
 
         let result = one_hot_encode(&ds, "category", false).unwrap();
 
-        // One dummy per level, found by the cell where it is 1 (row 0 is a, row 1 b, row 3 c);
-        // names of text levels: DATA-41 (Tier 4)
+        // One dummy per level, found by the cell where it is 1 (row 0 is a, row 1 b, row 3 c)
         let dummies: Vec<Vec<f64>> = result
             .df()
             .get_column_names()
@@ -2249,10 +2277,16 @@ mod tests {
 
         let result = rank(&ds, "value", false).unwrap();
 
-        // R: rank(c(30, 10, 20, 50, 40)); the values are distinct (the tie rule is DATA-71, Tier 4)
+        // R: rank(c(30, 10, 20, 50, 40))
         assert_eq!(
             num_cells(&result, "value_rank"),
             [3.0, 1.0, 2.0, 5.0, 4.0].map(Some)
+        );
+        // R: rank(c(10, 20, 20, 30)) is 1 2.5 2.5 4
+        let ties = Dataset::new(df!("v" => [10i64, 20, 20, 30]).unwrap());
+        assert_eq!(
+            num_cells(&rank(&ties, "v", false).unwrap(), "v_rank"),
+            [1.0, 2.5, 2.5, 4.0].map(Some)
         );
     }
 
@@ -2380,9 +2414,7 @@ mod tests {
     #[test]
     fn test_validate_model_matrix() {
         use p2a_validation::{Check, Tol};
-        // case data_munging_model_matrix: model.matrix(~ 0 + factor(g)) on an Int64 factor. Not pinned:
-        // drop_first's baseline (DATA-40, Tier 4: an arbitrary level instead of R's first) and the names
-        // of text levels (DATA-41, Tier 4: quoted); see the registry deviations.
+        // case data_munging_model_matrix: model.matrix(~ 0 + factor(g)) on an Int64 factor.
         let (case, ds) = crate::test_support::load_case("data_munging_model_matrix");
         assert_eq!(dtype(&ds, "g"), DataType::Int64);
         let out = one_hot_encode(&ds, "g", false).unwrap();
@@ -2665,5 +2697,92 @@ mod tests {
             shifted.f64().unwrap().into_iter().collect::<Vec<_>>(),
             num_cells(&positional, "y_lag2")
         );
+    }
+
+    #[test]
+    fn test_validate_one_hot_model_matrix_na() {
+        use p2a_validation::{Check, Tol};
+        // case data_munging_factor_t4: model.matrix(~ 0 + region) under na.action = na.pass: levels
+        // in factor order, an NA row NA in every dummy; treatment contrasts drop the first level
+        let (case, ds) = crate::test_support::load_case("data_munging_factor_t4");
+        let out = one_hot_encode_with(&ds, "region", false).unwrap();
+        assert_eq!(
+            out.columns,
+            ["region_east", "region_north", "region_south", "region_west"]
+        );
+        assert_eq!(out.n_missing, 1);
+        let g = one_hot_encode_with(&ds, "g", false).unwrap();
+        assert_eq!(g.columns, ["g_1.5", "g_2.5", "g_3"]);
+        let cells = |o: &OneHotOutcome, c: &str| as_r(&num_cells(&o.dataset, c));
+        Check::new(&case)
+            .vector("region_east", &cells(&out, "region_east"), Tol::exact())
+            .vector("region_north", &cells(&out, "region_north"), Tol::exact())
+            .vector("region_south", &cells(&out, "region_south"), Tol::exact())
+            .vector("region_west", &cells(&out, "region_west"), Tol::exact())
+            .vector("g_1_5", &cells(&g, "g_1.5"), Tol::exact())
+            .vector("g_2_5", &cells(&g, "g_2.5"), Tol::exact())
+            .vector("g_3", &cells(&g, "g_3"), Tol::exact())
+            .finish();
+        for c in &out.columns {
+            assert_eq!(dtype(&out.dataset, c), DataType::Int32);
+            assert_eq!(out.dataset.df().column(c).unwrap().null_count(), 1, "{c}");
+        }
+        assert_eq!(
+            one_hot_levels(&ds, "region").unwrap(),
+            case.names("region_levels")
+        );
+        assert_eq!(one_hot_levels(&ds, "g").unwrap(), case.names("g_levels"));
+        // drop_first drops R's baseline, on every call
+        let dropped = case.names("treatment_dropped")[0].clone();
+        for _ in 0..50 {
+            let o = one_hot_encode_with(&ds, "region", true).unwrap();
+            assert_eq!(o.dropped.as_deref(), Some(dropped.as_str()));
+            assert_eq!(o.columns, ["region_north", "region_south", "region_west"]);
+        }
+        // booleans and dates take R's labels
+        let b = Dataset::new(df!("b" => [true, false, true]).unwrap());
+        assert_eq!(
+            one_hot_encode_with(&b, "b", false).unwrap().columns,
+            ["b_FALSE", "b_TRUE"]
+        );
+        let d = Dataset::new(
+            DataFrame::new(vec![
+                Column::new("d".into(), [19_754i32, 19_723])
+                    .cast(&DataType::Date)
+                    .unwrap(),
+            ])
+            .unwrap(),
+        );
+        assert_eq!(
+            one_hot_encode_with(&d, "d", false).unwrap().columns,
+            ["d_2024-01-01", "d_2024-02-01"]
+        );
+        // a dummy that would replace an existing column is refused
+        let clash = Dataset::new(df!("r" => ["a", "b"], "r_a" => [1i64, 2]).unwrap());
+        assert!(matches!(
+            one_hot_encode(&clash, "r", false),
+            Err(MungeError::InvalidExpression(_))
+        ));
+    }
+
+    #[test]
+    fn test_validate_rank_average() {
+        use p2a_validation::{Check, Tol};
+        // case data_munging_factor_t4: rank(r, na.last = "keep") and rank(-r, ...): ties average,
+        // NA stays NA
+        let (case, ds) = crate::test_support::load_case("data_munging_factor_t4");
+        assert_eq!(dtype(&ds, "r"), DataType::Int64);
+        let up = rank(&ds, "r", false).unwrap();
+        let down = rank(&ds, "r", true).unwrap();
+        assert_eq!(dtype(&up, "r_rank"), DataType::Float64);
+        Check::new(&case)
+            .vector("rank_r", &as_r(&num_cells(&up, "r_rank")), Tol::exact())
+            .vector(
+                "rank_r_desc",
+                &as_r(&num_cells(&down, "r_rank")),
+                Tol::exact(),
+            )
+            .finish();
+        assert_eq!(up.df().column("r_rank").unwrap().null_count(), 1);
     }
 }
