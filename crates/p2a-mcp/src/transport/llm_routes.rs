@@ -176,8 +176,10 @@ impl ChatSession {
     /// `SessionManager::cleanup_expired` removed it first, and the lookup
     /// finds no session under the id. The chat's own `Arc` tells the second
     /// case from a deletion or an eviction: a removed session is no longer
-    /// touched, so an expired one is still past its TTL (as is one deleted or
-    /// evicted once past it, which had expired by then).
+    /// touched, so an expired one is still past its TTL. A session deleted or
+    /// evicted is reported as expired too when this lookup comes after its
+    /// TTL has run out, since it would have expired by then; one replaced
+    /// under its id stays `NotFound`.
     async fn live(&self) -> Result<Arc<Session>, SessionGone> {
         let gone = match self.gone.reason.get() {
             Some(gone) => *gone,
