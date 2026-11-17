@@ -108,6 +108,9 @@ pub enum StreamEvent {
     },
     #[serde(rename = "tool_result")]
     ToolResult {
+        /// The tool that produced the images (absent from older servers)
+        #[serde(default)]
+        tool: Option<String>,
         #[serde(default)]
         images: Option<Vec<ImageData>>,
     },
@@ -307,7 +310,12 @@ fn parse_sse_line(line: &str) -> Option<StreamEvent> {
 // Terminal rendering + recording
 // ---------------------------------------------------------------------------
 
-fn render_event(event: &StreamEvent, output_dir: &PathBuf, recorder: &mut Option<Recorder>) {
+fn render_event(
+    event: &StreamEvent,
+    output_dir: &std::path::Path,
+    recorder: &mut Option<Recorder>,
+    charts: &mut ChartNamer,
+) {
     match event {
         StreamEvent::Status { message } => {
             eprintln!("  {}", message.dimmed());
@@ -330,17 +338,11 @@ fn render_event(event: &StreamEvent, output_dir: &PathBuf, recorder: &mut Option
                 let _ = rec.write_tool_end(*elapsed_ms);
             }
         }
-        StreamEvent::ToolResult { images } => {
+        StreamEvent::ToolResult { tool, images } => {
             if let Some(imgs) = images {
-                for (i, img) in imgs.iter().enumerate() {
-                    let ext = match img.mime_type.as_str() {
-                        "image/png" => "png",
-                        "image/svg+xml" => "svg",
-                        _ => "bin",
-                    };
-                    let path = output_dir.join(format!("chart_{}.{}", i, ext));
-                    match save_image(&img.data, &path) {
-                        Ok(()) => {
+                for img in imgs {
+                    match charts.save(output_dir, tool.as_deref(), img) {
+                        Ok(path) => {
                             eprintln!("  {} {}", "Saved:".green(), path.display());
                             if let Some(rec) = recorder.as_mut() {
                                 let _ = rec.write_image_saved(&path);
@@ -399,10 +401,82 @@ fn session_label(id: &str) -> &str {
     p2a_text::truncate_chars(id, 8)
 }
 
-fn save_image(base64_data: &str, path: &std::path::Path) -> anyhow::Result<()> {
-    let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, base64_data)?;
-    std::fs::write(path, bytes)?;
-    Ok(())
+/// The file extension of a chart of MIME type `mime` (`bin` for an unknown type).
+fn chart_extension(mime: &str) -> &'static str {
+    match mime {
+        "image/png" => "png",
+        "image/svg+xml" => "svg",
+        "image/jpeg" | "image/jpg" => "jpg",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        _ => "bin",
+    }
+}
+
+/// A tool name as part of a file name: ASCII letters, digits, `_` and `-` kept, every other
+/// character `_`, at most 40 characters.
+fn chart_tool_part(tool: &str) -> String {
+    let safe: String = tool
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    p2a_text::truncate_chars(&safe, 40).to_string()
+}
+
+/// The most file names [`ChartNamer::save`] tries for one chart.
+const MAX_CHART_TRIES: u32 = 10_000;
+
+/// Names the charts of one run `chart_<NNN>[_<tool>].<ext>`, numbered from 1 over the
+/// whole run, and never overwrites a file: a taken name moves on to the next number.
+#[derive(Debug, Default)]
+struct ChartNamer {
+    /// The last number used
+    last: u32,
+}
+
+impl ChartNamer {
+    /// Decodes `img` and writes it to a new file in `dir`; returns its path.
+    fn save(
+        &mut self,
+        dir: &std::path::Path,
+        tool: Option<&str>,
+        img: &ImageData,
+    ) -> anyhow::Result<PathBuf> {
+        use std::io::Write as _;
+        let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &img.data)?;
+        let ext = chart_extension(&img.mime_type);
+        let tool = tool.map(chart_tool_part).filter(|t| !t.is_empty());
+        for _ in 0..MAX_CHART_TRIES {
+            self.last += 1;
+            let name = match &tool {
+                Some(t) => format!("chart_{:03}_{t}.{ext}", self.last),
+                None => format!("chart_{:03}.{ext}", self.last),
+            };
+            let path = dir.join(name);
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(mut file) => {
+                    file.write_all(&bytes)?;
+                    return Ok(path);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e.into()),
+            }
+        }
+        anyhow::bail!(
+            "no free chart file name in {} after {MAX_CHART_TRIES} tries",
+            dir.display()
+        )
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -634,6 +708,7 @@ pub async fn run(args: &ChatArgs) -> anyhow::Result<()> {
     };
 
     let mut history: Vec<Message> = Vec::new();
+    let mut charts = ChartNamer::default();
 
     // Choose input source: script file or interactive readline
     if let Some(prompts) = script_prompts {
@@ -663,6 +738,7 @@ pub async fn run(args: &ChatArgs) -> anyhow::Result<()> {
                 &request,
                 &args.output_dir,
                 &mut recorder,
+                &mut charts,
                 token_sent,
             )
             .await
@@ -744,6 +820,7 @@ pub async fn run(args: &ChatArgs) -> anyhow::Result<()> {
                 &request,
                 &args.output_dir,
                 &mut recorder,
+                &mut charts,
                 token_sent,
             )
             .await
@@ -807,6 +884,7 @@ async fn stream_chat(
     request: &LlmChatRequest,
     output_dir: &PathBuf,
     recorder: &mut Option<Recorder>,
+    charts: &mut ChartNamer,
     token_sent: bool,
 ) -> anyhow::Result<Message> {
     let resp = client
@@ -845,7 +923,7 @@ async fn stream_chat(
                 if let StreamEvent::Done { ref message } = event {
                     final_message = Some(message.clone());
                 }
-                render_event(&event, output_dir, recorder);
+                render_event(&event, output_dir, recorder, charts);
             }
         }
     }
@@ -857,7 +935,7 @@ async fn stream_chat(
             if let StreamEvent::Done { ref message } = event {
                 final_message = Some(message.clone());
             }
-            render_event(&event, output_dir, recorder);
+            render_event(&event, output_dir, recorder, charts);
         }
     }
 
@@ -1226,5 +1304,113 @@ mod tests {
         assert!(read_script(&p.0).unwrap().is_empty());
         drop(p);
         assert!(read_script(&std::env::temp_dir().join("p2a_chat_no_such_script.txt")).is_err());
+    }
+
+    /// A scratch directory under the temporary directory, removed when dropped.
+    struct ScratchDir(PathBuf);
+
+    impl Drop for ScratchDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn scratch_dir(tag: &str) -> ScratchDir {
+        let p = std::env::temp_dir().join(format!("p2a_chat_charts_{}_{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(&p).unwrap();
+        ScratchDir(p)
+    }
+
+    fn image_event(tool: Option<&str>, mime: &str, bytes: &[u8]) -> StreamEvent {
+        StreamEvent::ToolResult {
+            tool: tool.map(str::to_string),
+            images: Some(vec![ImageData {
+                data: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes),
+                mime_type: mime.to_string(),
+            }]),
+        }
+    }
+
+    fn files(dir: &std::path::Path) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn charts_get_a_running_number_and_the_tool_name() {
+        let d = scratch_dir("numbers");
+        let mut charts = ChartNamer::default();
+        let mut rec = None;
+        render_event(
+            &image_event(None, "image/png", b"first"),
+            &d.0,
+            &mut rec,
+            &mut charts,
+        );
+        render_event(
+            &image_event(Some("viz_scatter"), "image/png", b"second"),
+            &d.0,
+            &mut rec,
+            &mut charts,
+        );
+        assert_eq!(files(&d.0), ["chart_001.png", "chart_002_viz_scatter.png"]);
+        assert_eq!(std::fs::read(d.0.join("chart_001.png")).unwrap(), b"first");
+        assert_eq!(
+            std::fs::read(d.0.join("chart_002_viz_scatter.png")).unwrap(),
+            b"second"
+        );
+    }
+
+    #[test]
+    fn charts_never_overwrite_a_file() {
+        let d = scratch_dir("exists");
+        std::fs::write(d.0.join("chart_001.png"), b"mine").unwrap();
+        let mut charts = ChartNamer::default();
+        render_event(
+            &image_event(None, "image/png", b"new"),
+            &d.0,
+            &mut None,
+            &mut charts,
+        );
+        assert_eq!(std::fs::read(d.0.join("chart_001.png")).unwrap(), b"mine");
+        assert_eq!(std::fs::read(d.0.join("chart_002.png")).unwrap(), b"new");
+    }
+
+    #[test]
+    fn chart_extensions_and_tool_names_are_safe() {
+        let d = scratch_dir("names");
+        let mut charts = ChartNamer::default();
+        render_event(
+            &image_event(None, "image/jpeg", b"j"),
+            &d.0,
+            &mut None,
+            &mut charts,
+        );
+        render_event(
+            &image_event(Some("../x y"), "image/png", b"p"),
+            &d.0,
+            &mut None,
+            &mut charts,
+        );
+        render_event(
+            &image_event(Some(""), "image/x-unknown", b"u"),
+            &d.0,
+            &mut None,
+            &mut charts,
+        );
+        assert_eq!(
+            files(&d.0),
+            ["chart_001.jpg", "chart_002____x_y.png", "chart_003.bin"]
+        );
+        assert_eq!(chart_extension("image/jpg"), "jpg");
+        assert_eq!(chart_extension("image/gif"), "gif");
+        assert_eq!(chart_extension("image/webp"), "webp");
+        assert_eq!(chart_extension("image/svg+xml"), "svg");
+        assert_eq!(chart_tool_part(&"a".repeat(60)).len(), 40);
     }
 }
