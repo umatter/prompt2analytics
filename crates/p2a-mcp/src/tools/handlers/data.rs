@@ -123,7 +123,7 @@ pub(crate) enum FileSizeRefusal {
     /// Its size could not be read.
     Unreadable,
     /// It is larger than the `load_file_bytes` budget.
-    OverLimit(crate::tools::limits::LimitViolation),
+    OverLimit(Box<crate::tools::limits::LimitViolation>),
 }
 
 /// The file-size check before a file is parsed, shared by `load_dataset`
@@ -142,7 +142,7 @@ pub(crate) fn check_file_size(path: &Path, tool: &str) -> Result<Option<u64>, Fi
         .len();
     limits
         .check_budget(tool, "load_file_bytes", size, limits.load_file_bytes)
-        .map_err(FileSizeRefusal::OverLimit)?;
+        .map_err(|v| FileSizeRefusal::OverLimit(Box::new(v)))?;
     Ok(Some(size))
 }
 
