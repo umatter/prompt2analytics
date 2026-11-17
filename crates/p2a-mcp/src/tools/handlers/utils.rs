@@ -20,7 +20,10 @@ use crate::tools::requests::utils::{
 
 use p2a_core::{
     Dataset, HtmlReport, ReportSection, ReportTable,
-    polars::prelude::{AnyValue, Column, DataFrame},
+    polars::prelude::{
+        AnyValue, CategoricalPhysical, Categories, Column, DataFrame, DataType, FrozenCategories,
+        Series, TimeUnit, TimeZone,
+    },
     simulation::{ColumnSpec, Distribution, generate_random_data},
 };
 use serde::ser::{Serialize, SerializeMap, SerializeSeq, Serializer};
@@ -84,11 +87,23 @@ impl<W: std::io::Write> std::io::Write for CappedWriter<W> {
     }
 }
 
+/// The session file format `export_session` writes.
+const SESSION_VERSION: &str = "1.1";
+/// The session file formats `import_session` reads.
+const SESSION_VERSIONS: [&str; 2] = ["1.0", "1.1"];
+
 /// Write the `export_session` JSON for `datasets` to `w` in one streaming
 /// pass (compact, no intermediate `Value` tree): top-level keys `version`,
 /// `created_at`, `datasets`; datasets in name order, each with `schema`,
 /// `n_rows`, `n_cols` and, with `include_data`, `data` (one array per column,
-/// in column order). Cell values map as the previous tree builder mapped them.
+/// in column order).
+///
+/// Format 1.1: each schema entry has the 1.0 `name` and `dtype` (polars' debug
+/// text) plus `type` and its parameters ([`encode_dtype`]). Cells are written
+/// as the type's physical value: temporal columns as integer ticks,
+/// categorical and enum columns as labels, decimals as exact decimal text,
+/// non-finite floats as "NaN", "Inf" or "-Inf", and any other type as its
+/// display text (`type` "text", with a `note` naming the original type).
 fn write_session_json<W: std::io::Write>(
     datasets: &HashMap<String, Dataset>,
     include_data: bool,
@@ -114,7 +129,7 @@ struct SessionView<'a> {
 impl Serialize for SessionView<'_> {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         let mut map = s.serialize_map(Some(3))?;
-        map.serialize_entry("version", "1.0")?;
+        map.serialize_entry("version", SESSION_VERSION)?;
         map.serialize_entry("created_at", self.created_at)?;
         map.serialize_entry(
             "datasets",
@@ -182,10 +197,233 @@ struct SchemaEntry<'a>(&'a Column);
 
 impl Serialize for SchemaEntry<'_> {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        let mut map = s.serialize_map(Some(2))?;
+        let encoded = encode_dtype(self.0.dtype());
+        let extra = encoded.as_object().map_or(0, serde_json::Map::len);
+        let mut map = s.serialize_map(Some(2 + extra))?;
         map.serialize_entry("name", self.0.name().as_str())?;
         map.serialize_entry("dtype", &format!("{:?}", self.0.dtype()))?;
+        if let Some(entries) = encoded.as_object() {
+            for (k, v) in entries {
+                map.serialize_entry(k, v)?;
+            }
+        }
         map.end()
+    }
+}
+
+fn time_unit_name(unit: TimeUnit) -> &'static str {
+    match unit {
+        TimeUnit::Nanoseconds => "ns",
+        TimeUnit::Microseconds => "us",
+        TimeUnit::Milliseconds => "ms",
+    }
+}
+
+fn time_unit_of(name: &str) -> Result<TimeUnit, String> {
+    match name {
+        "ns" => Ok(TimeUnit::Nanoseconds),
+        "us" => Ok(TimeUnit::Microseconds),
+        "ms" => Ok(TimeUnit::Milliseconds),
+        other => Err(format!(
+            "unknown time unit '{other}' (expected ns, us or ms)"
+        )),
+    }
+}
+
+/// The session-file type of a column (format 1.1): `{"type": ...}` plus the
+/// type's parameters (`unit` and `tz` of a datetime, `unit` of a duration,
+/// `categories` (the name of polars' categories object, empty for the global one),
+/// `namespace` and `physical` of a categorical, `levels` of an enum,
+/// `precision` and `scale` of a decimal). A type with no file form (nested,
+/// binary, null, object, 128-bit integers) is `text`, with a `note` naming it.
+pub(crate) fn encode_dtype(dtype: &DataType) -> serde_json::Value {
+    use serde_json::json;
+    let simple = |t: &str| json!({ "type": t });
+    match dtype {
+        DataType::Boolean => simple("bool"),
+        DataType::Int8 => simple("i8"),
+        DataType::Int16 => simple("i16"),
+        DataType::Int32 => simple("i32"),
+        DataType::Int64 => simple("i64"),
+        DataType::UInt8 => simple("u8"),
+        DataType::UInt16 => simple("u16"),
+        DataType::UInt32 => simple("u32"),
+        DataType::UInt64 => simple("u64"),
+        DataType::Float32 => simple("f32"),
+        DataType::Float64 => simple("f64"),
+        DataType::String => simple("str"),
+        DataType::Date => simple("date"),
+        DataType::Time => simple("time"),
+        DataType::Datetime(unit, tz) => json!({
+            "type": "datetime",
+            "unit": time_unit_name(*unit),
+            "tz": tz.as_ref().map(|t| t.to_string()),
+        }),
+        DataType::Duration(unit) => json!({"type": "duration", "unit": time_unit_name(*unit)}),
+        DataType::Categorical(cats, _) => json!({
+            "type": "categorical",
+            "categories": cats.name().as_str(),
+            "namespace": cats.namespace().as_str(),
+            "physical": match cats.physical() {
+                CategoricalPhysical::U8 => "u8",
+                CategoricalPhysical::U16 => "u16",
+                CategoricalPhysical::U32 => "u32",
+            },
+        }),
+        DataType::Enum(fcats, _) => json!({
+            "type": "enum",
+            "levels": fcats.categories().values_iter().collect::<Vec<&str>>(),
+        }),
+        DataType::Decimal(precision, scale) => {
+            json!({"type": "decimal", "precision": precision, "scale": scale})
+        }
+        other => json!({"type": "text", "note": other.to_string()}),
+    }
+}
+
+/// The column type a 1.1 schema entry names ([`encode_dtype`]'s inverse). A
+/// `text` entry is a string column.
+pub(crate) fn decode_dtype(entry: &serde_json::Value) -> Result<DataType, String> {
+    let ty = entry
+        .get("type")
+        .and_then(|t| t.as_str())
+        .ok_or_else(|| "no type".to_string())?;
+    let field = |key: &str| entry.get(key).and_then(|v| v.as_str());
+    let unit = || time_unit_of(field("unit").unwrap_or_default());
+    let usize_field = |key: &str| {
+        entry
+            .get(key)
+            .and_then(|v| v.as_u64())
+            .and_then(|v| usize::try_from(v).ok())
+            .ok_or_else(|| format!("{ty}: no {key}"))
+    };
+    Ok(match ty {
+        "bool" => DataType::Boolean,
+        "i8" => DataType::Int8,
+        "i16" => DataType::Int16,
+        "i32" => DataType::Int32,
+        "i64" => DataType::Int64,
+        "u8" => DataType::UInt8,
+        "u16" => DataType::UInt16,
+        "u32" => DataType::UInt32,
+        "u64" => DataType::UInt64,
+        "f32" => DataType::Float32,
+        "f64" => DataType::Float64,
+        "str" | "text" => DataType::String,
+        "date" => DataType::Date,
+        "time" => DataType::Time,
+        "datetime" => {
+            let tz = TimeZone::opt_try_new(field("tz")).map_err(|e| format!("datetime: {e}"))?;
+            DataType::Datetime(unit()?, tz)
+        }
+        "duration" => DataType::Duration(unit()?),
+        "categorical" => {
+            let physical = match field("physical").unwrap_or("u32") {
+                "u8" => CategoricalPhysical::U8,
+                "u16" => CategoricalPhysical::U16,
+                "u32" => CategoricalPhysical::U32,
+                other => return Err(format!("categorical: unknown physical type '{other}'")),
+            };
+            DataType::from_categories(Categories::new(
+                field("categories").unwrap_or_default().into(),
+                field("namespace").unwrap_or_default().into(),
+                physical,
+            ))
+        }
+        "enum" => {
+            let levels: Vec<&str> = entry
+                .get("levels")
+                .and_then(|l| l.as_array())
+                .ok_or_else(|| "enum: no levels".to_string())?
+                .iter()
+                .map(|l| {
+                    l.as_str()
+                        .ok_or_else(|| "enum: a level is not text".to_string())
+                })
+                .collect::<Result<_, _>>()?;
+            DataType::from_frozen_categories(
+                FrozenCategories::new(levels).map_err(|e| format!("enum: {e}"))?,
+            )
+        }
+        "decimal" => DataType::Decimal(usize_field("precision")?, usize_field("scale")?),
+        other => return Err(format!("unknown type '{other}'")),
+    })
+}
+
+/// A float from a session-file cell of a float column: a number, or "NaN",
+/// "Inf" or "-Inf" (how format 1.1 writes non-finite values).
+fn session_float(v: &serde_json::Value) -> Option<f64> {
+    match v {
+        serde_json::Value::String(s) => nonfinite_float(s),
+        other => other.as_f64(),
+    }
+}
+
+fn nonfinite_float(s: &str) -> Option<f64> {
+    match s {
+        "NaN" => Some(f64::NAN),
+        "Inf" => Some(f64::INFINITY),
+        "-Inf" => Some(f64::NEG_INFINITY),
+        _ => None,
+    }
+}
+
+/// `series` (as the parser built it: i64, u64, f64, bool or str) cast to the
+/// schema's type. Integer ticks become dates, datetimes, durations and times;
+/// text becomes categorical, enum and decimal values; a float column read as
+/// text (its first value was "NaN") takes "NaN", "Inf" and "-Inf" as floats.
+/// Values that do not fit the type are an error naming the column.
+pub(crate) fn cast_to_schema(series: Series, dtype: &DataType) -> Result<Series, String> {
+    use p2a_core::polars::prelude::{IntoSeries, NamedFrom};
+    if series.dtype() == dtype {
+        return Ok(series);
+    }
+    let name = series.name().clone();
+    let fail = |e: &dyn std::fmt::Display| format!("column '{name}': {e}");
+    let ticks = |target: &DataType| series.strict_cast(target).map_err(|e| fail(&e));
+    match dtype {
+        DataType::Date => Ok(ticks(&DataType::Int32)?
+            .i32()
+            .map_err(|e| fail(&e))?
+            .clone()
+            .into_date()
+            .into_series()),
+        DataType::Datetime(unit, tz) => Ok(ticks(&DataType::Int64)?
+            .i64()
+            .map_err(|e| fail(&e))?
+            .clone()
+            .into_datetime(*unit, tz.clone())
+            .into_series()),
+        DataType::Duration(unit) => Ok(ticks(&DataType::Int64)?
+            .i64()
+            .map_err(|e| fail(&e))?
+            .clone()
+            .into_duration(*unit)
+            .into_series()),
+        DataType::Time => Ok(ticks(&DataType::Int64)?
+            .i64()
+            .map_err(|e| fail(&e))?
+            .clone()
+            .into_time()
+            .into_series()),
+        DataType::Float32 | DataType::Float64 if series.dtype() == &DataType::String => {
+            let text = series.str().map_err(|e| fail(&e))?;
+            let mut values = Vec::with_capacity(text.len());
+            for v in text {
+                values.push(match v {
+                    None => None,
+                    Some(s) => Some(
+                        nonfinite_float(s)
+                            .or_else(|| s.parse::<f64>().ok())
+                            .ok_or_else(|| fail(&format!("'{s}' is not a number")))?,
+                    ),
+                });
+            }
+            Series::new(name.clone(), values)
+                .strict_cast(dtype)
+                .map_err(|e| fail(&e))
+        }
+        _ => series.strict_cast(dtype).map_err(|e| fail(&e)),
     }
 }
 
@@ -207,7 +445,21 @@ struct ColumnValues<'a>(&'a Column);
 
 impl Serialize for ColumnValues<'_> {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        let col = self.0;
+        use serde::ser::Error as _;
+        // Temporal columns as their integer ticks, labels and decimals as text
+        // (format 1.1); every other type is written cell by cell.
+        let converted = match self.0.dtype() {
+            DataType::Date | DataType::Datetime(..) | DataType::Duration(_) | DataType::Time => {
+                Some(self.0.to_physical_repr())
+            }
+            DataType::Categorical(..) | DataType::Enum(..) | DataType::Decimal(..) => Some(
+                self.0
+                    .cast(&DataType::String)
+                    .map_err(|e| S::Error::custom(e.to_string()))?,
+            ),
+            _ => None,
+        };
+        let col = converted.as_ref().unwrap_or(self.0);
         let mut seq = s.serialize_seq(Some(col.len()))?;
         for i in 0..col.len() {
             seq.serialize_element(&SessionCell(col.get(i).ok()))?;
@@ -232,13 +484,25 @@ impl Serialize for SessionCell<'_> {
             Some(AnyValue::UInt16(v)) => s.serialize_u64(u64::from(*v)),
             Some(AnyValue::UInt32(v)) => s.serialize_u64(u64::from(*v)),
             Some(AnyValue::UInt64(v)) => s.serialize_u64(*v),
-            // The previous builder widened f32 to f64 (`json!`); non-finite
-            // values are written as null.
-            Some(AnyValue::Float32(v)) => s.serialize_f64(f64::from(*v)),
-            Some(AnyValue::Float64(v)) => s.serialize_f64(*v),
+            // f32 is widened to f64 (it narrows back exactly); non-finite
+            // values are written as "NaN", "Inf" or "-Inf".
+            Some(AnyValue::Float32(v)) => serialize_float(s, f64::from(*v)),
+            Some(AnyValue::Float64(v)) => serialize_float(s, *v),
             Some(AnyValue::String(v)) => s.serialize_str(v),
-            Some(other) => s.serialize_str(&format!("{other:?}")),
+            Some(AnyValue::StringOwned(v)) => s.serialize_str(v),
+            // Types with no file form are written as their display text.
+            Some(other) => s.serialize_str(&other.to_string()),
         }
+    }
+}
+
+fn serialize_float<S: Serializer>(s: S, v: f64) -> Result<S::Ok, S::Error> {
+    if v.is_nan() {
+        s.serialize_str("NaN")
+    } else if v.is_infinite() {
+        s.serialize_str(if v > 0.0 { "Inf" } else { "-Inf" })
+    } else {
+        s.serialize_f64(v)
     }
 }
 
@@ -253,8 +517,46 @@ enum ParsedDataset {
     Invalid,
     /// No `data` object (a metadata-only export).
     NoData,
-    /// The `data` object's columns, in file order.
-    Columns(Vec<(String, ParsedColumn)>),
+    /// The `data` object's columns, in file order, and the column types the
+    /// schema names (format 1.1; empty for 1.0).
+    Columns(Vec<(String, ParsedColumn)>, SessionSchema),
+}
+
+/// The column types of a dataset's schema (format 1.1), by column name; an
+/// entry whose type cannot be read holds the reason. 1.0 entries (no `type`)
+/// are not listed.
+type SessionSchema = HashMap<String, Result<DataType, String>>;
+
+/// The vector a column is read into: decided by the schema's type when the
+/// schema came before the data, else by the first non-null element.
+#[derive(Debug, Clone, Copy)]
+enum ColumnKind {
+    F64,
+    I64,
+    U64,
+    Bool,
+    Str,
+}
+
+impl ColumnKind {
+    fn of(dtype: &DataType) -> ColumnKind {
+        match dtype {
+            DataType::Boolean => ColumnKind::Bool,
+            DataType::Float32 | DataType::Float64 => ColumnKind::F64,
+            DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64 => {
+                ColumnKind::U64
+            }
+            DataType::Int8
+            | DataType::Int16
+            | DataType::Int32
+            | DataType::Int64
+            | DataType::Date
+            | DataType::Datetime(..)
+            | DataType::Duration(_)
+            | DataType::Time => ColumnKind::I64,
+            _ => ColumnKind::Str,
+        }
+    }
 }
 
 /// One column of a session file. The type is decided by the first non-null
@@ -263,6 +565,11 @@ enum ParsedDataset {
 enum ParsedColumn {
     F64(Vec<Option<f64>>),
     I64(Vec<Option<i64>>),
+    /// Only for a column the schema types unsigned (a value above i64::MAX).
+    U64(Vec<Option<u64>>),
+    /// A column the schema types holding a value that does not fit the type
+    /// (the value, cut for the message); the dataset is not built.
+    Mismatch(String),
     Bool(Vec<Option<bool>>),
     Str(Vec<Option<String>>),
     /// The column's value is not an array (skipped).
@@ -450,6 +757,17 @@ impl<'de> serde::de::Visitor<'de> for TopSeed<'_> {
         while let Some(key) = map.next_key::<String>()? {
             if key == "datasets" {
                 datasets = map.next_value_seed(DatasetsSeed(self.0))?;
+            } else if key == "version" {
+                let version = map.next_value_seed(ElementSeed(self.0))?;
+                let known = version
+                    .as_str()
+                    .is_some_and(|v| SESSION_VERSIONS.contains(&v));
+                if !known {
+                    return Err(self.0.stopped(format!(
+                        "unsupported session file version {version} (this server reads {})",
+                        SESSION_VERSIONS.join(", ")
+                    )));
+                }
             } else {
                 map.next_value::<serde::de::IgnoredAny>()?;
             }
@@ -504,19 +822,46 @@ impl<'de> serde::de::Visitor<'de> for DatasetSeed<'_> {
     non_map_values_are!(ParsedDataset::Invalid);
     fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
         let mut data = None;
+        let mut schema = SessionSchema::new();
         while let Some(key) = map.next_key::<String>()? {
             if key == "data" {
-                data = map.next_value_seed(DataSeed(self.0))?;
+                data = map.next_value_seed(DataSeed(self.0, &schema))?;
+            } else if key == "schema" {
+                // Charged as it is read, as a column element is.
+                let entries = map.next_value_seed(ElementSeed(self.0))?;
+                schema = read_schema(&entries);
             } else {
                 map.next_value::<serde::de::IgnoredAny>()?;
             }
         }
-        Ok(data.map_or(ParsedDataset::NoData, ParsedDataset::Columns))
+        Ok(match data {
+            None => ParsedDataset::NoData,
+            Some(columns) => ParsedDataset::Columns(columns, schema),
+        })
     }
 }
 
-/// A dataset's `data` value: `Some(columns)` for an object.
-struct DataSeed<'s>(&'s ImportState);
+/// The typed entries of a schema array (format 1.1; 1.0 entries have no
+/// `type` and are left out).
+fn read_schema(entries: &serde_json::Value) -> SessionSchema {
+    entries
+        .as_array()
+        .map(|entries| {
+            entries
+                .iter()
+                .filter(|e| e.get("type").is_some())
+                .filter_map(|e| {
+                    let name = e.get("name")?.as_str()?.to_string();
+                    Some((name, decode_dtype(e)))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A dataset's `data` value: `Some(columns)` for an object. The schema read so
+/// far decides each column's vector.
+struct DataSeed<'s>(&'s ImportState, &'s SessionSchema);
 
 impl<'de> serde::de::DeserializeSeed<'de> for DataSeed<'_> {
     type Value = Option<Vec<(String, ParsedColumn)>>;
@@ -536,7 +881,11 @@ impl<'de> serde::de::Visitor<'de> for DataSeed<'_> {
         while let Some(name) = map.next_key::<String>()? {
             self.0.checkpoint()?;
             self.0.charge(name.len() as u64)?;
-            let column = map.next_value_seed(ColumnSeed(self.0))?;
+            let kind = match self.1.get(&name) {
+                Some(Ok(dtype)) => Some(ColumnKind::of(dtype)),
+                _ => None,
+            };
+            let column = map.next_value_seed(ColumnSeed(self.0, kind))?;
             columns.insert(name, column, self.0)?;
         }
         Ok(Some(columns.into_vec()))
@@ -544,8 +893,9 @@ impl<'de> serde::de::Visitor<'de> for DataSeed<'_> {
 }
 
 /// One column's value: an array becomes a typed vector, anything else
-/// [`ParsedColumn::NotArray`].
-struct ColumnSeed<'s>(&'s ImportState);
+/// [`ParsedColumn::NotArray`]. The kind, when the schema gave one, decides the
+/// vector; otherwise the first non-null element does.
+struct ColumnSeed<'s>(&'s ImportState, Option<ColumnKind>);
 
 impl<'de> serde::de::DeserializeSeed<'de> for ColumnSeed<'_> {
     type Value = ParsedColumn;
@@ -555,13 +905,27 @@ impl<'de> serde::de::DeserializeSeed<'de> for ColumnSeed<'_> {
 }
 
 /// A column being filled: `Pending(n)` until the first non-null element has
-/// decided the type (`n` leading nulls so far).
+/// decided the type (`n` leading nulls so far), `Typed` once it has, and
+/// `Declared` when the schema gave the type before the data. A declared float
+/// column also reads "NaN", "Inf" and "-Inf".
 enum ColumnBuilder {
     Pending(usize),
     Typed(ParsedColumn),
+    Declared(ParsedColumn),
 }
 
 impl ColumnBuilder {
+    fn new(kind: Option<ColumnKind>) -> ColumnBuilder {
+        match kind {
+            None => ColumnBuilder::Pending(0),
+            Some(ColumnKind::F64) => ColumnBuilder::Declared(ParsedColumn::F64(Vec::new())),
+            Some(ColumnKind::I64) => ColumnBuilder::Declared(ParsedColumn::I64(Vec::new())),
+            Some(ColumnKind::U64) => ColumnBuilder::Declared(ParsedColumn::U64(Vec::new())),
+            Some(ColumnKind::Bool) => ColumnBuilder::Declared(ParsedColumn::Bool(Vec::new())),
+            Some(ColumnKind::Str) => ColumnBuilder::Declared(ParsedColumn::Str(Vec::new())),
+        }
+    }
+
     fn push<E: serde::de::Error>(
         &mut self,
         v: serde_json::Value,
@@ -584,20 +948,50 @@ impl ColumnBuilder {
             };
             *self = ColumnBuilder::Typed(column);
         }
-        let ColumnBuilder::Typed(column) = self else {
-            unreachable!("the type is decided above");
+        let (column, declared) = match self {
+            ColumnBuilder::Typed(column) => (column, false),
+            ColumnBuilder::Declared(column) => (column, true),
+            ColumnBuilder::Pending(_) => unreachable!("the type is decided above"),
         };
+        // A declared column refuses a value its type cannot hold, where the
+        // inferred (1.0) path reads it as null, as before.
+        let fits = |x: bool| !declared || x || v.is_null();
         match column {
             ParsedColumn::F64(vals) => {
                 state.charge(std::mem::size_of::<Option<f64>>() as u64)?;
-                vals.push(v.as_f64());
+                let x = if declared {
+                    session_float(&v)
+                } else {
+                    v.as_f64()
+                };
+                if !fits(x.is_some()) {
+                    *column = mismatch(&v);
+                    return Ok(());
+                }
+                vals.push(x);
             }
             ParsedColumn::I64(vals) => {
                 state.charge(std::mem::size_of::<Option<i64>>() as u64)?;
+                if !fits(v.as_i64().is_some()) {
+                    *column = mismatch(&v);
+                    return Ok(());
+                }
                 vals.push(v.as_i64());
+            }
+            ParsedColumn::U64(vals) => {
+                state.charge(std::mem::size_of::<Option<u64>>() as u64)?;
+                if !fits(v.as_u64().is_some()) {
+                    *column = mismatch(&v);
+                    return Ok(());
+                }
+                vals.push(v.as_u64());
             }
             ParsedColumn::Bool(vals) => {
                 state.charge(std::mem::size_of::<Option<bool>>() as u64)?;
+                if !fits(v.as_bool().is_some()) {
+                    *column = mismatch(&v);
+                    return Ok(());
+                }
                 vals.push(v.as_bool());
             }
             ParsedColumn::Str(vals) => {
@@ -610,7 +1004,7 @@ impl ColumnBuilder {
                 state.charge(std::mem::size_of::<Option<String>>() as u64 + text)?;
                 vals.push(s);
             }
-            ParsedColumn::NotArray => {}
+            ParsedColumn::NotArray | ParsedColumn::Mismatch(_) => {}
         }
         Ok(())
     }
@@ -621,9 +1015,15 @@ impl ColumnBuilder {
             ColumnBuilder::Pending(nulls) => {
                 ParsedColumn::Str(pending_nulls::<String, E>(nulls, state)?)
             }
-            ColumnBuilder::Typed(column) => column,
+            ColumnBuilder::Typed(column) | ColumnBuilder::Declared(column) => column,
         })
     }
+}
+
+/// The mismatch marker of a declared column, naming the value that does not
+/// fit (cut to 40 characters).
+fn mismatch(v: &serde_json::Value) -> ParsedColumn {
+    ParsedColumn::Mismatch(p2a_text::ellipsize(&v.to_string(), 40).into_owned())
 }
 
 /// `n` leading `None`s for a column whose type has just been decided.
@@ -670,7 +1070,7 @@ impl<'de> serde::de::Visitor<'de> for ColumnSeed<'_> {
     }
     fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
         let state = self.0;
-        let mut column = ColumnBuilder::Pending(0);
+        let mut column = ColumnBuilder::new(self.1);
         loop {
             // The element is held as one transient value, charged while it is
             // read and given back once it has been converted.
@@ -748,31 +1148,42 @@ impl<'de> serde::de::Visitor<'de> for ElementSeed<'_> {
 /// A parsed dataset as a frame, with the per-dataset error texts of the
 /// previous import (`invalid format`, `no data field (metadata-only
 /// session)`, `no column data found`, `DataFrame error - ...`). Columns that
-/// were not arrays are skipped.
+/// were not arrays are skipped. A column the schema types (format 1.1) is
+/// cast to that type ([`cast_to_schema`]); a value that does not fit, or a
+/// type that cannot be read, is an error naming the column.
 fn build_dataset(parsed: ParsedDataset) -> Result<DataFrame, String> {
-    use p2a_core::polars::prelude::{NamedFrom, Series};
-    let columns = match parsed {
+    use p2a_core::polars::prelude::NamedFrom;
+    let (columns, schema) = match parsed {
         ParsedDataset::Invalid => return Err("invalid format".to_string()),
         ParsedDataset::NoData => return Err("no data field (metadata-only session)".to_string()),
-        ParsedDataset::Columns(columns) => columns,
+        ParsedDataset::Columns(columns, schema) => (columns, schema),
     };
-    let columns: Vec<Column> = columns
-        .into_iter()
-        .filter_map(|(name, column)| {
-            let series = match column {
-                ParsedColumn::F64(v) => Series::new(name.as_str().into(), v),
-                ParsedColumn::I64(v) => Series::new(name.as_str().into(), v),
-                ParsedColumn::Bool(v) => Series::new(name.as_str().into(), v),
-                ParsedColumn::Str(v) => Series::new(name.as_str().into(), v),
-                ParsedColumn::NotArray => return None,
-            };
-            Some(series.into())
-        })
-        .collect();
-    if columns.is_empty() {
+    let mut out: Vec<Column> = Vec::with_capacity(columns.len());
+    for (name, column) in columns {
+        let series = match column {
+            ParsedColumn::F64(v) => Series::new(name.as_str().into(), v),
+            ParsedColumn::I64(v) => Series::new(name.as_str().into(), v),
+            ParsedColumn::U64(v) => Series::new(name.as_str().into(), v),
+            ParsedColumn::Bool(v) => Series::new(name.as_str().into(), v),
+            ParsedColumn::Str(v) => Series::new(name.as_str().into(), v),
+            ParsedColumn::NotArray => continue,
+            ParsedColumn::Mismatch(value) => {
+                return Err(format!(
+                    "column '{name}': the value {value} does not fit the schema's type"
+                ));
+            }
+        };
+        let series = match schema.get(&name) {
+            None => series,
+            Some(Ok(dtype)) => cast_to_schema(series, dtype)?,
+            Some(Err(e)) => return Err(format!("column '{name}': {e}")),
+        };
+        out.push(series.into());
+    }
+    if out.is_empty() {
         return Err("no column data found".to_string());
     }
-    DataFrame::new(columns).map_err(|e| format!("DataFrame error - {}", e))
+    DataFrame::new(out).map_err(|e| format!("DataFrame error - {}", e))
 }
 
 /// A refusal by a named budget, as an in-band tool error (logged at `info`).
@@ -953,20 +1364,58 @@ fn server_uptime() -> Duration {
     SERVER_START.get_or_init(Instant::now).elapsed()
 }
 
-/// The process's peak resident set size: `VmHWM` of `/proc/self/status`
-/// (in KiB there).
+/// The process's current and peak resident set size in bytes (`VmRSS` and
+/// `VmHWM`), from one read of `/proc/self/status`, so the peak is never
+/// below the current figure.
 #[cfg(target_os = "linux")]
-fn peak_rss_bytes() -> Option<u64> {
-    let status = std::fs::read_to_string("/proc/self/status").ok()?;
-    let line = status.lines().find(|line| line.starts_with("VmHWM:"))?;
-    let kib: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
-    kib.checked_mul(1024)
+fn read_status_rss() -> Option<(u64, u64)> {
+    parse_status_rss(&std::fs::read_to_string("/proc/self/status").ok()?)
 }
 
-/// The process's peak resident set size: not read on this platform.
+/// The process's resident set size: not read on this platform.
 #[cfg(not(target_os = "linux"))]
-fn peak_rss_bytes() -> Option<u64> {
+fn read_status_rss() -> Option<(u64, u64)> {
     None
+}
+
+/// `VmRSS` and `VmHWM` of a `/proc/<pid>/status` text (KiB there), in bytes.
+fn parse_status_rss(status: &str) -> Option<(u64, u64)> {
+    let field = |key: &str| -> Option<u64> {
+        let line = status.lines().find(|line| line.starts_with(key))?;
+        let kib: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
+        kib.checked_mul(1024)
+    };
+    Some((field("VmRSS:")?, field("VmHWM:")?))
+}
+
+/// The process-memory lines of `server_stats`: current and peak RSS from
+/// `status` (one read, [`read_status_rss`]), the current RSS from `current`
+/// where the status was not read, and the virtual size from `current`.
+fn process_memory_lines(
+    status: Option<(u64, u64)>,
+    current: Option<&p2a_core::ProcessMemory>,
+) -> String {
+    use crate::session::fmt_bytes;
+    let mut out = String::from("\n");
+    match (status, current) {
+        (Some((rss, _)), _) => out.push_str(&format!("Process RSS: {}\n", fmt_bytes(rss))),
+        (None, Some(current)) => out.push_str(&format!(
+            "Process RSS: {}\n",
+            fmt_bytes(current.rss_bytes as u64)
+        )),
+        (None, None) => out.push_str("Process RSS: not reported on this platform\n"),
+    }
+    match status {
+        Some((_, peak)) => out.push_str(&format!("Peak Process RSS: {}\n", fmt_bytes(peak))),
+        None => out.push_str("Peak Process RSS: not reported on this platform\n"),
+    }
+    if let Some(current) = current {
+        out.push_str(&format!(
+            "Process Virtual: {}\n",
+            fmt_bytes(current.virtual_bytes as u64)
+        ));
+    }
+    out
 }
 
 /// The tools that read the session seed (`set_seed`), as `set_seed`'s description and
@@ -1089,26 +1538,7 @@ impl AnalyticsServer {
             output.push_str("\nProcess memory: not reported in open public mode\n");
         } else {
             let current = get_process_memory();
-            // Read after the current figures, so it is never below them.
-            let peak = peak_rss_bytes();
-            if current.is_some() || peak.is_some() {
-                output.push('\n');
-            }
-            if let Some(current) = &current {
-                output.push_str(&format!(
-                    "Process RSS: {}\n",
-                    fmt_bytes(current.rss_bytes as u64)
-                ));
-            }
-            if let Some(peak) = peak {
-                output.push_str(&format!("Peak Process RSS: {}\n", fmt_bytes(peak)));
-            }
-            if let Some(current) = &current {
-                output.push_str(&format!(
-                    "Process Virtual: {}\n",
-                    fmt_bytes(current.virtual_bytes as u64)
-                ));
-            }
+            output.push_str(&process_memory_lines(read_status_rss(), current.as_ref()));
         }
 
         // Per-dataset breakdown
@@ -1138,7 +1568,11 @@ impl AnalyticsServer {
         if include_history {
             let profiler = self.memory_profiler.read().await;
             let history = profiler.history();
-            if !history.is_empty() {
+            if history.is_empty() {
+                output.push_str(
+                    "\nMemory history: none recorded (each HTTP call starts a fresh profiler)\n",
+                );
+            } else {
                 output.push_str(
                     "\n## Recent Memory History (datasets loaded with load_dataset, estimated)\n\n",
                 );
@@ -1522,7 +1956,7 @@ impl AnalyticsServer {
 
     /// Import a previously exported analysis session.
     #[tool(
-        description = "Import a previously exported session from a JSON file. Can merge with existing session or replace it. Restores all datasets with their original names."
+        description = "Import a previously exported session from a JSON file (format 1.0 or 1.1). Can merge with the existing session or replace it. Restores all datasets with their original names and, for 1.1 files, their column types. A file from which no dataset can be built (such as an export with include_data = false) changes nothing."
     )]
     pub async fn import_session(
         &self,
@@ -1575,24 +2009,48 @@ impl AnalyticsServer {
             Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
         };
 
+        // Every frame is built before the session is touched: an import that
+        // builds none leaves the session as it was. In replace mode the old
+        // datasets live until the swap below, so the peak holds both.
         let merge = request.merge.unwrap_or(false);
-        let mut datasets = self.datasets.write().await;
+        let mut built: Vec<(String, DataFrame)> = Vec::with_capacity(parsed.len());
+        let mut errors = Vec::new();
+        let mut metadata_only = 0usize;
+        let total = parsed.len();
+        for (name, dataset) in parsed {
+            if matches!(dataset, ParsedDataset::NoData) {
+                metadata_only += 1;
+            }
+            match build_dataset(dataset) {
+                Ok(df) => built.push((name, df)),
+                Err(e) => errors.push(format!("{}: {}", name, e)),
+            }
+        }
+        if built.is_empty() {
+            let reason = if total > 0 && metadata_only == total {
+                "the file has no dataset data (exported with include_data = false); nothing was \
+                 changed"
+                    .to_string()
+            } else if total == 0 {
+                "the file holds no datasets; nothing was changed".to_string()
+            } else {
+                format!(
+                    "no dataset could be built; nothing was changed\nErrors:\n{}",
+                    errors.join("\n")
+                )
+            };
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "Session import of `{shown}` failed: {reason}"
+            ))]));
+        }
 
+        let imported_count = built.len();
+        let mut datasets = self.datasets.write().await;
         if !merge {
             datasets.clear();
         }
-
-        let mut imported_count = 0;
-        let mut errors = Vec::new();
-
-        for (name, dataset) in parsed {
-            match build_dataset(dataset) {
-                Ok(df) => {
-                    datasets.insert(name, Dataset::new(df));
-                    imported_count += 1;
-                }
-                Err(e) => errors.push(format!("{}: {}", name, e)),
-            }
+        for (name, df) in built {
+            datasets.insert(name, Dataset::new(df));
         }
 
         let mut output = format!(
@@ -1788,13 +2246,27 @@ mod tests {
             assert_eq!(got["created_at"], "2026-01-01T00:00:00Z");
             got.as_object_mut().unwrap().remove("created_at");
             want.as_object_mut().unwrap().remove("created_at");
+            // Format 1.1 on the 1.0 tree: the version, each schema entry's
+            // type, and NaN written as "NaN" instead of null.
+            want["version"] = "1.1".into();
+            for (name, dataset) in &ds {
+                let entries = want["datasets"][name]["schema"].as_array_mut().unwrap();
+                for (entry, col) in entries.iter_mut().zip(dataset.df().get_columns()) {
+                    for (k, v) in encode_dtype(col.dtype()).as_object().unwrap() {
+                        entry[k] = v.clone();
+                    }
+                }
+            }
+            if include_data {
+                want["datasets"]["mixed"]["data"]["f"][1] = "NaN".into();
+            }
             assert_eq!(got, want, "include_data={include_data}");
         }
         // Datasets in name order, top-level keys in a fixed order.
         let mut out = Vec::new();
         write_session_json(&ds, false, "t", &mut out).unwrap();
         let text = String::from_utf8(out).unwrap();
-        assert!(text.starts_with(r#"{"version":"1.0","created_at":"t","datasets":{"mixed""#));
+        assert!(text.starts_with(r#"{"version":"1.1","created_at":"t","datasets":{"mixed""#));
         assert!(text.find(r#""mixed""#) < text.find(r#""other""#));
     }
 
@@ -2050,9 +2522,10 @@ mod tests {
 
     #[test]
     fn streaming_import_enforces_its_byte_budget() {
-        // Every input is far longer than the budget, so the reader cut-off
-        // would refuse it too ("is larger than"). The charge path's own
-        // wording shows the charge fired first, long before the cut-off.
+        // The column inputs below are far longer than the budget, so the
+        // reader cut-off would refuse them too ("is larger than"); the charge
+        // path's own wording shows the charge fired first. The null inputs at
+        // the end fit the budget, so only the charge can refuse them.
         let charged = "needs more than this server's import limit of 1000 bytes in memory";
         let column = |cells: &[String]| {
             format!(
@@ -2088,9 +2561,23 @@ mod tests {
         let err = parse_session_json(nested.as_bytes(), Some(1_000)).unwrap_err();
         assert!(err.contains(charged), "{err}");
         assert!(!err.contains("is larger than"), "{err}");
-        // So is a nested object: each entry is charged for its key and its
-        // nodes (about 66 bytes for 7 to 11 bytes of input).
-        let entries: Vec<String> = (0..10_000).map(|i| format!(r#""k{i}":{i}"#)).collect();
+        // A string inside a nested element is charged for its text while it
+        // is read: 64-character strings charge 96 bytes each (their text and
+        // one node) for 67 bytes of input, so without the text charge the
+        // node charge alone (32) would leave the cut-off to refuse the file.
+        let texts: Vec<String> = (0..10_000).map(|i| format!("\"{i:064}\"")).collect();
+        let nested_strings = format!(
+            r#"{{"datasets":{{"a":{{"data":{{"x":[[{}]]}}}}}}}}"#,
+            texts.join(",")
+        );
+        let err = parse_session_json(nested_strings.as_bytes(), Some(1_000)).unwrap_err();
+        assert!(err.contains(charged), "nested strings: {err}");
+        assert!(!err.contains("is larger than"), "nested strings: {err}");
+        // So is a nested object: each entry is charged for its key's text
+        // and two nodes. With 60-character keys an entry charges 124 bytes
+        // (60 + 2 x 32) for 66 to 70 bytes of input, so the key text is
+        // needed for the charge to outrun the input.
+        let entries: Vec<String> = (0..10_000).map(|i| format!(r#""{i:060}":{i}"#)).collect();
         let nested_object = format!(
             r#"{{"datasets":{{"a":{{"data":{{"x":[{{{}}}]}}}}}}}}"#,
             entries.join(",")
@@ -2115,7 +2602,7 @@ mod tests {
             assert!(err.contains(charged), "{kind}: {err}");
             assert!(!err.contains("is larger than"), "{kind}: {err}");
         }
-        // The same file passes with room to spare.
+        // The integer column of the first loop passes with room to spare.
         assert!(parse_session_json(column(&integers).as_bytes(), Some(10_000_000)).is_ok());
     }
 
@@ -2150,7 +2637,7 @@ mod tests {
         let names: Vec<&str> = parsed.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(names, ["a", "b"]);
         let columns = |d: &ParsedDataset| match d {
-            ParsedDataset::Columns(c) => c
+            ParsedDataset::Columns(c, _) => c
                 .iter()
                 .map(|(n, c)| (n.clone(), format!("{c:?}")))
                 .collect::<Vec<_>>(),
@@ -2190,6 +2677,271 @@ mod tests {
         assert_eq!(parsed[0].0, "d0");
         assert_eq!(parsed[49_999].0, "d49999");
         assert!(matches!(parsed[7].1, ParsedDataset::Invalid));
+    }
+
+    /// Export then import, through the file format alone.
+    fn round_trip(df: DataFrame) -> DataFrame {
+        let ds = HashMap::from([("d".to_string(), Dataset::new(df))]);
+        let mut out = Vec::new();
+        write_session_json(&ds, true, "t", &mut out).unwrap();
+        let mut parsed = parse_session_json(out.as_slice(), None).unwrap();
+        assert_eq!(parsed.len(), 1);
+        build_dataset(parsed.remove(0).1).unwrap()
+    }
+
+    fn cast(s: Series, dtype: &DataType) -> Column {
+        s.strict_cast(dtype).unwrap().into()
+    }
+
+    #[test]
+    fn test_session_round_trip_keeps_dtypes() {
+        use p2a_core::polars::prelude::{NamedFrom, TimeZone};
+        let zurich = TimeZone::opt_try_new(Some("Europe/Zurich")).unwrap();
+        let ints =
+            |name: &str| Series::new(name.into(), [Some(19_000i64), None, Some(-5), Some(0)]);
+        let labels =
+            |name: &str| Series::new(name.into(), [Some("hi"), Some("lo"), None, Some("mid")]);
+        let columns: Vec<Column> = vec![
+            Series::new("i8".into(), [Some(1i8), None, Some(-3), Some(i8::MIN)]).into(),
+            Series::new("i16".into(), [Some(1i16), None, Some(-3), Some(i16::MAX)]).into(),
+            Series::new("i32".into(), [Some(1i32), None, Some(-3), Some(i32::MIN)]).into(),
+            Series::new("u8".into(), [Some(1u8), None, Some(3), Some(u8::MAX)]).into(),
+            Series::new("u32".into(), [Some(1u32), None, Some(3), Some(u32::MAX)]).into(),
+            Series::new("u64".into(), [Some(1u64), None, Some(3), Some(u64::MAX)]).into(),
+            Series::new(
+                "f32".into(),
+                [Some(0.1f32), None, Some(f32::NAN), Some(-2.5)],
+            )
+            .into(),
+            Series::new("bool".into(), [Some(true), None, Some(false), Some(true)]).into(),
+            Series::new("str".into(), [Some("NaN"), None, Some("x"), Some("")]).into(),
+            cast(
+                Series::new("date".into(), [Some(19_000i32), None, Some(-5), Some(0)]),
+                &DataType::Date,
+            ),
+            cast(
+                ints("dt_us_zurich"),
+                &DataType::Datetime(TimeUnit::Microseconds, zurich),
+            ),
+            cast(
+                ints("dt_ns"),
+                &DataType::Datetime(TimeUnit::Nanoseconds, None),
+            ),
+            cast(ints("dur_ms"), &DataType::Duration(TimeUnit::Milliseconds)),
+            cast(
+                Series::new(
+                    "time".into(),
+                    [Some(3_600_000_000_000i64), None, Some(1), Some(0)],
+                ),
+                &DataType::Time,
+            ),
+            cast(
+                labels("cat"),
+                &DataType::from_categories(Categories::global()),
+            ),
+            cast(
+                labels("enum"),
+                &DataType::from_frozen_categories(
+                    FrozenCategories::new(["lo", "mid", "hi"]).unwrap(),
+                ),
+            ),
+            cast(
+                Series::new(
+                    "dec".into(),
+                    [Some("1.250"), None, Some("-3.001"), Some("1234567.891")],
+                ),
+                &DataType::Decimal(10, 3),
+            ),
+            Series::new(
+                "f64".into(),
+                [
+                    Some(f64::NAN),
+                    Some(f64::INFINITY),
+                    Some(f64::NEG_INFINITY),
+                    None,
+                ],
+            )
+            .into(),
+        ];
+        let df = DataFrame::new(columns).unwrap();
+        let back = round_trip(df.clone());
+        assert_eq!(back.schema(), df.schema());
+        for (a, b) in back.get_columns().iter().zip(df.get_columns()) {
+            if matches!(a.dtype(), DataType::Float32 | DataType::Float64) {
+                // NaN is not equal to itself: compare the bits, nulls apart.
+                let bits = |c: &Column| -> Vec<Option<u64>> {
+                    let c = c.cast(&DataType::Float64).unwrap();
+                    c.f64()
+                        .unwrap()
+                        .into_iter()
+                        .map(|v| v.map(f64::to_bits))
+                        .collect()
+                };
+                assert_eq!(bits(a), bits(b), "{}", a.name());
+            } else {
+                assert!(
+                    a.as_materialized_series()
+                        .equals_missing(b.as_materialized_series()),
+                    "{a:?}\n{b:?}"
+                );
+            }
+        }
+        let f = back.column("f64").unwrap().f64().unwrap();
+        assert!(f.get(0).unwrap().is_nan());
+        assert_eq!(f.get(1), Some(f64::INFINITY));
+        assert_eq!(f.get(2), Some(f64::NEG_INFINITY));
+        assert_eq!(f.get(3), None);
+    }
+
+    /// The 1.0 fixture of `streaming_import_matches_legacy_conversion`
+    /// still reads as before (that test compares it with the legacy
+    /// conversion); here its column types are pinned.
+    #[test]
+    fn test_session_import_v1_0_still_reads() {
+        let json = r#"{"version":"1.0","datasets":{"a":{"schema":[{"name":"x","dtype":"Int32"}],
+            "data":{"x":[1,2,null],"y":[0.5,null,"NaN"],"s":["NaN",null,"b"]}}}}"#;
+        let mut parsed = parse_session_json(json.as_bytes(), None).unwrap();
+        let df = build_dataset(parsed.remove(0).1).unwrap();
+        // 1.0: the first non-null value decides; the debug dtype is not read.
+        assert_eq!(df.column("x").unwrap().dtype(), &DataType::Int64);
+        assert_eq!(df.column("y").unwrap().dtype(), &DataType::Float64);
+        assert_eq!(df.column("y").unwrap().f64().unwrap().get(2), None);
+        assert_eq!(df.column("s").unwrap().str().unwrap().get(0), Some("NaN"));
+    }
+
+    #[test]
+    fn test_session_import_refuses_unknown_version() {
+        for version in [r#""2.0""#, "1.1", "null"] {
+            let json = format!(r#"{{"version":{version},"datasets":{{}}}}"#);
+            let err = parse_session_json(json.as_bytes(), None).unwrap_err();
+            assert!(err.contains("1.0, 1.1"), "{version}: {err}");
+            assert!(err.contains("unsupported session file version"), "{err}");
+        }
+        for version in ["1.0", "1.1"] {
+            let json = format!(r#"{{"version":"{version}","datasets":{{}}}}"#);
+            assert!(
+                parse_session_json(json.as_bytes(), None).is_ok(),
+                "{version}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_nonfinite_strings_only_in_float_columns() {
+        let df = df! {
+            "s" => [Some("NaN"), Some("Inf"), None],
+            "x" => [Some(f64::NAN), Some(1.5), None],
+        }
+        .unwrap();
+        let back = round_trip(df);
+        let s = back.column("s").unwrap().str().unwrap();
+        assert_eq!(s.get(0), Some("NaN"));
+        assert_eq!(s.get(1), Some("Inf"));
+        let x = back.column("x").unwrap().f64().unwrap();
+        assert!(x.get(0).unwrap().is_nan());
+        // A declared column refuses a value its type cannot hold.
+        let json = r#"{"version":"1.1","datasets":{"a":{"schema":[{"name":"x","dtype":"Int32","type":"i32"}],
+            "data":{"x":[1,"two"]}}}}"#;
+        let mut parsed = parse_session_json(json.as_bytes(), None).unwrap();
+        let err = build_dataset(parsed.remove(0).1).unwrap_err();
+        assert!(
+            err.contains("column 'x'") && err.contains("\"two\""),
+            "{err}"
+        );
+        // And a value outside the type's range.
+        let json = r#"{"version":"1.1","datasets":{"a":{"schema":[{"name":"x","dtype":"Int8","type":"i8"}],
+            "data":{"x":[1,300]}}}}"#;
+        let mut parsed = parse_session_json(json.as_bytes(), None).unwrap();
+        let err = build_dataset(parsed.remove(0).1).unwrap_err();
+        assert!(err.contains("column 'x'"), "{err}");
+    }
+
+    #[test]
+    fn test_nested_column_exports_as_text_with_note() {
+        use p2a_core::polars::prelude::NamedFrom;
+        let list = Series::new(
+            "l".into(),
+            &[
+                Series::new("".into(), [1i64, 2]),
+                Series::new("".into(), [3i64]),
+            ],
+        );
+        let df = DataFrame::new(vec![list.into()]).unwrap();
+        let ds = HashMap::from([("d".to_string(), Dataset::new(df.clone()))]);
+        let mut out = Vec::new();
+        write_session_json(&ds, true, "t", &mut out).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        let entry = &v["datasets"]["d"]["schema"][0];
+        assert_eq!(entry["type"], "text", "{entry}");
+        assert_eq!(entry["note"], "list[i64]", "{entry}");
+        assert!(v["datasets"]["d"]["data"]["l"][0].is_string(), "{v}");
+        // It imports as a string column.
+        let back = round_trip(df);
+        assert_eq!(back.column("l").unwrap().dtype(), &DataType::String);
+    }
+
+    /// Runs `import_session` on `server` for `path`.
+    async fn import(
+        server: &AnalyticsServer,
+        path: &std::path::Path,
+        merge: bool,
+    ) -> CallToolResult {
+        server
+            .import_session(Parameters(ImportSessionRequest {
+                file_path: path.to_str().unwrap().to_string(),
+                merge: Some(merge),
+            }))
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_failed_import_leaves_session_unchanged() {
+        let dir = tempfile::Builder::new()
+            .prefix(".p2a-wp31-")
+            .tempdir_in(crate::path_jail::allowed_data_root().unwrap())
+            .unwrap();
+        let server = AnalyticsServer::new();
+        server
+            .datasets
+            .write()
+            .await
+            .insert("a".into(), Dataset::new(df! { "x" => [1.5, 2.5] }.unwrap()));
+        // A metadata-only export, imported in replace mode.
+        let meta = dir.path().join("meta.json");
+        let ds = HashMap::from([(
+            "b".to_string(),
+            Dataset::new(df! { "y" => [1i64, 2] }.unwrap()),
+        )]);
+        let mut out = Vec::new();
+        write_session_json(&ds, false, "t", &mut out).unwrap();
+        std::fs::write(&meta, out).unwrap();
+        let r = import(&server, &meta, false).await;
+        assert_eq!(r.is_error, Some(true));
+        assert!(
+            text(&r).contains(
+                "the file has no dataset data (exported with include_data = false); nothing was \
+                 changed"
+            ),
+            "{}",
+            text(&r)
+        );
+        let held: Vec<String> = server.datasets.read().await.keys().cloned().collect();
+        assert_eq!(held, ["a"]);
+        // One good and one bad dataset: the good one replaces the session,
+        // the bad one is listed.
+        let mixed = dir.path().join("mixed.json");
+        std::fs::write(
+            &mixed,
+            r#"{"version":"1.1","datasets":{"good":{"data":{"z":[1,2]}},"bad":{"schema":[]}}}"#,
+        )
+        .unwrap();
+        let r = import(&server, &mixed, false).await;
+        assert_ne!(r.is_error, Some(true), "{}", text(&r));
+        assert!(text(&r).contains("Datasets imported: 1"), "{}", text(&r));
+        assert!(text(&r).contains("bad: no data field"), "{}", text(&r));
+        let held: Vec<String> = server.datasets.read().await.keys().cloned().collect();
+        assert_eq!(held, ["good"]);
     }
 
     /// A path guaranteed to sit outside the jail root, whatever it resolves to:
@@ -2439,16 +3191,35 @@ mod tests {
     /// RSS. Its "Peak Memory" was the peak of a per-server estimate of
     /// datasets loaded with `load_dataset`, which on the HTTP path (a
     /// server per call) was always "0 bytes".
-    #[cfg(target_os = "linux")]
     #[test]
     fn server_stats_reports_the_peak_process_rss() {
         let shown = server_stats_text(None);
         assert!(!shown.contains("Peak Memory"), "{shown}");
-        let peak = figure_bytes(line_after(&shown, "Peak Process RSS: ").expect(&shown));
+        let peak = line_after(&shown, "Peak Process RSS: ").expect(&shown);
+        if !cfg!(target_os = "linux") {
+            assert_eq!(peak, "not reported on this platform", "{shown}");
+            return;
+        }
+        let peak = figure_bytes(peak);
         let rss = figure_bytes(line_after(&shown, "Process RSS: ").expect(&shown));
-        // Read after the current RSS, which it is never below (2-decimal
-        // rounding aside).
-        assert!(rss > 0.0 && peak >= rss * 0.99, "{shown}");
+        // One read of the status gives both, so the peak is never below
+        // the current figure.
+        assert!(rss > 0.0 && peak >= rss, "{shown}");
+    }
+
+    #[test]
+    fn process_memory_lines_say_what_is_not_reported() {
+        let status = "Name:\tp2a\nVmHWM:\t  2048 kB\nVmRSS:\t  1024 kB\n";
+        assert_eq!(parse_status_rss(status), Some((1024 * 1024, 2048 * 1024)));
+        assert_eq!(parse_status_rss("VmRSS:\t1 kB\n"), None);
+        let shown = process_memory_lines(None, None);
+        assert!(
+            shown.contains("Peak Process RSS: not reported on this platform"),
+            "{shown}"
+        );
+        let shown = process_memory_lines(Some((1024, 2048)), None);
+        assert!(shown.contains("Process RSS: 1.00 KiB"), "{shown}");
+        assert!(shown.contains("Peak Process RSS: 2.00 KiB"), "{shown}");
     }
 
     /// `server_stats` sizes each dataset as the dataset quotas charge it,
@@ -2519,7 +3290,10 @@ mod tests {
         assert!(withheld.contains("Datasets Loaded: 0"), "{withheld}");
 
         for shown in [server_stats_text(None), server_stats_text(Some(false))] {
-            assert!(!shown.contains("not reported"), "{shown}");
+            // Off Linux the peak RSS is "not reported on this platform".
+            if cfg!(target_os = "linux") {
+                assert!(!shown.contains("not reported"), "{shown}");
+            }
             if p2a_core::get_process_memory().is_some() {
                 assert!(
                     shown.contains("Process RSS: ") && shown.contains("Process Virtual: "),
