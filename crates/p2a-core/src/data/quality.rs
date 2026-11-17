@@ -294,12 +294,7 @@ pub fn generate_quality_profile(dataset: &Dataset) -> DataQualityProfile {
         columns.push(profile);
     }
 
-    // Calculate completeness score
-    let completeness_score = if total_cells > 0 {
-        1.0 - (total_null_count as f64 / total_cells as f64)
-    } else {
-        1.0
-    };
+    let completeness_score = completeness_of(total_null_count, total_cells);
 
     // Collect dataset-level issues
     let mut dataset_issues = Vec::new();
@@ -318,6 +313,32 @@ pub fn generate_quality_profile(dataset: &Dataset) -> DataQualityProfile {
     }
 }
 
+/// The share of present cells: 1 less the missing (null, or NaN in a float column) cells over
+/// all cells; 1 for a frame with no cells. The profile's `completeness_score`.
+fn completeness_of(missing: usize, cells: usize) -> f64 {
+    if cells > 0 {
+        1.0 - (missing as f64 / cells as f64)
+    } else {
+        1.0
+    }
+}
+
+/// [`DataQualityProfile::completeness_score`] of `df` without the rest of the profile: null
+/// cells, and NaN cells of float columns, count as missing (as `describe` counts them).
+pub(crate) fn completeness(df: &DataFrame) -> f64 {
+    let mut missing = 0usize;
+    for col in df.get_columns() {
+        missing += col.null_count();
+        if matches!(col.dtype(), DataType::Float64 | DataType::Float32)
+            && let Ok(cast) = col.cast(&DataType::Float64)
+            && let Ok(ca) = cast.f64()
+        {
+            missing += ca.iter().flatten().filter(|v| v.is_nan()).count();
+        }
+    }
+    completeness_of(missing, df.height() * df.width())
+}
+
 /// Profile a single column.
 fn profile_column(col: &Column, row_count: usize) -> ColumnProfile {
     let name = col.name().to_string();
@@ -328,6 +349,7 @@ fn profile_column(col: &Column, row_count: usize) -> ColumnProfile {
         .then(|| present_values(col))
         .flatten();
     let nan_count = numeric.as_ref().map_or(0, |(_, nan)| *nan);
+    let numeric = numeric.and_then(|(present, _)| present);
     let null_count = col.null_count() + nan_count;
     let null_pct = if row_count > 0 {
         null_count as f64 / row_count as f64
@@ -382,7 +404,7 @@ fn profile_column(col: &Column, row_count: usize) -> ColumnProfile {
     // Type-specific statistics
     let (numeric_stats, string_stats) = match col.dtype() {
         dt if is_numeric_dtype(dt, false) => {
-            let stats = numeric.and_then(|(present, _)| compute_numeric_stats(present));
+            let stats = numeric.and_then(compute_numeric_stats);
             if let Some(ref s) = stats {
                 if s.outlier_count > 0 {
                     issues.push(DataIssue::OutlierValues {
@@ -438,20 +460,20 @@ fn profile_column(col: &Column, row_count: usize) -> ColumnProfile {
 }
 
 /// The present (neither null nor NaN) values of a numeric column and its
-/// number of NaN cells; `None` when the column cannot be read as numbers or its
-/// values cannot be allocated (the profile then has no numeric statistics).
-fn present_values(col: &Column) -> Option<(Vec<f64>, usize)> {
+/// number of NaN cells; `None` when the column cannot be read as numbers. The
+/// values are `None` when they cannot be allocated (the profile then has no
+/// numeric statistics); the NaN count is taken without allocating, so it is
+/// right either way.
+fn present_values(col: &Column) -> Option<(Option<Vec<f64>>, usize)> {
     let ca = float64_strict(col, false)?;
-    let mut present =
-        crate::resource::try_with_capacity(ca.len() - ca.null_count(), "profile values").ok()?;
-    let mut nan = 0usize;
-    for v in ca.iter().flatten() {
-        if v.is_nan() {
-            nan += 1;
-        } else {
-            present.push(v);
-        }
-    }
+    let nan = ca.iter().flatten().filter(|v| v.is_nan()).count();
+    let present =
+        crate::resource::try_with_capacity(ca.len() - ca.null_count() - nan, "profile values")
+            .ok()
+            .map(|mut present: Vec<f64>| {
+                present.extend(ca.iter().flatten().filter(|v| !v.is_nan()));
+                present
+            });
     Some((present, nan))
 }
 
@@ -528,7 +550,7 @@ fn compute_string_stats(col: &Column, _name: &str) -> Option<StringStats> {
     let mut value_counts: HashMap<String, usize> = HashMap::new();
     let mut non_null_count = 0;
 
-    // Pattern detection
+    // Pattern detection: each distinct value has at most one pattern.
     let mut has_email_pattern = false;
     let mut has_date_pattern = false;
     let mut has_numeric_pattern = false;
@@ -561,25 +583,15 @@ fn compute_string_stats(col: &Column, _name: &str) -> Option<StringStats> {
     }
 
     // Pattern detection (simple heuristics), once per distinct value: a
-    // pattern is reported iff some row matches, which is the same as some
-    // distinct value matching.
+    // pattern is reported iff some row has it, which is the same as some
+    // distinct value having it.
     for val in value_counts.keys() {
-        if !has_email_pattern && val.contains('@') && val.contains('.') {
-            has_email_pattern = true;
-        }
-        if !has_date_pattern && detect_date_pattern(val) {
-            has_date_pattern = true;
-        }
-        if !has_numeric_pattern
-            && val
-                .chars()
-                .all(|c| c.is_ascii_digit() || c == '.' || c == '-')
-            && !val.is_empty()
-        {
-            has_numeric_pattern = true;
-        }
-        if !has_phone_pattern && detect_phone_pattern(val) {
-            has_phone_pattern = true;
+        match value_pattern(val) {
+            Some(ValuePattern::Email) => has_email_pattern = true,
+            Some(ValuePattern::Date) => has_date_pattern = true,
+            Some(ValuePattern::Phone) => has_phone_pattern = true,
+            Some(ValuePattern::NumericString) => has_numeric_pattern = true,
+            None => {}
         }
     }
 
@@ -622,6 +634,37 @@ fn compute_string_stats(col: &Column, _name: &str) -> Option<StringStats> {
         top_values,
         detected_patterns,
     })
+}
+
+/// The one pattern a text value has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ValuePattern {
+    Email,
+    Date,
+    Phone,
+    NumericString,
+}
+
+/// The first pattern `val` matches, in the order email, date, phone, numeric text (digits,
+/// '.' and '-' that parse as a number). "2024-01-15" is a date only and "555-123-4567" a phone
+/// number only, so a column of either is consistent.
+fn value_pattern(val: &str) -> Option<ValuePattern> {
+    if val.contains('@') && val.contains('.') {
+        Some(ValuePattern::Email)
+    } else if detect_date_pattern(val) {
+        Some(ValuePattern::Date)
+    } else if detect_phone_pattern(val) {
+        Some(ValuePattern::Phone)
+    } else if !val.is_empty()
+        && val
+            .chars()
+            .all(|c| c.is_ascii_digit() || c == '.' || c == '-')
+        && val.parse::<f64>().is_ok()
+    {
+        Some(ValuePattern::NumericString)
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -769,7 +812,7 @@ mod tests {
         let mut s: Vec<String> = (0..10_000).map(|i| format!("name_{}", i % 500)).collect();
         s[9_999] = "2024-01-31".to_string(); // the only date is the last row
         let cases: Vec<(Vec<String>, Vec<&str>)> = vec![
-            (s, vec!["date", "numeric_string"]),
+            (s, vec!["date"]),
             (
                 vec![
                     "alice@example.com".into(),
@@ -779,7 +822,7 @@ mod tests {
                 vec!["email", "phone"],
             ),
             (vec!["12/31/2024".into(), "x".into()], vec!["date"]),
-            (vec!["31-12-2024".into()], vec!["date", "numeric_string"]),
+            (vec!["31-12-2024".into()], vec!["date"]),
             (vec!["2024/01/31".into()], vec!["date"]),
             (
                 (0..10_000).map(|i| format!("name_{}", i % 500)).collect(),
@@ -791,6 +834,90 @@ mod tests {
             let stats = compute_string_stats(df.column("s").unwrap(), "s").unwrap();
             assert_eq!(stats.detected_patterns, want);
         }
+    }
+
+    #[test]
+    fn iso_date_and_phone_columns_are_consistent() {
+        // Pre-fix an ISO date was also numeric text and a phone number with dashes too, so
+        // both columns reported two patterns and an InconsistentFormat issue.
+        let df = df! {
+            "d" => ["2024-01-15", "2023-12-31", "2024-02-29", "2022-07-04"],
+            "p" => ["555-123-4567", "555-987-6543", "555-222-0199", "555-000-1234"],
+            "m" => ["2024-01-15", "a@b.org", "2024-03-01", "c@d.net"],
+            "n" => ["12.5", "-3", "7.25", "1-2-3-"],
+        }
+        .unwrap();
+        let profile = generate_quality_profile(&Dataset::new(df));
+        let inconsistent = |name: &str| {
+            column(&profile, name)
+                .issues
+                .iter()
+                .any(|i| matches!(i, DataIssue::InconsistentFormat { .. }))
+        };
+        for name in ["d", "p"] {
+            let patterns = &column(&profile, name)
+                .string_stats
+                .as_ref()
+                .unwrap()
+                .detected_patterns;
+            assert_eq!(patterns.len(), 1, "{name}: {patterns:?}");
+            assert!(!inconsistent(name), "{name}");
+        }
+        let m = &column(&profile, "m")
+            .string_stats
+            .as_ref()
+            .unwrap()
+            .detected_patterns;
+        assert_eq!(m, &["email", "date"]);
+        assert!(inconsistent("m"));
+        // "1-2-3-" does not parse as a number.
+        let n = &column(&profile, "n")
+            .string_stats
+            .as_ref()
+            .unwrap()
+            .detected_patterns;
+        assert_eq!(n, &["numeric_string"]);
+        assert_eq!(value_pattern("1-2-3-"), None);
+        assert_eq!(value_pattern("2024-01-15"), Some(ValuePattern::Date));
+        assert_eq!(value_pattern("555-123-4567"), Some(ValuePattern::Phone));
+    }
+
+    #[test]
+    fn nan_count_survives_a_refused_value_buffer() {
+        // Pre-fix a refused value buffer dropped the NaN count to 0 with it.
+        let values: Vec<f64> = (0..10_000)
+            .map(|i| {
+                if i % 1_500 == 7 {
+                    f64::NAN
+                } else {
+                    (i as f64 * 0.37).sin() * 3.0 + 10.0
+                }
+            })
+            .collect();
+        let nans = values.iter().filter(|v| v.is_nan()).count();
+        assert_eq!(nans, 7);
+        let df = df!("x" => values).unwrap();
+        let col = df.column("x").unwrap();
+        let p = crate::resource::with_alloc_ceiling(Some(64), || profile_column(col, 10_000));
+        assert_eq!(p.nan_count, 7);
+        assert_eq!(p.null_count, 7);
+        assert!(p.numeric_stats.is_none());
+        let full = profile_column(col, 10_000);
+        assert_eq!(full.nan_count, 7);
+        assert!(full.numeric_stats.is_some());
+    }
+
+    #[test]
+    fn completeness_counts_nan_as_missing() {
+        let df = df! {
+            "x" => [Some(1.0), None, Some(f64::NAN), Some(4.0)],
+            "y" => [Some("a"), None, Some("c"), Some("d")],
+        }
+        .unwrap();
+        assert_eq!(completeness(&df), 5.0 / 8.0);
+        let profile = generate_quality_profile(&Dataset::new(df));
+        assert_eq!(profile.completeness_score, 5.0 / 8.0);
+        assert_eq!(completeness(&DataFrame::empty()), 1.0);
     }
 
     #[test]
