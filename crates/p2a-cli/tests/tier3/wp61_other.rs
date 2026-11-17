@@ -2041,3 +2041,58 @@ fn test_cli_dendrogram_refuses_one_row() {
         "{e}"
     );
 }
+
+/// `ml svm` on a 0/1 target counts the predictions by the target's labels (the old count
+/// compared with 0 and called every 0 positive), and svm and tsne carry their notes in JSON
+/// and text; their help states the solver budget and Rtsne's eta.
+#[test]
+fn test_cli_svm_counts_by_label_and_ml_notes() {
+    let s = temp_session();
+    s.load_as(
+        &repo_path("validation/datasets/employee_training.csv"),
+        "emp",
+        &[],
+    );
+    let args = [
+        "ml",
+        "svm",
+        "emp",
+        "--cols",
+        "tenure",
+        "performance",
+        "-y",
+        "bonus",
+    ];
+    let j = s.json(&args);
+    let preds = j["predictions"].as_array().unwrap();
+    let counts = j["prediction_counts"].as_array().unwrap();
+    assert_eq!(counts[0]["label"], 0, "{j}");
+    assert_eq!(counts[1]["label"], 1, "{j}");
+    for c in counts {
+        let n = preds.iter().filter(|p| **p == c["label"]).count();
+        assert_eq!(c["count"].as_u64(), Some(n as u64), "{j}");
+    }
+    assert!(j.get("converged").is_some(), "{j}");
+    let text = s.ok(&args);
+    let want = format!(
+        "Predicted labels: 0: {}, 1: {}",
+        counts[0]["count"], counts[1]["count"]
+    );
+    assert!(text.contains(&want), "{want}\n{text}");
+
+    let t = s.json(&[
+        "ml", "tsne", "emp", "--cols", "tenure", "performance", "--max-iter", "50", "--seed",
+        "1", "--perplexity", "5",
+    ]);
+    // t-SNE has no convergence record; its warnings (if any) are a JSON array
+    assert!(t.get("warnings").is_none_or(|w| w.is_array()), "{t}");
+
+    let help = |cmd: &str| {
+        let out = p2a().args(["ml", cmd, "--help"]).output().unwrap();
+        String::from_utf8_lossy(&out.stdout).to_string()
+    };
+    let h = help("svm");
+    assert!(h.contains("max_iter × n pair updates"), "{h}");
+    let h = help("tsne");
+    assert!(h.contains("Rtsne's eta"), "{h}");
+}
