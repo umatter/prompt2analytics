@@ -80,7 +80,9 @@ pub struct CleaningSuggestion {
     pub category: CleaningCategory,
     /// Target column(s) - None for dataset-level operations
     pub columns: Option<Vec<String>>,
-    /// The operation type (matches preview_cleaning/apply_cleaning)
+    /// The operation, as `preview_cleaning` and `cleaning_session_apply` accept it with the
+    /// parameters below: `fill_na`, `drop_na`, `filter`, `drop_column`, `replace`, `trim` or
+    /// `deduplicate`; `none` for guidance only (the description says what to do).
     pub operation: String,
     /// Parameters for the operation
     pub parameters: SuggestionParameters,
@@ -103,6 +105,12 @@ pub struct SuggestionParameters {
     pub additional_columns: Option<Vec<String>>,
     /// Strategy parameter (e.g., fill strategy)
     pub strategy: Option<String>,
+    /// A filter's comparison operator (`>=`, `<=`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator: Option<String>,
+    /// The value a `replace` replaces (`value` is its replacement).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub old_value: Option<String>,
 }
 
 /// Estimated impact of applying a suggestion.
@@ -165,7 +173,14 @@ pub fn generate_suggestions(profile: &DataQualityProfile) -> SuggestionReport {
     // Process column-level issues
     for col_profile in &profile.columns {
         for issue in &col_profile.issues {
-            if let Some(suggestion) =
+            if let DataIssue::OutlierValues { .. } = issue {
+                suggestions.extend(outlier_suggestions(
+                    issue,
+                    col_profile,
+                    profile,
+                    &mut next_id,
+                ));
+            } else if let Some(suggestion) =
                 suggestion_for_column_issue(issue, col_profile, profile, &mut next_id)
             {
                 suggestions.push(suggestion);
@@ -234,6 +249,8 @@ where
                     value: None,
                     additional_columns: None,
                     strategy: Some("first".to_string()),
+                    operator: None,
+                    old_value: None,
                 },
                 estimated_impact: EstimatedImpact {
                     rows_affected: *count,
@@ -269,6 +286,8 @@ where
                     value: None,
                     additional_columns: Some(columns.clone()),
                     strategy: Some("first".to_string()),
+                    operator: None,
+                    old_value: None,
                 },
                 estimated_impact: EstimatedImpact {
                     rows_affected: *count,
@@ -287,6 +306,81 @@ where
         }
         _ => None, // Other dataset issues don't have direct suggestions
     }
+}
+
+/// The filters an outlier issue suggests: `>=` the lower fence when some value lies below it,
+/// `<=` the upper fence when some value lies above it.
+fn outlier_suggestions<F>(
+    issue: &DataIssue,
+    col_profile: &ColumnProfile,
+    profile: &DataQualityProfile,
+    next_id: &mut F,
+) -> Vec<CleaningSuggestion>
+where
+    F: FnMut() -> String,
+{
+    let DataIssue::OutlierValues {
+        column,
+        count,
+        lower_bound,
+        upper_bound,
+    } = issue
+    else {
+        return Vec::new();
+    };
+    let Some(stats) = col_profile.numeric_stats.as_ref() else {
+        return Vec::new();
+    };
+    let pct = *count as f64 / profile.row_count as f64 * 100.0;
+    let mut out = Vec::new();
+    for (operator, fence, beyond, side) in [
+        (">=", *lower_bound, stats.min < *lower_bound, "below"),
+        ("<=", *upper_bound, stats.max > *upper_bound, "above"),
+    ] {
+        if !beyond {
+            continue;
+        }
+        out.push(CleaningSuggestion {
+            id: next_id(),
+            title: format!("Review outliers {side} the fence in '{column}'"),
+            description: format!(
+                "Found {count} outlier values ({pct:.1}%) in column '{column}' outside the expected \
+                 range [{lower_bound:.2}, {upper_bound:.2}]. This filter keeps the rows where \
+                 '{column}' {operator} {fence}; it also drops the rows where '{column}' is missing, \
+                 as every filter does."
+            ),
+            addresses_issue: issue.description(),
+            priority: if pct > 5.0 {
+                SuggestionPriority::High
+            } else {
+                SuggestionPriority::Medium
+            },
+            category: CleaningCategory::OutlierHandling,
+            columns: Some(vec![column.clone()]),
+            operation: "filter".to_string(),
+            parameters: SuggestionParameters {
+                column: Some(column.clone()),
+                value: Some(fence.to_string()),
+                additional_columns: None,
+                strategy: None,
+                operator: Some(operator.to_string()),
+                old_value: None,
+            },
+            estimated_impact: EstimatedImpact {
+                rows_affected: *count,
+                rows_affected_pct: pct,
+                completeness_change: None,
+                impact_description: format!("May remove up to {count} rows"),
+            },
+            reasoning: "Outliers can significantly impact statistical analyses. Review these values to determine if they are errors or valid extreme observations.".to_string(),
+            considerations: vec![
+                "Outliers may be valid data points that shouldn't be removed".to_string(),
+                "Consider winsorizing (capping) instead of removing".to_string(),
+                "Review the actual outlier values before deciding".to_string(),
+            ],
+        });
+    }
+    out
 }
 
 /// Generate a suggestion for a column-level issue.
@@ -312,6 +406,15 @@ where
 
             // Determine best fill strategy based on column type
             let (strategy, fill_value, reasoning) = determine_fill_strategy(col_profile);
+            // A column mostly missing is dropped; a fill with no strategy for its type drops the
+            // rows instead.
+            let operation = if *pct > 0.7 {
+                "drop_column"
+            } else if strategy == "drop" {
+                "drop_na"
+            } else {
+                "fill_na"
+            };
 
             Some(CleaningSuggestion {
                 id: next_id(),
@@ -331,16 +434,18 @@ where
                 priority,
                 category: CleaningCategory::MissingValues,
                 columns: Some(vec![column.clone()]),
-                operation: if *pct > 0.7 {
-                    "drop_column".to_string()
-                } else {
-                    "fill_na".to_string()
-                },
+                operation: operation.to_string(),
                 parameters: SuggestionParameters {
                     column: Some(column.clone()),
-                    value: fill_value,
+                    value: if operation == "fill_na" {
+                        fill_value
+                    } else {
+                        None
+                    },
                     additional_columns: None,
-                    strategy: Some(strategy),
+                    strategy: (operation == "fill_na").then_some(strategy),
+                    operator: None,
+                    old_value: None,
                 },
                 estimated_impact: EstimatedImpact {
                     rows_affected: null_count,
@@ -387,6 +492,8 @@ where
                     value: None,
                     additional_columns: None,
                     strategy: None,
+                    operator: None,
+                    old_value: None,
                 },
                 estimated_impact: EstimatedImpact {
                     rows_affected: *count,
@@ -418,9 +525,12 @@ where
                 operation: "replace".to_string(),
                 parameters: SuggestionParameters {
                     column: Some(column.clone()),
-                    value: Some("".to_string()),
+                    // "" becomes a missing value.
+                    value: Some("null".to_string()),
                     additional_columns: None,
-                    strategy: Some("null".to_string()), // Replace empty with null
+                    strategy: None,
+                    operator: None,
+                    old_value: Some(String::new()),
                 },
                 estimated_impact: EstimatedImpact {
                     rows_affected: *count,
@@ -436,52 +546,15 @@ where
             })
         }
 
-        DataIssue::OutlierValues {
-            column,
-            count,
-            lower_bound,
-            upper_bound,
-        } => {
-            let pct = *count as f64 / profile.row_count as f64 * 100.0;
-            Some(CleaningSuggestion {
-                id: next_id(),
-                title: format!("Review outliers in '{}'", column),
-                description: format!(
-                    "Found {} outlier values ({:.1}%) in column '{}' outside the expected range [{:.2}, {:.2}].",
-                    count, pct, column, lower_bound, upper_bound
-                ),
-                addresses_issue: issue.description(),
-                priority: if pct > 5.0 { SuggestionPriority::High } else { SuggestionPriority::Medium },
-                category: CleaningCategory::OutlierHandling,
-                columns: Some(vec![column.clone()]),
-                operation: "filter".to_string(), // Or could be "clip" to winsorize
-                parameters: SuggestionParameters {
-                    column: Some(column.clone()),
-                    value: Some(format!("between {} and {}", lower_bound, upper_bound)),
-                    additional_columns: None,
-                    strategy: Some("remove".to_string()),
-                },
-                estimated_impact: EstimatedImpact {
-                    rows_affected: *count,
-                    rows_affected_pct: pct,
-                    completeness_change: None,
-                    impact_description: format!("May remove up to {} rows", count),
-                },
-                reasoning: "Outliers can significantly impact statistical analyses. Review these values to determine if they are errors or valid extreme observations.".to_string(),
-                considerations: vec![
-                    "Outliers may be valid data points that shouldn't be removed".to_string(),
-                    "Consider winsorizing (capping) instead of removing".to_string(),
-                    "Review the actual outlier values before deciding".to_string(),
-                ],
-            })
-        }
+        // One or two filters on the fences: outlier_suggestions.
+        DataIssue::OutlierValues { .. } => None,
 
         DataIssue::InconsistentFormat { column, patterns } => {
             Some(CleaningSuggestion {
                 id: next_id(),
                 title: format!("Standardize format in '{}'", column),
                 description: format!(
-                    "Column '{}' has multiple formats detected: {}. Consider standardizing to a single format.",
+                    "Column '{}' has multiple formats detected: {}. Consider standardizing to a single format (str_regex_replace for the text, munge_cast for the type); no cleaning operation does it.",
                     column,
                     patterns.join(", ")
                 ),
@@ -489,12 +562,14 @@ where
                 priority: SuggestionPriority::Medium,
                 category: CleaningCategory::TypeStandardization,
                 columns: Some(vec![column.clone()]),
-                operation: "standardize".to_string(),
+                operation: "none".to_string(),
                 parameters: SuggestionParameters {
                     column: Some(column.clone()),
-                    value: Some(patterns.first().cloned().unwrap_or_default()),
+                    value: None,
                     additional_columns: None,
-                    strategy: Some("format".to_string()),
+                    strategy: None,
+                    operator: None,
+                    old_value: None,
                 },
                 estimated_impact: EstimatedImpact {
                     rows_affected: profile.row_count, // Unknown exact count
@@ -529,6 +604,8 @@ where
                 value: None,
                 additional_columns: None,
                 strategy: None,
+                operator: None,
+                old_value: None,
             },
             estimated_impact: EstimatedImpact {
                 rows_affected: 0,
@@ -550,19 +627,21 @@ where
                 id: next_id(),
                 title: format!("Resolve mixed types in '{}'", column),
                 description: format!(
-                    "Column '{}' appears to contain mixed data types. Examples: {}",
+                    "Column '{}' appears to contain mixed data types. Examples: {}. Use munge_cast to convert it to one type.",
                     column, examples.join(", ")
                 ),
                 addresses_issue: issue.description(),
                 priority: SuggestionPriority::High,
                 category: CleaningCategory::TypeStandardization,
                 columns: Some(vec![column.clone()]),
-                operation: "cast".to_string(),
+                operation: "none".to_string(),
                 parameters: SuggestionParameters {
                     column: Some(column.clone()),
                     value: None, // User should decide target type
                     additional_columns: None,
-                    strategy: Some("infer".to_string()),
+                    strategy: None,
+                    operator: None,
+                    old_value: None,
                 },
                 estimated_impact: EstimatedImpact {
                     rows_affected: profile.row_count,
@@ -596,6 +675,8 @@ where
                     value: None,
                     additional_columns: None,
                     strategy: None,
+                    operator: None,
+                    old_value: None,
                 },
                 estimated_impact: EstimatedImpact {
                     rows_affected: 0,
@@ -633,6 +714,8 @@ where
                     value: None,
                     additional_columns: None,
                     strategy: None,
+                    operator: None,
+                    old_value: None,
                 },
                 estimated_impact: EstimatedImpact {
                     rows_affected: 0,
@@ -932,6 +1015,88 @@ mod tests {
             .iter()
             .find(|s| s.category == CleaningCategory::OutlierHandling);
         assert!(outlier_suggestion.is_some());
+    }
+
+    #[test]
+    fn every_suggestion_is_an_accepted_operation() {
+        // Pre-fix: drop_column was not an operation of preview or apply, the outlier filter
+        // carried "between L and U" and no operator, standardize and cast were not operations,
+        // and the empty-string replace had no old value.
+        let n = 20;
+        let mostly_missing: Vec<Option<f64>> = (0..n)
+            .map(|i| (i % 4 == 0).then_some(i as f64 * 0.7 + 0.1))
+            .collect();
+        let mut wide: Vec<f64> = (0..n)
+            .map(|i| 50.0 + (i as f64 * 1.3).sin() * 4.0)
+            .collect();
+        wide[3] = -400.0;
+        wide[11] = 900.0;
+        let texts: Vec<&str> = (0..n)
+            .map(|i| match i % 5 {
+                0 => "",
+                1 => "12.5",
+                2 => "7",
+                3 => "2024-01-15",
+                _ => "abc",
+            })
+            .collect();
+        let df = df! {
+            "mostly_missing" => mostly_missing,
+            "constant" => vec![3i64; n],
+            "wide" => wide,
+            "texts" => texts,
+        }
+        .unwrap();
+        let report = generate_suggestions(&generate_quality_profile(&Dataset::new(df)));
+        let accepted = [
+            "fill_na",
+            "filter",
+            "drop_column",
+            "drop_na",
+            "replace",
+            "trim",
+            "deduplicate",
+            "none",
+        ];
+        let mut seen: Vec<&str> = Vec::new();
+        for s in &report.suggestions {
+            assert!(accepted.contains(&s.operation.as_str()), "{}", s.operation);
+            seen.push(s.operation.as_str());
+            match s.operation.as_str() {
+                "filter" => {
+                    let op = s.parameters.operator.as_deref().unwrap();
+                    assert!([">=", "<="].contains(&op), "{op}");
+                    s.parameters
+                        .value
+                        .as_deref()
+                        .unwrap()
+                        .parse::<f64>()
+                        .unwrap();
+                    assert!(s.description.contains("missing"), "{}", s.description);
+                }
+                "replace" => {
+                    assert_eq!(s.parameters.old_value.as_deref(), Some(""));
+                    assert_eq!(s.parameters.value.as_deref(), Some("null"));
+                }
+                "drop_column" => assert!(s.columns.as_ref().is_some_and(|c| c.len() == 1)),
+                _ => {}
+            }
+        }
+        let filters: Vec<&str> = report
+            .suggestions
+            .iter()
+            .filter(|s| s.operation == "filter")
+            .map(|s| s.parameters.operator.as_deref().unwrap())
+            .collect();
+        assert_eq!(filters.len(), 2, "{filters:?}");
+        assert!(filters.contains(&">=") && filters.contains(&"<="));
+        for op in ["drop_column", "replace"] {
+            assert!(seen.contains(&op), "{op} not suggested: {seen:?}");
+        }
+        // Guidance only (standardize, cast): no operation to run.
+        for s in report.suggestions.iter().filter(|s| s.operation == "none") {
+            assert!(s.parameters.strategy.is_none() && s.parameters.operator.is_none());
+        }
     }
 
     #[test]

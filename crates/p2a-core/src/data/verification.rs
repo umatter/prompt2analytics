@@ -146,6 +146,8 @@ pub enum CleaningOperation {
         operator: String,
         value: String,
     },
+    /// Drop whole columns
+    DropColumns { columns: Vec<String> },
 }
 
 impl CleaningOperation {
@@ -207,6 +209,9 @@ impl CleaningOperation {
             } => {
                 format!("Filter rows where {} {} {}", column, operator, value)
             }
+            CleaningOperation::DropColumns { columns } => {
+                format!("Drop columns: {}", columns.join(", "))
+            }
         }
     }
 }
@@ -258,6 +263,34 @@ pub fn preview_cleaning(
             operator,
             value,
         } => preview_filter(df, column, operator, value, row_count),
+        CleaningOperation::DropColumns { columns } => preview_drop_columns(df, columns),
+    }
+}
+
+/// Preview dropping columns: no row changes, the columns named, and a warning for a name the
+/// frame does not have (the apply refuses it).
+fn preview_drop_columns(df: &DataFrame, columns: &[String]) -> CleaningPreview {
+    let mut warnings = Vec::new();
+    for name in columns {
+        if df.column(name).is_err() {
+            warnings.push(format!("Column '{name}' not found"));
+        }
+    }
+    if columns.is_empty() {
+        warnings.push("No columns named to drop".to_string());
+    } else if warnings.is_empty() && columns.len() >= df.width() {
+        warnings.push("Warning: This operation would drop ALL columns!".to_string());
+    }
+    CleaningPreview {
+        operation: CleaningOperation::DropColumns {
+            columns: columns.to_vec(),
+        }
+        .description(),
+        rows_affected: 0,
+        pct_affected: 0.0,
+        sample_changes: vec![],
+        estimated_quality_change: 0.0,
+        warnings,
     }
 }
 

@@ -14,9 +14,9 @@ use rmcp::{
 
 use p2a_core::data::munging::clean::fill_na_with;
 use p2a_core::data::{
-    CleaningOperation, CleaningSession, SuggestionPriority, deduplicate, drop_na, filter,
-    generate_quality_profile, generate_suggestions, preview_cleaning, replace, to_lowercase,
-    to_uppercase, trim, verify_cleaning,
+    CleaningOperation, CleaningSession, CleaningSuggestion, SuggestionPriority, deduplicate,
+    drop_columns, drop_na, filter, generate_quality_profile, generate_suggestions,
+    preview_cleaning, replace, to_lowercase, to_uppercase, trim, verify_cleaning,
 };
 
 use crate::server::AnalyticsServer;
@@ -111,7 +111,7 @@ impl AnalyticsServer {
 
     /// Preview what a cleaning operation would do before applying it.
     #[tool(
-        description = "Preview a data cleaning operation before applying it. Shows how many rows would be affected, sample changes, and warnings. Supports: trim, lowercase, uppercase, fill_na, drop_na, deduplicate, replace, filter. fill_na strategies: mean, median, mode, forward, backward, zero, constant (with value); a value without a strategy means constant."
+        description = "Preview a data cleaning operation before applying it. Shows how many rows would be affected, sample changes, and warnings. Supports: trim, lowercase, uppercase, fill_na, drop_na, deduplicate, replace, filter (with operator and filter_value), drop_column (the columns named). fill_na strategies: mean, median, mode, forward, backward, zero, constant (with value); a value without a strategy means constant."
     )]
     pub async fn preview_cleaning(
         &self,
@@ -219,9 +219,15 @@ impl AnalyticsServer {
                     value,
                 }
             }
+            "drop_column" | "drop_columns" => {
+                let columns = request.columns.filter(|c| !c.is_empty()).ok_or_else(|| {
+                    McpError::invalid_request("drop_column operation requires columns", None)
+                })?;
+                CleaningOperation::DropColumns { columns }
+            }
             _ => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Unknown operation '{}'. Supported: trim, lowercase, uppercase, fill_na, drop_na, deduplicate, replace, filter",
+                    "Unknown operation '{}'. Supported: trim, lowercase, uppercase, fill_na, drop_na, deduplicate, replace, filter, drop_column",
                     request.operation
                 ))]));
             }
@@ -503,9 +509,25 @@ impl AnalyticsServer {
                     }),
                 )
             }
+            "drop_column" | "drop_columns" => {
+                let cols = request
+                    .columns
+                    .clone()
+                    .filter(|c| !c.is_empty())
+                    .ok_or_else(|| {
+                        McpError::invalid_request("drop_column requires columns", None)
+                    })?;
+                (
+                    format!("drop_column {}", cols.join(", ")),
+                    Box::new(move |ds| {
+                        let names: Vec<&str> = cols.iter().map(String::as_str).collect();
+                        drop_columns(ds, &names).map_err(|e| e.to_string())
+                    }),
+                )
+            }
             _ => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Unknown operation '{}'. Supported: trim, lowercase, uppercase, fill_na, drop_na, deduplicate, replace, filter",
+                    "Unknown operation '{}'. Supported: trim, lowercase, uppercase, fill_na, drop_na, deduplicate, replace, filter, drop_column",
                     request.operation
                 ))]));
             }
@@ -727,11 +749,8 @@ impl AnalyticsServer {
                      \n\
                      Impact: {}\n\
                      \n\
-                     Operation: '{}'\n\
-                     Parameters:\n\
-                     - column: {}\n\
-                     - value: {}\n\
-                     - strategy: {}\n\
+                     Arguments:\n\
+                     {}\
                      \n\
                      Considerations:\n",
                     i + 1,
@@ -742,10 +761,7 @@ impl AnalyticsServer {
                     s.description,
                     s.reasoning,
                     s.estimated_impact.impact_description,
-                    s.operation,
-                    s.parameters.column.as_deref().unwrap_or("-"),
-                    suggested_value(s.operation.as_str(), &s.parameters),
-                    s.parameters.strategy.as_deref().unwrap_or("-"),
+                    suggestion_argument_lines(s),
                 ));
 
                 for consideration in &s.considerations {
@@ -793,6 +809,86 @@ fn suggested_value(operation: &str, parameters: &p2a_core::data::SuggestionParam
         }
         _ => value.to_string(),
     }
+}
+
+/// The arguments of `preview_cleaning` / `cleaning_session_apply` that run suggestion `s` (with
+/// `dataset` or `session_id` added): `operation`, `columns` ([column], or the deduplication
+/// subset), and what the operation reads of `operator`, `filter_value`, `value`, `old_value`,
+/// `strategy` and `keep`. A computed fill value is left out: `fill_na` computes it itself and
+/// refuses it with any strategy but 'constant'. A `none` suggestion has only its operation.
+pub(crate) fn suggestion_arguments(
+    s: &CleaningSuggestion,
+) -> serde_json::Map<String, serde_json::Value> {
+    use serde_json::Value;
+    let p = &s.parameters;
+    let mut m = serde_json::Map::new();
+    m.insert("operation".into(), Value::from(s.operation.as_str()));
+    let columns = p
+        .additional_columns
+        .clone()
+        .or_else(|| p.column.clone().map(|c| vec![c]));
+    let mut put = |k: &str, v: Option<&str>| {
+        if let Some(v) = v {
+            m.insert(k.into(), Value::from(v));
+        }
+    };
+    match s.operation.as_str() {
+        "filter" => {
+            put("operator", p.operator.as_deref());
+            put("filter_value", p.value.as_deref());
+        }
+        "replace" => {
+            put("old_value", p.old_value.as_deref());
+            put("value", p.value.as_deref());
+        }
+        "fill_na" => {
+            put("strategy", p.strategy.as_deref());
+            if p.strategy
+                .as_deref()
+                .is_none_or(|st| st.trim().eq_ignore_ascii_case("constant"))
+            {
+                put("value", p.value.as_deref());
+            }
+        }
+        "deduplicate" => put("keep", p.strategy.as_deref()),
+        "none" => return m,
+        _ => {}
+    }
+    if let Some(columns) = columns {
+        m.insert(
+            "columns".into(),
+            Value::from(columns.into_iter().map(Value::from).collect::<Vec<_>>()),
+        );
+    }
+    m
+}
+
+/// The `Arguments:` block of a suggestion in `suggest_cleaning`'s reply: one `- key: value` line
+/// per [`suggestion_arguments`] entry (arrays as JSON), the operation first; a computed fill
+/// value is shown for reference after them.
+fn suggestion_argument_lines(s: &CleaningSuggestion) -> String {
+    let mut out = String::new();
+    let args = suggestion_arguments(s);
+    let mut keys: Vec<&String> = args.keys().collect();
+    keys.sort_by_key(|k| {
+        (
+            k.as_str() != "operation",
+            k.as_str() != "columns",
+            k.as_str(),
+        )
+    });
+    for k in keys {
+        let v = &args[k];
+        let text = v.as_str().map_or_else(|| v.to_string(), str::to_string);
+        out.push_str(&format!("- {k}: {text}\n"));
+    }
+    if s.operation == "fill_na" && !args.contains_key("value") && s.parameters.value.is_some() {
+        out.push_str(&format!(
+            "- value: {}\n",
+            suggested_value(&s.operation, &s.parameters)
+        ));
+    }
+    out
 }
 
 impl AnalyticsServer {
