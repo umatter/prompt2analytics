@@ -286,7 +286,7 @@ pub struct StataReader<R: Read + Seek> {
     data_len: u64,
     map: [u64; MAP_SLOTS],
     /// strL contents by (v, o), read before the rows when a strL column exists.
-    strls: HashMap<(u64, u64), String>,
+    strls: PlHashMap<(u64, u64), String>,
     notes: Vec<String>,
 }
 
@@ -434,7 +434,7 @@ impl<R: Read + Seek> StataReader<R> {
             data_offset,
             data_len,
             map,
-            strls: HashMap::new(),
+            strls: PlHashMap::new(),
             notes: Vec::new(),
         })
     }
@@ -503,7 +503,7 @@ impl<R: Read + Seek> StataReader<R> {
                 self.read_value(dtype, &var_names[var_idx], row, &mut columns[var_idx])?;
             }
         }
-        self.strls = HashMap::new();
+        self.strls = PlHashMap::new();
 
         let label_sets = if self.variables.iter().any(|v| !v.label_set.is_empty()) {
             self.read_value_labels()?
@@ -554,7 +554,7 @@ impl<R: Read + Seek> StataReader<R> {
     }
 
     /// The `<strls>` section: every GSO block's text by (v, o).
-    fn read_strls(&mut self) -> Result<HashMap<(u64, u64), String>, StataError> {
+    fn read_strls(&mut self) -> Result<PlHashMap<(u64, u64), String>, StataError> {
         let start = self.map[MAP_STRLS];
         let end = self.map[MAP_VALUE_LABELS];
         if end < start {
@@ -565,7 +565,7 @@ impl<R: Read + Seek> StataReader<R> {
         Self::seek_tag(&mut self.reader, start, b"<strls>")?;
         let order = self.byte_order;
         let release = self.release;
-        let mut table = HashMap::new();
+        let mut table = PlHashMap::new();
         let mut binary = false;
         // The position is tracked here: `stream_position` on the buffered reader is a system
         // call per block.
