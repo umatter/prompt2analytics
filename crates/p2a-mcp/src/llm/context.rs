@@ -268,16 +268,13 @@ fn columns_header(listed: usize, width: usize) -> String {
 fn column_line(col_name: &str, column: &Column) -> String {
     let series = column.as_materialized_series();
     let dtype = series.dtype();
-    // Missing: null, or NaN in a float column.
-    let nan_count = if matches!(dtype, DataType::Float32 | DataType::Float64) {
-        series
-            .is_nan()
-            .ok()
-            .and_then(|nan| nan.sum())
-            .map_or(0, |n| n as usize)
+    // Missing: null, or NaN in a float column; a float column's range comes from the same pass.
+    let float_scan = if matches!(dtype, DataType::Float32 | DataType::Float64) {
+        scan_floats(series)
     } else {
-        0
+        None
     };
+    let nan_count = float_scan.as_ref().map_or(0, |scan| scan.nan);
     let missing_count = series.null_count() + nan_count;
     let total_count = series.len();
 
@@ -306,7 +303,11 @@ fn column_line(col_name: &str, column: &Column) -> String {
         parts.push(format!("{}% missing", missing_pct));
     }
 
-    if dtype.is_numeric() {
+    if let Some(scan) = &float_scan {
+        if let Some((min, max)) = scan.range {
+            parts.push(range_text(min, max));
+        }
+    } else if dtype.is_numeric() {
         if let Some(stats) = get_numeric_stats(series) {
             parts.push(stats);
         }
@@ -317,6 +318,38 @@ fn column_line(col_name: &str, column: &Column) -> String {
     }
 
     parts.join(" | ")
+}
+
+/// A float column's NaN count (nulls not counted) and the range of its present values.
+struct FloatScan {
+    nan: usize,
+    range: Option<(f64, f64)>,
+}
+
+/// One pass over a float series for [`FloatScan`]. `f64::min` and `f64::max` pass over a NaN
+/// operand, so the loop has no branch.
+fn scan_floats(series: &Series) -> Option<FloatScan> {
+    // Float64 casts to itself without a copy.
+    let float = series.cast(&DataType::Float64).ok()?;
+    let ca = float.f64().ok()?;
+    let (mut nan, mut min, mut max) = (0usize, f64::INFINITY, f64::NEG_INFINITY);
+    let mut visit = |x: f64| {
+        nan += usize::from(x.is_nan());
+        min = min.min(x);
+        max = max.max(x);
+    };
+    if ca.null_count() == 0 {
+        for arr in ca.downcast_iter() {
+            arr.values().iter().copied().for_each(&mut visit);
+        }
+    } else {
+        ca.iter().flatten().for_each(&mut visit);
+    }
+    let present = ca.len() - ca.null_count() - nan;
+    Some(FloatScan {
+        nan,
+        range: (present > 0).then_some((min, max)),
+    })
 }
 
 /// Up to `max_samples` present (not null, not NaN) sample values from the first rows, each cut
@@ -353,8 +386,7 @@ fn get_sample_values(series: &Series, max_samples: usize) -> Vec<String> {
     samples
 }
 
-/// The range of a numeric series' present values (polars' `min` and `max` skip nulls and NaN);
-/// `None` when it has none.
+/// The range of a non-float numeric series' present values; `None` when it has none.
 fn get_numeric_stats(series: &Series) -> Option<String> {
     // Try to cast to f64 for statistics
     let float_series = series.cast(&DataType::Float64).ok()?;
@@ -362,7 +394,11 @@ fn get_numeric_stats(series: &Series) -> Option<String> {
 
     let min = ca.min().filter(|x| !x.is_nan())?;
     let max = ca.max().filter(|x| !x.is_nan())?;
+    Some(range_text(min, max))
+}
 
+/// `range: min..max`, whole numbers as integers.
+fn range_text(min: f64, max: f64) -> String {
     // Format nicely - use integer format if values are whole numbers
     let format_num = |n: f64| {
         if n.fract() == 0.0 && n.abs() < 1e9 {
@@ -374,7 +410,7 @@ fn get_numeric_stats(series: &Series) -> Option<String> {
         }
     };
 
-    Some(format!("range: {}..{}", format_num(min), format_num(max)))
+    format!("range: {}..{}", format_num(min), format_num(max))
 }
 
 /// Configuration for context window management.
