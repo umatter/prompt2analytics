@@ -416,7 +416,22 @@ impl AnalyticsServer {
             }
             // The rows of each cell, data[a][b], for the library's tables (R's projections of
             // the sequential fit y ~ a + b + a:b).
-            let mut data: Vec<Vec<Vec<f64>>> = vec![vec![Vec::new(); lb]; la];
+            let data = (|| {
+                use p2a_core::resource::{try_vec, try_with_capacity};
+                let mut rows: Vec<Vec<Vec<f64>>> = try_with_capacity(la, "cell-means table")?;
+                for _ in 0..la {
+                    rows.push(try_vec(lb, Vec::new(), "cell-means table")?);
+                }
+                p2a_core::errors::EconResult::Ok(rows)
+            })();
+            let mut data = match data {
+                Ok(data) => data,
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Two-way model tables refused: {e}"
+                    ))]));
+                }
+            };
             for ((&yi, &a), &b) in y.iter().zip(&fa.codes).zip(&fb.codes) {
                 data[a as usize][b as usize].push(yi);
             }
@@ -2486,6 +2501,26 @@ mod tests {
         })
         .unwrap();
         assert_eq!(fits.is_error, Some(false), "{}", text(&fits));
+    }
+
+    /// With limits off, the cell buffers still honour the allocation ceiling: a row of
+    /// 5,000 cells over a 100 kB ceiling is a refusal, not an abort.
+    #[test]
+    fn model_tables_two_way_buffers_honour_the_alloc_ceiling() {
+        let (rt, server) = server_with(vec![("d", two_factors(6000, 2, 5000))]);
+        let r = limits::with_limits(Limits::off(), || {
+            p2a_core::resource::with_alloc_ceiling(Some(100_000), || {
+                rt.block_on(server.stats_model_tables(Parameters(tables_req())))
+            })
+        })
+        .unwrap();
+        assert_eq!(r.is_error, Some(true), "{}", text(&r));
+        assert!(
+            text(&r).starts_with("Two-way model tables refused:")
+                && text(&r).contains("cell-means table"),
+            "{}",
+            text(&r)
+        );
     }
 
     fn loglin_req(cols: &[&str]) -> LoglinRequest {
