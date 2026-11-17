@@ -15,7 +15,9 @@ use p2a_core::{
 };
 use std::path::PathBuf;
 
-use crate::output::{OutputFormat, missing_json, print_error, print_message, print_missing_note};
+use crate::output::{
+    OutputFormat, missing_json, print_error, print_message, print_missing_note, se_label,
+};
 use crate::output::{add_result_notes, print_result_notes};
 use crate::session::SessionManager;
 
@@ -176,7 +178,12 @@ EXAMPLES:
         #[arg(long, default_value = "0.95")]
         conf_level: f64,
 
-        /// Chart title
+        /// Standard errors of the intervals, as reg ols --robust: hc1 (default,
+        /// heteroskedasticity-robust), hc0, hc2, hc3, or standard (classical, as R's confint)
+        #[arg(long, default_value = "hc1")]
+        se: crate::commands::regression::RobustSE,
+
+        /// Chart title (default: the outcome, the level and the standard errors)
         #[arg(long)]
         title: Option<String>,
     },
@@ -529,6 +536,47 @@ fn print_saved(msg: &str, missing: &MissingSummary, format: &OutputFormat) {
     }
 }
 
+/// Writes a chart file. A missing parent directory is an error naming it (no directory is
+/// created); a failed write names the file.
+fn write_chart(path: &std::path::Path, bytes: &[u8]) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+        && !parent.is_dir()
+    {
+        anyhow::bail!(
+            "cannot write {}: directory {} does not exist",
+            path.display(),
+            parent.display()
+        );
+    }
+    std::fs::write(path, bytes).map_err(|e| anyhow::anyhow!("writing {}: {e}", path.display()))
+}
+
+/// The warning for a static chart (PNG data) written under a name whose extension is not
+/// `png` (case-insensitive); `None` for a `.png` name.
+fn png_extension_warning(path: &std::path::Path) -> Option<String> {
+    let is_png = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("png"));
+    (!is_png).then(|| {
+        format!(
+            "{} holds PNG image data; static charts are PNG whatever the file name",
+            path.display()
+        )
+    })
+}
+
+/// [`write_chart`] for a static chart, warning on stderr when the name's extension is not
+/// `png`.
+fn write_png_chart(path: &std::path::Path, png: &[u8]) -> anyhow::Result<()> {
+    write_chart(path, png)?;
+    if let Some(w) = png_extension_warning(path) {
+        eprintln!("Warning: {w}");
+    }
+    Ok(())
+}
+
 /// Decode base64 image to bytes
 fn decode_base64_image(base64_str: &str) -> Result<Vec<u8>, String> {
     use base64::{Engine as _, engine::general_purpose};
@@ -616,6 +664,7 @@ pub fn execute(
             indep_vars,
             output,
             conf_level,
+            se,
             title,
         } => execute_coefplot(
             dataset,
@@ -623,6 +672,7 @@ pub fn execute(
             indep_vars,
             output,
             *conf_level,
+            (*se).into(),
             title.as_deref(),
             format,
             session,
@@ -797,7 +847,7 @@ fn execute_histogram(
                     // Decode base64 and save PNG to file
                     match decode_base64_image(&result.image_base64) {
                         Ok(png_data) => {
-                            std::fs::write(output, &png_data)?;
+                            write_png_chart(output, &png_data)?;
                             print_saved(
                                 &format!("Histogram saved to: {}", output.display()),
                                 cols.missing(),
@@ -869,7 +919,7 @@ fn execute_scatter(
             match scatter_plot(x_data, y_data, config) {
                 Ok(result) => match decode_base64_image(&result.image_base64) {
                     Ok(png_data) => {
-                        std::fs::write(output, &png_data)?;
+                        write_png_chart(output, &png_data)?;
                         print_saved(
                             &format!("Scatter plot saved to: {}", output.display()),
                             cols.missing(),
@@ -943,7 +993,7 @@ fn execute_line(
             match line_chart(&series, config) {
                 Ok(result) => match decode_base64_image(&result.image_base64) {
                     Ok(png_data) => {
-                        std::fs::write(output, &png_data)?;
+                        write_png_chart(output, &png_data)?;
                         print_saved(
                             &format!("Line plot saved to: {}", output.display()),
                             cols.missing(),
@@ -1008,7 +1058,7 @@ fn execute_boxplot(
             match box_plot(&groups, config) {
                 Ok(result) => match decode_base64_image(&result.image_base64) {
                     Ok(png_data) => {
-                        std::fs::write(output, &png_data)?;
+                        write_png_chart(output, &png_data)?;
                         print_saved(
                             &format!("Box plot saved to: {}", output.display()),
                             &missing,
@@ -1057,7 +1107,7 @@ fn execute_heatmap(
             match correlation_heatmap(&corr_matrix, &labels, &labels, title, Some(800), Some(600)) {
                 Ok(result) => match decode_base64_image(&result.image_base64) {
                     Ok(png_data) => {
-                        std::fs::write(output, &png_data)?;
+                        write_png_chart(output, &png_data)?;
                         let mut message = format!("Heatmap saved to: {}", output.display());
                         if let Some(note) = na_note(&labels, &constant, missing.n_used) {
                             message.push_str(&format!(" ({note})"));
@@ -1113,6 +1163,7 @@ fn execute_coefplot(
     indep_vars: &[String],
     output: &PathBuf,
     conf_level: f64,
+    cov: CovarianceType,
     title: Option<&str>,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
@@ -1130,7 +1181,7 @@ fn execute_coefplot(
             let x_cols: Vec<&str> = indep_vars.iter().map(|s| s.as_str()).collect();
 
             // Run OLS to get coefficients
-            match run_ols(ds, dep_var, &x_cols, true, CovarianceType::HC1) {
+            match run_ols(ds, dep_var, &x_cols, true, cov) {
                 Ok(result) => {
                     let names: Vec<String> = result.variable_names.clone();
                     let estimates: Vec<f64> =
@@ -1150,11 +1201,16 @@ fn execute_coefplot(
                         }
                     };
 
-                    let chart_title = title
-                        .map(|s| s.to_string())
-                        .or_else(|| Some(format!("Coefficients: {}", dep_var)));
+                    // 0.9 -> "90", 0.975 -> "97.5"
+                    let pct = (conf_level * 1000.0).round() / 10.0;
+                    let se_name = cov.short_label();
+                    let chart_title = title.map(|s| s.to_string()).unwrap_or_else(|| {
+                        format!(
+                            "Coefficients: {dep_var}, {pct}% CIs ({se_name} standard errors)"
+                        )
+                    });
                     let config = ChartConfig {
-                        title: chart_title,
+                        title: Some(chart_title.clone()),
                         width: 800,
                         height: 600,
                         ..Default::default()
@@ -1163,12 +1219,42 @@ fn execute_coefplot(
                     match coefficient_plot(&names, &estimates, &ci_lower, &ci_upper, config, true) {
                         Ok(plot_result) => match decode_base64_image(&plot_result.image_base64) {
                             Ok(png_data) => {
-                                std::fs::write(output, &png_data)?;
-                                print_saved(
-                                    &format!("Coefficient plot saved to: {}", output.display()),
-                                    &MissingSummary::none(result.n_obs()),
-                                    format,
+                                write_png_chart(output, &png_data)?;
+                                let message = format!(
+                                    "Coefficient plot saved to: {} ({pct}% intervals, {} \
+                                     standard errors)",
+                                    output.display(),
+                                    se_label(cov)
                                 );
+                                let missing = MissingSummary::none(result.n_obs());
+                                match format {
+                                    OutputFormat::Json => {
+                                        let coefficients: Vec<serde_json::Value> = names
+                                            .iter()
+                                            .enumerate()
+                                            .map(|(i, n)| {
+                                                serde_json::json!({
+                                                    "name": n,
+                                                    "estimate": estimates[i],
+                                                    "lower": ci_lower[i],
+                                                    "upper": ci_upper[i],
+                                                })
+                                            })
+                                            .collect();
+                                        let mut json = serde_json::json!({
+                                            "message": message,
+                                            "title": chart_title,
+                                            "se_type": se_name,
+                                            "conf_level": conf_level,
+                                            "coefficients": coefficients,
+                                        });
+                                        if let Some(m) = missing_json(&missing) {
+                                            json["missing"] = m;
+                                        }
+                                        println!("{json}");
+                                    }
+                                    _ => print_saved(&message, &missing, format),
+                                }
                             }
                             Err(e) => print_error(&e, format),
                         },
@@ -1304,7 +1390,7 @@ fn execute_residuals(
             return Ok(());
         }
     };
-    std::fs::write(output, &png_data)?;
+    write_png_chart(output, &png_data)?;
     let mut files = vec![output.display().to_string()];
     let stem = output
         .file_stem()
@@ -1325,15 +1411,13 @@ fn execute_residuals(
                 return Ok(());
             }
         };
+        // PNG data, so the side plots keep the .png extension whatever the main name's
         let path = parent.join(format!("{stem}_{suffix}.png"));
-        std::fs::write(&path, &data)?;
+        write_chart(&path, &data)?;
         files.push(path.display().to_string());
     }
 
-    let msg = format!(
-        "Residual diagnostics saved to: {} (+ _qq, _scale_location, _leverage)",
-        output.display()
-    );
+    let msg = format!("Residual diagnostics saved to: {}", files.join(", "));
     match format {
         OutputFormat::Json => {
             let mut json = serde_json::json!({
@@ -1418,7 +1502,7 @@ fn execute_dendrogram(
                     match dendrogram(linkage_matrix, None, config) {
                         Ok(plot_result) => match decode_base64_image(&plot_result.image_base64) {
                             Ok(png_data) => {
-                                std::fs::write(output, &png_data)?;
+                                write_png_chart(output, &png_data)?;
                                 let msg = format!("Dendrogram saved to: {}", output.display());
                                 match format {
                                     OutputFormat::Json => {
@@ -1498,7 +1582,7 @@ fn execute_event_study(
             match event_study_plot(time, estimates, ci_lower, ci_upper, config) {
                 Ok(result) => match decode_base64_image(&result.image_base64) {
                     Ok(png_data) => {
-                        std::fs::write(output, &png_data)?;
+                        write_png_chart(output, &png_data)?;
                         print_saved(
                             &format!("Event study plot saved to: {}", output.display()),
                             cols.missing(),
@@ -1575,7 +1659,7 @@ fn execute_irf(
             ) {
                 Ok(result) => match decode_base64_image(&result.image_base64) {
                     Ok(png_data) => {
-                        std::fs::write(output, &png_data)?;
+                        write_png_chart(output, &png_data)?;
                         print_saved(
                             &format!("IRF plot saved to: {}", output.display()),
                             cols.missing(),
@@ -1624,7 +1708,7 @@ fn execute_scatter_interactive(
 
             match scatter_interactive(ds.df(), x_col, y_col, group_col, config) {
                 Ok(result) => {
-                    std::fs::write(output, &result.html)?;
+                    write_chart(output, result.html.as_bytes())?;
                     print_message(
                         &format!("Interactive scatter plot saved to: {}", output.display()),
                         format,
@@ -1669,7 +1753,7 @@ fn execute_histogram_interactive(
 
             match histogram_interactive(ds.df(), col, group_col, config) {
                 Ok(result) => {
-                    std::fs::write(output, &result.html)?;
+                    write_chart(output, result.html.as_bytes())?;
                     print_message(
                         &format!("Interactive histogram saved to: {}", output.display()),
                         format,
@@ -1714,7 +1798,7 @@ fn execute_line_interactive(
 
             match line_interactive(ds.df(), x_col, y_col, config) {
                 Ok(result) => {
-                    std::fs::write(output, &result.html)?;
+                    write_chart(output, result.html.as_bytes())?;
                     print_message(
                         &format!("Interactive line plot saved to: {}", output.display()),
                         format,
@@ -1730,6 +1814,30 @@ fn execute_line_interactive(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn png_extension_warning_names_non_png_files() {
+        use std::path::Path;
+        assert!(png_extension_warning(Path::new("a/b.png")).is_none());
+        assert!(png_extension_warning(Path::new("b.PNG")).is_none());
+        let w = png_extension_warning(Path::new("out.jpg")).unwrap();
+        assert!(w.contains("out.jpg") && w.contains("PNG"), "{w}");
+        assert!(png_extension_warning(Path::new("noext")).is_some());
+    }
+
+    #[test]
+    fn write_chart_names_a_missing_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("missing-dir").join("h.png");
+        let e = write_chart(&p, b"x").unwrap_err().to_string();
+        assert!(
+            e.contains("missing-dir") && e.contains("does not exist"),
+            "{e}"
+        );
+        let ok = dir.path().join("h.png");
+        write_chart(&ok, b"x").unwrap();
+        assert_eq!(std::fs::read(&ok).unwrap(), b"x");
+    }
     use super::*;
     use p2a_validation::{Case, Check, Tol};
 

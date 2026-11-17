@@ -191,8 +191,9 @@ EXAMPLES:
         #[arg(long, default_value = "W", value_parser = crate::output::parse_core_option::<WeightStyle>)]
         weight_style: WeightStyle,
 
-        /// Alternative hypothesis, as spdep::moran.test: two.sided (default), greater or less
-        #[arg(long, default_value = "two.sided", value_parser = crate::output::parse_core_option::<MoranAlternative>)]
+        /// Alternative hypothesis, as spdep::moran.test: greater (default, positive spatial
+        /// autocorrelation), less or two.sided
+        #[arg(long, default_value = "greater", value_parser = crate::output::parse_core_option::<MoranAlternative>)]
         alternative: MoranAlternative,
     },
 }

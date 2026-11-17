@@ -207,7 +207,7 @@ What each command prints, besides the coefficient table and its `Standard errors
   Var(b_FE) - Var(b_RE) is not positive definite or is singular.
 - `panel hdfe`: HC1 standard errors (fixest `vcov = "hetero"`), the within R-squared labelled
   `R-squared (within):` and `Adj. R-squared (within):` (adjusted with (n-1)/df_resid as plm;
-  fixest's `war2` differs: 0.716833 vs 0.670467 on Grunfeld), the levels of each fixed effect
+  fixest's `war2` is 0.716833 on Grunfeld; p2a prints plm's 0.670467), the levels of each fixed effect
   and the within F test.
 - `panel gmm`: Arellano-Bond difference GMM, as R's `plm::pgmm` (`effect = "individual"`).
   `--lags` (default 1) lags of the dependent variable are added to `-x`; the instruments are the
@@ -516,8 +516,8 @@ finite (an aliased regressor's `NaN`) are `null`.
 | `reg ols` | `adj_r_squared`, `coefficients` (objects with `coefficient`, `name`, `p_value`, `std_error`, `t_value`), `method`, `n_observations`, `r_squared`, `r_squared_type` (`"ordinary"`), `se_type` (`"classical"`, `"HC0"` ... `"HC3"`), `statistic` (`"t"`), `warnings` (only when there are any) |
 | `reg clustered` | as `reg ols`, plus `n_clusters`; `se_type` is `"cluster:<var>"` |
 | `reg hac` | `bandwidth`, `coefficients`, `kernel`, `method`, `n_obs`, `p_values`, `r_squared`, `std_errors`, `t_values` (coefficient / HAC SE), `warnings` (only when there are any) |
-| `panel fe` | as `reg ols`, plus `n_groups`, `f_statistic`, `f_p_value`; `r_squared_type` is `"within"`; `se_type` is `"classical"`, `"cluster:<entity>"`, `"cluster-hc0:<entity>"` or `"cluster-hc1:<entity>"` |
-| `panel re` | as `panel fe`, but the coefficient objects have `z_value` instead of `t_value` and `statistic` is `"z"`; `r_squared_type` is `"cor(y*, X*b)^2 (plm)"`; `f_statistic`/`f_p_value` are the F form W/K of the Wald test; plus `wald_chi2`, `wald_df`, `wald_p_value`, `sigma_u`, `sigma_e`, `theta` (the observation-weighted mean on an unbalanced panel) and, on an unbalanced panel, `theta_min` and `theta_max` |
+| `panel fe` | as `reg ols`, plus `n_groups`, `f_statistic`, `f_p_value`, `f_df1`, `f_df2` (the F test's degrees of freedom: the slopes and the residual df, or G - 1 when clustered), `missing` (only when rows were dropped); `r_squared_type` is `"within"`; `se_type` is `"classical"`, `"cluster:<entity>"`, `"cluster-hc0:<entity>"` or `"cluster-hc1:<entity>"` |
+| `panel re` | as `panel fe`, but the coefficient objects have `z_value` instead of `t_value` and `statistic` is `"z"`; `r_squared_type` is `"cor(y*, X*b)^2 (plm)"`; `f_statistic`/`f_p_value` are the F form W/K of the Wald test (`f_df1` the slopes without the intercept); plus `wald_chi2`, `wald_df`, `wald_p_value`, `sigma_u`, `sigma_e`, `theta` (the observation-weighted mean on an unbalanced panel) and, on an unbalanced panel, `theta_min` and `theta_max` |
 | `panel hdfe` | as `panel fe`, plus `fe_dimensions` (objects with `levels`, `name`, one per `--fe` column); `n_groups` is the number of levels of the first `--fe` column; `se_type` is `"HC1"` |
 | `panel hausman` | `chi2_statistic`, `df`, `p_value`, `recommendation`, `test`, `vcov_method`, `warnings` (always, possibly `[]`) |
 

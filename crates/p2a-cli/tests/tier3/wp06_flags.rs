@@ -566,7 +566,8 @@ fn test_cli_max_memory_without_session() {
 /// error naming the dataset, not a fit. Pinned as clap reports it. The flags that behave so
 /// (`BoolishValueParser`): `--intercept` of `reg ols`, `clustered`, `quantreg`, `gls`, `step` and
 /// `hac`, `reg step --use-bic`, `ts ar --aic`, `ts stl --robust`, `ts spectrum --detrend`,
-/// `script export --comments` and `discrete clogit --asc`. Put them after the positionals, or give
+/// `script export --comments`, `discrete clogit --asc`, `stats pp-test --lshort` and `causal iv
+/// --robust`. Put them after the positionals, or give
 /// the value (`--intercept false`).
 #[test]
 fn test_cli_bare_flag_before_positional_is_a_value_error() {

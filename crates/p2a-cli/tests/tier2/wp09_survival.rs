@@ -102,12 +102,17 @@ fn test_validate_cli_survival_km_groups_missing_note() {
         "{note:?} not after the last group\n{out}"
     );
 
+    // CLI-38: one JSON document, the groups an array inside it
     let docs = s.json_docs(&args);
-    assert_eq!(docs.len(), 4);
-    for d in &docs {
-        assert_eq!(d["missing"]["n_dropped"], 1, "{d}");
-    }
-    let n_obs: Vec<f64> = docs.iter().map(|d| num(&d["n_obs"])).collect();
+    assert_eq!(docs.len(), 1);
+    let v = &docs[0];
+    assert_eq!(v["method"], "Kaplan-Meier", "{v}");
+    assert_eq!(v["group_variable"], "ph.ecog", "{v}");
+    assert_eq!(v["missing"]["n_dropped"], 1, "{v}");
+    assert!(v["warnings"].is_array(), "{v}");
+    let groups = v["groups"].as_array().unwrap();
+    assert_eq!(groups.len(), 4);
+    let n_obs: Vec<f64> = groups.iter().map(|d| num(&d["n_obs"])).collect();
     Check::new(&case)
         .vector("ecog_n", &n_obs, Tol::exact())
         .finish();

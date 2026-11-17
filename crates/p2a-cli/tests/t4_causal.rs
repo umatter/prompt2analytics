@@ -214,3 +214,176 @@ fn test_cli_causal_ipw_reports_trimmed() {
     untrimmed.extend_from_slice(&["--trim", "0"]);
     assert_eq!(s.json(&untrimmed)["n_trimmed"], 0);
 }
+
+/// `causal iv` names its standard errors and reports ivreg's adjusted R-squared (case
+/// cli_iv_report: AER::ivreg, classical and HC1 via coeftest). Fails before: no --robust flag, no
+/// `se_type`, and the R-squared was printed again as the adjusted value.
+#[test]
+fn test_validate_cli_iv_report() {
+    let case = Case::load("cli_iv_report");
+    let n = case.scalar("n") as usize;
+    let s = temp_session();
+    s.load_as(&case.dataset_path(), "ivw", &[]);
+    let args = [
+        "causal",
+        "iv",
+        "ivw",
+        "-y",
+        "y",
+        "--endog",
+        "x",
+        "--instruments",
+        "z1",
+        "z2",
+        "--exog",
+        "w",
+    ];
+    for (robust, se_key, p_key, se_type) in [
+        (None, "se_hc1", "p_hc1", "HC1"),
+        (Some("false"), "se_classical", "p_classical", "classical"),
+    ] {
+        let mut a: Vec<&str> = args.to_vec();
+        if let Some(r) = robust {
+            a.extend(["--robust", r]);
+        }
+        let v = s.json(&a);
+        let t = json_table(&v, "t_value");
+        Check::new(&case)
+            .named("coef", &t.names, &t.coef, Tol::coef(n))
+            .named(se_key, &t.names, &t.se, Tol::se(n))
+            .named(p_key, &t.names, &t.p, Tol::p_value(n))
+            .scalar("r_squared", number(&v, "r_squared"), Tol::stat(n))
+            .scalar("adj_r_squared", number(&v, "adj_r_squared"), Tol::stat(n))
+            .finish();
+        assert_eq!(v["se_type"], se_type, "{v}");
+        let text = s.ok(&a);
+        let want = if robust.is_none() {
+            "Standard errors: HC1 (heteroskedasticity-robust)"
+        } else {
+            "Standard errors: classical"
+        };
+        assert!(text.lines().any(|l| l == want), "{text}");
+    }
+}
+
+/// CLI-33 (gsynth part): with no --force and no --n-factors the CLI fits gsynth's defaults, unit
+/// fixed effects with the number of factors chosen by cross-validation over 0..=5 (case
+/// cli_gsynth_defaults: gsynth at fixed r, CV = FALSE; gsynth 1.4's own CV draws random folds,
+/// so the r it chooses is not pinned, only the fit at the r core chooses). Fails before: the
+/// default was two-way effects searched over 0..=10.
+#[test]
+fn test_validate_cli_gsynth_defaults() {
+    let case = Case::load("cli_gsynth_defaults");
+    let s = temp_session();
+    s.load_as(&case.dataset_path(), "gs", &[]);
+    let base = [
+        "causal", "gsynth", "gs", "-y", "Y", "-d", "D", "--unit", "id", "--time", "time", "-x",
+        "X",
+    ];
+    // p2a's EM stops before R's converged fit at r >= 1: 5e-4 relative, the tolerance of the
+    // estimator's own validation and of test_validate_cli_gsynth_r_spellings (other.md)
+    let tol = Tol::iterative(5e-4);
+    let j = s.json(&base);
+    assert_eq!(j["force"], "unit", "{j}");
+    assert_eq!(j["r_max"], 5, "{j}");
+    let r = number(&j, "n_factors") as usize;
+    assert!(r <= 1, "core chose r = {r}; R's fits are pinned for r = 0 and 1");
+    Check::new(&case)
+        .scalar(&format!("unit_r{r}_att_avg"), number(&j, "att"), tol)
+        .finish();
+    // fixed numbers of factors, both fixed-effect choices; r = 0 is the search over 0..=0
+    for (force, r) in [("unit", 0), ("unit", 1), ("two_way", 0), ("two_way", 1)] {
+        let fixed = if r == 0 {
+            ["--r-max", "0"]
+        } else {
+            ["--n-factors", "1"]
+        };
+        let j = s.json(&argv(&argv(&base, &["--force", force]), &fixed));
+        assert_eq!(number(&j, "n_factors"), f64::from(r), "{j}");
+        let tag = if force == "unit" { "unit" } else { "twoway" };
+        Check::new(&case)
+            .scalar(&format!("{tag}_r{r}_att_avg"), number(&j, "att"), tol)
+            .finish();
+    }
+}
+
+/// causal staggered-did takes did's base_period (--base-period-type universal), passes
+/// --min-obs-per-cell to core, and reports the simple overall ATT and the units dropped as
+/// treated in the first period (cases did_cs_varying, did_cs_small_cohorts; analytic SEs).
+/// Fails before: no such flags or fields.
+#[test]
+fn test_validate_cli_staggered_universal_simple() {
+    let case = Case::load("did_cs_varying");
+    let s = temp_session();
+    s.load_as(&case.dataset_path(), "cs", &[]);
+    let base = [
+        "causal",
+        "staggered-did",
+        "cs",
+        "-y",
+        "y",
+        "--treatment-time",
+        "first_treat",
+        "--time",
+        "time",
+        "--unit",
+        "unit",
+        "--bootstrap",
+        "0",
+    ];
+    let j = s.json(&base);
+    let n = number(&j, "n_obs") as usize;
+    assert_eq!(j["base_period_type"], "varying", "{j}");
+    Check::new(&case)
+        .scalar(
+            "never_varying_simple_overall_att",
+            number(&j["overall_simple"], "att"),
+            Tol::coef(n),
+        )
+        .scalar(
+            "never_varying_simple_overall_se",
+            number(&j["overall_simple"], "std_error"),
+            Tol::se(n),
+        )
+        .finish();
+    let u = s.json(&argv(&base, &["--base-period-type", "universal"]));
+    assert_eq!(u["base_period_type"], "universal", "{u}");
+    Check::new(&case)
+        .scalar(
+            "never_universal_group_overall_att",
+            number(&u["overall_att"], "att"),
+            Tol::coef(n),
+        )
+        .scalar(
+            "never_universal_group_overall_se",
+            number(&u["overall_att"], "std_error"),
+            Tol::se(n),
+        )
+        .finish();
+    let text = s.ok(&base);
+    assert!(text.to_lowercase().contains("simple"), "{text}");
+
+    let small = Case::load("did_cs_small_cohorts");
+    s.load_as(&small.dataset_path(), "cs_small", &[]);
+    let mut sm = base.to_vec();
+    sm[2] = "cs_small";
+    let j = s.json(&sm);
+    Check::new(&small)
+        .scalar(
+            "n_dropped_first_period",
+            number(&j, "n_dropped_first_period"),
+            Tol::exact(),
+        )
+        .finish();
+    // a cell minimum above every cell's size leaves no cell to estimate
+    let out = s.run(&argv(&base, &["--min-obs-per-cell", "100000"]));
+    let all = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !out.status.success() || all.contains("min_obs_per_cell") || all.contains("cell"),
+        "{all}"
+    );
+}

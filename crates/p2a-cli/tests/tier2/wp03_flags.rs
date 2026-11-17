@@ -347,7 +347,7 @@ fn test_validate_cli_data_load_na_strings() {
     s.load_as(&dot, "raw", &[]); // default markers: "." is text
     // (column name, dtype) in column order, and the first n rows, of a loaded dataset
     let dtypes = |name: &str| -> Vec<(String, String)> {
-        s.json_docs(&["data", "describe", name])[1]
+        s.json(&["data", "describe", name])["column_types"]
             .as_array()
             .unwrap()
             .iter()
@@ -369,7 +369,7 @@ fn test_validate_cli_data_load_na_strings() {
             .unwrap()
             .iter()
             .enumerate()
-            .filter(|(_, r)| r[col] == "null")
+            .filter(|(_, r)| r[col].is_null())
             .map(|(i, _)| i)
             .collect()
     };
@@ -415,7 +415,7 @@ fn test_validate_cli_data_load_na_strings() {
             .filter(|&i| {
                 ["y", "n", "s"]
                     .iter()
-                    .all(|col| head_rows[i][*col] != "null")
+                    .all(|col| !head_rows[i][*col].is_null())
             })
             .map(|i| i as f64)
             .collect();

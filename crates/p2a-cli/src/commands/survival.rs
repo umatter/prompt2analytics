@@ -10,7 +10,7 @@ use p2a_core::{
 
 use crate::output::{
     OutputFormat, add_notes, add_result_notes, missing_json, parse_core_option, print_error,
-    print_missing_note, print_result_notes,
+    print_json, print_missing_note, print_result_notes,
 };
 use crate::session::SessionManager;
 
@@ -300,77 +300,89 @@ fn execute_km(
         }
     };
 
-    // One document or block per group (CLI-38: still one JSON document per group)
+    // JSON: one document; with --group the groups are an array of one object
+    if matches!(format, OutputFormat::Json) {
+        let group_json = |result: &p2a_core::KaplanMeierResult| {
+            serde_json::json!({
+                "method": "Kaplan-Meier",
+                "group": result.group,
+                "n_obs": result.n_obs,
+                "total_events": result.total_events,
+                "total_censored": result.total_censored,
+                "conf_level": result.conf_level,
+                "conf_type": result.conf_type.to_string(),
+                "median_survival": result.median_survival,
+                "median_ci": [result.median_ci.0, result.median_ci.1],
+                "times": result.times,
+                "n_at_risk": result.n_at_risk,
+                "n_events": result.n_events,
+                "n_censored": result.n_censored,
+                "survival": result.survival,
+                "std_errors": result.std_errors,
+                "ci_lower": result.ci_lower,
+                "ci_upper": result.ci_upper,
+            })
+        };
+        let missing = results
+            .first()
+            .map(|r| r.missing.clone())
+            .unwrap_or_default();
+        let json = match group_col {
+            Some(g) => serde_json::json!({
+                "method": "Kaplan-Meier",
+                "group_variable": g,
+                "groups": results.iter().map(group_json).collect::<Vec<_>>(),
+            }),
+            None => results
+                .first()
+                .map(group_json)
+                .unwrap_or(serde_json::Value::Null),
+        };
+        let mut json = with_missing(json, &missing);
+        add_notes(&mut json, None, &[]);
+        return print_json(&json);
+    }
+
+    // One block per group
     for result in &results {
-        match format {
-            OutputFormat::Json => {
-                let json = with_missing(
-                    serde_json::json!({
-                        "method": "Kaplan-Meier",
-                        "group": result.group,
-                        "n_obs": result.n_obs,
-                        "total_events": result.total_events,
-                        "total_censored": result.total_censored,
-                        "conf_level": result.conf_level,
-                        "conf_type": result.conf_type.to_string(),
-                        "median_survival": result.median_survival,
-                        "median_ci": [result.median_ci.0, result.median_ci.1],
-                        "times": result.times,
-                        "n_at_risk": result.n_at_risk,
-                        "n_events": result.n_events,
-                        "n_censored": result.n_censored,
-                        "survival": result.survival,
-                        "std_errors": result.std_errors,
-                        "ci_lower": result.ci_lower,
-                        "ci_upper": result.ci_upper,
-                    }),
-                    &result.missing,
-                );
-                let mut json = json;
-                add_notes(&mut json, None, &[]);
-                println!("{}", serde_json::to_string_pretty(&json)?);
-            }
-            _ => {
-                let pct = percent(result.conf_level);
-                println!("\nKaplan-Meier Survival Estimates");
-                println!("{}", "=".repeat(50));
-                if let Some(ref group) = result.group {
-                    println!("Group: {}", group);
-                }
-                println!("Observations: {}", result.n_obs);
-                println!("Events: {}", result.total_events);
-                println!("Censored: {}", result.total_censored);
-                println!(
-                    "Confidence intervals: {pct}%, conf.type = {}",
-                    result.conf_type
-                );
-                let limits = format!(
-                    "({pct}% CI: {} - {})",
-                    na4(result.median_ci.0),
-                    na4(result.median_ci.1)
-                );
-                match result.median_survival {
-                    Some(median) => println!("Median survival time: {median:.4} {limits}"),
-                    None => println!("Median survival time: not reached {limits}"),
-                }
-                println!("\nSurvival table (first 10 time points):");
-                println!(
-                    "{:<12} {:<12} {:<12} {:<12} {:<12}",
-                    "Time", "Survival", "Std.Error", "Lower", "Upper"
-                );
-                println!("{}", "-".repeat(60));
-                let n = result.times.len().min(10);
-                for i in 0..n {
-                    println!(
-                        "{:<12.4} {:<12.4} {:<12} {:<12} {:<12}",
-                        result.times[i],
-                        result.survival[i],
-                        na4(Some(result.std_errors[i])),
-                        na4(Some(result.ci_lower[i])),
-                        na4(Some(result.ci_upper[i]))
-                    );
-                }
-            }
+        let pct = percent(result.conf_level);
+        println!("\nKaplan-Meier Survival Estimates");
+        println!("{}", "=".repeat(50));
+        if let Some(ref group) = result.group {
+            println!("Group: {}", group);
+        }
+        println!("Observations: {}", result.n_obs);
+        println!("Events: {}", result.total_events);
+        println!("Censored: {}", result.total_censored);
+        println!(
+            "Confidence intervals: {pct}%, conf.type = {}",
+            result.conf_type
+        );
+        let limits = format!(
+            "({pct}% CI: {} - {})",
+            na4(result.median_ci.0),
+            na4(result.median_ci.1)
+        );
+        match result.median_survival {
+            Some(median) => println!("Median survival time: {median:.4} {limits}"),
+            None => println!("Median survival time: not reached {limits}"),
+        }
+        println!("\nSurvival table (first 10 time points):");
+        println!(
+            "{:<12} {:<12} {:<12} {:<12} {:<12}",
+            "Time", "Survival", "Std.Error", "Lower", "Upper"
+        );
+        println!("{}", "-".repeat(60));
+        let n = result.times.len().min(10);
+        for i in 0..n {
+            println!(
+                "{:<12.4} {:<12.4} {:<12} {:<12} {:<12}",
+                result.times[i],
+                result.survival[i],
+                na4(Some(result.std_errors[i])),
+                na4(Some(result.ci_lower[i])),
+                na4(Some(result.ci_upper[i]))
+            );
         }
     }
     // The rows dropped from the whole call, once after the last group.

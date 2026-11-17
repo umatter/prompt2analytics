@@ -314,11 +314,10 @@ fn test_data_head_command() {
     let rows: serde_json::Value = serde_json::from_slice(&out.stdout).expect("one JSON document");
     let rows = rows.as_array().expect("an array of rows");
     assert_eq!(rows.len(), 5);
-    // cells may print as strings or typed values: compare their text
-    let cell = |v: &serde_json::Value| v.to_string().trim_matches('"').to_string();
+    // cells are typed JSON values
     assert_eq!(
-        (cell(&rows[4]["a"]), cell(&rows[4]["b"])),
-        ("4".into(), "8".into())
+        (rows[4]["a"].clone(), rows[4]["b"].clone()),
+        (serde_json::json!(4), serde_json::json!(8))
     );
 }
 

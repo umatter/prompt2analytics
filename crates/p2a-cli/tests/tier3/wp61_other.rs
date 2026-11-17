@@ -448,6 +448,8 @@ fn test_cli_staggered_short_help_lists_flags() {
         "--method <",
         "--bootstrap <",
         "--anticipation <",
+        "--base-period-type <",
+        "--min-obs-per-cell <",
     ] {
         let i = lines
             .iter()
@@ -1729,6 +1731,10 @@ fn test_validate_cli_moran_alternative() {
     ];
     let two = s.json(&argv(&m, &["--alternative", "two.sided"]));
     let gt = s.json(&argv(&m, &["--alternative", "greater"]));
+    // CLI-33: no --alternative is moran.test's default, greater
+    let default = s.json(&m);
+    assert_eq!(field(&default, "alternative"), "greater");
+    assert_eq!(field(&default, "p_value"), field(&gt, "p_value"));
     Check::new(&case)
         .named_subset(
             "moran",

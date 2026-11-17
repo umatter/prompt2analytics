@@ -110,7 +110,7 @@ fn test_validate_cli_logit_prints_converged_and_warnings() {
     ];
     let v = s.json(&al);
     assert_eq!(v["aliased"], json!(["x1b"]));
-    let t = json_table(&v, "t_value");
+    let t = json_table(&v, "z_value");
     Check::new(&case)
         .named("aliased_coef", &t.names, &t.coef, Tol::coef(400))
         .finish();
@@ -160,7 +160,7 @@ fn test_validate_cli_logit_probit_glm() {
             "x2",
             "d",
         ]);
-        let t = json_table(&v, "t_value"); // the z statistic, under T0's key
+        let t = json_table(&v, "z_value");
         let mut c = Check::new(&case);
         if model == "logit" {
             c.named("logit_coef", &t.names, &t.coef, Tol::coef(n))
@@ -174,6 +174,13 @@ fn test_validate_cli_logit_probit_glm() {
                     num(&v["log_likelihood_null"]),
                     Tol::stat(n),
                 );
+            // McFadden: 1 - logLik / logLik(null), from R's two log-likelihoods
+            let pr2 = 1.0 - case.scalar("logit_loglik") / case.scalar("logit_null_loglik");
+            assert!(
+                (num(&v["pseudo_r_squared"]) - pr2).abs() <= 1e-6 * pr2.abs(),
+                "pseudo R-squared {} vs {pr2}",
+                v["pseudo_r_squared"]
+            );
         } else {
             c.named("probit_coef_tight", &t.names, &t.coef, Tol::iterative(1e-6))
                 .named("probit_se_tight", &t.names, &t.se, Tol::iterative(1e-6))
@@ -188,6 +195,42 @@ fn test_validate_cli_logit_probit_glm() {
         assert_eq!(v["aliased"], json!([]));
         assert_eq!(v["separation"], false);
         assert_eq!(v["converged"], true);
+        // glm's names: z statistics and a pseudo R-squared, no linear-model keys
+        assert_eq!(v["statistic"], "z");
+        for k in ["r_squared", "adj_r_squared"] {
+            assert!(v.get(k).is_none(), "{model}: key {k} in {v}");
+        }
+        assert!(
+            v["coefficients"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|c| c.get("t_value").is_none() && c["z_value"].is_number()),
+            "{v}"
+        );
+        let text = s.ok(&[
+            "discrete",
+            model,
+            d.as_str(),
+            "-y",
+            "y",
+            "-x",
+            "x1",
+            "x2",
+            "d",
+        ]);
+        assert!(
+            text.lines()
+                .any(|l| l.starts_with("McFadden pseudo R-squared: ")),
+            "{text}"
+        );
+        assert!(
+            !text
+                .lines()
+                .any(|l| l.starts_with("R-squared:") || l.starts_with("Adj. R-squared:")),
+            "{text}"
+        );
+        assert!(text.contains("z-value") && !text.contains("t-value"), "{text}");
     }
 }
 
@@ -1189,25 +1232,34 @@ fn test_validate_cli_nls_expdecay() {
 
 /// STAT-77 (CLI pp-test): `p2a stats pp-test` through the binary on pp_t3 (n = 200), pinned to R's
 /// PP.test internals (case stat_pp_t3, rw_short_*: lshort = TRUE, lag trunc(4 (n/100)^0.25) = 4).
-/// `--lshort` is passed because the CLI's default is lshort = false. The Z(tau) statistic and its
-/// p-value are not pinned (registry deviations).
+/// The default is R's lshort = TRUE (CLI-21); `--lshort` alone means the same and `--lshort false`
+/// gives the long lag (rw_long_*). The Z(tau) statistic and its p-value are not pinned (registry
+/// deviations).
 #[test]
 fn test_validate_cli_pp_test_internals() {
     let case = Case::load("stat_pp_t3");
     let s = temp_session();
     let d = s.load(&case);
-    let j = s.json(&["stats", "pp-test", d.as_str(), "--col", "rw", "--lshort"]);
-    Check::new(&case)
-        .scalar("rw_short_gamma", num(&j["gamma_hat"]), Tol::coef(200))
-        .scalar("rw_short_t", num(&j["t_statistic"]), Tol::stat(200))
-        .scalar("rw_short_sigma2", num(&j["sigma_squared"]), Tol::stat(200))
-        .scalar(
-            "rw_short_lambda2",
-            num(&j["lambda_squared"]),
-            Tol::stat(200),
-        )
-        .scalar("rw_short_lag", num(&j["truncation_lag"]), Tol::exact())
-        .finish();
+    let base = ["stats", "pp-test", d.as_str(), "--col", "rw"];
+    for extra in [&[][..], &["--lshort"][..], &["--lshort", "false"][..]] {
+        let tag = if extra.len() == 2 { "long" } else { "short" };
+        let j = s.json(&argv(&base, extra));
+        Check::new(&case)
+            .scalar(&format!("rw_{tag}_gamma"), num(&j["gamma_hat"]), Tol::coef(200))
+            .scalar(&format!("rw_{tag}_t"), num(&j["t_statistic"]), Tol::stat(200))
+            .scalar(
+                &format!("rw_{tag}_sigma2"),
+                num(&j["sigma_squared"]),
+                Tol::stat(200),
+            )
+            .scalar(
+                &format!("rw_{tag}_lambda2"),
+                num(&j["lambda_squared"]),
+                Tol::stat(200),
+            )
+            .scalar(&format!("rw_{tag}_lag"), num(&j["truncation_lag"]), Tol::exact())
+            .finish();
+    }
 }
 
 // =================================================================================================
@@ -1267,7 +1319,7 @@ fn test_validate_cli_munge_persists_across_invocations() {
         "-c",
         r#"[{"name": "x", "distribution": {"type": "normal", "mean": 0, "std": 1}}, {"name": "y", "distribution": {"type": "uniform", "min": 0, "max": 1}}]"#,
     ]);
-    assert_eq!(s.json_docs(&["data", "describe", "sim"])[0]["rows"], 50);
+    assert_eq!(s.json(&["data", "describe", "sim"])["rows"], 50);
     s.ok(&["reg", "ols", "sim", "-y", "y", "-x", "x"]);
     // in place: the munged version replaces the loaded one for later invocations
     s.ok(&[
@@ -1280,7 +1332,7 @@ fn test_validate_cli_munge_persists_across_invocations() {
         g.as_str(),
     ]);
     assert_eq!(
-        s.json_docs(&["data", "describe", g.as_str()])[0]["columns"],
+        s.json(&["data", "describe", g.as_str()])["columns"],
         4
     );
     let sess: Value = serde_json::from_str(&std::fs::read_to_string(s.path()).unwrap()).unwrap();
@@ -1348,7 +1400,7 @@ fn test_validate_cli_derived_dataset_names_replacement_and_errors() {
         "my data/ü",
     ]);
     assert_eq!(
-        s.json_docs(&["data", "describe", "my data/ü"])[0]["rows"],
+        s.json(&["data", "describe", "my data/ü"])["rows"],
         200
     );
     assert!(
@@ -1635,7 +1687,7 @@ fn test_cli_data_load_jsonl_persists() {
         let p = s.dir().join(format!("t.{ext}"));
         std::fs::write(&p, body).unwrap();
         s.load_as(&p, ext, &[]);
-        let types: Vec<(String, String)> = s.json_docs(&["data", "describe", ext])[1]
+        let types: Vec<(String, String)> = s.json(&["data", "describe", ext])["column_types"]
             .as_array()
             .unwrap()
             .iter()
@@ -1657,7 +1709,7 @@ fn test_cli_data_load_jsonl_persists() {
         let rows = s.json(&["data", "head", ext, "-n", "3"]);
         assert_eq!(
             (rows[1]["b"].clone(), rows[2]["c"].clone()),
-            (json!("null"), json!("null"))
+            (Value::Null, Value::Null)
         );
     }
     let p = s.dir().join("t.xyz");
@@ -1709,7 +1761,7 @@ fn test_cli_data_save_json_round_trip() {
         assert_eq!(g.to_bits(), w.to_bits());
     }
     s.load_as(&out, "back", &[]);
-    let mut types: Vec<(String, String)> = s.json_docs(&["data", "describe", "back"])[1]
+    let mut types: Vec<(String, String)> = s.json(&["data", "describe", "back"])["column_types"]
         .as_array()
         .unwrap()
         .iter()
