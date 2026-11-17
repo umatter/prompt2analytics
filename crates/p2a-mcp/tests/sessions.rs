@@ -499,7 +499,7 @@ async fn reload_refuses_a_parquet_source_past_the_quota_before_decoding_it() {
         .as_str()
         .unwrap_or_default();
     assert!(
-        error.starts_with("Loading this file takes at least")
+        error.starts_with("Loading this file takes an estimated")
             && error.contains("Nothing was loaded")
             && error.contains("(limit 8.00 MiB per session)"),
         "{body}"
