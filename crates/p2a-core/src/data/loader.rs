@@ -1027,7 +1027,8 @@ impl DataLoader {
     ///
     /// # Arguments
     /// * `path` - Path to the CSV file
-    /// * `skip_rows` - Number of rows to skip (excluding header)
+    /// * `skip_rows` - Number of data rows to skip after the header; every chunk keeps
+    ///   the file's header names
     /// * `n_rows` - Number of rows to read
     ///
     /// # Example
@@ -1047,14 +1048,26 @@ impl DataLoader {
         skip_rows: usize,
         n_rows: usize,
     ) -> Result<DataFrame, LoadError> {
+        // polars misreads an offset equal to the number of data rows (a row of
+        // nulls from the end of the file), so the read starts one row early,
+        // where a data row is known to exist, and that row is dropped.
+        let before = skip_rows.saturating_sub(1);
+        let lead = skip_rows - before;
         let options = csv_options(Self::DEFAULT_NA_STRINGS)
-            .with_skip_rows(skip_rows)
-            .with_n_rows(Some(n_rows));
+            .with_skip_rows_after_header(before)
+            .with_n_rows(Some(n_rows.saturating_add(lead)));
 
-        let df = options
+        match options
             .try_into_reader_with_file_path(Some(path.as_ref().to_path_buf()))?
-            .finish()?;
-        Ok(df)
+            .finish()
+        {
+            Ok(df) => Ok(df.slice(lead as i64, n_rows)),
+            // An offset past the last data row: return the header with no rows.
+            Err(PolarsError::NoData(_)) if skip_rows > 0 => {
+                Ok(Self::load_csv_chunk(path, 0, 1)?.slice(0, 0))
+            }
+            Err(e) => Err(e.into()),
+        }
     }
 
     /// Create a chunk iterator for processing large CSV files.
@@ -1838,6 +1851,69 @@ mod tests {
             .unwrap();
         assert_eq!(first.column("x").unwrap().dtype(), &DataType::Float64);
         assert_eq!(first.column("x").unwrap().null_count(), 1);
+
+        // A second chunk keeps the header and holds rows 601-1100, NA at 1050.
+        let chunks: Vec<DataFrame> = DataLoader::iter_csv_chunks(&path, 600)
+            .map(|c| c.unwrap())
+            .collect();
+        assert_eq!(chunks.len(), 2);
+        let second = &chunks[1];
+        assert_eq!(second.get_column_names(), ["id", "x"]);
+        assert_eq!(second.height(), 500);
+        let ids = second.column("id").unwrap().cast(&DataType::Int64).unwrap();
+        assert_eq!(ids.i64().unwrap().get(0), Some(601));
+        assert_eq!(ids.i64().unwrap().get(499), Some(1100));
+        assert_eq!(null_rows(second, "x"), vec![1050 - 601]);
+    }
+
+    #[test]
+    fn csv_chunks_keep_the_header_and_cover_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut text = String::from("id,x,s\n");
+        for i in 1..=23 {
+            let x = if i == 9 {
+                String::new()
+            } else {
+                format!("{}", i as f64 * 1.7 + ((i * 37) % 11) as f64 / 10.0)
+            };
+            text.push_str(&format!("{i},{x},w{}\n", (i * 7) % 5));
+        }
+        let path = dir.path().join("chunks.csv");
+        std::fs::write(&path, text).unwrap();
+        let whole = DataLoader::load_csv(&path).unwrap();
+        assert_eq!(whole.height(), 23);
+        let schema = whole.schema();
+        for size in [1usize, 5, 7, 23] {
+            let chunks: Vec<DataFrame> = DataLoader::iter_csv_chunks(&path, size)
+                .map(|c| c.unwrap())
+                .collect();
+            let mut stacked: Option<DataFrame> = None;
+            let mut rows = 0;
+            for chunk in &chunks {
+                assert_eq!(chunk.get_column_names(), ["id", "x", "s"], "size {size}");
+                rows += chunk.height();
+                let cast = DataFrame::new(
+                    chunk
+                        .get_columns()
+                        .iter()
+                        .map(|c| c.cast(schema.get(c.name()).unwrap()).unwrap())
+                        .collect(),
+                )
+                .unwrap();
+                stacked = Some(match stacked {
+                    None => cast,
+                    Some(acc) => acc.vstack(&cast).unwrap(),
+                });
+            }
+            assert_eq!(rows, 23, "size {size}");
+            assert!(stacked.unwrap().equals_missing(&whole), "size {size}");
+        }
+        // Offsets at and past the end give the header with no rows.
+        for skip in [23usize, 24, 100] {
+            let empty = DataLoader::load_csv_chunk(&path, skip, 5).unwrap();
+            assert_eq!(empty.height(), 0, "skip {skip}");
+            assert_eq!(empty.get_column_names(), ["id", "x", "s"], "skip {skip}");
+        }
     }
 
     #[test]
