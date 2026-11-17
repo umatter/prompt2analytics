@@ -120,8 +120,8 @@ fn mean_sd(x: &[f64]) -> (f64, f64) {
 /// Why [`check_file_size`] refused a file.
 #[derive(Debug)]
 pub(crate) enum FileSizeRefusal {
-    /// Its size could not be read.
-    Unreadable,
+    /// Its size could not be read (the I/O error, for the caller's log).
+    Unreadable(std::io::Error),
     /// It is larger than the `load_file_bytes` budget.
     OverLimit(Box<crate::tools::limits::LimitViolation>),
 }
@@ -138,7 +138,7 @@ pub(crate) fn check_file_size(path: &Path, tool: &str) -> Result<Option<u64>, Fi
         return Ok(None);
     }
     let size = std::fs::metadata(path)
-        .map_err(|_| FileSizeRefusal::Unreadable)?
+        .map_err(FileSizeRefusal::Unreadable)?
         .len();
     limits
         .check_budget(tool, "load_file_bytes", size, limits.load_file_bytes)
@@ -155,7 +155,6 @@ fn count_levels(codes: &[Option<u32>], counts: &mut [usize], name: &str) -> Resu
     let mut n = 0usize;
     for &code in codes.iter().flatten() {
         let Some(c) = counts.get_mut(code as usize) else {
-            debug_assert!(false, "factor code {code} outside the {n_levels} levels");
             return Err(format!(
                 "factor code {code} outside the {n_levels} levels of column '{name}'"
             ));
@@ -1858,7 +1857,7 @@ impl AnalyticsServer {
         // 64 MiB, none when limits are off, P2A_LIMIT_OVERRIDES in any mode).
         match check_file_size(&path, "load_dataset") {
             Ok(_) => {}
-            Err(FileSizeRefusal::Unreadable) => {
+            Err(FileSizeRefusal::Unreadable(_)) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
                     "Failed to load dataset: File not found: {}",
                     path_jail::display_path(&path)
@@ -2297,19 +2296,30 @@ impl AnalyticsServer {
 
         let n = request.n.unwrap_or(5);
         let df = dataset.df();
-        let shown = n.min(HEAD_MAX_ROWS).min(df.height());
+        let (shown, shown_columns, _) = head_shape(df, n);
         let capped = if n > HEAD_MAX_ROWS {
             format!("; n = {n} capped at {HEAD_MAX_ROWS}")
         } else {
             String::new()
         };
+        let columns = if shown_columns < df.width() {
+            format!("{} columns, first {shown_columns} shown", df.width())
+        } else {
+            format!("{} columns", df.width())
+        };
+        let table = match render_head(df, n) {
+            Ok(table) => table,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Preview stopped: {e}"
+                ))]));
+            }
+        };
 
         let result = format!(
-            "Dataset: {} (showing first {shown} of {} rows, {} columns{capped})\n\n{}",
+            "Dataset: {} (showing first {shown} of {} rows, {columns}{capped})\n\n{table}",
             request.dataset,
             df.height(),
-            df.width(),
-            render_head(df, n)
         );
 
         Ok(CallToolResult::success(vec![Content::text(result)]))
@@ -2321,55 +2331,124 @@ pub(crate) const HEAD_MAX_ROWS: usize = 1000;
 /// Characters a preview cell shows before it is cut with an ellipsis.
 pub(crate) const HEAD_CELL_CHARS: usize = 40;
 
-/// The first `rows` rows (at most [`HEAD_MAX_ROWS`]) of every column of `df` as a plain
-/// table: the column names, their types as polars prints them (`str`, `i64`, `f64`, ...), a
-/// rule, and one line per row. Cells are cut to [`HEAD_CELL_CHARS`] characters, a missing
-/// value prints `null`, and columns are aligned by characters, not bytes. Unlike polars'
-/// own display, no row or column is hidden.
-pub(crate) fn render_head(df: &DataFrame, rows: usize) -> String {
+/// Most cells a preview shows. A tighter `table_cells` budget lowers it; the
+/// shown columns are cut first, then (with one column left) the rows.
+pub(crate) const HEAD_MAX_CELLS: usize = 100_000;
+
+/// The rows and columns a preview of the first `rows` rows of `df` shows: at
+/// most [`HEAD_MAX_ROWS`] rows and [`HEAD_MAX_CELLS`] cells (or the limits'
+/// `table_cells`, when lower), columns cut before rows.
+pub(crate) fn head_shape(df: &DataFrame, rows: usize) -> (usize, usize, usize) {
     let rows = rows.min(HEAD_MAX_ROWS).min(df.height());
-    let columns = df.get_columns();
-    let mut table: Vec<Vec<String>> = Vec::with_capacity(columns.len());
+    let cap = crate::tools::limits::current()
+        .table_cells
+        .map_or(HEAD_MAX_CELLS, |c| usize::try_from(c).unwrap_or(usize::MAX))
+        .clamp(1, HEAD_MAX_CELLS);
+    let columns = df.width().min((cap / rows.max(1)).max(1));
+    let rows = rows.min(cap / columns.max(1));
+    (rows, columns, cap)
+}
+
+/// One preview cell: control characters (a line break or tab would break the
+/// table) as spaces, cut to [`HEAD_CELL_CHARS`] characters.
+fn head_cell(column: &Column, i: usize) -> String {
+    let text = match column.get(i) {
+        Ok(AnyValue::String(v)) => v.to_string(),
+        Ok(AnyValue::StringOwned(v)) => v.to_string(),
+        Ok(v) => v.to_string(),
+        Err(_) => "?".to_string(),
+    };
+    let text = text.replace(|c: char| c.is_control(), " ");
+    p2a_text::ellipsize(&text, HEAD_CELL_CHARS).into_owned()
+}
+
+/// The first `rows` rows of `df` as a plain table: the column names, their
+/// types as polars prints them (`str`, `i64`, `f64`, ...), a rule, and one line per row.
+/// Cells are cut to [`HEAD_CELL_CHARS`] characters, a missing value prints `null`, and
+/// columns are aligned by characters, not bytes. Rows and columns follow [`head_shape`]
+/// (every column of a frame within the cell cap); a cut, and a stop once the text reaches
+/// the limits' `response_bytes`, is noted on a last line. The cells are formatted twice
+/// (widths, then rows) rather than held, so the work is bounded by the shown cells.
+pub(crate) fn render_head(df: &DataFrame, rows: usize) -> Result<String, String> {
+    use std::fmt::Write as _;
+    let requested = rows.min(HEAD_MAX_ROWS).min(df.height());
+    let (rows, n_columns, cap) = head_shape(df, rows);
+    let columns = &df.get_columns()[..n_columns];
+    let headers = |column: &Column| {
+        [
+            p2a_text::ellipsize(column.name().as_str(), HEAD_CELL_CHARS).into_owned(),
+            p2a_text::ellipsize(&column.dtype().to_string(), HEAD_CELL_CHARS).into_owned(),
+        ]
+    };
+    let mut widths = Vec::with_capacity(columns.len());
     for column in columns {
-        let mut cells = Vec::with_capacity(rows + 2);
-        cells.push(p2a_text::ellipsize(column.name().as_str(), HEAD_CELL_CHARS).into_owned());
-        cells.push(p2a_text::ellipsize(&column.dtype().to_string(), HEAD_CELL_CHARS).into_owned());
-        for i in 0..rows {
-            let text = match column.get(i) {
-                Ok(AnyValue::String(v)) => v.to_string(),
-                Ok(AnyValue::StringOwned(v)) => v.to_string(),
-                Ok(v) => v.to_string(),
-                Err(_) => "?".to_string(),
-            };
-            // a line break or tab inside a cell would break the table
-            let text = text.replace(|c: char| c.is_control(), " ");
-            cells.push(p2a_text::ellipsize(&text, HEAD_CELL_CHARS).into_owned());
-        }
-        table.push(cells);
-    }
-    let widths: Vec<usize> = table
-        .iter()
-        .map(|cells| cells.iter().map(|c| c.chars().count()).max().unwrap_or(0))
-        .collect();
-    let mut out = String::new();
-    for r in 0..rows + 2 {
-        if r == 2 {
-            let rule: Vec<String> = widths.iter().map(|&w| "-".repeat(w)).collect();
-            out.push_str(&rule.join("-+-"));
-            out.push('\n');
-        }
-        let cells: Vec<String> = widths
+        p2a_core::resource::checkpoint().map_err(|e| e.to_string())?;
+        let mut w = headers(column)
             .iter()
-            .zip(&table)
-            .map(|(&w, column)| {
-                let c = &column[r];
-                format!("{c}{}", " ".repeat(w.saturating_sub(c.chars().count())))
-            })
-            .collect();
-        out.push_str(cells.join(" | ").trim_end());
-        out.push('\n');
+            .map(|c| c.chars().count())
+            .max()
+            .unwrap_or(0);
+        for i in 0..rows {
+            w = w.max(head_cell(column, i).chars().count());
+        }
+        widths.push(w);
     }
-    out
+    let byte_cap = crate::tools::limits::current()
+        .response_bytes
+        .map(|b| usize::try_from(b).unwrap_or(usize::MAX));
+    let mut out = String::new();
+    let mut line = String::new();
+    let push_line = |out: &mut String, line: &mut String| {
+        out.push_str(line.trim_end());
+        out.push('\n');
+        line.clear();
+    };
+    let pad = |line: &mut String, cell: &str, w: usize, first: bool| {
+        if !first {
+            line.push_str(" | ");
+        }
+        line.push_str(cell);
+        let n = w.saturating_sub(cell.chars().count());
+        line.extend(std::iter::repeat_n(' ', n));
+    };
+    let header_cells: Vec<[String; 2]> = columns.iter().map(headers).collect();
+    for k in 0..2 {
+        for (j, (cells, &w)) in header_cells.iter().zip(&widths).enumerate() {
+            pad(&mut line, &cells[k], w, j == 0);
+        }
+        push_line(&mut out, &mut line);
+    }
+    let rule: Vec<String> = widths.iter().map(|&w| "-".repeat(w)).collect();
+    line.push_str(&rule.join("-+-"));
+    push_line(&mut out, &mut line);
+    let mut written = 0;
+    for i in 0..rows {
+        p2a_core::resource::checkpoint().map_err(|e| e.to_string())?;
+        if byte_cap.is_some_and(|cap| out.len() >= cap) {
+            break;
+        }
+        for (j, (column, &w)) in columns.iter().zip(&widths).enumerate() {
+            pad(&mut line, &head_cell(column, i), w, j == 0);
+        }
+        push_line(&mut out, &mut line);
+        written += 1;
+    }
+    if written < rows {
+        let _ = writeln!(
+            out,
+            "({written} of {requested} rows shown: the output reached this server's response \
+             limit of {} bytes)",
+            byte_cap.unwrap_or_default()
+        );
+    } else if n_columns < df.width() || rows < requested {
+        let _ = writeln!(
+            out,
+            "({n_columns} of {} columns and {rows} of {requested} rows shown: a preview shows \
+             at most {cap} cells)",
+            df.width()
+        );
+    }
+    Ok(out)
 }
 
 /// Load `path` as `load_dataset` does: [`DataLoader::load`] without `na_strings`, or
@@ -2396,13 +2475,8 @@ mod tests {
         let n = count_levels(&[Some(0), None, Some(1), Some(1)], &mut counts, "g");
         assert_eq!(n, Ok(3));
         assert_eq!(counts, [1, 2]);
-        let outside = || count_levels(&[Some(0), Some(2)], &mut [0usize; 2], "g");
-        if cfg!(debug_assertions) {
-            assert!(std::panic::catch_unwind(outside).is_err());
-        } else {
-            let e = outside().unwrap_err();
-            assert_eq!(e, "factor code 2 outside the 2 levels of column 'g'");
-        }
+        let e = count_levels(&[Some(0), Some(2)], &mut [0usize; 2], "g").unwrap_err();
+        assert_eq!(e, "factor code 2 outside the 2 levels of column 'g'");
     }
 
     /// LLM-6, full precision: validation/r/cases/mcp_data_t3.R, case data_describe_columns (summary(), sd(),
@@ -4160,12 +4234,83 @@ mod tests {
         assert!(small.starts_with("Dataset: d (showing first 5 of 5000 rows, 1 columns)\n"));
     }
 
+    /// A wide frame shows at most the preview's cells: columns are cut first and the
+    /// cut is noted, under the hosted limits and under a smaller `table_cells` budget.
+    #[test]
+    fn test_head_preview_is_bounded_by_cells() {
+        use crate::tools::limits::{self, Limits};
+        let width = 300;
+        let columns: Vec<Column> = (0..width)
+            .map(|j| {
+                let v: Vec<f64> = (0..600).map(|i| (i * 7 + j) as f64 * 0.37 + 0.01).collect();
+                Series::new(format!("c{j}").into(), v).into()
+            })
+            .collect();
+        let df = DataFrame::new(columns).unwrap();
+        // Hosted: 1,000 rows of 300 columns are over the cap, so columns are cut.
+        let t = limits::with_limits(Limits::hosted(), || render_head(&df, 1000)).unwrap();
+        let (rows, cols, cap) = limits::with_limits(Limits::hosted(), || head_shape(&df, 1000));
+        assert_eq!(cap, HEAD_MAX_CELLS);
+        assert_eq!(rows, 600);
+        assert!(cols < width && cols * rows <= cap, "{cols} x {rows}");
+        let lines: Vec<&str> = t.lines().collect();
+        assert_eq!(lines.len(), 3 + rows + 1);
+        assert_eq!(lines[0].split(" | ").count(), cols);
+        assert_eq!(
+            *lines.last().unwrap(),
+            format!(
+                "({cols} of {width} columns and 600 of 600 rows shown: a preview shows at most \
+                 {cap} cells)"
+            )
+        );
+        // A smaller table_cells budget: one column, and its rows cut.
+        let mut small = Limits::off();
+        small.table_cells = Some(50);
+        let t = limits::with_limits(small, || render_head(&df, 1000)).unwrap();
+        let lines: Vec<&str> = t.lines().collect();
+        assert_eq!(lines.len(), 3 + 50 + 1, "{t}");
+        assert!(lines[0].starts_with("c0") && !lines[0].contains('|'), "{t}");
+        assert_eq!(
+            *lines.last().unwrap(),
+            "(1 of 300 columns and 50 of 600 rows shown: a preview shows at most 50 cells)"
+        );
+        // And the response limit stops the rows, with a note.
+        let mut bytes = Limits::off();
+        bytes.response_bytes = Some(2_000);
+        let t = limits::with_limits(bytes, || render_head(&df, 1000)).unwrap();
+        // The header lines alone pass 2,000 bytes here, so no row follows them.
+        assert_eq!(t.lines().count(), 3 + 1, "{t}");
+        assert!(
+            t.trim_end()
+                .ends_with("(0 of 600 rows shown: the output reached this server's response limit of 2000 bytes)"),
+            "{}",
+            &t[t.len() - 200..]
+        );
+        // The header of head_dataset says how many columns are shown.
+        use crate::tools::common::test_support::server_with;
+        let (rt, server) = server_with(vec![("d", df.clone())]);
+        let h = limits::with_limits(Limits::hosted(), || head(&rt, &server, Some(10)));
+        assert!(
+            h.starts_with("Dataset: d (showing first 10 of 600 rows, 300 columns)"),
+            "{}",
+            &h[..100]
+        );
+        let mut tiny = Limits::off();
+        tiny.table_cells = Some(100);
+        let h = limits::with_limits(tiny, || head(&rt, &server, Some(10)));
+        assert!(
+            h.starts_with("Dataset: d (showing first 10 of 600 rows, 300 columns, first 10 shown)"),
+            "{}",
+            &h[..100]
+        );
+    }
+
     /// LLM-13: a long multibyte cell is cut on a character boundary; a missing value is `null`.
     #[test]
     fn test_head_dataset_cells_are_cut_on_char_boundaries() {
         let long = "é".repeat(200);
         let df = df!("s" => [Some(long.as_str()), None, Some("a\nb")]).unwrap();
-        let t = render_head(&df, 3);
+        let t = render_head(&df, 3).unwrap();
         let lines: Vec<&str> = t.lines().collect();
         assert_eq!(lines.len(), 6, "{t}");
         assert_eq!(lines[3].chars().count(), HEAD_CELL_CHARS, "{t}");

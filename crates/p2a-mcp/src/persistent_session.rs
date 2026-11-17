@@ -775,8 +775,8 @@ pub fn load_reload_source(
         use crate::tools::handlers::data::{FileSizeRefusal, check_file_size};
         match check_file_size(&path, RELOAD_LABEL) {
             Ok(_) => {}
-            Err(FileSizeRefusal::Unreadable) => {
-                tracing::debug!(dataset = %name, "Failed to read a reload source's size");
+            Err(FileSizeRefusal::Unreadable(e)) => {
+                tracing::debug!(dataset = %name, error = %e, "Failed to read a reload source's size");
                 return Err(RELOAD_LOAD_FAILED.to_string());
             }
             Err(FileSizeRefusal::OverLimit(v)) => {

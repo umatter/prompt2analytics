@@ -263,7 +263,8 @@ impl AnalyticsServer {
         let note = truncation_note(&outcome, &opts);
         let result = outcome.result;
 
-        let preview = render_head(&result.dataframe, PREVIEW_ROWS);
+        let preview = render_head(&result.dataframe, PREVIEW_ROWS)
+            .unwrap_or_else(|e| format!("(preview stopped: {e})\n"));
         let dataset = Dataset::new(result.dataframe);
 
         // A default name never replaces another dataset; an explicit one may, and says so.
@@ -408,7 +409,8 @@ impl AnalyticsServer {
         let note = truncation_note(&outcome, &opts);
         let result = outcome.result;
 
-        let preview = render_head(&result.dataframe, PREVIEW_ROWS);
+        let preview = render_head(&result.dataframe, PREVIEW_ROWS)
+            .unwrap_or_else(|e| format!("(preview stopped: {e})\n"));
         let dataset = Dataset::new(result.dataframe);
 
         // A default name never replaces another dataset; an explicit one may, and says so.
@@ -549,7 +551,8 @@ impl AnalyticsServer {
         let note = truncation_note(&outcome, &opts);
         let result = outcome.result;
 
-        let preview = render_head(&result.dataframe, PREVIEW_ROWS);
+        let preview = render_head(&result.dataframe, PREVIEW_ROWS)
+            .unwrap_or_else(|e| format!("(preview stopped: {e})\n"));
         let dataset = Dataset::new(result.dataframe);
 
         // A default name never replaces another dataset; an explicit one may, and says so.
