@@ -846,7 +846,7 @@ fn rollback_refusal(session: &CleaningSession, index: Option<usize>) -> Option<S
             index,
             session.list_checkpoints().len().saturating_sub(1)
         )),
-        None if session.current_checkpoint == 0 => {
+        None if !session.can_rollback() => {
             Some("Already at initial state, cannot rollback further".to_string())
         }
         _ => None,
