@@ -370,14 +370,14 @@ crates/p2a-core/src/
 │   ├── structts.rs        # Structural time series (local level, trend, BSM)
 │   ├── changepoint.rs     # PELT and binary segmentation
 │   ├── garch.rs           # GARCH(p,q) by conditional ML, normal or Student-t errors
-│   ├── causal_impact.rs   # Bayesian structural time series causal inference
+│   ├── causal_impact.rs   # CausalImpact: maximum-likelihood structural model, joint forecast-error intervals
 │   └── tsutils.rs         # lag, embed, diffinv, filter, window, arima_sim, runmed
 │
 ├── ml/                    # Machine learning (35+ files)
 │   ├── clustering.rs      # K-means (k-means++), DBSCAN, Hierarchical (Ward, single, complete, average)
-│   ├── reduction.rs       # PCA (via SVD), t-SNE
+│   ├── reduction.rs       # PCA (via SVD), exact t-SNE with Rtsne defaults, cmdscale with the Cailliez constant
 │   ├── trees.rs           # Random Forest (CART)
-│   ├── svm.rs             # Linear SVM (SMO)
+│   ├── svm.rs             # Linear SVM via the LIBSVM solver, kernel SVM via SMO
 │   ├── gbm.rs, xgboost.rs, lightgbm.rs, adaboost.rs, mboost.rs   # Boosting family
 │   ├── bart.rs, bart_causal.rs, causal_forest.rs                 # Bayesian trees, heterogeneous effects
 │   ├── shap.rs, pdp.rs, ice.rs   # Model interpretation (exact TreeSHAP, Kernel SHAP; one PDP/ICE engine)

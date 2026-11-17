@@ -272,10 +272,11 @@ const SCPI_WORK_HOSTED: u64 = 512_000;
 const CTREE_PERMUTATION_WORK_HOSTED: u64 = 2_000_000_000;
 
 /// Hosted [`Limits::probit_impact_rows`]. The SAR probit's impacts invert the dense n x n
-/// spatial multiplier at each of 17 to 19 values of rho, O(n^3) each: on a release build, one
-/// call at a time on one core, they took 43.6 s on 2,000 rows (the hosted `cubic_rows`), where
-/// the sampler alone took 12.4 s, about 0.2 ns per n^3 unit, so 1,500 rows keep the impacts near
-/// a quarter of the hosted 60 s deadline and the whole call well inside it.
+/// spatial multiplier at 17 to 37 values of rho (19 typical), O(n^3) each. On a release build,
+/// one call at a time on one core of a quiet machine, the whole call with impacts took 21.3 s on
+/// 2,000 rows (the hosted `cubic_rows`); on 1,500 rows it took 10.3 s with impacts and 3.1 s
+/// without, about 0.1 ns per n^3 unit at 19 inverses. At 37 inverses the impacts on 1,500 rows
+/// take about 14 s, so the whole call stays well inside the hosted 60 s deadline.
 const PROBIT_IMPACT_ROWS_HOSTED: u64 = 1_500;
 
 /// Hosted [`Limits::ensemble_bytes`]: 256 MiB, the hosted per-allocation ceiling

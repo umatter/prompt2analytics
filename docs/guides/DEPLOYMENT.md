@@ -692,10 +692,11 @@ asymptotic test types (`bonferroni`, `univariate`) run no permutations and are
 not counted.
 
 The hosted `probit_impact_rows` of 1,500 holds the SAR probit's impacts, which
-invert the dense spatial multiplier at 17 to 19 values of rho, to fewer rows
-than `cubic_rows`: on a release build, one call at a time on one core, the
-impacts took 43.6 s on 2,000 rows and the sampler 12.4 s, so on 1,500 rows the
-impacts take about a quarter of the default deadline. A call with
+invert the dense spatial multiplier at 17 to 37 values of rho (19 typical), to
+fewer rows than `cubic_rows`: on a release build, one call at a time on one core
+of a quiet machine, the whole call with impacts took 21.3 s on 2,000 rows; on
+1,500 rows it took 10.3 s with impacts and 3.1 s without, and at 37 inverses the
+impacts there take about 14 s, well inside the default deadline. A call with
 `compute_impacts` set to false is held to `cubic_rows` only. With a lower
 `P2A_TOOL_TIMEOUT_SECS`, or on a slower or throttled CPU, lower both in
 proportion with `P2A_LIMIT_OVERRIDES` (`probit_impact_rows` with the cube root
