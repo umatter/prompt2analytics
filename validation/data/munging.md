@@ -15,8 +15,8 @@ about 1e-15.
 ## Lag, lead, diff and pct_change
 
 Positional, as `dplyr::lag` and `dplyr::lead` without `order_by`, within `group_by` groups in data
-order; a time-aware lag (`plm::lag`, gaps) is DATA-39 (Tier 4). An integer column stays integer in `lag`
-and `diff`; NA is a missing value, not NaN.
+order. With an integer `time` column the shift is time-aware instead, as `plm::lag` (see "Tier 4 pins").
+An integer column stays integer in `lag` and `diff`; NA is a missing value, not NaN.
 
 - R: `d %>% group_by(g) %>% mutate(lag2 = lag(x, 2), lead1 = lead(y, 1))`, `x - lag(x, k)`,
   `(y - lag(y)) / lag(y)`. Case `data_munging_lag`, on `munging_long.csv` (Int64 with NA, interleaved groups).
@@ -36,10 +36,9 @@ edges with open outer bins.
 
 ## One-hot (model.matrix)
 
-An integer factor and the full dummy set, as `model.matrix(~ 0 + factor(g))`. Not pinned: the baseline
-of `drop_first`, an arbitrary level where R's treatment contrast drops the first sorted level (DATA-40,
-Tier 4), and the names of text levels, which are quoted, and the dummy for NA (DATA-41, Tier 4). Both
-are registry deviations.
+An integer factor and the full dummy set, as `model.matrix(~ 0 + factor(g))`. The level order, the
+plain level names, the `drop_first` baseline and missing values are pinned on text and float factors in
+"Tier 4 pins".
 
 - Case `data_munging_model_matrix`, on `munging_factor.csv`. Decisive value: `level_counts = [3, 4, 3]`.
 - Test: `test_validate_model_matrix`.
@@ -90,8 +89,8 @@ Case `data_munging_fill_mode`, on `munging_fill.csv`. Decisive values: `k_mode =
 `"NA"` and `"null"` (any ASCII case) write a missing value, as `dplyr::na_if`. Old and new values are
 parsed in the column's type, as constants are above; Float32 cells compare in f32. Text and category
 labels compare exactly, so `"NA"` as an old value matches the text `NA`. Other column types are an
-error. A missing value is never matched: that is `fill_na`. The float match keeps its absolute-epsilon
-rule (DATA-69, Tier 4).
+error. A missing value is never matched: that is `fill_na`. Floats match exactly, as R's `x == old`
+(`-0` matches `0`). A replacement that matches nothing returns the column as it is.
 
 Case `data_munging_na_if`, on `munging_fill.csv`. Decisive value:
 `k_na_if_3 = [NA, NA, 1, NA, 1, 2, NA, 5, 4, 6]`. Tests: `test_validate_replace_na_if`,
@@ -121,11 +120,11 @@ Case `data_munging_describe`, on `munging_fill.csv`. Decisive values: `k`: count
 The right-hand columns are named by `dplyr:::add_suffixes`: a name that is taken gets the suffix, again
 until it is unique, and earlier names win (`value_right_right`). The right names are checked against the
 left columns polars keeps: all of them, except that a right join drops the left keys. The right keys
-take part, as in `dplyr:::join_cols`, although inner and left joins then drop them. Where dplyr
+take part, as in `dplyr:::join_cols`, although inner, left and full joins then drop them. Where dplyr
 silently drops a column under an empty suffix, an empty suffix that leaves a name on both sides is an error.
 
-p2a's full join keeps both key columns (`k`, `k_right`; DATA-43, Tier 4), so the pin uses
-`full_join(keep = TRUE)` and is a registry deviation.
+A full join has one column per key, as `dplyr::full_join` (the right keys are coalesced into the left
+ones and take no suffix).
 
 Case `data_munging_join_suffix`, on `munging_join_frames.csv`. Decisive names: `left_join(AB, C)` gives `k,
 value, value_right, value_right_right`; `cross_join(AB, C)` gives `k, value, value_right, k_right,
@@ -206,7 +205,30 @@ run the low-cardinality rows ran 0.18-1.06x, mean fill 0.88-1.06x, `preview_repl
 the n = 100 match row) and the fill preview +2.05 µs; the other rows of the table are from 2026-11-08.
 Mean fill is unchanged (within 1.1x).
 
-## Not covered here (Tier 4)
+## Tier 4 pins
 
-DATA-11 (integer normalize and pct_change), DATA-36 (row and column order of deduplicate, group_by,
-stack), DATA-71 (rank ties).
+Cases in `validation/r/cases/data_munging_t4.R`, registry `validation/methods/data_munging_t4.json`.
+Conventions (decided 2026-11-17): missing join keys match each other (U1, dplyr's default
+`na_matches = "na"` and `base::merge`); a missing one-hot value is missing in every dummy (U2,
+`model.matrix` under `na.action = na.pass`); grouped results are sorted by their keys, missing last
+(U3, `dplyr::summarise`); a time index is an integer column (U4, `munge_lag_lead` and `munge_diff`).
+
+- Panel shifts (`data_munging_panel_shift`, on `munging_panel.csv`: integer `x`, unsorted rows, interleaved
+  firms, firm 3 without 2003). Grouped `diff` and `pct_change` as `dplyr::mutate(group_by(d, firm), ...)`;
+  `tidyr::fill` by firm, down and up; time-indexed lag, lead and diff as `plm::lag`/`lead`/`diff` on
+  `pdata.frame(index = c("firm", "year"))`, mapped back to data order; `pct_change` and `normalize` of an
+  integer column in floating point. Tests: `test_validate_panel_shift_integer`,
+  `test_validate_panel_shift_grouped`, `test_validate_panel_shift_time_index`,
+  `test_validate_fill_grouped_tidyr`, `test_validate_mcp_diff_group_by`, `test_validate_mcp_lag_time_index`.
+- One-hot and rank (`data_munging_factor_t4`, on `munging_regions.csv`): levels as `levels(factor(x))`
+  (`east, north, south, west`; floats as `1.5, 2.5, 3`), dummies named `<column>_<level>`, NA in every
+  dummy, `drop_first` dropping `east`; `rank` with ties averaged as `rank(ties.method = "average")`.
+  Tests: `test_validate_one_hot_model_matrix_na`, `test_validate_mcp_one_hot_names`, `test_validate_rank_average`.
+- Joins, binds and order (`data_munging_combine_t4`): full, inner, semi and anti joins with missing keys
+  (one key column; NA keys match); `dplyr::bind_rows` of an integer and a double `x` (double) and of
+  `Income`/`income` (two half-missing columns); `distinct` keeping first, last and none in data order;
+  `summarise` by group, NA last. Tests: `test_validate_join_na_keys_dplyr`, `test_validate_concat_bind_rows`,
+  `test_validate_distinct_order`, `test_validate_group_by_order`.
+
+Tolerances: exact for lags, leads, fills, dummies, ranks, names and integer values; 1e-14 relative for
+differences, ratios and normalize (the same IEEE operations as R); group sums 1e-10.
