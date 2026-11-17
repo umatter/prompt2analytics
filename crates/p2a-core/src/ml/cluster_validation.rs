@@ -15,7 +15,7 @@
 //! - Normalized Mutual Information: Information-theoretic measure
 
 use crate::errors::{EconError, EconResult};
-use ndarray::{Array1, Array2, ArrayView2, Axis};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -72,6 +72,63 @@ pub(crate) fn compact_labels(labels: &[usize], what: &str) -> Result<CompactLabe
     }
 }
 
+/// The labels OR-ed together: at least the largest label and below twice it (0 for no label).
+/// One pass that vectorises, unlike the maximum over `usize`.
+fn label_bound(labels: &[usize]) -> usize {
+    labels.iter().fold(0, |acc, &l| acc | l)
+}
+
+/// The compacted ids of [`compact_labels`] without copying the labels where that can be avoided.
+pub(crate) enum LabelIds {
+    /// The labels already are `0..k` with every value present: each label is its id
+    Same,
+    /// Id by label value (labels below `2n`)
+    Remap(Vec<usize>),
+    /// Id by observation ([`compact_labels`])
+    Ids(Vec<usize>),
+}
+
+impl LabelIds {
+    /// Calls `f(row, id)` for every observation in order.
+    pub(crate) fn for_each(&self, labels: &[usize], mut f: impl FnMut(usize, usize)) {
+        match self {
+            LabelIds::Same => labels.iter().enumerate().for_each(|(i, &l)| f(i, l)),
+            LabelIds::Remap(remap) => labels.iter().enumerate().for_each(|(i, &l)| f(i, remap[l])),
+            LabelIds::Ids(ids) => ids.iter().enumerate().for_each(|(i, &id)| f(i, id)),
+        }
+    }
+}
+
+/// The ids of [`compact_labels`] and the number of distinct labels, as a [`LabelIds`]: no buffer
+/// when the labels are already compact, a remap table of at most `2n` entries when the labels are
+/// small, otherwise the ids of [`compact_labels`].
+pub(crate) fn label_ids(labels: &[usize], what: &str) -> Result<(LabelIds, usize), String> {
+    let n = labels.len();
+    let bound = label_bound(labels);
+    if bound / 2 >= n.max(1) {
+        let c = compact_labels(labels, what)?;
+        return Ok((LabelIds::Ids(c.ids), c.k));
+    }
+    let mut remap = crate::resource::try_vec(bound + 1, usize::MAX, what)
+        .map_err(|e: EconError| e.to_string())?;
+    for &l in labels {
+        remap[l] = 0;
+    }
+    let (mut k, mut last) = (0, 0);
+    for (l, r) in remap.iter_mut().enumerate() {
+        if *r == 0 {
+            *r = k;
+            k += 1;
+            last = l;
+        }
+    }
+    if k > 0 && k == last + 1 {
+        Ok((LabelIds::Same, k))
+    } else {
+        Ok((LabelIds::Remap(remap), k))
+    }
+}
+
 /// The contingency table of two labellings: its nonzero cells `(t, p, count)` in lexicographic
 /// order of the labels, the row and column sums (indexed as the cells; zero sums are allowed) and
 /// the numbers of distinct labels.
@@ -87,6 +144,11 @@ struct Contingency {
 /// table of `(max_t + 1) (max_p + 1)` entries has at most `4n` of them (one pass, as for
 /// contiguous labels), otherwise by the compacted labels, densely or from the sorted pairs. Every
 /// path gives the same cells in the same order, so the sums over them are identical.
+///
+/// The raw table is first sized by the labels OR-ed together, an upper bound of the largest label
+/// (below twice it) that one vectorised pass finds; the exact maxima are only taken when that
+/// table would be too large. The empty trailing rows and columns of a table sized by the bound are
+/// dropped, so the sums are those of the table sized by the maxima.
 fn contingency(
     labels_true: &[usize],
     labels_pred: &[usize],
@@ -94,13 +156,18 @@ fn contingency(
 ) -> Result<Contingency, String> {
     let n = labels_true.len();
     let to_string = |e: EconError| e.to_string();
-    let max_t = labels_true.iter().copied().max().unwrap_or(0);
-    let max_p = labels_pred.iter().copied().max().unwrap_or(0);
-    let raw = max_t
-        .checked_add(1)
-        .zip(max_p.checked_add(1))
-        .and_then(|(a, b)| a.checked_mul(b).map(|size| (a, b, size)))
-        .filter(|&(_, _, size)| size <= 4 * n.max(1));
+    let dims = |max_t: usize, max_p: usize| {
+        max_t
+            .checked_add(1)
+            .zip(max_p.checked_add(1))
+            .and_then(|(a, b)| a.checked_mul(b).map(|size| (a, b, size)))
+            .filter(|&(_, _, size)| size <= 4 * n.max(1))
+    };
+    let raw = dims(label_bound(labels_true), label_bound(labels_pred)).or_else(|| {
+        let max_t = labels_true.iter().copied().max().unwrap_or(0);
+        let max_p = labels_pred.iter().copied().max().unwrap_or(0);
+        dims(max_t, max_p)
+    });
     if let Some((kt, kp, size)) = raw {
         let mut table = crate::resource::try_vec(size, 0usize, what).map_err(to_string)?;
         for (&a, &b) in labels_true.iter().zip(labels_pred) {
@@ -117,6 +184,10 @@ fn contingency(
                 cells.push((i, j, c));
             }
         }
+        // Up to the largest label (one entry when there is no label)
+        let used = |v: &[usize]| v.iter().rposition(|&c| c > 0).map_or(1, |i| i + 1);
+        rows.truncate(used(&rows));
+        cols.truncate(used(&cols));
         let k_true = rows.iter().filter(|&&r| r > 0).count();
         let k_pred = cols.iter().filter(|&&c| c > 0).count();
         return Ok(Contingency {
@@ -784,12 +855,7 @@ pub fn davies_bouldin(
         return Err("Empty data".to_string());
     }
 
-    let CompactLabels {
-        ids: labels,
-        k: n_clusters,
-        ..
-    } = compact_labels(labels, "Davies-Bouldin labels")?;
-    let labels = labels.as_slice();
+    let (ids, n_clusters) = label_ids(labels, "Davies-Bouldin labels")?;
 
     if n_clusters < 2 {
         return Err(format!(
@@ -797,11 +863,9 @@ pub fn davies_bouldin(
         ));
     }
 
-    // Group points by cluster
+    // Group points by cluster (the compacted label)
     let mut cluster_indices: Vec<Vec<usize>> = vec![Vec::new(); n_clusters];
-    for (i, &label) in labels.iter().enumerate() {
-        cluster_indices[label].push(i);
-    }
+    ids.for_each(labels, |i, id| cluster_indices[id].push(i));
 
     // Compute cluster centroids
     let mut centroids: Vec<Array1<f64>> = Vec::with_capacity(n_clusters);
@@ -818,13 +882,18 @@ pub fn davies_bouldin(
         }
     }
 
-    // Compute cluster dispersions (average distance to centroid)
+    // Compute cluster dispersions (average distance to centroid); one difference buffer for
+    // every row, with the same products and sums as a fresh array per row
     let mut dispersions = vec![0.0; n_clusters];
+    let mut diff = vec![0.0; n_features];
     for c in 0..n_clusters {
         if !cluster_indices[c].is_empty() {
             let mut sum = 0.0;
             for &i in &cluster_indices[c] {
-                let diff = &data.row(i) - &centroids[c];
+                for ((d, &x), &m) in diff.iter_mut().zip(data.row(i)).zip(&centroids[c]) {
+                    *d = x - m;
+                }
+                let diff = ArrayView1::from(&diff[..]);
                 sum += diff.dot(&diff).sqrt();
             }
             dispersions[c] = sum / cluster_indices[c].len() as f64;
@@ -2076,6 +2145,177 @@ mod tests {
         let r1 = nmi(&t, &p, None).unwrap().nmi;
         let r2 = nmi(&far, &p, None).unwrap().nmi;
         assert_eq!(r1.to_bits(), r2.to_bits());
+    }
+
+    /// The labellings of the equivalence tests: small dense ones, gapped ones, ones whose OR-ed
+    /// bound is too large for the raw table while the maximum is not, and sparse ones.
+    fn labelling_cases() -> Vec<(Vec<usize>, Vec<usize>)> {
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut draw = |m: usize| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state % m as u64) as usize
+        };
+        let mut cases = Vec::new();
+        for &n in &[1usize, 2, 7, 10, 100, 1000] {
+            for &(levels_t, levels_p) in &[
+                (&[0usize, 1, 2][..], &[0usize, 1, 2][..]),
+                (&[0, 4, 9], &[0, 1, 2, 3]),
+                (&[3, 4], &[3, 4]),
+                (&[1, 2, 4, 8, 16], &[0, 5]),
+                (&[0, 1 << 40, 7], &[2, 3 << 33]),
+            ] {
+                let t: Vec<usize> = (0..n).map(|_| levels_t[draw(levels_t.len())]).collect();
+                let p: Vec<usize> = (0..n).map(|_| levels_p[draw(levels_p.len())]).collect();
+                cases.push((t, p));
+            }
+        }
+        cases
+    }
+
+    /// `contingency` as it was before the OR-ed bound: the raw table sized by the maxima.
+    fn contingency_by_maxima(t: &[usize], p: &[usize]) -> Contingency {
+        let n = t.len();
+        let (max_t, max_p) = (
+            t.iter().copied().max().unwrap_or(0),
+            p.iter().copied().max().unwrap_or(0),
+        );
+        let raw = max_t
+            .checked_add(1)
+            .zip(max_p.checked_add(1))
+            .and_then(|(a, b)| a.checked_mul(b).map(|size| (a, b, size)))
+            .filter(|&(_, _, size)| size <= 4 * n.max(1));
+        let Some((kt, kp, size)) = raw else {
+            let (ct, cp) = (
+                compact_labels(t, "t").unwrap(),
+                compact_labels(p, "t").unwrap(),
+            );
+            let (cells, rows, cols) = contingency_cells(&ct, &cp).unwrap();
+            return Contingency {
+                cells,
+                rows,
+                cols,
+                k_true: ct.k,
+                k_pred: cp.k,
+            };
+        };
+        let mut table = vec![0usize; size];
+        for (&a, &b) in t.iter().zip(p) {
+            table[a * kp + b] += 1;
+        }
+        let (mut rows, mut cols, mut cells) = (vec![0usize; kt], vec![0usize; kp], Vec::new());
+        for (idx, &c) in table.iter().enumerate() {
+            if c > 0 {
+                rows[idx / kp] += c;
+                cols[idx % kp] += c;
+                cells.push((idx / kp, idx % kp, c));
+            }
+        }
+        let k_true = rows.iter().filter(|&&r| r > 0).count();
+        let k_pred = cols.iter().filter(|&&c| c > 0).count();
+        Contingency {
+            cells,
+            rows,
+            cols,
+            k_true,
+            k_pred,
+        }
+    }
+
+    #[test]
+    fn test_contingency_matches_the_table_sized_by_the_maxima() {
+        for (t, p) in labelling_cases() {
+            let new = contingency(&t, &p, "t").unwrap();
+            let old = contingency_by_maxima(&t, &p);
+            assert_eq!(new.cells, old.cells, "{t:?} {p:?}");
+            assert_eq!(new.rows, old.rows, "{t:?} {p:?}");
+            assert_eq!(new.cols, old.cols, "{t:?} {p:?}");
+            assert_eq!((new.k_true, new.k_pred), (old.k_true, old.k_pred));
+        }
+    }
+
+    #[test]
+    fn test_label_ids_match_compact_labels() {
+        for (t, _) in labelling_cases() {
+            let c = compact_labels(&t, "t").unwrap();
+            let (ids, k) = label_ids(&t, "t").unwrap();
+            let mut got = vec![usize::MAX; t.len()];
+            ids.for_each(&t, |i, id| got[i] = id);
+            assert_eq!((got, k), (c.ids, c.k), "{t:?}");
+        }
+        assert!(matches!(
+            label_ids(&[2, 0, 1, 1], "t").unwrap(),
+            (LabelIds::Same, 3)
+        ));
+        assert!(matches!(
+            label_ids(&[0, 4, 9, 0, 4, 9, 0, 4], "t").unwrap(),
+            (LabelIds::Remap(_), 3)
+        ));
+        assert!(matches!(
+            label_ids(&[0, 1 << 40], "t").unwrap(),
+            (LabelIds::Ids(_), 2)
+        ));
+    }
+
+    #[test]
+    fn test_davies_bouldin_dispersions_match_a_fresh_difference_per_row() {
+        let mut state = 3_u64;
+        let mut noise = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 11) as f64 / (1u64 << 53) as f64 - 0.5
+        };
+        for d in [1usize, 2, 7, 8, 9, 17] {
+            let x =
+                Array2::from_shape_fn((60, d), |(i, j)| (i % 4) as f64 * 3.0 + j as f64 + noise());
+            let labels: Vec<usize> = (0..60).map(|i| i % 4).collect();
+            // a column-major copy reads the rows through strides
+            let xt = x.t().to_owned();
+            for view in [x.view(), xt.t()] {
+                let r = davies_bouldin(view, &labels).unwrap();
+                for (c, &dispersion) in r.dispersions.iter().enumerate() {
+                    let centroid = Array1::from(r.centroids[c].clone());
+                    let rows: Vec<usize> = (0..60).filter(|&i| labels[i] == c).collect();
+                    let mut sum = 0.0;
+                    for &i in &rows {
+                        let diff = &view.row(i) - &centroid;
+                        sum += diff.dot(&diff).sqrt();
+                    }
+                    let expected = sum / rows.len() as f64;
+                    assert_eq!(
+                        dispersion.to_bits(),
+                        expected.to_bits(),
+                        "d = {d}, cluster {c}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_davies_bouldin_same_for_relabelled_clusters() {
+        let mut state = 7_u64;
+        let mut noise = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 11) as f64 / (1u64 << 53) as f64 - 0.5
+        };
+        let x = Array2::from_shape_fn((90, 3), |(i, j)| (i % 3) as f64 * 4.0 + j as f64 + noise());
+        let plain: Vec<usize> = (0..90).map(|i| i % 3).collect();
+        let base = davies_bouldin(x.view(), &plain).unwrap();
+        for map in [[0usize, 4, 9], [2, 0, 1], [0, 1 << 40, 5]] {
+            let relabelled: Vec<usize> = plain.iter().map(|&l| map[l]).collect();
+            let r = davies_bouldin(x.view(), &relabelled).unwrap();
+            // ids follow the order of the labels, so a permutation reorders the clusters
+            let mut order: Vec<usize> = (0..3).collect();
+            order.sort_by_key(|&c| map[c]);
+            let dispersions: Vec<f64> = order.iter().map(|&c| base.dispersions[c]).collect();
+            assert_eq!(r.dispersions, dispersions);
+            assert_eq!(r.n_clusters, 3);
+        }
     }
 
     #[test]
