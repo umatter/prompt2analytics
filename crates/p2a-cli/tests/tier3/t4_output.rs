@@ -30,16 +30,37 @@ const ONE_DOC: &[&[&str]] = &[
     &["data", "head", "grunfeld"],
     &["data", "describe", "grunfeld"],
     &["data", "list"],
-    &["reg", "ols", "grunfeld", "-y", "inv", "-x", "value", "capital"],
+    &[
+        "reg", "ols", "grunfeld", "-y", "inv", "-x", "value", "capital",
+    ],
     &["reg", "hac", "hac_ar1", "-y", "y", "-x", "x", "--lags", "2"],
     &[
         "panel", "fe", "grunfeld", "-y", "inv", "-x", "value", "capital", "--entity", "firm",
     ],
-    &["discrete", "logit", "binary_glm", "-y", "y", "-x", "x1", "x2"],
+    &[
+        "discrete",
+        "logit",
+        "binary_glm",
+        "-y",
+        "y",
+        "-x",
+        "x1",
+        "x2",
+    ],
     &["discrete", "zip", "zeroinfl", "-y", "y", "-x", "x1", "x2"],
     &[
-        "causal", "iv", "iv_weak_controls", "-y", "y", "--endog", "x", "--instruments", "z1",
-        "z2", "--exog", "w",
+        "causal",
+        "iv",
+        "iv_weak_controls",
+        "-y",
+        "y",
+        "--endog",
+        "x",
+        "--instruments",
+        "z1",
+        "z2",
+        "--exog",
+        "w",
     ],
     &["stats", "fivenum", "grunfeld", "-c", "inv"],
     &["stats", "acf", "ts_acf_spline_t3", "-c", "x"],
@@ -47,7 +68,9 @@ const ONE_DOC: &[&[&str]] = &[
     &[
         "survival", "km", "lung", "--time", "time", "--event", "status", "--group", "sex",
     ],
-    &["survival", "km", "lung", "--time", "time", "--event", "status"],
+    &[
+        "survival", "km", "lung", "--time", "time", "--event", "status",
+    ],
 ];
 
 /// Every command in [`ONE_DOC`] prints one JSON value on stdout.
@@ -189,7 +212,8 @@ fn json_problems(file: &str, raw: &str) -> Vec<String> {
                         let base = d + 1;
                         for (k, (l, st)) in sites.iter().enumerate() {
                             if st[base.min(st.len())..].iter().any(|(_, lp)| *lp) {
-                                problems.push(format!("{file}:{l} {fn_name}: JSON printed in a loop"));
+                                problems
+                                    .push(format!("{file}:{l} {fn_name}: JSON printed in a loop"));
                             }
                             for (l2, st2) in &sites[k + 1..] {
                                 if st2.starts_with(st) || st.starts_with(st2) {

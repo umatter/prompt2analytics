@@ -1205,9 +1205,7 @@ fn execute_coefplot(
                     let pct = (conf_level * 1000.0).round() / 10.0;
                     let se_name = cov.short_label();
                     let chart_title = title.map(|s| s.to_string()).unwrap_or_else(|| {
-                        format!(
-                            "Coefficients: {dep_var}, {pct}% CIs ({se_name} standard errors)"
-                        )
+                        format!("Coefficients: {dep_var}, {pct}% CIs ({se_name} standard errors)")
                     });
                     let config = ChartConfig {
                         title: Some(chart_title.clone()),

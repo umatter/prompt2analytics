@@ -7,8 +7,8 @@
 
 mod common;
 mod t3perf4_vecm;
+mod t4_output;
 mod wp06_flags;
 mod wp21_did;
 mod wp60_models;
 mod wp61_other;
-mod t4_output;

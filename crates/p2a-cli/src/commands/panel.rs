@@ -849,7 +849,10 @@ fn execute_hdfe(
                         statistic: StatKind::T,
                         fit_lines: vec![
                             FitLine::r_squared("R-squared (within)", result.r_squared_within),
-                            FitLine::adj_r_squared("Adj. R-squared (within)", result.adj_r_squared_within),
+                            FitLine::adj_r_squared(
+                                "Adj. R-squared (within)",
+                                result.adj_r_squared_within,
+                            ),
                         ],
                         n_obs: result.n_obs,
                         se_type: &se_type,
@@ -1572,7 +1575,6 @@ fn with_missing(
     }
     json
 }
-
 
 /// `warnings` without the missing-value note, for a caller that prints that note last.
 fn without_missing_note(

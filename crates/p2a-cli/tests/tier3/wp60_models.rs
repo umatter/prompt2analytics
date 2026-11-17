@@ -230,7 +230,10 @@ fn test_validate_cli_logit_probit_glm() {
                 .any(|l| l.starts_with("R-squared:") || l.starts_with("Adj. R-squared:")),
             "{text}"
         );
-        assert!(text.contains("z-value") && !text.contains("t-value"), "{text}");
+        assert!(
+            text.contains("z-value") && !text.contains("t-value"),
+            "{text}"
+        );
     }
 }
 
@@ -1245,8 +1248,16 @@ fn test_validate_cli_pp_test_internals() {
         let tag = if extra.len() == 2 { "long" } else { "short" };
         let j = s.json(&argv(&base, extra));
         Check::new(&case)
-            .scalar(&format!("rw_{tag}_gamma"), num(&j["gamma_hat"]), Tol::coef(200))
-            .scalar(&format!("rw_{tag}_t"), num(&j["t_statistic"]), Tol::stat(200))
+            .scalar(
+                &format!("rw_{tag}_gamma"),
+                num(&j["gamma_hat"]),
+                Tol::coef(200),
+            )
+            .scalar(
+                &format!("rw_{tag}_t"),
+                num(&j["t_statistic"]),
+                Tol::stat(200),
+            )
             .scalar(
                 &format!("rw_{tag}_sigma2"),
                 num(&j["sigma_squared"]),
@@ -1257,7 +1268,11 @@ fn test_validate_cli_pp_test_internals() {
                 num(&j["lambda_squared"]),
                 Tol::stat(200),
             )
-            .scalar(&format!("rw_{tag}_lag"), num(&j["truncation_lag"]), Tol::exact())
+            .scalar(
+                &format!("rw_{tag}_lag"),
+                num(&j["truncation_lag"]),
+                Tol::exact(),
+            )
             .finish();
     }
 }
@@ -1331,10 +1346,7 @@ fn test_validate_cli_munge_persists_across_invocations() {
         "--name",
         g.as_str(),
     ]);
-    assert_eq!(
-        s.json(&["data", "describe", g.as_str()])["columns"],
-        4
-    );
+    assert_eq!(s.json(&["data", "describe", g.as_str()])["columns"], 4);
     let sess: Value = serde_json::from_str(&std::fs::read_to_string(s.path()).unwrap()).unwrap();
     for (name, file) in [
         ("sub", "sub.parquet"),
@@ -1399,10 +1411,7 @@ fn test_validate_cli_derived_dataset_names_replacement_and_errors() {
         "--name",
         "my data/ü",
     ]);
-    assert_eq!(
-        s.json(&["data", "describe", "my data/ü"])["rows"],
-        200
-    );
+    assert_eq!(s.json(&["data", "describe", "my data/ü"])["rows"], 200);
     assert!(
         s.dir()
             .join("session.json.datasets/my%20data%2F%C3%BC.parquet")

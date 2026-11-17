@@ -950,8 +950,14 @@ mod report_tests {
         assert_eq!(any_value_json(&AnyValue::UInt8(7)), json!(7));
         assert_eq!(any_value_json(&AnyValue::Float64(2.5)), json!(2.5));
         assert_eq!(any_value_json(&AnyValue::Float64(f64::NAN)), json!(null));
-        assert_eq!(any_value_json(&AnyValue::Float64(f64::INFINITY)), json!(null));
-        assert_eq!(any_value_json(&AnyValue::Float32(f32::NEG_INFINITY)), json!(null));
+        assert_eq!(
+            any_value_json(&AnyValue::Float64(f64::INFINITY)),
+            json!(null)
+        );
+        assert_eq!(
+            any_value_json(&AnyValue::Float32(f32::NEG_INFINITY)),
+            json!(null)
+        );
         assert_eq!(any_value_json(&AnyValue::Null), json!(null));
         assert_eq!(any_value_json(&AnyValue::Boolean(true)), json!(true));
         assert_eq!(any_value_json(&AnyValue::String("3")), json!("3"));

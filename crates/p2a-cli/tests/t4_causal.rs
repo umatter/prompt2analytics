@@ -277,8 +277,7 @@ fn test_validate_cli_gsynth_defaults() {
     let s = temp_session();
     s.load_as(&case.dataset_path(), "gs", &[]);
     let base = [
-        "causal", "gsynth", "gs", "-y", "Y", "-d", "D", "--unit", "id", "--time", "time", "-x",
-        "X",
+        "causal", "gsynth", "gs", "-y", "Y", "-d", "D", "--unit", "id", "--time", "time", "-x", "X",
     ];
     // p2a's EM stops before R's converged fit at r >= 1: 5e-4 relative, the tolerance of the
     // estimator's own validation and of test_validate_cli_gsynth_r_spellings (other.md)
@@ -287,7 +286,10 @@ fn test_validate_cli_gsynth_defaults() {
     assert_eq!(j["force"], "unit", "{j}");
     assert_eq!(j["r_max"], 5, "{j}");
     let r = number(&j, "n_factors") as usize;
-    assert!(r <= 1, "core chose r = {r}; R's fits are pinned for r = 0 and 1");
+    assert!(
+        r <= 1,
+        "core chose r = {r}; R's fits are pinned for r = 0 and 1"
+    );
     Check::new(&case)
         .scalar(&format!("unit_r{r}_att_avg"), number(&j, "att"), tol)
         .finish();

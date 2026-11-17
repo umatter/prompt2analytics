@@ -1540,7 +1540,11 @@ fn test_validate_cli_chisq_gof_counts() {
         .scalar("uniform_p", num(&j, "p_value"), Tol::p_value(120))
         .vector("counts", &num_vec(&j, "observed"), Tol::exact())
         .vector("uniform_expected", &num_vec(&j, "expected"), Tol::stat(120))
-        .vector("uniform_residuals", &num_vec(&j, "residuals"), Tol::stat(120))
+        .vector(
+            "uniform_residuals",
+            &num_vec(&j, "residuals"),
+            Tol::stat(120),
+        )
         .finish();
     assert_eq!(j["categories"], json!(["1", "2", "3", "4", "5", "6"]));
     let mut with_p = base.to_vec();
@@ -1585,7 +1589,11 @@ fn test_validate_cli_chisq_gof_observed_probs() {
             probs,
         ]);
         Check::new(&case)
-            .scalar(&format!("{key}_chisq"), num(&j, "chi_squared"), Tol::stat(50))
+            .scalar(
+                &format!("{key}_chisq"),
+                num(&j, "chi_squared"),
+                Tol::stat(50),
+            )
             .scalar(&format!("{key}_p"), num(&j, "p_value"), Tol::p_value(50))
             .vector(
                 &format!("{key}_expected"),
@@ -1610,11 +1618,17 @@ fn test_cli_chisq_gof_refusals() {
         a
     }
     let e = s.err(&gof(&["--counts", "n"]));
-    assert!(e.contains("'n'") && e.to_lowercase().contains("missing"), "{e}");
+    assert!(
+        e.contains("'n'") && e.to_lowercase().contains("missing"),
+        "{e}"
+    );
     let e = s.err(&gof(&["--counts", "neg"]));
     assert!(e.contains("non-negative and finite"), "{e}");
     let e = s.err(&gof(&["--counts", "id", "--probs", "0.5,0.5"]));
-    assert!(e.contains("--probs has 2 value(s)") && e.contains("3 rows"), "{e}");
+    assert!(
+        e.contains("--probs has 2 value(s)") && e.contains("3 rows"),
+        "{e}"
+    );
     let e = s.err(&gof(&["--counts", "id", "--probs", "0.2,0.2,0.2"]));
     assert!(
         e.contains("must sum to 1") && e.contains("--rescale-p") && !e.contains("rescale_p"),
@@ -1672,7 +1686,14 @@ fn test_validate_cli_box_test_default_lag() {
     let s = temp_session();
     let d = load_dataset(&s, "datasets/generated/ts_acf_spline_t3.csv");
     let lb = s.json(&["stats", "box-test", d.as_str(), "--col", "x"]);
-    let bp = s.json(&["stats", "box-test", d.as_str(), "--col", "x", "--box-pierce"]);
+    let bp = s.json(&[
+        "stats",
+        "box-test",
+        d.as_str(),
+        "--col",
+        "x",
+        "--box-pierce",
+    ]);
     let lb10 = s.json(&["stats", "box-test", d.as_str(), "--col", "x", "--lag", "10"]);
     Check::new(&case)
         .scalar("box_lb_statistic", num(&lb, "statistic"), Tol::stat(64))
@@ -1698,7 +1719,9 @@ fn test_validate_cli_viz_coefplot_ci() {
     s.load_as(&case.dataset_path(), "ivw", &[]);
     let png = s.dir().join("coef.png");
     let png = png.to_str().unwrap();
-    let base = ["viz", "coefplot", "ivw", "-y", "y", "-x", "x", "w", "-f", png];
+    let base = [
+        "viz", "coefplot", "ivw", "-y", "y", "-x", "x", "w", "-f", png,
+    ];
     let limits = |v: &Value| -> (Vec<String>, Vec<f64>, Vec<f64>) {
         let rows = v["coefficients"].as_array().unwrap();
         (
@@ -1711,7 +1734,11 @@ fn test_validate_cli_viz_coefplot_ci() {
     };
     for (extra, key, se_type) in [
         (&["--conf-level", "0.9"][..], "ci90_hc1", "HC1"),
-        (&["--conf-level", "0.9", "--se", "standard"][..], "ci90_classical", "classical"),
+        (
+            &["--conf-level", "0.9", "--se", "standard"][..],
+            "ci90_classical",
+            "classical",
+        ),
         (&[][..], "ci95_hc1", "HC1"),
     ] {
         let mut a = base.to_vec();

@@ -59,8 +59,8 @@ use crate::output::{
 };
 use crate::session::SessionManager;
 use p2a_core::diagnostics::IdentificationReport;
-use p2a_core::econometrics::staggered_did::BasePeriodType;
 use p2a_core::econometrics::matching::{MOrder, MatchMethodKind, MatchOptions, match_it_with};
+use p2a_core::econometrics::staggered_did::BasePeriodType;
 
 /// Identification warnings of severity Caution and above, as
 /// `[{"code", "severity", "title", "message"}]`.

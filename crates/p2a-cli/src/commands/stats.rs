@@ -15,13 +15,13 @@ use p2a_core::{
     WilcoxonConfig,
     // ACF/PACF/CCF (raw data versions)
     acf,
+    // Chi-squared tests
+    chisq_test_gof,
     pacf,
     run_bartlett_test,
     // Box test (Ljung-Box)
     run_box_test,
     run_ccf,
-    // Chi-squared tests
-    chisq_test_gof,
     run_chisq_independence,
     run_fisher_test,
     // Descriptive
@@ -1241,18 +1241,15 @@ fn gof_labels(ds: &p2a_core::Dataset, labels: Option<&str>, k: usize) -> EconRes
     let Some(col) = labels else {
         return Ok((1..=k).map(|i| i.to_string()).collect());
     };
-    let column = ds
-        .df()
-        .column(col)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: col.to_string(),
-            available: ds
-                .df()
-                .get_column_names()
-                .iter()
-                .map(|c| c.to_string())
-                .collect(),
-        })?;
+    let column = ds.df().column(col).map_err(|_| EconError::ColumnNotFound {
+        column: col.to_string(),
+        available: ds
+            .df()
+            .get_column_names()
+            .iter()
+            .map(|c| c.to_string())
+            .collect(),
+    })?;
     let text = column
         .cast(&polars::prelude::DataType::String)
         .map_err(|e| EconError::Computation(format!("column '{col}' as text: {e}")))?;

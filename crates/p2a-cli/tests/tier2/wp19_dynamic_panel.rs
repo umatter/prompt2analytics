@@ -271,7 +271,8 @@ fn test_validate_cli_panel_missing_notes() {
         let t = s.ok(&args.iter().map(String::as_str).collect::<Vec<_>>());
         assert!(
             t.lines()
-                .any(|l| l.starts_with("Note: ") && l.contains("rows dropped because of missing values")),
+                .any(|l| l.starts_with("Note: ")
+                    && l.contains("rows dropped because of missing values")),
             "{cmd}\n{t}"
         );
     }
@@ -369,7 +370,10 @@ fn test_validate_cli_panel_fe_missing_note() {
         ];
         let t = s.ok(&args);
         assert_eq!(t.lines().last(), Some(note), "{cmd}\n{t}");
-        assert!(!t.contains(&format!("  - {}", &note[6..])), "{cmd}: note among warnings\n{t}");
+        assert!(
+            !t.contains(&format!("  - {}", &note[6..])),
+            "{cmd}: note among warnings\n{t}"
+        );
         let j = s.json(&args);
         assert_eq!(j["missing"]["n_dropped"], 5, "{j}");
         let ws: Vec<&str> = j["warnings"]
@@ -377,7 +381,8 @@ fn test_validate_cli_panel_fe_missing_note() {
             .map(|a| a.iter().filter_map(|w| w.as_str()).collect())
             .unwrap_or_default();
         assert!(
-            !ws.iter().any(|w| w.contains("rows dropped because of missing values")),
+            !ws.iter()
+                .any(|w| w.contains("rows dropped because of missing values")),
             "{ws:?}"
         );
     }
@@ -389,17 +394,17 @@ fn test_validate_cli_panel_fe_missing_note() {
 #[test]
 fn test_cli_panel_f_degrees_of_freedom() {
     let s = temp_session();
-    s.load_as(
-        &repo_path("validation/datasets/grunfeld.csv"),
-        "g",
-        &[],
-    );
+    s.load_as(&repo_path("validation/datasets/grunfeld.csv"), "g", &[]);
     let base = [
         "panel", "fe", "g", "-y", "inv", "-x", "value", "capital", "--entity", "firm",
     ];
     // Grunfeld: 200 rows, 10 firms, 2 slopes: residual df 200 - 10 - 2 = 188
     let fe = s.json(&base);
-    assert_eq!((fe["f_df1"].clone(), fe["f_df2"].clone()), (2.into(), 188.into()), "{fe}");
+    assert_eq!(
+        (fe["f_df1"].clone(), fe["f_df2"].clone()),
+        (2.into(), 188.into()),
+        "{fe}"
+    );
     let mut cl = base.to_vec();
     cl.extend(["--vcov", "cluster"]);
     let fe_cl = s.json(&cl);

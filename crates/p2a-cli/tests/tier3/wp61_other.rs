@@ -2081,8 +2081,18 @@ fn test_cli_svm_counts_by_label_and_ml_notes() {
     assert!(text.contains(&want), "{want}\n{text}");
 
     let t = s.json(&[
-        "ml", "tsne", "emp", "--cols", "tenure", "performance", "--max-iter", "50", "--seed",
-        "1", "--perplexity", "5",
+        "ml",
+        "tsne",
+        "emp",
+        "--cols",
+        "tenure",
+        "performance",
+        "--max-iter",
+        "50",
+        "--seed",
+        "1",
+        "--perplexity",
+        "5",
     ]);
     // t-SNE has no convergence record; its warnings (if any) are a JSON array
     assert!(t.get("warnings").is_none_or(|w| w.is_array()), "{t}");
@@ -2109,7 +2119,15 @@ fn test_validate_cli_stl_s_window() {
     let tol = Tol::new(0.0, 1e-5 * case.scalar("stl_sd"));
     for (w, prefix) in [("periodic", "stl_periodic"), ("13", "stl_swin13")] {
         let j = s.json(&[
-            "ts", "stl", "ts", "--col", "y", "--period", "12", "--s-window", w,
+            "ts",
+            "stl",
+            "ts",
+            "--col",
+            "y",
+            "--period",
+            "12",
+            "--s-window",
+            w,
         ]);
         assert_eq!(j["s_window"], w, "{j}");
         for part in ["seasonal", "trend", "remainder"] {
@@ -2123,7 +2141,15 @@ fn test_validate_cli_stl_s_window() {
     }
     // a usage error (clap, exit 2)
     let out = s.run(&[
-        "ts", "stl", "ts", "--col", "y", "--period", "12", "--s-window", "12",
+        "ts",
+        "stl",
+        "ts",
+        "--col",
+        "y",
+        "--period",
+        "12",
+        "--s-window",
+        "12",
     ]);
     let e = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(2), "{e}");

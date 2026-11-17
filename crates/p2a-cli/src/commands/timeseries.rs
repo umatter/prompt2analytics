@@ -10,6 +10,8 @@ use p2a_core::{
     CostFunction,
     DecomposeType,
     SeasonalType,
+    // STL decomposition
+    StlConfig,
     StructTsType,
     // AR model
     ar,
@@ -20,8 +22,7 @@ use p2a_core::{
     run_decompose,
     run_holt_winters,
     run_mstl,
-    // STL decomposition
-    StlConfig, run_stl_with_config,
+    run_stl_with_config,
     // Structural time series
     run_struct_ts,
     run_var,

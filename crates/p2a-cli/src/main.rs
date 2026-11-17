@@ -374,7 +374,10 @@ fn run_smoke_test(format: &OutputFormat) -> anyhow::Result<()> {
     // 2. Run OLS regression
     progress("2. Running OLS regression: y ~ x1 + x2...");
     let result = run_ols(&dataset, "y", &["x1", "x2"], true, CovarianceType::HC1)?;
-    progress(&format!("   N = {}, R² = {:.4}", result.n_obs, result.r_squared));
+    progress(&format!(
+        "   N = {}, R² = {:.4}",
+        result.n_obs, result.r_squared
+    ));
 
     // 3. Verify results
     progress("3. Verifying results...");

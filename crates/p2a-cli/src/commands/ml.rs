@@ -1116,9 +1116,7 @@ fn execute_svm(
                                 println!("  {}: {:.6}", feature_names[*idx], weight);
                             }
 
-                            println!(
-                                "\nPredicted labels: {neg}: {neg_count}, {pos}: {pos_count}"
-                            );
+                            println!("\nPredicted labels: {neg}: {neg_count}, {pos}: {pos_count}");
                             print_result_notes(&result, format);
                             print_missing_note(&missing, format);
                         }
