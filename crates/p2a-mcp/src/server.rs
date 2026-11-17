@@ -155,7 +155,7 @@ use p2a_core::{
     // Goodman-Bacon decomposition
     bacon_decomp,
     box_plot,
-    // CausalImpact (Bayesian Structural Time Series)
+    // CausalImpact (maximum-likelihood structural time series)
     causal_impact,
     cmdscale,
     cmdscale_from_data,
@@ -809,7 +809,9 @@ impl AnalyticsServer {
     /// wide table a `PIVOT_RULES` tool would make of it within the pivot
     /// budgets. After
     /// the handler returns, output above the `response_bytes` budget
-    /// replaces the result. A refusal is
+    /// replaces the result; below it, a failed result's `error` copy is cut
+    /// to the room its content leaves, and a handler or argument error's
+    /// message is cut to the budget. A refusal is
     /// `ToolCallError::LimitExceeded` (422 `limit_exceeded`). The response
     /// cap comes after the work, so a call refused by it has made its
     /// changes (a created or modified dataset stays, unless the governor's
@@ -845,9 +847,13 @@ impl AnalyticsServer {
 
         // A session-scoped server instance that shares the session's state.
         let session_server = Self::with_session(session);
-        let result = session_server.dispatch_tool(tool_name, arguments).await?;
+        let mut result = session_server
+            .dispatch_tool(tool_name, arguments)
+            .await
+            .map_err(|e| bound_error_message(e, &limits))?;
         let output_bytes = crate::audit::ResultSummary::of_tool_result(&result).output_bytes();
         check_response_size(&limits, tool_name, output_bytes).map_err(log_and_convert)?;
+        fit_error_copy(&mut result, &limits);
         Ok(result)
     }
 
@@ -1451,6 +1457,58 @@ fn check_response_size(limits: &Limits, tool: &str, bytes: usize) -> Result<(), 
     })
 }
 
+/// The marker that ends a message cut to `response_bytes`.
+#[cfg(feature = "http")]
+const ERROR_CUT_MARKER: &str = " [cut: response_bytes]";
+
+/// Cuts a failed result's `error` copy (its first text) to the room its content leaves under
+/// `response_bytes`, so that content and copy together stay within the cap. Nothing changes
+/// when the copy fits or no cap is set.
+#[cfg(feature = "http")]
+fn fit_error_copy(result: &mut crate::transport::http::ToolResult, limits: &Limits) {
+    let Some(max) = limits.response_bytes else {
+        return;
+    };
+    let content = crate::audit::ResultSummary::of_tool_result(result).output_bytes();
+    let room = usize::try_from(max)
+        .unwrap_or(usize::MAX)
+        .saturating_sub(content);
+    if let Some(error) = result.error.as_mut()
+        && error.len() > room
+    {
+        *error = p2a_text::ellipsize_bytes(error, room, ERROR_CUT_MARKER).into_owned();
+    }
+}
+
+/// Cuts the message of a refused call to `response_bytes` where a cap is set: the variants
+/// whose message can quote a caller's input or a handler's text (`InvalidArguments`,
+/// `QuotaExceeded`, `Internal`). The others carry fixed or already bounded texts and pass
+/// unchanged.
+#[cfg(feature = "http")]
+fn bound_error_message(
+    e: crate::exec::ToolCallError,
+    limits: &Limits,
+) -> crate::exec::ToolCallError {
+    use crate::exec::ToolCallError;
+    let Some(max) = limits.response_bytes else {
+        return e;
+    };
+    let max = usize::try_from(max).unwrap_or(usize::MAX);
+    let cut = |m: String| {
+        if m.len() <= max {
+            m
+        } else {
+            p2a_text::ellipsize_bytes(&m, max, ERROR_CUT_MARKER).into_owned()
+        }
+    };
+    match e {
+        ToolCallError::InvalidArguments(m) => ToolCallError::InvalidArguments(cut(m)),
+        ToolCallError::QuotaExceeded(m) => ToolCallError::QuotaExceeded(cut(m)),
+        ToolCallError::Internal(m) => ToolCallError::Internal(cut(m)),
+        other => other,
+    }
+}
+
 /// Logs a refusal with the knob that would raise the limit (`override_key`
 /// is for operators; the caller sees only the message).
 fn log_violation(v: &LimitViolation) {
@@ -1922,6 +1980,144 @@ mod tests {
                 .filter(|k| schema.contains_key(*k))
                 .collect();
             assert!(hidden.is_empty(), "{}: {hidden:?}", tool.name);
+        }
+    }
+
+    /// The total bytes of a result's content and its `error` copy.
+    #[cfg(feature = "http")]
+    fn result_bytes(r: &crate::transport::http::ToolResult) -> usize {
+        crate::audit::ResultSummary::of_tool_result(r).output_bytes()
+            + r.error.as_ref().map_or(0, String::len)
+    }
+
+    #[cfg(feature = "http")]
+    fn response_cap(bytes: u64) -> Limits {
+        Limits::hosted()
+            .with_overrides(&[format!("response_bytes={bytes}")])
+            .unwrap()
+    }
+
+    /// A failed result's `error` copy is cut to the room its content leaves under
+    /// `response_bytes`; with room enough, or no cap, it stays whole.
+    #[cfg(feature = "http")]
+    #[test]
+    fn a_failed_results_error_copy_fits_the_response_cap() {
+        use crate::transport::http::{ContentItem, ToolResult};
+        let failed = || ToolResult {
+            success: false,
+            content: vec![ContentItem::Text {
+                text: "e".repeat(1_000),
+            }],
+            error: Some("e".repeat(1_000)),
+        };
+        let mut r = failed();
+        fit_error_copy(&mut r, &response_cap(1_500));
+        assert!(
+            matches!(&r.content[..], [ContentItem::Text { text }] if *text == "e".repeat(1_000))
+        );
+        let error = r.error.as_deref().unwrap();
+        assert!(error.ends_with(ERROR_CUT_MARKER), "{error}");
+        assert!(error.starts_with("eee"), "{error}");
+        assert!(result_bytes(&r) <= 1_500, "{}", result_bytes(&r));
+        for limits in [response_cap(4_000), Limits::off()] {
+            let mut r = failed();
+            fit_error_copy(&mut r, &limits);
+            assert_eq!(r.error, Some("e".repeat(1_000)));
+        }
+    }
+
+    /// Through the governed path: a failed result that quotes a long argument stays within
+    /// `response_bytes`, its `error` copy included.
+    #[cfg(feature = "http")]
+    #[test]
+    fn a_failed_call_stays_within_the_response_cap() {
+        use crate::session::Session;
+        crate::tools::limits::with_limits(response_cap(1_500), || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    let session = Session::new("cap".into(), None);
+                    let server = AnalyticsServer::with_session(&session);
+                    let r = server
+                        .call_tool_with_session(
+                            "describe_dataset",
+                            serde_json::json!({"dataset": "d".repeat(1_000)}),
+                            &session,
+                        )
+                        .await
+                        .unwrap();
+                    assert!(!r.success);
+                    assert!(r.error.is_some());
+                    assert!(result_bytes(&r) <= 1_500, "{}", result_bytes(&r));
+                })
+        });
+    }
+
+    /// A refused call's message is cut to `response_bytes` for the variants that can quote
+    /// a caller's input or a handler's text; the others, and every message without a cap,
+    /// stay as they are.
+    #[cfg(feature = "http")]
+    #[test]
+    fn a_refused_calls_message_is_cut_to_the_response_cap() {
+        use crate::exec::ToolCallError;
+        let long = "x".repeat(5_000);
+        let check = |e: ToolCallError| match e {
+            ToolCallError::InvalidArguments(m)
+            | ToolCallError::QuotaExceeded(m)
+            | ToolCallError::Internal(m) => {
+                assert!(m.len() <= 1_000 && m.ends_with(ERROR_CUT_MARKER), "{m}");
+                assert!(m.starts_with("xxx"), "{m}");
+            }
+            other => panic!("{other:?}"),
+        };
+        check(bound_error_message(
+            ToolCallError::InvalidArguments(long.clone()),
+            &response_cap(1_000),
+        ));
+        check(bound_error_message(
+            ToolCallError::QuotaExceeded(long.clone()),
+            &response_cap(1_000),
+        ));
+        check(bound_error_message(
+            ToolCallError::Internal(long.clone()),
+            &response_cap(1_000),
+        ));
+        let untouched = || {
+            vec![
+                ToolCallError::UnknownTool(long.clone()),
+                ToolCallError::LimitExceeded {
+                    parameter: "p".into(),
+                    requested: "1".into(),
+                    limit: "0".into(),
+                    message: long.clone(),
+                },
+                ToolCallError::SessionBusy {
+                    retry_after_secs: 1,
+                },
+                ToolCallError::ServerBusy {
+                    retry_after_secs: 1,
+                },
+                ToolCallError::MemoryPressure {
+                    retry_after_secs: 1,
+                },
+                ToolCallError::DeadlineExceeded { limit_secs: 60 },
+            ]
+        };
+        for e in untouched() {
+            let before = e.to_string();
+            assert_eq!(
+                bound_error_message(e, &response_cap(1_000)).to_string(),
+                before
+            );
+        }
+        for e in [
+            ToolCallError::InvalidArguments(long.clone()),
+            ToolCallError::Internal(long.clone()),
+        ] {
+            let before = e.to_string();
+            assert_eq!(bound_error_message(e, &Limits::off()).to_string(), before);
         }
     }
 
