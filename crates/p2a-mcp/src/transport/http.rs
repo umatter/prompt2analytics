@@ -472,7 +472,8 @@ pub async fn bind(config: &ServerConfig) -> TransportResult<tokio::net::TcpListe
 ///
 /// Before it returns, it stops the health readers and writes out every audit
 /// entry queued by then; a call still running after its deadline answer is
-/// logged when its work ends.
+/// logged when its work ends. The health readers also stop when the `serve`
+/// future is dropped.
 pub async fn serve(
     listener: tokio::net::TcpListener,
     mut config: ServerConfig,
@@ -510,28 +511,37 @@ pub async fn serve(
     serve_app(listener, app, state, shutdown).await
 }
 
+/// A task aborted when this guard is dropped.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// Serve a built app with its health readers ([`spawn_health_readers`])
 /// until `shutdown` resolves, then stop the readers and write out the queued
-/// audit entries.
+/// audit entries. The readers also stop when this future is dropped.
 async fn serve_app(
     listener: tokio::net::TcpListener,
     app: Router,
     state: AppState,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> TransportResult<()> {
-    let readers = spawn_health_readers(&state.governor, state.governor.config());
+    // Each reader holds the governor, and through it the session manager and
+    // every session's datasets; both start heap hand-backs through
+    // `health()`, and the watchdog could still exit the process (code 70)
+    // over a server that has stopped. An embedder that keeps the process
+    // after a graceful shutdown must keep none of that. The guard aborts
+    // them when the serve ends, and also when this future is dropped.
+    let readers = spawn_health_readers(&state.governor, state.governor.config()).map(AbortOnDrop);
 
     let served = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown)
         .await
         .map_err(|e| TransportError::Http(format!("HTTP server error: {}", e)));
-    // Each reader holds the governor, and through it the session manager
-    // and every session's datasets, and the plain poll keeps handing memory
-    // back; an embedder that keeps the process after a graceful shutdown
-    // must not keep those too.
-    if let Some(readers) = readers {
-        readers.abort();
-    }
+    drop(readers);
     // Write out the queued audit entries before returning, so a caller that
     // exits right after a graceful shutdown keeps them. The governor's logger
     // holds the entries of every tool call; `state.audit_logger` is opened
@@ -1026,12 +1036,13 @@ mod serve_tests {
         assert_eq!(health.rss_bytes, Some(LIMIT / 2));
     }
 
-    /// The health readers stop when the server does. Each holds the
+    /// The health readers stop when the server does, after a graceful
+    /// shutdown and when the serve future is dropped. Each holds the
     /// governor, and through it the session manager and every session's
     /// datasets, and the plain poll keeps handing memory back, so a reader
-    /// left running after a graceful shutdown would keep a dead server's
-    /// memory and its hand-backs for as long as an embedder keeps the
-    /// process (PR-04).
+    /// left running would keep a dead server's memory and its hand-backs for
+    /// as long as an embedder keeps the process (PR-04). Without a reader the
+    /// governor goes with the server (the control).
     #[tokio::test]
     async fn the_health_readers_stop_when_the_server_does() {
         let config = ServerConfig {
@@ -1039,6 +1050,8 @@ mod serve_tests {
             ..Default::default()
         };
         let readers = [
+            // The control: no reader, so the governor goes with the server.
+            ("no reader", ExecConfig::default()),
             (
                 // A soft limit far above any RSS, so nothing is refused or
                 // handed back, and no watchdog.
@@ -1058,11 +1071,26 @@ mod serve_tests {
             ),
         ];
         let mut outlived = Vec::new();
-        for (reader, exec) in readers {
+        for (reader, exec, dropped) in readers.iter().flat_map(|(reader, exec)| {
+            [
+                (*reader, exec.clone(), false),
+                (*reader, exec.clone(), true),
+            ]
+        }) {
             let (app, state) = build_app_with(&config, exec).await.unwrap();
             let governor = Arc::downgrade(&state.governor);
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            serve_app(listener, app, state, async {}).await.unwrap();
+            if dropped {
+                // A serve future dropped before its shutdown (an embedder's timeout or
+                // abort) stops its readers too.
+                let serving = serve_app(listener, app, state, std::future::pending());
+                assert!(
+                    tokio::time::timeout(Duration::ZERO, serving).await.is_err(),
+                    "the serve ended without its shutdown"
+                );
+            } else {
+                serve_app(listener, app, state, async {}).await.unwrap();
+            }
             // A bound on the wait, not a timing assertion: an aborted task
             // is dropped on its next turn on the runtime.
             for _ in 0..500 {
@@ -1072,7 +1100,7 @@ mod serve_tests {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
             if governor.upgrade().is_some() {
-                outlived.push(reader);
+                outlived.push((reader, dropped));
             }
         }
         assert!(outlived.is_empty(), "outlived the server: {outlived:?}");
