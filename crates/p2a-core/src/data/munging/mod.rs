@@ -57,9 +57,21 @@ fn numeric_f64(
         .map_err(|_| MungeError::ColumnNotFound(column.to_string()))?;
     crate::data::columns::float64_strict(col, allow_bool).ok_or_else(|| MungeError::TypeMismatch {
         column: column.to_string(),
-        expected: "numeric (convert text with munge_cast first)".to_string(),
+        expected: numeric_expectation(col.dtype(), "numeric"),
         found: col.dtype().to_string(),
     })
+}
+
+/// The `expected` text of a refused non-numeric column: `what`, with "cast the column to a
+/// number first" for a text column, the one kind a cast turns into numbers.
+fn numeric_expectation(found: &polars::prelude::DataType, what: &str) -> String {
+    use polars::prelude::DataType;
+    match found {
+        DataType::String | DataType::Categorical(..) | DataType::Enum(..) => {
+            format!("{what} (cast the column to a number first)")
+        }
+        _ => what.to_string(),
+    }
 }
 
 /// Refuse a column that fails [`numeric_f64`]'s rule, without converting it: a
@@ -80,7 +92,7 @@ fn require_numeric(
     } else {
         Err(MungeError::TypeMismatch {
             column: column.to_string(),
-            expected: "numeric (convert text with munge_cast first)".to_string(),
+            expected: numeric_expectation(col.dtype(), "numeric"),
             found: col.dtype().to_string(),
         })
     }
@@ -112,15 +124,19 @@ pub use error::{MungeError, MungeResult};
 
 // Re-export transform operations
 pub use transform::{
-    ArithOp, FilterOp, MutateExpr, drop_columns, filter, filter_and, head, mutate, rename, sample,
-    sample_rows, select, slice, sort, tail, take_rows,
+    ArithOp, FilterOp, MutateExpr, drop_columns, filter, filter_and, fresh_seed, head, mutate,
+    rename, sample, sample_rows, select, slice, sort, tail, take_rows,
 };
 
 // Re-export clean operations
 pub use clean::{
     CastOptions,
     CastReport,
+    FillOutcome,
     FillStrategy,
+    FillStrategyKind,
+    ReplaceOptions,
+    ReplaceOutcome,
     cast,
     cast_columns,
     cast_columns_with,
@@ -130,6 +146,7 @@ pub use clean::{
     drop_na,
     fill_na,
     fill_na_by,
+    fill_na_with,
     parse_cast_dtype,
     regex_count,
     regex_extract,
@@ -139,6 +156,7 @@ pub use clean::{
     regex_replace_all,
     regex_replace_bytes,
     replace,
+    replace_with,
     str_concat,
     str_length,
     str_pad,
@@ -158,14 +176,16 @@ pub use join::{
 };
 
 // Re-export aggregate operations
-pub use aggregate::{AggFn, AggSpec, describe, group_by, summarize, value_counts};
+pub use aggregate::{
+    AggFn, AggSpec, describe, group_by, summarize, value_counts, value_counts_with,
+};
 
 // Re-export reshape operations
 pub use reshape::{explode, melt, pivot, stack, transpose};
 
 // Re-export feature engineering operations
 pub use features::{
-    BinOptions, BinOutcome, BinStrategy, ShiftOptions, bin, bin_with, cumprod, cumsum, diff,
-    diff_with, lag, lag_with, lead, lead_with, normalize, one_hot_encode, pct_change,
-    pct_change_with, rank, standardize,
+    BinOptions, BinOutcome, BinStrategy, OneHotOutcome, ShiftOptions, bin, bin_with, cumprod,
+    cumsum, diff, diff_with, lag, lag_with, lead, lead_with, normalize, one_hot_encode,
+    one_hot_encode_with, one_hot_levels, pct_change, pct_change_with, rank, standardize,
 };

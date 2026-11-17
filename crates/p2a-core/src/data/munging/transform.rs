@@ -39,6 +39,23 @@ pub enum FilterOp {
 }
 
 impl FilterOp {
+    /// The canonical name of every operator, in the order of the enum. [`FilterOp::from_str`]
+    /// also takes symbols and aliases (`>=`, `like`, `matches`, ...).
+    pub const NAMES: &'static [&'static str] = &[
+        "eq",
+        "ne",
+        "gt",
+        "ge",
+        "lt",
+        "le",
+        "contains",
+        "not_contains",
+        "starts_with",
+        "ends_with",
+        "regex",
+        "not_regex",
+    ];
+
     /// Parse operator from string.
     pub fn from_str(s: &str) -> MungeResult<Self> {
         match s.to_lowercase().as_str() {
@@ -114,60 +131,60 @@ pub fn filter(dataset: &Dataset, column: &str, op: &str, value: &str) -> MungeRe
         });
     }
 
-    // Build the filter expression based on column type
-    // Cast to common types for comparison
+    // Build the filter mask based on column type. Integers compare as integers when the value
+    // is one (exactly, also above 2^53) and as floats when it is a fraction, as R's `x > 2.5`.
+    let invalid = |reason: &str| MungeError::InvalidValue {
+        column: column.to_string(),
+        value: value.to_string(),
+        reason: reason.to_string(),
+    };
+    let as_float = || -> MungeResult<f64> {
+        value
+            .trim()
+            .parse::<f64>()
+            .ok()
+            .filter(|v| !v.is_nan())
+            .ok_or_else(|| invalid("Cannot parse as a number"))
+    };
     let mask = match dtype {
-        DataType::Int64 => {
-            let val: i64 = value.parse().map_err(|_| MungeError::InvalidValue {
-                column: column.to_string(),
-                value: value.to_string(),
-                reason: "Cannot parse as integer".to_string(),
-            })?;
-            apply_numeric_filter_i64(col_series, op, val)?
-        }
-        DataType::Int32 => {
-            let val: i32 = value.parse().map_err(|_| MungeError::InvalidValue {
-                column: column.to_string(),
-                value: value.to_string(),
-                reason: "Cannot parse as integer".to_string(),
-            })?;
-            apply_numeric_filter_i32(col_series, op, val)?
-        }
-        DataType::Int16 | DataType::Int8 => {
-            // Cast to i32 for smaller types
-            let casted = col_series.cast(&DataType::Int32)?;
-            let val: i32 = value.parse().map_err(|_| MungeError::InvalidValue {
-                column: column.to_string(),
-                value: value.to_string(),
-                reason: "Cannot parse as integer".to_string(),
-            })?;
-            apply_numeric_filter_i32(&casted, op, val)?
+        DataType::Int64 | DataType::Int32 | DataType::Int16 | DataType::Int8 => {
+            match value.trim().parse::<i64>() {
+                Ok(val) => {
+                    let casted = col_series.cast(&DataType::Int64)?;
+                    apply_numeric_filter_i64(&casted, op, val)?
+                }
+                Err(_) => {
+                    let val = as_float()?;
+                    let as_f64 = col_series.cast(&DataType::Float64)?;
+                    apply_numeric_filter_f64(&as_f64, op, val)?
+                }
+            }
         }
         DataType::UInt64 | DataType::UInt32 | DataType::UInt16 | DataType::UInt8 => {
-            let val: u64 = value.parse().map_err(|_| MungeError::InvalidValue {
-                column: column.to_string(),
-                value: value.to_string(),
-                reason: "Cannot parse as unsigned integer".to_string(),
-            })?;
-            apply_numeric_filter_u64(col_series, op, val)?
+            match value.trim().parse::<u64>() {
+                Ok(val) => {
+                    let casted = col_series.cast(&DataType::UInt64)?;
+                    apply_numeric_filter_u64(&casted, op, val)?
+                }
+                Err(_) => {
+                    let val = as_float()?;
+                    let as_f64 = col_series.cast(&DataType::Float64)?;
+                    apply_numeric_filter_f64(&as_f64, op, val)?
+                }
+            }
         }
         DataType::Float64 | DataType::Float32 => {
-            let val: f64 = value.parse().map_err(|_| MungeError::InvalidValue {
-                column: column.to_string(),
-                value: value.to_string(),
-                reason: "Cannot parse as float".to_string(),
-            })?;
+            let val: f64 = value
+                .parse()
+                .map_err(|_| invalid("Cannot parse as float"))?;
             // Float32 compares as Float64 (`f64()` refused a Float32 column).
             let as_f64 = col_series.cast(&DataType::Float64)?;
             apply_numeric_filter_f64(&as_f64, op, val)?
         }
         DataType::String => apply_string_filter(col_series, op, value)?,
         DataType::Boolean => {
-            let val: bool = value.parse().map_err(|_| MungeError::InvalidValue {
-                column: column.to_string(),
-                value: value.to_string(),
-                reason: "Cannot parse as boolean".to_string(),
-            })?;
+            // R's as.logical: TRUE/true/T/True and FALSE/false/F/False
+            let val = super::clean::parse_bool(column, value)?;
             apply_bool_filter(col_series, op, val)?
         }
         _ => {
@@ -181,6 +198,15 @@ pub fn filter(dataset: &Dataset, column: &str, op: &str, value: &str) -> MungeRe
 
     let filtered_df = df.filter(&mask)?;
     Ok(Dataset::new(filtered_df))
+}
+
+/// A string operator on a numeric column (guarded before the comparison).
+fn not_numeric_op(series: &Column, op: FilterOp) -> MungeError {
+    MungeError::TypeMismatch {
+        column: series.name().to_string(),
+        expected: format!("a string column for {op:?}"),
+        found: series.dtype().to_string(),
+    }
 }
 
 fn apply_numeric_filter_i64(
@@ -197,32 +223,7 @@ fn apply_numeric_filter_i64(
         FilterOp::Lt => ca.lt(value),
         FilterOp::Le => ca.lt_eq(value),
         // String-only operators should not reach here (caught earlier)
-        _ => {
-            return Err(MungeError::InvalidOperator(
-                "String operators not valid for numeric columns".to_string(),
-            ));
-        }
-    })
-}
-
-fn apply_numeric_filter_i32(
-    series: &Column,
-    op: FilterOp,
-    value: i32,
-) -> MungeResult<BooleanChunked> {
-    let ca = series.i32()?;
-    Ok(match op {
-        FilterOp::Eq => ca.equal(value),
-        FilterOp::Ne => ca.not_equal(value),
-        FilterOp::Gt => ca.gt(value),
-        FilterOp::Ge => ca.gt_eq(value),
-        FilterOp::Lt => ca.lt(value),
-        FilterOp::Le => ca.lt_eq(value),
-        _ => {
-            return Err(MungeError::InvalidOperator(
-                "String operators not valid for numeric columns".to_string(),
-            ));
-        }
+        _ => return Err(not_numeric_op(series, op)),
     })
 }
 
@@ -239,11 +240,7 @@ fn apply_numeric_filter_u64(
         FilterOp::Ge => ca.gt_eq(value),
         FilterOp::Lt => ca.lt(value),
         FilterOp::Le => ca.lt_eq(value),
-        _ => {
-            return Err(MungeError::InvalidOperator(
-                "String operators not valid for numeric columns".to_string(),
-            ));
-        }
+        _ => return Err(not_numeric_op(series, op)),
     })
 }
 
@@ -261,11 +258,7 @@ fn apply_numeric_filter_f64(
         FilterOp::Ge => ca.gt_eq(value),
         FilterOp::Lt => ca.lt(value),
         FilterOp::Le => ca.lt_eq(value),
-        _ => {
-            return Err(MungeError::InvalidOperator(
-                "String operators not valid for numeric columns".to_string(),
-            ));
-        }
+        _ => return Err(not_numeric_op(series, op)),
     })
 }
 
@@ -320,9 +313,9 @@ fn apply_bool_filter(series: &Column, op: FilterOp, value: bool) -> MungeResult<
         FilterOp::Eq => ca.into_iter().map(|opt| opt.map(|v| v == value)).collect(),
         FilterOp::Ne => ca.into_iter().map(|opt| opt.map(|v| v != value)).collect(),
         _ => {
-            return Err(MungeError::InvalidOperator(
-                "Only eq/ne valid for boolean columns".to_string(),
-            ));
+            return Err(MungeError::InvalidExpression(format!(
+                "only eq and ne compare a boolean column, not {op:?}"
+            )));
         }
     };
     Ok(result)
@@ -470,7 +463,7 @@ fn numeric_operand(df: &DataFrame, name: &str) -> MungeResult<Column> {
     if !is_numeric_dtype(col.dtype(), true) && col.null_count() != col.len() {
         return Err(MungeError::TypeMismatch {
             column: name.to_string(),
-            expected: "numeric or boolean (convert text with munge_cast first)".to_string(),
+            expected: super::numeric_expectation(col.dtype(), "numeric or boolean"),
             found: col.dtype().to_string(),
         });
     }
@@ -689,12 +682,19 @@ pub fn sample(
     Ok(Dataset::new(sampled))
 }
 
+/// A seed for a draw the caller did not seed: random on every call, so an unseeded sample is a
+/// fresh one, as R's `sample` without `set.seed`.
+pub fn fresh_seed() -> u64 {
+    rand::random()
+}
+
 /// The row indices [`sample`] takes for `n` rows of a dataset of `height`
 /// rows with `seed`, in the order it takes them:
 /// `take_rows(dataset, &sample_rows(dataset.nrows(), n, r, seed)?)` is
 /// `sample(dataset, Some(n), None, r, Some(seed))`. A caller that has to
 /// know which rows a sample takes before the sample is built draws them
-/// with this.
+/// with this. It builds an index of all `height` rows first (4 bytes a row,
+/// polars' row index type), then the `n` drawn.
 ///
 /// # Errors
 ///
@@ -1021,5 +1021,97 @@ mod tests {
                 Tol::exact(),
             )
             .finish();
+    }
+
+    fn ids(ds: &Dataset) -> Vec<i64> {
+        ds.df()
+            .column("id")
+            .unwrap()
+            .cast(&DataType::Int64)
+            .unwrap()
+            .i64()
+            .unwrap()
+            .into_no_null_iter()
+            .collect()
+    }
+
+    #[test]
+    fn filter_compares_unsigned_fractional_and_r_logical_values() {
+        // value_counts' count column is UInt32
+        let counts = crate::data::munging::value_counts(
+            &Dataset::new(df!("g" => ["a", "b", "a", "c", "a", "b"]).unwrap()),
+            "g",
+        )
+        .unwrap();
+        assert_eq!(filter(&counts, "count", "gt", "1").unwrap().nrows(), 2);
+        let df = df!(
+            "id" => [1i64, 2, 3, 4],
+            "x" => [1i64, 2, 3, 4],
+            "b" => [true, false, true, false],
+        )
+        .unwrap();
+        for dt in [DataType::UInt8, DataType::UInt16, DataType::UInt32] {
+            let mut d = df.clone();
+            let u = d
+                .column("x")
+                .unwrap()
+                .cast(&dt)
+                .unwrap()
+                .with_name("u".into());
+            d.with_column(u).unwrap();
+            let out = filter(&Dataset::new(d), "u", "ge", "3").unwrap();
+            assert_eq!(ids(&out), [3, 4], "{dt}");
+        }
+        // dplyr::filter(x > 2.5) on an integer column
+        let ds = Dataset::new(df.clone());
+        assert_eq!(ids(&filter(&ds, "x", "gt", "2.5").unwrap()), [3, 4]);
+        assert_eq!(filter(&ds, "x", "eq", "2.5").unwrap().nrows(), 0);
+        assert_eq!(ids(&filter(&ds, "x", "le", "2.0").unwrap()), [1, 2]);
+        // above 2^53, digits compare exactly as i64
+        let big = Dataset::new(
+            df!("id" => [1i64, 2], "x" => [9_007_199_254_740_993i64, 9_007_199_254_740_992])
+                .unwrap(),
+        );
+        assert_eq!(
+            ids(&filter(&big, "x", "eq", "9007199254740993").unwrap()),
+            [1]
+        );
+        // R's as.logical
+        for t in ["TRUE", "True", "true", "T"] {
+            assert_eq!(ids(&filter(&ds, "b", "eq", t).unwrap()), [1, 3], "{t}");
+        }
+        for f in ["FALSE", "False", "false", "F"] {
+            assert_eq!(ids(&filter(&ds, "b", "eq", f).unwrap()), [2, 4], "{f}");
+        }
+        assert!(matches!(
+            filter(&ds, "b", "eq", "yes"),
+            Err(MungeError::InvalidValue { .. })
+        ));
+        // the operator list is the parser's
+        let msg = filter(&ds, "x", "in", "1").err().unwrap().to_string();
+        let names = [
+            "eq",
+            "ne",
+            "gt",
+            "ge",
+            "lt",
+            "le",
+            "contains",
+            "not_contains",
+            "starts_with",
+            "ends_with",
+            "regex",
+            "not_regex",
+        ];
+        for op in names {
+            assert!(msg.contains(op), "{msg}");
+        }
+        assert_eq!(FilterOp::NAMES, names);
+        assert!(!msg.contains("not_in") && !msg.contains(" in,"), "{msg}");
+        // a string operator on a number is a type error
+        assert!(matches!(
+            filter(&ds, "x", "contains", "1"),
+            Err(MungeError::TypeMismatch { .. })
+        ));
     }
 }

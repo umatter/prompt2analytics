@@ -16,7 +16,7 @@ pub enum MungeError {
         found: String,
     },
 
-    #[error("Invalid operator '{0}'. Valid operators: eq, ne, gt, ge, lt, le, in, not_in")]
+    #[error("Invalid operator '{0}'. Valid operators: {ops}", ops = filter_operators())]
     InvalidOperator(String),
 
     #[error("Invalid expression: {0}")]
@@ -55,6 +55,12 @@ pub enum MungeError {
 
     #[error("Polars error: {0}")]
     Polars(#[from] PolarsError),
+}
+
+/// The operators [`super::transform::filter`] accepts, for the [`MungeError::InvalidOperator`]
+/// message.
+fn filter_operators() -> String {
+    super::transform::FilterOp::NAMES.join(", ")
 }
 
 /// Result type for data munging operations.

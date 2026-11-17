@@ -117,7 +117,9 @@ impl AggSpec {
 /// Group by columns and apply aggregations.
 ///
 /// Groups the dataset by the specified columns and applies aggregation
-/// functions to compute summary statistics for each group.
+/// functions to compute summary statistics for each group. The result has one
+/// row per group, sorted by the group columns with missing keys last, as
+/// `dplyr::summarise`, on every call.
 ///
 /// # Arguments
 ///
@@ -185,10 +187,17 @@ pub fn group_by(dataset: &Dataset, by: &[&str], aggs: &[AggSpec]) -> MungeResult
         })
         .collect();
 
-    // Execute groupby
+    // Execute groupby; rows sorted by the keys, missing last (as dplyr::summarise)
+    let sort_by: Vec<PlSmallStr> = by.iter().map(|c| PlSmallStr::from(*c)).collect();
     let result = lazy
         .group_by(by_exprs)
         .agg(agg_exprs)
+        .sort(
+            sort_by,
+            SortMultipleOptions::default()
+                .with_nulls_last(true)
+                .with_maintain_order(true),
+        )
         .collect()
         .map_err(|e| MungeError::AggregationError(e.to_string()))?;
 
@@ -234,6 +243,12 @@ pub fn value_counts_with(dataset: &Dataset, column: &str, normalize: bool) -> Mu
         return Err(MungeError::ColumnNotFound(column.to_string()));
     }
     let value_column = if normalize { "proportion" } else { "count" };
+    if column == value_column {
+        return Err(MungeError::InvalidExpression(format!(
+            "the result's tally column is named '{value_column}', as the counted column is; \
+             rename the column first"
+        )));
+    }
 
     let aggregation = |e: PolarsError| MungeError::AggregationError(e.to_string());
     let source = dataset.df().column(column).map_err(aggregation)?;
@@ -893,5 +908,72 @@ mod tests {
             .named_subset("describe_f", &["mean"], &names, &f, Tol::coef(m))
             .named_subset("describe_f", &["std"], &names, &f, Tol::stat(m))
             .finish();
+    }
+
+    #[test]
+    fn test_validate_group_by_order() {
+        use p2a_validation::{Check, Tol};
+        // case data_munging_combine_t4: summarise(group_by(o, g), n = n(), s = sum(v)): one row per
+        // group, sorted by g, NA last; the same order on every call
+        let case = p2a_validation::Case::load("data_munging_combine_t4");
+        let o = Dataset::new(
+            crate::data::DataLoader::load_csv(p2a_validation::repo_path(
+                "validation/datasets/generated/munging_order.csv",
+            ))
+            .unwrap(),
+        );
+        let aggs = [
+            AggSpec::new("v", AggFn::Count).with_alias("n"),
+            AggSpec::new("v", AggFn::Sum).with_alias("s"),
+        ];
+        let cells = |ds: &Dataset, c: &str| -> Vec<f64> {
+            ds.df()
+                .column(c)
+                .unwrap()
+                .cast(&DataType::Float64)
+                .unwrap()
+                .f64()
+                .unwrap()
+                .into_iter()
+                .map(|v| v.unwrap_or(f64::NAN))
+                .collect()
+        };
+        let first = group_by(&o, &["g"], &aggs).unwrap();
+        Check::new(&case)
+            .vector("summarise_g", &cells(&first, "g"), Tol::exact())
+            .vector("summarise_n", &cells(&first, "n"), Tol::exact())
+            .vector("summarise_s", &cells(&first, "s"), Tol::new(1e-10, 0.0))
+            .finish();
+        assert_eq!(first.df().column("g").unwrap().null_count(), 1);
+        for _ in 0..20 {
+            assert!(
+                group_by(&o, &["g"], &aggs)
+                    .unwrap()
+                    .df()
+                    .equals_missing(first.df())
+            );
+        }
+    }
+
+    #[test]
+    fn value_counts_refuse_a_column_named_like_the_tally() {
+        let ds =
+            Dataset::new(df!("count" => [1i64, 2, 2], "proportion" => ["a", "b", "b"]).unwrap());
+        for (column, normalize) in [("count", false), ("proportion", true)] {
+            match value_counts_with(&ds, column, normalize) {
+                Err(MungeError::InvalidExpression(m)) => {
+                    assert!(
+                        m.contains(&format!("named '{column}'"))
+                            && m.contains("rename the column first")
+                            && !m.contains("change"),
+                        "{m}"
+                    )
+                }
+                other => panic!("{column}: {:?}", other.err()),
+            }
+        }
+        // the other tally name is free
+        let out = value_counts_with(&ds, "count", true).unwrap();
+        assert_eq!(out.df().get_column_names_str(), ["count", "proportion"]);
     }
 }
