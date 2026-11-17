@@ -1,5 +1,5 @@
 //! HTTP middleware: CORS, bearer-token authentication, the request body
-//! limit and the local-mode Host check, plus the order in which they wrap
+//! limits and the local-mode Host check, plus the order in which they wrap
 //! the router.
 
 use std::sync::Arc;
@@ -71,40 +71,60 @@ pub(crate) const MAX_HTTP_BODY_VAR: &str = "P2A_MAX_HTTP_BODY_MB";
 ///
 /// Caps memory use from oversized requests (e.g. large base64 dataset uploads)
 /// on a publicly reachable backend. Defaults to 32 MiB; override with the
-/// `P2A_MAX_HTTP_BODY_MB` environment variable. This only limits request
-/// bodies and does not affect SSE/streaming responses. The routes that parse
-/// a JSON body take one up to this size, except in the hosted profile
-/// ([`parsed_body_bytes`]).
+/// `P2A_MAX_HTTP_BODY_MB` environment variable ([`body_cap_setting`]). This
+/// only limits request bodies and does not affect SSE/streaming responses.
+/// The routes that parse a JSON body take one up to this size, except in the
+/// hosted profile ([`parsed_body_bytes`]).
 pub(crate) fn max_request_body_bytes() -> usize {
-    body_cap_bytes(std::env::var(MAX_HTTP_BODY_VAR).ok().as_deref())
+    let (cap, warning) = body_cap_setting(std::env::var(MAX_HTTP_BODY_VAR));
+    if let Some(warning) = warning {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| tracing::warn!("{warning}"));
+    }
+    cap
 }
 
-/// The body cap a `P2A_MAX_HTTP_BODY_MB` value sets, in bytes: the default
-/// 32 MiB when the variable is unset, is not a positive whole number, or is
-/// too large to count in bytes. A value set but not used is logged once per
-/// process, as a warning.
-fn body_cap_bytes(value: Option<&str>) -> usize {
+/// The body cap a `P2A_MAX_HTTP_BODY_MB` reading sets, in bytes, and the
+/// warning to log once when the value set is not used. Surrounding whitespace
+/// is ignored and an empty value means unset, as for `P2A_AUDIT_MAX_MB`. The
+/// cap is the default 32 MiB when the variable is unset or empty (no
+/// warning), or when it is not a positive whole number, is too large to count
+/// in bytes, or is not valid UTF-8 (with a warning).
+fn body_cap_setting(value: Result<String, std::env::VarError>) -> (usize, Option<String>) {
     const DEFAULT_MB: usize = 32;
     const MIB: usize = 1024 * 1024;
-    let Some(value) = value else {
-        return DEFAULT_MB * MIB;
+    let value = match value {
+        Ok(value) => value,
+        Err(std::env::VarError::NotPresent) => return (DEFAULT_MB * MIB, None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return (
+                DEFAULT_MB * MIB,
+                Some(format!(
+                    "{MAX_HTTP_BODY_VAR} is not valid UTF-8; using the default {DEFAULT_MB} MiB"
+                )),
+            );
+        }
     };
-    let bytes = value
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return (DEFAULT_MB * MIB, None);
+    }
+    let bytes = trimmed
         .parse::<usize>()
         .ok()
         .filter(|&mb| mb > 0)
         .and_then(|mb| mb.checked_mul(MIB));
-    bytes.unwrap_or_else(|| {
-        static WARNED: std::sync::Once = std::sync::Once::new();
-        WARNED.call_once(|| {
-            tracing::warn!(
-                "{MAX_HTTP_BODY_VAR}={value:?} is not a positive whole number of MiB \
-                 below {} MiB; using the default {DEFAULT_MB} MiB",
+    match bytes {
+        Some(bytes) => (bytes, None),
+        None => (
+            DEFAULT_MB * MIB,
+            Some(format!(
+                "{MAX_HTTP_BODY_VAR}={value:?} is not a positive whole number of MiB below {} \
+                 MiB; using the default {DEFAULT_MB} MiB",
                 usize::MAX / MIB + 1
-            );
-        });
-        DEFAULT_MB * MIB
-    })
+            )),
+        ),
+    }
 }
 
 /// The largest body the hosted profile parses: 2 MiB, axum's own default for
@@ -130,9 +150,13 @@ fn parsed_body_bytes(profile: ResourceProfile, body_cap: usize) -> usize {
 /// What building the router logs in the hosted profile when the body cap
 /// `body_cap` is above [`HOSTED_PARSED_BODY_BYTES`]: an operator who raised
 /// `P2A_MAX_HTTP_BODY_MB` learns that HTTP JSON bodies stay at the hosted
-/// limit, which no setting raises. `None` when the two limits are the same.
-fn hosted_parse_limit_note(profile: ResourceProfile, body_cap: usize) -> Option<String> {
-    let parsed = parsed_body_bytes(profile, body_cap);
+/// limit, which no setting raises. `parsed` is [`parsed_body_bytes`] of the
+/// two. `None` when the two limits are the same.
+fn hosted_parse_limit_note(
+    profile: ResourceProfile,
+    body_cap: usize,
+    parsed: usize,
+) -> Option<String> {
     (profile == ResourceProfile::Hosted && parsed < body_cap).then(|| {
         format!(
             "hosted profile: HTTP JSON request bodies are limited to {parsed} bytes; \
@@ -167,8 +191,9 @@ pub(crate) fn apply_global_middleware(router: Router, config: &ServerConfig) -> 
     // development only; the startup guard forbids this on a public bind).
     let token_state: Option<Arc<str>> = config.http.access_token.as_deref().map(Arc::from);
     let body_cap = max_request_body_bytes();
-    let parsed = parsed_body_bytes(config.resource_profile(), body_cap);
-    if let Some(note) = hosted_parse_limit_note(config.resource_profile(), body_cap) {
+    let profile = config.resource_profile();
+    let parsed = parsed_body_bytes(profile, body_cap);
+    if let Some(note) = hosted_parse_limit_note(profile, body_cap, parsed) {
         tracing::info!("{note}");
     }
     let router = router
@@ -357,25 +382,21 @@ mod tests {
     #[test]
     fn a_hosted_router_logs_a_json_body_limit_below_the_cap_once() {
         const MIB: usize = 1024 * 1024;
-        let note = hosted_parse_limit_note(ResourceProfile::Hosted, 32 * MIB)
-            .expect("a hosted cap above 2 MiB is noted");
+        let note =
+            |profile, cap| hosted_parse_limit_note(profile, cap, parsed_body_bytes(profile, cap));
+        let note_32 =
+            note(ResourceProfile::Hosted, 32 * MIB).expect("a hosted cap above 2 MiB is noted");
         for part in [
             "2097152 bytes",
             "33554432 bytes",
             MAX_HTTP_BODY_VAR,
             "websocket",
         ] {
-            assert!(note.contains(part), "{part}: {note}");
+            assert!(note_32.contains(part), "{part}: {note_32}");
         }
-        assert_eq!(
-            hosted_parse_limit_note(ResourceProfile::Hosted, 2 * MIB),
-            None
-        );
-        assert_eq!(hosted_parse_limit_note(ResourceProfile::Hosted, MIB), None);
-        assert_eq!(
-            hosted_parse_limit_note(ResourceProfile::Off, 32 * MIB),
-            None
-        );
+        assert_eq!(note(ResourceProfile::Hosted, 2 * MIB), None);
+        assert_eq!(note(ResourceProfile::Hosted, MIB), None);
+        assert_eq!(note(ResourceProfile::Off, 32 * MIB), None);
 
         let captured = Captured::default();
         let writer = captured.clone();
@@ -399,7 +420,7 @@ mod tests {
         let _router = apply_global_middleware(Router::new(), &config);
         // The cap this test process runs with: the default 32 MiB unless its
         // environment sets another.
-        match hosted_parse_limit_note(ResourceProfile::Hosted, max_request_body_bytes()) {
+        match note(ResourceProfile::Hosted, max_request_body_bytes()) {
             Some(note) => assert_eq!(log().matches(&note).count(), 1, "{}", log()),
             None => assert!(!log().contains("hosted profile"), "{}", log()),
         }
@@ -411,22 +432,55 @@ mod tests {
         assert_eq!(log(), before);
     }
 
-    /// The cap is `P2A_MAX_HTTP_BODY_MB` MiB; unset, not a positive whole
-    /// number, or too large to count in bytes, it is the default 32 MiB.
+    /// The cap is `P2A_MAX_HTTP_BODY_MB` MiB, read as `P2A_AUDIT_MAX_MB` is:
+    /// surrounding whitespace is ignored and an empty value means unset. Not
+    /// a positive whole number, too large to count in bytes, or not UTF-8, it
+    /// is the default 32 MiB with a warning.
     #[test]
-    fn body_cap_follows_the_variable_and_falls_back_to_32_mib() {
+    fn body_cap_setting_reads_the_variable_as_the_audit_cap_does() {
+        use std::env::VarError;
         const MIB: usize = 1024 * 1024;
-        assert_eq!(body_cap_bytes(None), 32 * MIB);
-        assert_eq!(body_cap_bytes(Some("4")), 4 * MIB);
-        for invalid in ["0", "-1", "4.5", "", "lots"] {
-            assert_eq!(body_cap_bytes(Some(invalid)), 32 * MIB, "{invalid:?}");
+        let ok = |v: &str| body_cap_setting(Ok(v.to_string()));
+        assert_eq!(
+            body_cap_setting(Err(VarError::NotPresent)),
+            (32 * MIB, None)
+        );
+        for unset in ["", "  "] {
+            assert_eq!(ok(unset), (32 * MIB, None), "{unset:?}");
+        }
+        for four in ["4", " 4 ", "4\n"] {
+            assert_eq!(ok(four), (4 * MIB, None), "{four:?}");
+        }
+        let refused = |v: &str| {
+            let (cap, warning) = ok(v);
+            assert_eq!(cap, 32 * MIB, "{v:?}");
+            let w = warning.unwrap_or_else(|| panic!("no warning for {v:?}"));
+            assert!(w.starts_with("P2A_MAX_HTTP_BODY_MB="), "{w}");
+        };
+        for invalid in ["0", "-1", "4.5", "lots"] {
+            refused(invalid);
         }
         let largest = usize::MAX / MIB;
-        assert_eq!(body_cap_bytes(Some(&largest.to_string())), largest * MIB);
+        assert_eq!(ok(&largest.to_string()), (largest * MIB, None));
         // One MiB more does not fit in a usize of bytes: the product used to
         // overflow (a panic in a debug build, a wrap in a release build).
         for huge in [largest + 1, usize::MAX] {
-            assert_eq!(body_cap_bytes(Some(&huge.to_string())), 32 * MIB, "{huge}");
+            refused(&huge.to_string());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            let value = std::ffi::OsString::from_vec(vec![0x34, 0xff]);
+            assert_eq!(
+                body_cap_setting(Err(VarError::NotUnicode(value))),
+                (
+                    32 * MIB,
+                    Some(
+                        "P2A_MAX_HTTP_BODY_MB is not valid UTF-8; using the default 32 MiB"
+                            .to_string()
+                    )
+                )
+            );
         }
     }
 
