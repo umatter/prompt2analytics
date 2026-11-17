@@ -21,7 +21,7 @@ use p2a_core::{
     run_holt_winters,
     run_mstl,
     // STL decomposition
-    run_stl,
+    StlConfig, run_stl_with_config,
     // Structural time series
     run_struct_ts,
     run_var,
@@ -437,6 +437,11 @@ EXAMPLES:
             value_parser = clap::builder::BoolishValueParser::new()
         )]
         robust: bool,
+
+        /// Seasonal smoothing window, as stl's s.window: periodic, or an odd span of at least
+        /// 3 (default: the next odd number from the period, stlrs' default; R's stl has none)
+        #[arg(long, value_name = "periodic|N", value_parser = s_window_arg)]
+        s_window: Option<SWindow>,
     },
 
     /// Classical seasonal decomposition (moving averages)
@@ -475,7 +480,9 @@ EXAMPLES:
         period: Option<usize>,
     },
 
-    /// Bayesian structural time series causal inference (CausalImpact)
+    /// Causal impact of an intervention from a structural time-series model (as CausalImpact,
+    /// fitted by maximum likelihood; intervals and tail probabilities from the normal
+    /// approximation, not a posterior)
     #[command(after_help = "\
 EXAMPLES:
     # Estimate causal impact of intervention
@@ -699,7 +706,8 @@ pub fn execute(
             col,
             period,
             robust,
-        } => execute_stl(dataset, col, *period, *robust, format, session),
+            s_window,
+        } => execute_stl(dataset, col, *period, *robust, *s_window, format, session),
         TimeseriesCommands::Decompose {
             dataset,
             col,
@@ -1696,11 +1704,52 @@ fn execute_ar(
     Ok(())
 }
 
+/// The period 1/f of a spectral frequency; `None` at frequency 0 (or below), where no period
+/// is defined.
+fn period(f: f64) -> Option<f64> {
+    (f > 0.0).then(|| 1.0 / f)
+}
+
+/// `ts stl --s-window`: stl's `s.window`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SWindow {
+    /// `s.window = "periodic"`: the seasonal component is the cycle means.
+    Periodic,
+    /// An odd seasonal smoothing span of at least 3.
+    Span(usize),
+}
+
+impl std::fmt::Display for SWindow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SWindow::Periodic => write!(f, "periodic"),
+            SWindow::Span(n) => write!(f, "{n}"),
+        }
+    }
+}
+
+fn s_window_arg(s: &str) -> Result<SWindow, String> {
+    let t = s.trim();
+    if t.eq_ignore_ascii_case("periodic") || t.eq_ignore_ascii_case("per") {
+        return Ok(SWindow::Periodic);
+    }
+    match t.parse::<usize>() {
+        Ok(n) if n >= 3 && n % 2 == 1 => Ok(SWindow::Span(n)),
+        Ok(n) => Err(format!(
+            "the seasonal window must be odd and at least 3, got {n}"
+        )),
+        Err(_) => Err(format!(
+            "expected 'periodic' or an odd number of at least 3, got '{s}'"
+        )),
+    }
+}
+
 fn execute_stl(
     dataset_name: &str,
     col: &str,
     period: usize,
     robust: bool,
+    s_window: Option<SWindow>,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
@@ -1713,7 +1762,14 @@ fn execute_stl(
     };
 
     match dataset {
-        Some(ds) => match run_stl(ds, col, period, robust) {
+        Some(ds) => match run_stl_with_config(ds, col, {
+            let config = StlConfig::new(period).robust(robust);
+            match s_window {
+                None => config,
+                Some(SWindow::Periodic) => config.periodic(),
+                Some(SWindow::Span(n)) => config.seasonal_length(n),
+            }
+        }) {
             Ok(result) => match format {
                 OutputFormat::Json => {
                     let json = serde_json::json!({
@@ -1721,6 +1777,7 @@ fn execute_stl(
                         "period": result.period,
                         "n_obs": result.n_obs,
                         "robust": result.robust,
+                        "s_window": s_window.map(|w| w.to_string()),
                         "seasonal_strength": result.seasonal_strength,
                         "trend_strength": result.trend_strength,
                         "trend_sample": result.trend.iter().take(10).collect::<Vec<_>>(),
@@ -1993,11 +2050,11 @@ fn execute_causal_impact(
 
                         println!("\n--- Inference ---");
                         println!(
-                            "Posterior prob (effect > 0): {:.2}%",
+                            "P(effect > 0), normal approximation: {:.2}%",
                             result.inference.prob_positive * 100.0
                         );
                         println!(
-                            "Posterior prob (effect < 0): {:.2}%",
+                            "P(effect < 0), normal approximation: {:.2}%",
                             result.inference.prob_negative * 100.0
                         );
                         println!(
@@ -2059,7 +2116,7 @@ fn execute_spectrum(
                             "detrend": result.detrend,
                             "kernel_spans": result.kernel_spans,
                             "peak_frequency": result.peak_frequency().map(|(f, s)| {
-                                serde_json::json!({"frequency": f, "spectrum": s, "period": 1.0 / f})
+                                serde_json::json!({"frequency": f, "spectrum": s, "period": period(f)})
                             }),
                             "freq_sample": result.freq.iter().take(10).collect::<Vec<_>>(),
                             "spec_sample": result.spec.iter().take(10).collect::<Vec<_>>(),
@@ -2080,12 +2137,8 @@ fn execute_spectrum(
                             println!("Kernel spans: {:?}", spans);
                         }
                         if let Some((peak_freq, peak_spec)) = result.peak_frequency() {
-                            if peak_freq > 0.0 {
-                                println!(
-                                    "\nPeak frequency: {:.4} (period = {:.2})",
-                                    peak_freq,
-                                    1.0 / peak_freq
-                                );
+                            if let Some(p) = period(peak_freq) {
+                                println!("\nPeak frequency: {peak_freq:.4} (period = {p:.2})");
                             } else {
                                 println!(
                                     "\nPeak frequency: {:.4} (period = not defined at frequency 0)",
@@ -2115,6 +2168,21 @@ fn execute_spectrum(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spectrum_period_is_null_at_zero_frequency() {
+        assert_eq!(period(0.0), None);
+        assert_eq!(period(0.25), Some(4.0));
+    }
+
+    #[test]
+    fn s_window_parses_periodic_and_odd_spans() {
+        assert_eq!(s_window_arg("periodic"), Ok(SWindow::Periodic));
+        assert_eq!(s_window_arg("13"), Ok(SWindow::Span(13)));
+        assert!(s_window_arg("12").unwrap_err().contains("odd"));
+        assert!(s_window_arg("1").is_err());
+        assert!(s_window_arg("wide").is_err());
+    }
 
     #[test]
     fn test_cli_option_tables_parse_aliases_and_reject_unknown() {

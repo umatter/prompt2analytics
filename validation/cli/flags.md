@@ -17,6 +17,8 @@ T3-WP06 made the following CLI options do what their help says (CLI-5, CLI-18, D
 | `--aic` | `ts ar` | true | false: fits the maximum order min(n − 1, floor(10 log10 n)), as `ar(aic = FALSE)`; `--order` fixes the order and wins over both |
 | `--detrend` | `ts spectrum` | true | false: no least-squares linear trend removed first |
 | `--robust` | `ts stl` | false | true: robust (outlier-resistant) STL |
+| `--lshort` | `stats pp-test` | true | false: the long truncation lag 12 (n/100)^(1/4), as `PP.test(lshort = FALSE)` |
+| `--robust` | `causal iv` | true | false: classical standard errors instead of HC1 |
 
 Before: a `bool` field with `default_value = "true"` was a clap `SetTrue` flag, so `--intercept
 false` was a usage error (exit 2) and the flag could never be false; `--robust true`, the help
@@ -70,6 +72,7 @@ spectral-analysis --test tier3`):
 | `test_validate_cli_quantreg_no_intercept_reaches_core` | `ols_no_intercept_grunfeld` | `--intercept false` reaches `quantreg()`: CLI coefficients equal the in-process call | `Tol::new(1e-12, 1e-15)` |
 | `test_validate_cli_ts_ar_aic_flag` | `ts_ar_yw_aic` | AIC order, coefficients, relative AIC, mean and prediction variance; `--aic false` order 20, its coefficients and prediction variance; `--order 2 --aic false` | README, n = 120; orders exact |
 | `test_validate_cli_ts_stl_robust_flag` | `ts_ar_yw_aic` | `--robust true/false`, bare and default; remainder equals `run_stl` in process | exact |
+| `test_validate_cli_stl_s_window` | `ts_utils_t4` | `--s-window periodic` and `13`: first ten seasonal, trend and remainder values of `stl(s.window = ...)`; an even span is refused | absolute 1e-5 sd(y) (stlrs computes in f32), as the core STL tests |
 | `test_validate_cli_ts_spectrum_detrend_flag` | `ts_ar_yw_aic` | `--detrend false` equals `run_spectrum` in process and differs from the default | exact |
 | `test_cli_script_export_comments_flag` | none | `--comments false` drops only the per-command comment lines | exact |
 | `test_cli_max_memory_warns_once` | none | one warning per invocation, values 1.17 and 2.35 MB, none without a limit or under it | exact |
@@ -95,9 +98,10 @@ R-pinned (registry `validation/methods/cli_flags.json`, ids `cli_regression_flag
 - `var_pred` of `ts ar` is not compared by these tests; the Yule-Walker prediction variance
   (with `ar.yw`'s n/(n − (order + 1)) factor) is pinned by the core AR tests
   ([ar.md](../timeseries/ar.md)).
-- **TS-26** (`ts stl`): the CLI's default windows are not R's (`stl` needs `s.window`); the core
-  STL is pinned to `stl` ([stl.md](../forecasting/stl.md)). The test compares the CLI with
-  `run_stl` in process.
+- **TS-26** (`ts stl`): `stl` needs `s.window`, which the CLI takes as `--s-window` (`periodic`
+  or an odd span of at least 3); without it the seasonal window is the next odd number from the
+  period (stlrs' default). `test_validate_cli_stl_s_window` pins both forms to `stl`; the core
+  STL is pinned too ([stl.md](../forecasting/stl.md)).
 - `ts spectrum`: the test compares the CLI with `run_spectrum` in process; the periodogram itself
   is pinned to `spec.pgram` by the core tests ([spectrum.md](../timeseries/spectrum.md)).
 - `reg quantreg --intercept false`: the test checks that the flag reaches `quantreg()` (equal

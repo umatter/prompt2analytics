@@ -2096,3 +2096,43 @@ fn test_cli_svm_counts_by_label_and_ml_notes() {
     let h = help("tsne");
     assert!(h.contains("Rtsne's eta"), "{h}");
 }
+
+/// `ts stl --s-window` is stl's s.window: `periodic` and 13 give the first ten values of
+/// stl(ts(y, frequency = 12), s.window = ...) (case ts_utils_t4; stlrs computes in f32, so the
+/// core test's tolerance, 1e-5 sd(y) absolute); an even span is refused. The causal-impact
+/// output speaks of a normal approximation, not a posterior.
+#[test]
+fn test_validate_cli_stl_s_window() {
+    let case = Case::load("ts_utils_t4");
+    let s = temp_session();
+    s.load_as(&case.dataset_path(), "ts", &[]);
+    let tol = Tol::new(0.0, 1e-5 * case.scalar("stl_sd"));
+    for (w, prefix) in [("periodic", "stl_periodic"), ("13", "stl_swin13")] {
+        let j = s.json(&[
+            "ts", "stl", "ts", "--col", "y", "--period", "12", "--s-window", w,
+        ]);
+        assert_eq!(j["s_window"], w, "{j}");
+        for part in ["seasonal", "trend", "remainder"] {
+            let got = f64s(&j[format!("{part}_sample")]);
+            let want = case.vector(&format!("{prefix}_{part}"));
+            assert_eq!(got.len(), 10, "{j}");
+            for (i, (g, e)) in got.iter().zip(&want).enumerate() {
+                assert!(tol.allows(*g, *e), "{prefix}_{part}[{i}]: {g} vs {e}");
+            }
+        }
+    }
+    // a usage error (clap, exit 2)
+    let out = s.run(&[
+        "ts", "stl", "ts", "--col", "y", "--period", "12", "--s-window", "12",
+    ]);
+    let e = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{e}");
+    assert!(e.contains("odd"), "{e}");
+
+    let out = p2a()
+        .args(["ts", "causal-impact", "--help"])
+        .output()
+        .unwrap();
+    let h = String::from_utf8_lossy(&out.stdout);
+    assert!(!h.contains("Bayesian"), "{h}");
+}
