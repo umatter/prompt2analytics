@@ -10,8 +10,8 @@
 //! standard error that would round to zero at the style's decimals is written with that many
 //! significant digits in scientific notation (`1.156e-07`).
 
-use super::{LegendStyle, format_estimate, significance_legend};
 use super::latex::format_cell;
+use super::{LegendStyle, format_estimate, significance_legend};
 use crate::regression::OlsResult;
 use crate::traits::SignificanceLevel;
 
@@ -348,7 +348,10 @@ mod tests {
             .caption("**bold** caption")
             .build();
         let lines: Vec<&str> = md.lines().collect();
-        let header = lines.iter().position(|l| l.starts_with("| Variable")).unwrap();
+        let header = lines
+            .iter()
+            .position(|l| l.starts_with("| Variable"))
+            .unwrap();
         let cells = gfm_cells(lines[header]);
         assert_eq!(cells.len(), 5, "{md}");
         assert_eq!(cells.len(), gfm_cells(lines[header + 1]).len(), "{md}");

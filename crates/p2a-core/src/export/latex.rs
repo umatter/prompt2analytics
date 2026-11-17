@@ -948,8 +948,14 @@ mod tests {
                 tex.find(needle)
                     .unwrap_or_else(|| panic!("{what}: no {needle}: {tex}"))
             };
-            assert!(at("\\begin{threeparttable}") < at("\\begin{tabular}"), "{what}");
-            assert!(at("\\end{tablenotes}") < at("\\end{threeparttable}"), "{what}");
+            assert!(
+                at("\\begin{threeparttable}") < at("\\begin{tabular}"),
+                "{what}"
+            );
+            assert!(
+                at("\\end{tablenotes}") < at("\\end{threeparttable}"),
+                "{what}"
+            );
             assert!(at("\\end{threeparttable}") < at("\\end{table}"), "{what}");
             assert!(tex.contains(legend), "{what}: {tex}");
             assert_eq!(
@@ -970,7 +976,10 @@ mod tests {
         let mut style = LatexStyle::default();
         style.significance_stars = false;
         let tex = m1.to_latex_styled(style);
-        assert!(!tex.contains("threeparttable") && !tex.contains("tablenotes"), "{tex}");
+        assert!(
+            !tex.contains("threeparttable") && !tex.contains("tablenotes"),
+            "{tex}"
+        );
         assert!(tex.starts_with("\\begin{table}"), "{tex}");
     }
 
@@ -988,14 +997,22 @@ mod tests {
         let mut style = HtmlStyle::default();
         style.se_in_parentheses = false;
         let html = m1.to_html_styled(style);
-        assert!(html.contains(html_legend) && !html.contains("parentheses"), "{html}");
-        let md = MarkdownTableBuilder::new().add_model("(1)", m1.clone()).build();
+        assert!(
+            html.contains(html_legend) && !html.contains("parentheses"),
+            "{html}"
+        );
+        let md = MarkdownTableBuilder::new()
+            .add_model("(1)", m1.clone())
+            .build();
         assert!(md.contains(md_legend), "{md}");
         assert!(md.contains("Standard errors in parentheses."), "{md}");
         let mut style = MarkdownStyle::default();
         style.se_in_parentheses = false;
         let md = m1.to_markdown_styled(style);
-        assert!(md.contains(md_legend) && !md.contains("parentheses"), "{md}");
+        assert!(
+            md.contains(md_legend) && !md.contains("parentheses"),
+            "{md}"
+        );
         let fe = crate::econometrics::run_fixed_effects(
             &grunfeld(),
             "inv",
@@ -1004,14 +1021,22 @@ mod tests {
         )
         .unwrap();
         let html = fe.to_html();
-        assert!(html.contains(html_legend) && !html.contains("parentheses"), "{html}");
+        assert!(
+            html.contains(html_legend) && !html.contains("parentheses"),
+            "{html}"
+        );
     }
 
     /// Case `export_ols_grunfeld_usd`'s model: `inv ~ value_usd + capital`, value in dollars.
     fn ols_grunfeld_usd() -> (p2a_validation::Case, OlsResult) {
         use polars::prelude::*;
         let (case, mut ds) = crate::test_support::load_case("export_ols_grunfeld_usd");
-        let value = ds.df().column("value").unwrap().cast(&DataType::Float64).unwrap();
+        let value = ds
+            .df()
+            .column("value")
+            .unwrap()
+            .cast(&DataType::Float64)
+            .unwrap();
         let usd = (value.as_materialized_series() * 1e6).with_name("value_usd".into());
         ds.df_mut().with_column(usd).unwrap();
         let fit = crate::regression::run_ols(
@@ -1045,7 +1070,10 @@ mod tests {
         assert_eq!(rows[row("capital")][1], "0.2307***", "{tex}");
         let names = ["(Intercept)", "value_usd", "capital"];
         let labels = ["(Intercept)", "value\\_usd", "capital"];
-        let coef: Vec<f64> = labels.iter().map(|l| cell_number(&rows[row(l)][1])).collect();
+        let coef: Vec<f64> = labels
+            .iter()
+            .map(|l| cell_number(&rows[row(l)][1]))
+            .collect();
         let se: Vec<f64> = labels
             .iter()
             .map(|l| cell_number(&rows[row(l) + 1][1]))
@@ -1056,8 +1084,20 @@ mod tests {
         check
             .named_subset("coef", &["value_usd"], &names, &coef, sig4)
             .named_subset("se", &["value_usd"], &names, &se, sig4)
-            .named_subset("coef", &["(Intercept)", "capital"], &names, &coef, Tol::printed(4))
-            .named_subset("se", &["(Intercept)", "capital"], &names, &se, Tol::printed(4));
+            .named_subset(
+                "coef",
+                &["(Intercept)", "capital"],
+                &names,
+                &coef,
+                Tol::printed(4),
+            )
+            .named_subset(
+                "se",
+                &["(Intercept)", "capital"],
+                &names,
+                &se,
+                Tol::printed(4),
+            );
         check.finish();
     }
 
@@ -1065,7 +1105,9 @@ mod tests {
     fn test_html_and_markdown_small_coefficient_cells() {
         use crate::export::{HtmlTableBuilder, MarkdownTableBuilder};
         let (_, fit) = ols_grunfeld_usd();
-        let html = HtmlTableBuilder::new().add_model("(1)", fit.clone()).build();
+        let html = HtmlTableBuilder::new()
+            .add_model("(1)", fit.clone())
+            .build();
         assert!(
             html.contains("<td class=\"coef\">1.156e-07<sup>***</sup></td>")
                 && html.contains("<td class=\"se\">(5.836e-09)</td>")

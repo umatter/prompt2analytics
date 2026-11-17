@@ -10,8 +10,8 @@
 //! standard error that would round to zero at the style's decimals is written with that many
 //! significant digits in scientific notation (`1.156e-07`).
 
-use super::{LegendStyle, format_estimate, significance_legend};
 use super::latex::format_cell;
+use super::{LegendStyle, format_estimate, significance_legend};
 use crate::econometrics::{DiscreteResult, PanelResult};
 use crate::regression::OlsResult;
 use crate::traits::SignificanceLevel;

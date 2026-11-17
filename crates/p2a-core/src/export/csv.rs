@@ -81,7 +81,10 @@ impl CsvExport for OlsResult {
         csv.push_str("statistic,value\n");
         csv.push_str(&format!("n_obs,{}\n", self.n_obs));
         csv.push_str(&format!("r_squared,{}\n", csv_number(self.r_squared)));
-        csv.push_str(&format!("adj_r_squared,{}\n", csv_number(self.adj_r_squared)));
+        csv.push_str(&format!(
+            "adj_r_squared,{}\n",
+            csv_number(self.adj_r_squared)
+        ));
         csv.push_str(&format!("f_statistic,{}\n", csv_number(self.f_statistic)));
         csv.push_str(&format!("f_p_value,{}\n", csv_number(self.f_p_value)));
         csv.push_str(&format!("df_model,{}\n", self.df_model));
@@ -128,12 +131,18 @@ impl CsvExport for DiscreteResult {
         csv.push_str(&format!("dep_var,{}\n", escape_csv(&self.dep_var)));
         csv.push_str(&format!("n_obs,{}\n", self.n_obs));
         csv.push_str(&format!("n_positive,{}\n", self.n_positive));
-        csv.push_str(&format!("log_likelihood,{}\n", csv_number(self.log_likelihood)));
+        csv.push_str(&format!(
+            "log_likelihood,{}\n",
+            csv_number(self.log_likelihood)
+        ));
         csv.push_str(&format!(
             "log_likelihood_null,{}\n",
             csv_number(self.log_likelihood_null)
         ));
-        csv.push_str(&format!("pseudo_r_squared,{}\n", csv_number(self.pseudo_r_squared)));
+        csv.push_str(&format!(
+            "pseudo_r_squared,{}\n",
+            csv_number(self.pseudo_r_squared)
+        ));
         csv.push_str(&format!("aic,{}\n", csv_number(self.aic)));
         csv.push_str(&format!("bic,{}\n", csv_number(self.bic)));
         csv.push_str(&format!("iterations,{}\n", self.iterations));
@@ -175,7 +184,10 @@ impl CsvExport for PanelResult {
         csv.push_str(&format!("n_obs,{}\n", self.n_obs));
         csv.push_str(&format!("n_groups,{}\n", self.n_groups));
         csv.push_str(&format!("r_squared,{}\n", csv_number(self.r_squared)));
-        csv.push_str(&format!("adj_r_squared,{}\n", csv_number(self.adj_r_squared)));
+        csv.push_str(&format!(
+            "adj_r_squared,{}\n",
+            csv_number(self.adj_r_squared)
+        ));
         csv.push_str(&format!("f_stat,{}\n", csv_number(self.f_stat)));
         csv.push_str(&format!("f_p_value,{}\n", csv_number(self.f_p_value)));
         csv.push_str(&format!("df,{}\n", self.df));
@@ -201,7 +213,10 @@ impl CsvExport for HausmanResult {
         // Test results
         csv.push_str("# Hausman Test Results\n");
         csv.push_str("statistic,value\n");
-        csv.push_str(&format!("chi2_statistic,{}\n", csv_number(self.chi2_statistic)));
+        csv.push_str(&format!(
+            "chi2_statistic,{}\n",
+            csv_number(self.chi2_statistic)
+        ));
         csv.push_str(&format!("p_value,{}\n", csv_number(self.p_value)));
         csv.push_str(&format!("df,{}\n", self.df));
         csv.push_str(&format!(
@@ -288,7 +303,10 @@ impl CsvExport for PCAResult {
         csv.push_str("\n# Statistics\n");
         csv.push_str("statistic,value\n");
         csv.push_str(&format!("n_components,{}\n", self.n_components));
-        csv.push_str(&format!("total_variance,{}\n", csv_number(self.total_variance)));
+        csv.push_str(&format!(
+            "total_variance,{}\n",
+            csv_number(self.total_variance)
+        ));
 
         csv
     }
@@ -447,7 +465,12 @@ mod tests {
     /// Grunfeld with `value_usd = value * 1e6`, as case `export_ols_grunfeld_usd` builds it.
     fn grunfeld_usd(mut ds: crate::data::Dataset) -> crate::data::Dataset {
         use polars::prelude::*;
-        let value = ds.df().column("value").unwrap().cast(&DataType::Float64).unwrap();
+        let value = ds
+            .df()
+            .column("value")
+            .unwrap()
+            .cast(&DataType::Float64)
+            .unwrap();
         let usd = (value.as_materialized_series() * 1e6).with_name("value_usd".into());
         ds.df_mut().with_column(usd).unwrap();
         ds
@@ -528,7 +551,11 @@ mod tests {
             -f64::MAX,
         ] {
             let cell = csv_number(x);
-            assert_eq!(cell.parse::<f64>().unwrap().to_bits(), x.to_bits(), "{x}: {cell}");
+            assert_eq!(
+                cell.parse::<f64>().unwrap().to_bits(),
+                x.to_bits(),
+                "{x}: {cell}"
+            );
         }
         assert_eq!(csv_number(f64::NAN), "NA");
         assert_eq!(csv_number(f64::INFINITY), "Inf");
