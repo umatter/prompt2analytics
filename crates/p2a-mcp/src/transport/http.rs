@@ -527,16 +527,10 @@ pub async fn serve(
     mut config: ServerConfig,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> TransportResult<()> {
-    config.http.addr = listener
+    let addr = listener
         .local_addr()
         .map_err(|e| TransportError::Http(format!("Failed to read the bound address: {e}")))?;
-    config.transport = TransportType::Http;
-    config
-        .validate()
-        .map_err(|e| TransportError::Config(e.to_string()))?;
-    let limits = resolve_limits(&config)?;
-    let exec = ExecConfig::from_config(&config);
-    let held = hold_limits(&limits, &exec)?;
+    let (held, limits, exec) = hold_for_socket(&mut config, addr)?;
     let (app, state) = build_app_with(&config, exec).await?;
     // Every connection task and websocket session of this server keeps the
     // hold, not only this future (see `LimitsHold`).
@@ -566,6 +560,26 @@ impl Drop for AbortOnDrop {
     fn drop(&mut self) {
         self.0.abort();
     }
+}
+
+/// Read `config` as [`serve`] serves it on the socket bound at `addr` (its
+/// address replaced by the socket's and its transport set to HTTP), validate
+/// it, and take its hold ([`hold_limits`]): the hold, the resolved request
+/// limits and the governor settings. [`serve`] and `start_embedded_server`
+/// derive their hold here, so the two cannot disagree on it.
+pub(crate) fn hold_for_socket(
+    config: &mut ServerConfig,
+    addr: std::net::SocketAddr,
+) -> TransportResult<(LimitsHold, Limits, ExecConfig)> {
+    config.http.addr = addr;
+    config.transport = TransportType::Http;
+    config
+        .validate()
+        .map_err(|e| TransportError::Config(e.to_string()))?;
+    let limits = resolve_limits(config)?;
+    let exec = ExecConfig::from_config(config);
+    let held = hold_limits(&limits, &exec)?;
+    Ok((held, limits, exec))
 }
 
 /// Serve a built app with its health readers ([`spawn_health_readers`])
