@@ -264,3 +264,85 @@ fn test_cli_failed_replay_leaves_nothing() {
     assert_eq!(entries(tmp.path()), Vec::<String>::new());
     assert_eq!(entries(s.dir()), before);
 }
+
+/// A script file `name` in `dir` with `body`.
+fn script_file(dir: &Path, name: &str, body: &str) -> std::path::PathBuf {
+    let p = dir.join(name);
+    std::fs::write(&p, body).unwrap();
+    p
+}
+
+#[cfg(unix)]
+#[test]
+fn test_cli_script_run_returns_the_script_status() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = script_file(dir.path(), "s.sh", "echo one\necho two >&2\nexit 3\n");
+    let out = p2a()
+        .args(["script", "run"])
+        .arg(&script)
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(3), "{stderr}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        format!("Running script: {}\none\n", script.display())
+    );
+    assert!(stderr.contains("two"), "{stderr}");
+    assert!(
+        stderr.contains("Script failed with exit code 3"),
+        "{stderr}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_cli_script_run_passes_stdin_and_the_binary() {
+    use std::io::Write as _;
+    let dir = tempfile::tempdir().unwrap();
+    let script = script_file(
+        dir.path(),
+        "s.sh",
+        "read x\necho \"got $x\"\n\"$P2A\" --version\n",
+    );
+    let mut child = p2a()
+        .args(["script", "run"])
+        .arg(&script)
+        .current_dir(dir.path())
+        .env_remove("P2A")
+        .env("PATH", SYSTEM_PATH)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(b"hi\n").unwrap();
+    let out = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{stdout}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(stdout.contains("got hi\n"), "{stdout}");
+    assert!(
+        stdout.contains(&format!("p2a {}", env!("CARGO_PKG_VERSION"))),
+        "{stdout}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_cli_script_run_json_mode_prints_only_the_child_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = script_file(dir.path(), "s.sh", "echo plain\n");
+    let out = p2a()
+        .args(["-F", "json", "script", "run"])
+        .arg(&script)
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "plain\n");
+}

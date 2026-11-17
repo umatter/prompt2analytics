@@ -354,8 +354,15 @@ fn execute_history(session_file: &PathBuf, format: &OutputFormat) -> anyhow::Res
     Ok(())
 }
 
+/// Run `script_file` with bash: the script reads this process's stdin and writes to its
+/// stdout and stderr as it runs, and `$P2A` is this p2a binary. Text mode frames the
+/// script's output with `Running script:` and `Script completed successfully`; JSON mode
+/// adds nothing to stdout. A failed script ends this process with the script's exit code
+/// (128 + the signal number when a signal killed it), so `main` does not save a
+/// `--session` file afterwards, which is harmless: `script` commands are not recorded.
 fn execute_run(script_file: &PathBuf, format: &OutputFormat) -> anyhow::Result<()> {
-    use std::process::Command;
+    use std::io::Write as _;
+    use std::process::{Command, Stdio};
 
     if !script_file.exists() {
         print_error(
@@ -364,34 +371,49 @@ fn execute_run(script_file: &PathBuf, format: &OutputFormat) -> anyhow::Result<(
         );
         return Ok(());
     }
-
-    print_message(
-        &format!("Running script: {}", script_file.display()),
-        format,
-    );
-
-    let output = Command::new("bash").arg(script_file).output()?;
-
-    // Print stdout
-    if !output.stdout.is_empty() {
-        print!("{}", String::from_utf8_lossy(&output.stdout));
-    }
-
-    // Print stderr
-    if !output.stderr.is_empty() {
-        eprint!("{}", String::from_utf8_lossy(&output.stderr));
-    }
-
-    if output.status.success() {
-        print_message("Script completed successfully", format);
-    } else {
-        print_error(
-            &format!("Script failed with exit code: {:?}", output.status.code()),
+    let text = !matches!(format, OutputFormat::Json);
+    if text {
+        print_message(
+            &format!("Running script: {}", script_file.display()),
             format,
         );
     }
+    let _ = std::io::stdout().flush();
 
-    Ok(())
+    let status = Command::new("bash")
+        .arg("--")
+        .arg(script_file)
+        .env("P2A", std::env::current_exe()?)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()?;
+
+    if status.success() {
+        if text {
+            print_message("Script completed successfully", format);
+        }
+        return Ok(());
+    }
+    let code = exit_code(&status);
+    print_error(&format!("Script failed with exit code {code}"), format);
+    std::process::exit(code);
+}
+
+/// The exit code of a finished child: its own, or 128 + the signal number on Unix when a
+/// signal killed it (as a shell reports it); 1 when neither is known.
+fn exit_code(status: &std::process::ExitStatus) -> i32 {
+    if let Some(code) = status.code() {
+        return code;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(sig) = status.signal() {
+            return 128 + sig;
+        }
+    }
+    1
 }
 
 /// Reconstruct a CLI command from a CommandRecord
