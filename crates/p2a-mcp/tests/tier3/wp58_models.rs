@@ -1112,7 +1112,7 @@ async fn test_validate_mcp_loess_x10_and_mass_point() {
                 &server,
                 &session,
                 "regression_loess",
-                json!({"dataset": "loess_x10", "y": "y", "x": "x", "span": span, "degree": degree}),
+                json!({"dataset": "loess_x10", "y": "y", "x": "x", "span": span, "degree": degree, "full": true}),
             )
             .await,
         );
@@ -1125,7 +1125,7 @@ async fn test_validate_mcp_loess_x10_and_mass_point() {
             &server,
             &session,
             "regression_loess",
-            json!({"dataset": "smoothers_t3", "y": "ym", "x": "xm", "span": 0.5, "degree": 1}),
+            json!({"dataset": "smoothers_t3", "y": "ym", "x": "xm", "span": 0.5, "degree": 1, "full": true}),
         )
         .await,
     );
@@ -1219,60 +1219,69 @@ async fn test_validate_mcp_supsmu_span_and_periodic() {
     assert!(e.contains("periodic"), "{e}");
 }
 
-/// smooth.spline's criterion through MCP. A property test, not R-pinned (its numbers are
-/// REG-29/REG-30, Tier 4): the tool must equal the library with the same criterion, and GCV
-/// and CV must give different fits.
+/// smooth_spline_t4: smooth.spline through MCP. The GCV, CV and df = 6 searches give R's
+/// spar, lambda, df, criterion value and fit (Tol::iterative(1e-6), the core test's
+/// tolerance for a searched fit), spar = 0.5 gives R's lambda, df and fit (Tol::coef(n), as the
+/// core test); GCV and CV choose
+/// different smoothing, and an unknown criterion is refused.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_mcp_smooth_spline_criterion() {
-    use p2a_core::regression::{SmoothSplineConfig, smooth_spline, smooth_spline::SplineCriterion};
-    let ds = generated_dataset("smoothers_t3");
-    let col = |n: &str| {
-        p2a_core::data::columns::numeric_column(ds.df(), n, p2a_core::data::columns::NaPolicy::Fail)
-            .unwrap()
-            .0
-    };
-    let (x, y) = (col("x"), col("y"));
-    let (session, server) = session_with_datasets(vec![("smoothers_t3", ds.clone())]);
-    let mut fits = Vec::new();
-    for (c, crit, label) in [
-        (None, SplineCriterion::Gcv, "gcv"),
-        (Some("cv"), SplineCriterion::Cv, "cv"),
-        (Some("LOOCV"), SplineCriterion::Cv, "cv"),
+async fn test_validate_mcp_smooth_spline_smooth_spline_t4() {
+    let case = Case::load("smooth_spline_t4");
+    let (session, server) = session_with("smooth_spline_t4");
+    let ds = "smooth_spline_t4a";
+    let t = Tol::iterative(1e-6);
+    let mut dfs = Vec::new();
+    for (extra, label, prefix) in [
+        (json!({}), Some("gcv"), "r_a_gcv_"),
+        (json!({"criterion": "cv"}), Some("cv"), "r_a_cv_"),
+        (json!({"criterion": "LOOCV"}), Some("cv"), "r_a_cv_"),
+        (json!({"df": 6.0}), None, "r_a_df6_"),
     ] {
-        let mut a = json!({"dataset": "smoothers_t3", "x": "x", "y": "y"});
-        if let Some(s) = c {
-            a["criterion"] = json!(s); // fails before: unknown field `criterion`
+        let mut a = json!({"dataset": ds, "x": "x", "y": "y", "full": true});
+        for (k, v) in extra.as_object().unwrap() {
+            a[k] = v.clone();
         }
         let j = json_of(&call(&server, &session, "regression_smooth_spline", a).await);
-        let lib = smooth_spline(&x, &y, SmoothSplineConfig::with_criterion(crit)).unwrap();
-        assert_eq!(j["criterion"], label);
-        assert_eq!(
-            (
-                j["df"].as_f64(),
-                j["lambda"].as_f64(),
-                j["cv_crit"].as_f64()
-            ),
-            (Some(lib.df), Some(lib.lambda), lib.cv_crit)
-        );
-        fits.push(j["df"].as_f64().unwrap());
+        match label {
+            Some(l) => assert_eq!(j["criterion"], l, "{j}"),
+            None => assert!(j["criterion"].is_null(), "{j}"),
+        }
+        Check::new(&case)
+            .scalar(&format!("{prefix}spar"), j["spar"].as_f64().unwrap(), t)
+            .scalar(&format!("{prefix}lambda"), j["lambda"].as_f64().unwrap(), t)
+            .scalar(&format!("{prefix}df"), j["df"].as_f64().unwrap(), t)
+            .scalar(
+                &format!("{prefix}cv_crit"),
+                j["cv_crit"].as_f64().unwrap(),
+                t,
+            )
+            .vector(&format!("{prefix}fit"), &nums(&j["fitted"]), t)
+            .finish();
+        dfs.push(j["df"].as_f64().unwrap());
     }
-    assert_ne!(fits[0], fits[1], "GCV and CV choose different smoothing");
+    assert_ne!(dfs[0], dfs[1], "GCV and CV choose different smoothing");
     let j = json_of(
         &call(
             &server,
             &session,
             "regression_smooth_spline",
-            json!({"dataset": "smoothers_t3", "x": "x", "y": "y", "df": 6.0}),
+            json!({"dataset": ds, "x": "x", "y": "y", "spar": 0.5, "full": true}),
         )
         .await,
     );
-    assert!(j["criterion"].is_null(), "{j}");
+    // the core test's tolerance for the same values (test_validate_smooth_spline_spar_fixed)
+    let fixed = Tol::coef(120);
+    Check::new(&case)
+        .scalar("r_a_spar05_lambda", j["lambda"].as_f64().unwrap(), fixed)
+        .scalar("r_a_spar05_df", j["df"].as_f64().unwrap(), fixed)
+        .vector("r_a_spar05_fit", &nums(&j["fitted"]), fixed)
+        .finish();
     let e = tool_error(
         &call(
             &server,
             &session,
             "regression_smooth_spline",
-            json!({"dataset": "smoothers_t3", "x": "x", "y": "y", "criterion": "aic"}),
+            json!({"dataset": ds, "x": "x", "y": "y", "criterion": "aic"}),
         )
         .await,
     );
