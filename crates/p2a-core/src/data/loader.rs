@@ -1280,15 +1280,7 @@ fn excel_range_to_dataframe(range: &Range<Data>) -> Result<DataFrame, LoadError>
         return Err(LoadError::ExcelError("Empty worksheet".to_string()));
     }
 
-    // Extract headers from first row
-    let mut headers: Vec<String> = Vec::with_capacity(width);
-    for col_idx in 0..width {
-        let header = match range.get((0, col_idx)) {
-            Some(data) => data_to_string(data),
-            None => format!("col_{}", col_idx),
-        };
-        headers.push(header);
-    }
+    let headers = excel_headers(range, width);
 
     // Extract data columns - need to determine types
     // First pass: collect all values as strings, then infer types
@@ -1317,7 +1309,7 @@ fn excel_range_to_dataframe(range: &Range<Data>) -> Result<DataFrame, LoadError>
             // Parse as integers
             let values: Vec<Option<i64>> = col_data
                 .iter()
-                .map(|opt| opt.as_ref().and_then(|s| s.parse::<i64>().ok()))
+                .map(|opt| opt.as_deref().and_then(excel_int))
                 .collect();
             Column::new(name.as_str().into(), values)
         } else if is_all_numeric {
@@ -1337,6 +1329,45 @@ fn excel_range_to_dataframe(range: &Range<Data>) -> Result<DataFrame, LoadError>
     }
 
     DataFrame::new(column_vec).map_err(LoadError::PolarsError)
+}
+
+/// Column names from the first row: a blank or missing cell is named
+/// `col_{i}` (0-based column index), and a repeated name gets the suffix
+/// `_duplicated_{k}` (k from 0), as polars names repeated CSV headers.
+#[cfg(feature = "file-formats")]
+fn excel_headers(range: &Range<Data>, width: usize) -> Vec<String> {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut repeats: HashMap<String, usize> = HashMap::new();
+    let mut headers = Vec::with_capacity(width);
+    for col_idx in 0..width {
+        let base = match range.get((0, col_idx)).map(data_to_string) {
+            Some(text) if !text.is_empty() => text,
+            _ => format!("col_{col_idx}"),
+        };
+        let mut name = base.clone();
+        while seen.contains(&name) {
+            let k = repeats.entry(base.clone()).or_insert(0);
+            name = format!("{base}_duplicated_{k}");
+            *k += 1;
+        }
+        seen.insert(name.clone());
+        headers.push(name);
+    }
+    headers
+}
+
+/// The integer a cell's text holds: an i64, or a finite, integral number
+/// within the i64 range written as a float ("3.0", "1e3"). Used both to choose
+/// the column type and to convert the cells, so the two agree.
+#[cfg(feature = "file-formats")]
+fn excel_int(s: &str) -> Option<i64> {
+    if let Ok(i) = s.parse::<i64>() {
+        return Some(i);
+    }
+    let f = s.parse::<f64>().ok()?;
+    // 2^63 is exactly representable; the i64 range is [-2^63, 2^63).
+    const LIMIT: f64 = 9_223_372_036_854_775_808.0;
+    (f.is_finite() && f.fract() == 0.0 && (-LIMIT..LIMIT).contains(&f)).then_some(f as i64)
 }
 
 /// Convert calamine Data to a string representation.
@@ -1378,8 +1409,7 @@ fn check_numeric_type(col_data: &[Option<String>]) -> (bool, bool) {
 
             // Check if it parses as a number
             if s.parse::<f64>().is_ok() {
-                // Check if it's an integer (no decimal point or ends with .0)
-                if s.parse::<i64>().is_err() && !s.ends_with(".0") {
+                if is_all_int && excel_int(s).is_none() {
                     is_all_int = false;
                 }
             } else {
@@ -1914,6 +1944,70 @@ mod tests {
             assert_eq!(empty.height(), 0, "skip {skip}");
             assert_eq!(empty.get_column_names(), ["id", "x", "s"], "skip {skip}");
         }
+    }
+
+    #[cfg(feature = "file-formats")]
+    fn excel_range(cells: &[&[Data]]) -> Range<Data> {
+        let rows = cells.len() as u32;
+        let cols = cells[0].len() as u32;
+        let mut range = Range::new((0, 0), (rows - 1, cols - 1));
+        for (i, row) in cells.iter().enumerate() {
+            for (j, cell) in row.iter().enumerate() {
+                range.set_value((i as u32, j as u32), cell.clone());
+            }
+        }
+        range
+    }
+
+    #[test]
+    #[cfg(feature = "file-formats")]
+    fn excel_blank_and_repeated_headers_get_unique_names() {
+        let s = |t: &str| Data::String(t.to_string());
+        let range = excel_range(&[
+            &[s("a"), Data::Empty, s("a"), Data::Empty],
+            &[Data::Int(1), Data::Float(2.5), s("u"), Data::Int(4)],
+            &[Data::Int(2), Data::Float(3.5), s("v"), Data::Int(5)],
+            &[Data::Int(3), Data::Float(4.5), s("w"), Data::Int(7)],
+        ]);
+        let df = excel_range_to_dataframe(&range).unwrap();
+        assert_eq!(
+            df.get_column_names(),
+            ["a", "col_1", "a_duplicated_0", "col_3"]
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "file-formats")]
+    fn excel_integer_text_with_a_zero_fraction_is_an_integer() {
+        let s = |t: &str| Data::String(t.to_string());
+        let column = |cells: [Data; 3]| {
+            let range = excel_range(&[
+                &[s("v")],
+                &[cells[0].clone()],
+                &[cells[1].clone()],
+                &[cells[2].clone()],
+            ]);
+            excel_range_to_dataframe(&range)
+                .unwrap()
+                .column("v")
+                .unwrap()
+                .clone()
+        };
+        let ints = column([Data::Int(1), s("3.0"), Data::Float(2.0)]);
+        assert_eq!(ints.dtype(), &DataType::Int64);
+        assert_eq!(
+            ints.i64().unwrap().into_iter().collect::<Vec<_>>(),
+            [Some(1), Some(3), Some(2)]
+        );
+        let half = column([Data::Int(1), s("3.5"), Data::Float(2.0)]);
+        assert_eq!(half.dtype(), &DataType::Float64);
+        assert_eq!(half.f64().unwrap().get(1), Some(3.5));
+        let big = column([Data::Int(1), s("9.3e18"), Data::Float(2.0)]);
+        assert_eq!(big.dtype(), &DataType::Float64);
+        assert_eq!(big.f64().unwrap().get(1), Some(9.3e18));
+        assert_eq!(excel_int("inf"), None);
+        assert_eq!(excel_int("NaN"), None);
+        assert_eq!(excel_int("-9223372036854775808.0"), Some(i64::MIN));
     }
 
     #[test]
