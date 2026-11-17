@@ -1254,6 +1254,16 @@ fn gof_labels(ds: &p2a_core::Dataset, labels: Option<&str>, k: usize) -> EconRes
             .map(|c| c.to_string())
             .collect(),
     })?;
+    if column.dtype().is_float() {
+        // R names a float category as.character() does: 1 and 2, not 1.0 and 2.0
+        let values = column
+            .cast(&polars::prelude::DataType::Float64)
+            .map_err(|e| EconError::Computation(format!("column '{col}' as numbers: {e}")))?;
+        let values = values
+            .f64()
+            .map_err(|e| EconError::Computation(format!("column '{col}' as numbers: {e}")))?;
+        return Ok(values.into_iter().map(float_label).collect());
+    }
     let text = column
         .cast(&polars::prelude::DataType::String)
         .map_err(|e| EconError::Computation(format!("column '{col}' as text: {e}")))?;
@@ -1264,6 +1274,18 @@ fn gof_labels(ds: &p2a_core::Dataset, labels: Option<&str>, k: usize) -> EconRes
         .into_iter()
         .map(|v| v.map_or_else(|| "NA".to_string(), str::to_string))
         .collect())
+}
+
+/// A float category label as R's `as.character` prints it for the common cases: a whole number
+/// without a fractional part, `NA` for a missing cell, `NaN`, `Inf`, `-Inf`.
+fn float_label(v: Option<f64>) -> String {
+    match v {
+        None => "NA".to_string(),
+        Some(x) if x.is_nan() => "NaN".to_string(),
+        Some(x) if x.is_infinite() => if x > 0.0 { "Inf" } else { "-Inf" }.to_string(),
+        Some(x) if x.fract() == 0.0 && x.abs() < 1e15 => format!("{:.0}", x + 0.0),
+        Some(x) => x.to_string(),
+    }
 }
 
 fn execute_chisq_gof(
@@ -2775,5 +2797,35 @@ mod chisq_gof_tests {
             rescale_p: false,
         };
         assert!(execute(&cmd, &OutputFormat::Json, true, None).is_ok());
+        // the refusal was reported, so the process exits non-zero (the flag only ever moves
+        // from false to true, so parallel tests cannot unset it)
+        assert!(crate::output::error_was_reported());
+    }
+
+    /// --labels names the categories as R does: an integer column and a whole-number float
+    /// column both give `1`, `2`; a fractional float keeps its digits.
+    #[test]
+    fn chisq_gof_labels_follow_r_names() {
+        use polars::prelude::*;
+        let ds = p2a_core::Dataset::new(
+            df! {
+                "i" => [1i64, 2, 3],
+                "f" => [Some(1.0f64), Some(2.0), None],
+                "h" => [0.5f64, -3.0, 2.25],
+            }
+            .unwrap(),
+        );
+        assert_eq!(
+            super::gof_labels(&ds, Some("i"), 3).unwrap(),
+            ["1", "2", "3"]
+        );
+        assert_eq!(
+            super::gof_labels(&ds, Some("f"), 3).unwrap(),
+            ["1", "2", "NA"]
+        );
+        assert_eq!(
+            super::gof_labels(&ds, Some("h"), 3).unwrap(),
+            ["0.5", "-3", "2.25"]
+        );
     }
 }

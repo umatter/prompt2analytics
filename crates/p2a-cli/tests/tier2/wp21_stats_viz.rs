@@ -1814,9 +1814,19 @@ fn test_cli_viz_paths_and_png_names() {
         jpg.to_str().unwrap(),
     ]);
     assert!(out.status.success(), "{out:?}");
+    // -F json: the warning is in the document's `warnings`, not loose on stderr
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("out.jpg") && err.contains("PNG"), "{err}");
+    assert!(!err.contains("PNG"), "{err}");
     let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let png_warned = |v: &Value| {
+        v["warnings"].as_array().is_some_and(|ws| {
+            ws.iter().any(|w| {
+                w.as_str()
+                    .is_some_and(|w| w.contains(".jpg") && w.contains("PNG"))
+            })
+        })
+    };
+    assert!(png_warned(&v), "{v}");
     let files: Vec<&str> = v["files"]
         .as_array()
         .unwrap()
@@ -1830,4 +1840,24 @@ fn test_cli_viz_paths_and_png_names() {
         assert!(std::path::Path::new(f).exists(), "{f}");
     }
     assert!(v["message"].as_str().unwrap().contains("out_qq.png"), "{v}");
+    // a chart printed through the shared saved-message path: JSON warnings, text note line
+    let h = s.dir().join("h.jpg");
+    let hist = [
+        "viz",
+        "histogram",
+        "grunfeld",
+        "--col",
+        "inv",
+        "-f",
+        h.to_str().unwrap(),
+    ];
+    assert!(png_warned(&s.json(&hist)));
+    // text: the shared note line after the saved message (print_notes), on stdout
+    let text = s.ok(&hist);
+    let lines: Vec<&str> = text.lines().collect();
+    assert!(lines[0].starts_with("Histogram saved to: "), "{text}");
+    assert!(
+        lines[1].starts_with("Warning: ") && lines[1].contains("h.jpg holds PNG"),
+        "{text}"
+    );
 }

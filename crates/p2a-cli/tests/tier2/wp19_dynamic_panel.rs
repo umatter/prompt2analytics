@@ -386,6 +386,56 @@ fn test_validate_cli_panel_fe_missing_note() {
             "{ws:?}"
         );
     }
+    // with a warning: `value2 = 2 * value` is collinear with value, so fe and re drop it and
+    // warn; the Warnings block follows the F line (re: the sigma line) and precedes the Note
+    let src = std::fs::read_to_string(case.dataset_path()).unwrap();
+    let mut csv = String::new();
+    for (i, line) in src.lines().enumerate() {
+        let value = line.split(',').nth(5).unwrap();
+        let extra = if i == 0 {
+            "\"value2\"".to_string()
+        } else if value.is_empty() || value == "NA" {
+            String::new()
+        } else {
+            format!("{}", 2.0 * value.parse::<f64>().unwrap())
+        };
+        csv.push_str(&format!("{line},{extra}\n"));
+    }
+    let p = s.dir().join("grunfeld_na_collinear.csv");
+    std::fs::write(&p, csv).unwrap();
+    s.load_as(&p, "gc", &[]);
+    for (cmd, before) in [("fe", "F-statistic"), ("re", "sigma_u")] {
+        let t = s.ok(&[
+            "panel",
+            cmd,
+            "gc",
+            "-y",
+            "inv",
+            "-x",
+            "value",
+            "capital",
+            "value2",
+            "--entity",
+            "firm_name",
+        ]);
+        let lines: Vec<&str> = t.lines().collect();
+        let at = |pred: &dyn Fn(&str) -> bool| lines.iter().position(|l| pred(l));
+        let w = at(&|l| l == "Warnings:").unwrap_or_else(|| panic!("{cmd}: no Warnings\n{t}"));
+        let stat = at(&|l| l.starts_with(before))
+            .unwrap_or_else(|| panic!("{cmd}: no {before} line\n{t}"));
+        assert!(stat < w, "{cmd}: Warnings before the {before} line\n{t}");
+        assert!(
+            lines[w + 1..]
+                .iter()
+                .any(|l| l.contains("'value2' dropped")),
+            "{cmd}\n{t}"
+        );
+        assert!(
+            lines.last().unwrap().starts_with("Note: "),
+            "{cmd}: the Note is not last\n{t}"
+        );
+        assert!(w < lines.len() - 1, "{cmd}\n{t}");
+    }
 }
 
 /// panel fe/re JSON carry the F test's degrees of freedom, as core's PanelResult::f_df: the

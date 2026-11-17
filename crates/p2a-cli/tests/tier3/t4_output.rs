@@ -23,6 +23,8 @@ const DATASETS: &[&str] = &[
     "validation/datasets/generated/iv_weak_controls.csv",
     "validation/datasets/generated/ts_acf_spline_t3.csv",
     "validation/datasets/generated/hac_ar1.csv",
+    "validation/datasets/gdp_quarterly.csv",
+    "validation/datasets/employee_training.csv",
 ];
 
 /// Commands across the categories, each of which must print exactly one JSON document.
@@ -71,6 +73,226 @@ const ONE_DOC: &[&[&str]] = &[
     &[
         "survival", "km", "lung", "--time", "time", "--event", "status",
     ],
+    // the rest of the smoke list, at least one command per category
+    &[
+        "reg", "quantreg", "grunfeld", "-y", "inv", "-x", "value", "capital",
+    ],
+    &[
+        "panel", "re", "grunfeld", "-y", "inv", "-x", "value", "capital", "--entity", "firm",
+    ],
+    &[
+        "panel",
+        "pvcm",
+        "grunfeld",
+        "--dep-var",
+        "inv",
+        "--entity",
+        "firm",
+        "--indep-vars",
+        "value",
+        "capital",
+    ],
+    &[
+        "ts",
+        "arima",
+        "gdp_quarterly",
+        "--col",
+        "gdp_growth",
+        "-p",
+        "1",
+        "-d",
+        "0",
+        "-q",
+        "0",
+        "--horizon",
+        "4",
+    ],
+    &[
+        "ts",
+        "holt-winters",
+        "gdp_quarterly",
+        "--col",
+        "gdp_growth",
+        "--period",
+        "4",
+        "--horizon",
+        "4",
+    ],
+    &[
+        "ts",
+        "stl",
+        "gdp_quarterly",
+        "--col",
+        "gdp_growth",
+        "--period",
+        "4",
+    ],
+    &[
+        "ts", "var", "grunfeld", "--cols", "inv", "value", "--lags", "1",
+    ],
+    &[
+        "ml", "kmeans", "grunfeld", "--cols", "inv", "value", "capital", "-k", "3", "--seed", "42",
+    ],
+    &[
+        "ml",
+        "pca",
+        "grunfeld",
+        "--cols",
+        "inv",
+        "value",
+        "capital",
+        "--n-components",
+        "2",
+    ],
+    &[
+        "ml",
+        "hierarchical",
+        "grunfeld",
+        "--cols",
+        "inv",
+        "value",
+        "capital",
+        "-n",
+        "3",
+        "--linkage",
+        "ward",
+    ],
+    &[
+        "spatial",
+        "moran",
+        "grunfeld",
+        "-y",
+        "inv",
+        "--coord-x",
+        "value",
+        "--coord-y",
+        "capital",
+        "-k",
+        "4",
+    ],
+    &[
+        "spatial",
+        "sar",
+        "grunfeld",
+        "-y",
+        "inv",
+        "-x",
+        "value",
+        "--coord-x",
+        "value",
+        "--coord-y",
+        "capital",
+        "-k",
+        "4",
+    ],
+    &[
+        "munge", "filter", "grunfeld", "--column", "inv", "--op", "gt", "--value", "100",
+    ],
+    &["munge", "value-counts", "grunfeld", "--column", "firm"],
+    &["munge", "sort", "grunfeld", "--by", "inv"],
+    &[
+        "stats",
+        "t-test-two",
+        "grunfeld",
+        "--col1",
+        "inv",
+        "--col2",
+        "value",
+    ],
+    &["stats", "pacf", "ts_acf_spline_t3", "-c", "x"],
+    &["stats", "box-test", "ts_acf_spline_t3", "-c", "x"],
+    &["stats", "pp-test", "ts_acf_spline_t3", "-c", "x"],
+    &["stats", "ccf", "hac_ar1", "--x", "x", "--y", "y"],
+    &[
+        "stats",
+        "anova",
+        "employee_training",
+        "-r",
+        "performance",
+        "--factor",
+        "department",
+    ],
+    &[
+        "stats",
+        "kruskal",
+        "employee_training",
+        "--col",
+        "performance",
+        "--group",
+        "department",
+    ],
+    &[
+        "causal",
+        "did",
+        "employee_training",
+        "-y",
+        "performance",
+        "--treat",
+        "training_group",
+        "--post",
+        "post_training",
+    ],
+    &[
+        "causal",
+        "rd",
+        "binary_glm",
+        "-y",
+        "x1",
+        "--running",
+        "x2",
+        "--cutoff",
+        "0",
+    ],
+    &[
+        "causal",
+        "ipw",
+        "employee_training",
+        "-y",
+        "performance",
+        "--treatment",
+        "training_group",
+        "-x",
+        "tenure",
+        "years_since_hire",
+    ],
+    &[
+        "causal",
+        "matching",
+        "employee_training",
+        "--treatment",
+        "training_group",
+        "-x",
+        "tenure",
+        "years_since_hire",
+        "--method",
+        "nearest",
+    ],
+];
+
+/// The `viz` commands of the one-document check, each writing `<session dir>/<file>`.
+const ONE_DOC_VIZ: &[(&[&str], &str)] = &[
+    (&["viz", "histogram", "grunfeld", "--col", "inv"], "h.png"),
+    (
+        &[
+            "viz", "coefplot", "grunfeld", "-y", "inv", "-x", "value", "capital",
+        ],
+        "c.png",
+    ),
+    (
+        &[
+            "viz",
+            "residuals",
+            "grunfeld",
+            "-y",
+            "inv",
+            "-x",
+            "value",
+            "capital",
+        ],
+        "r.png",
+    ),
+    // a non-.png name: the extension warning is inside the one document
+    (&["viz", "histogram", "grunfeld", "--col", "inv"], "h.jpg"),
 ];
 
 /// Every command in [`ONE_DOC`] prints one JSON value on stdout.
@@ -82,6 +304,15 @@ fn test_cli_commands_print_one_json_document() {
         let docs = s.json_docs(args);
         if docs.len() != 1 {
             problems.push(format!("{}: {} JSON documents", args.join(" "), docs.len()));
+        }
+    }
+    for (args, file) in ONE_DOC_VIZ {
+        let path = s.dir().join(file);
+        let mut all = args.to_vec();
+        all.extend(["-f", path.to_str().unwrap()]);
+        let docs = s.json_docs(&all);
+        if docs.len() != 1 {
+            problems.push(format!("{}: {} JSON documents", all.join(" "), docs.len()));
         }
     }
     assert!(problems.is_empty(), "{}", problems.join("\n"));
@@ -344,6 +575,70 @@ fn test_cli_marks_weak_significance_with_a_dot() {
         .find(|l| l.split_whitespace().next() == Some(weak[0]))
         .unwrap_or_else(|| panic!("no row for {}\n{text}", weak[0]));
     assert!(row.ends_with(" ."), "{row:?}\n{text}");
+}
+
+/// The row of the coefficient `name` in `text`, which must end in R's ` .` mark.
+fn assert_dot_row(text: &str, name: &str) {
+    let row = text
+        .lines()
+        .find(|l| l.split_whitespace().next() == Some(name))
+        .unwrap_or_else(|| panic!("no row for {name}\n{text}"));
+    assert!(row.ends_with(" ."), "{row:?}\n{text}");
+}
+
+/// The `.` mark in a regression-module table and a panel table, on fixtures built here with
+/// one coefficient at 0.05 <= p < 0.1. `reg hac -y y -x x --lags 2`: x has p = 0.0673
+/// (R: `coeftest(lm(y ~ x), NeweyWest(m, lag = 2, prewhite = FALSE, adjust = FALSE))`).
+/// `panel pvcm`: x's mean-group p-value is 0.0764 as p2a reports it (plm's summary of a
+/// within pvcm prints no p-values).
+#[test]
+fn test_cli_marks_weak_significance_in_regression_and_panel_tables() {
+    let s = temp_session();
+    // y = 1 + 0.13 x + e with a fixed, uneven noise pattern
+    let mut hac = String::from("y,x\n");
+    for i in 0..40u32 {
+        let x = f64::from(i % 10) + f64::from((i * 7) % 5) / 10.0;
+        let e = (f64::from((i * 37) % 17) - 8.0) / 4.0;
+        hac.push_str(&format!("{},{x}\n", 1.0 + 0.13 * x + e));
+    }
+    let p = s.dir().join("weak.csv");
+    std::fs::write(&p, hac).unwrap();
+    s.load_as(&p, "weak", &[]);
+    let args = ["reg", "hac", "weak", "-y", "y", "-x", "x", "--lags", "2"];
+    let pv = s.json(&args)["p_values"][1].as_f64().unwrap();
+    assert!((0.05..0.1).contains(&pv), "x: p = {pv}");
+    assert_dot_row(&s.ok(&args), "x");
+
+    // 12 entities x 5 periods, y = g / 2 + 0.07 x + e
+    let mut panel = String::from("y,x,id,t\n");
+    for g in 0..12u32 {
+        for t in 0..5u32 {
+            let i = g * 5 + t;
+            let x = f64::from((i * 13) % 11) / 2.0 + f64::from(g % 3);
+            let e = (f64::from((i * 37) % 17) - 8.0) / 4.0;
+            panel.push_str(&format!(
+                "{},{x},{g},{t}\n",
+                f64::from(g) / 2.0 + 0.07 * x + e
+            ));
+        }
+    }
+    let p = s.dir().join("weak_panel.csv");
+    std::fs::write(&p, panel).unwrap();
+    s.load_as(&p, "wp", &[]);
+    let args = [
+        "panel",
+        "pvcm",
+        "wp",
+        "--dep-var",
+        "y",
+        "--entity",
+        "id",
+        "--indep-vars",
+        "x",
+    ];
+    let pv = s.json(&args)["p_values"][1].as_f64().unwrap();
+    assert!((0.05..0.1).contains(&pv), "x: p = {pv}");
+    assert_dot_row(&s.ok(&args), "x");
 }
 
 /// `data head -F json` prints typed cells: integers and floats as numbers, a missing cell as

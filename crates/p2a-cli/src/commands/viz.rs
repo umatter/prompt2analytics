@@ -16,8 +16,8 @@ use p2a_core::{
 use std::path::PathBuf;
 
 use crate::output::{
-    OutputFormat, missing_json, print_error, print_json, print_message, print_missing_note,
-    se_label,
+    OutputFormat, add_notes, missing_json, print_error, print_json, print_message,
+    print_missing_note, print_notes, se_label,
 };
 use crate::output::{add_result_notes, print_result_notes};
 use crate::session::SessionManager;
@@ -521,17 +521,19 @@ fn na_note(cols: &[String], constant: &[usize], n_complete: usize) -> Option<Str
 
 /// Text: `msg`, then the dropped-rows note; JSON: one line `{"message": msg}`, with a
 /// `"missing"` object when rows were dropped.
-fn print_saved(msg: &str, missing: &MissingSummary, format: &OutputFormat) {
+fn print_saved(msg: &str, missing: &MissingSummary, warnings: &[String], format: &OutputFormat) {
     match format {
         OutputFormat::Json => {
             let mut json = serde_json::json!({ "message": msg });
             if let (Some(summary), Some(object)) = (missing_json(missing), json.as_object_mut()) {
                 object.insert("missing".to_string(), summary);
             }
+            add_notes(&mut json, None, warnings);
             println!("{json}");
         }
         _ => {
             println!("{msg}");
+            print_notes(None, warnings, format);
             print_missing_note(missing, format);
         }
     }
@@ -568,14 +570,12 @@ fn png_extension_warning(path: &std::path::Path) -> Option<String> {
     })
 }
 
-/// [`write_chart`] for a static chart, warning on stderr when the name's extension is not
-/// `png`.
-fn write_png_chart(path: &std::path::Path, png: &[u8]) -> anyhow::Result<()> {
+/// [`write_chart`] for a static chart. Returns its warnings (the extension warning when the
+/// name's extension is not `png`) for the caller's notes: the JSON `warnings` array or the
+/// text `Warnings:` block.
+fn write_png_chart(path: &std::path::Path, png: &[u8]) -> anyhow::Result<Vec<String>> {
     write_chart(path, png)?;
-    if let Some(w) = png_extension_warning(path) {
-        eprintln!("Warning: {w}");
-    }
-    Ok(())
+    Ok(png_extension_warning(path).into_iter().collect())
 }
 
 /// Decode base64 image to bytes
@@ -848,10 +848,11 @@ fn execute_histogram(
                     // Decode base64 and save PNG to file
                     match decode_base64_image(&result.image_base64) {
                         Ok(png_data) => {
-                            write_png_chart(output, &png_data)?;
+                            let png_warnings = write_png_chart(output, &png_data)?;
                             print_saved(
                                 &format!("Histogram saved to: {}", output.display()),
                                 cols.missing(),
+                                &png_warnings,
                                 format,
                             );
                         }
@@ -920,10 +921,11 @@ fn execute_scatter(
             match scatter_plot(x_data, y_data, config) {
                 Ok(result) => match decode_base64_image(&result.image_base64) {
                     Ok(png_data) => {
-                        write_png_chart(output, &png_data)?;
+                        let png_warnings = write_png_chart(output, &png_data)?;
                         print_saved(
                             &format!("Scatter plot saved to: {}", output.display()),
                             cols.missing(),
+                            &png_warnings,
                             format,
                         );
                     }
@@ -994,10 +996,11 @@ fn execute_line(
             match line_chart(&series, config) {
                 Ok(result) => match decode_base64_image(&result.image_base64) {
                     Ok(png_data) => {
-                        write_png_chart(output, &png_data)?;
+                        let png_warnings = write_png_chart(output, &png_data)?;
                         print_saved(
                             &format!("Line plot saved to: {}", output.display()),
                             cols.missing(),
+                            &png_warnings,
                             format,
                         );
                     }
@@ -1059,10 +1062,11 @@ fn execute_boxplot(
             match box_plot(&groups, config) {
                 Ok(result) => match decode_base64_image(&result.image_base64) {
                     Ok(png_data) => {
-                        write_png_chart(output, &png_data)?;
+                        let png_warnings = write_png_chart(output, &png_data)?;
                         print_saved(
                             &format!("Box plot saved to: {}", output.display()),
                             &missing,
+                            &png_warnings,
                             format,
                         );
                     }
@@ -1108,12 +1112,12 @@ fn execute_heatmap(
             match correlation_heatmap(&corr_matrix, &labels, &labels, title, Some(800), Some(600)) {
                 Ok(result) => match decode_base64_image(&result.image_base64) {
                     Ok(png_data) => {
-                        write_png_chart(output, &png_data)?;
+                        let png_warnings = write_png_chart(output, &png_data)?;
                         let mut message = format!("Heatmap saved to: {}", output.display());
                         if let Some(note) = na_note(&labels, &constant, missing.n_used) {
                             message.push_str(&format!(" ({note})"));
                         }
-                        print_saved(&message, &missing, format);
+                        print_saved(&message, &missing, &png_warnings, format);
                     }
                     Err(e) => print_error(&e, format),
                 },
@@ -1218,7 +1222,7 @@ fn execute_coefplot(
                     match coefficient_plot(&names, &estimates, &ci_lower, &ci_upper, config, true) {
                         Ok(plot_result) => match decode_base64_image(&plot_result.image_base64) {
                             Ok(png_data) => {
-                                write_png_chart(output, &png_data)?;
+                                let png_warnings = write_png_chart(output, &png_data)?;
                                 let message = format!(
                                     "Coefficient plot saved to: {} ({pct}% intervals, {} \
                                      standard errors)",
@@ -1250,9 +1254,10 @@ fn execute_coefplot(
                                         if let Some(m) = missing_json(&missing) {
                                             json["missing"] = m;
                                         }
+                                        add_notes(&mut json, None, &png_warnings);
                                         print_json(&json)?;
                                     }
-                                    _ => print_saved(&message, &missing, format),
+                                    _ => print_saved(&message, &missing, &png_warnings, format),
                                 }
                             }
                             Err(e) => print_error(&e, format),
@@ -1389,7 +1394,7 @@ fn execute_residuals(
             return Ok(());
         }
     };
-    write_png_chart(output, &png_data)?;
+    let png_warnings = write_png_chart(output, &png_data)?;
     let mut files = vec![output.display().to_string()];
     let stem = output
         .file_stem()
@@ -1430,10 +1435,11 @@ fn execute_residuals(
                 "cooks_distance": plot_result.cooks_distance,
             });
             add_result_notes(&mut json, &plot_result);
+            add_notes(&mut json, None, &png_warnings);
             println!("{}", serde_json::to_string_pretty(&json)?);
         }
         _ => {
-            print_saved(&msg, &MissingSummary::none(y.len()), format);
+            print_saved(&msg, &MissingSummary::none(y.len()), &png_warnings, format);
             print_result_notes(&plot_result, format);
         }
     }
@@ -1501,7 +1507,7 @@ fn execute_dendrogram(
                     match dendrogram(linkage_matrix, None, config) {
                         Ok(plot_result) => match decode_base64_image(&plot_result.image_base64) {
                             Ok(png_data) => {
-                                write_png_chart(output, &png_data)?;
+                                let png_warnings = write_png_chart(output, &png_data)?;
                                 let msg = format!("Dendrogram saved to: {}", output.display());
                                 match format {
                                     OutputFormat::Json => {
@@ -1513,9 +1519,12 @@ fn execute_dendrogram(
                                         if let Some(m) = missing_json(columns.missing()) {
                                             json["missing"] = m;
                                         }
+                                        add_notes(&mut json, None, &png_warnings);
                                         println!("{json}");
                                     }
-                                    _ => print_saved(&msg, columns.missing(), format),
+                                    _ => {
+                                        print_saved(&msg, columns.missing(), &png_warnings, format)
+                                    }
                                 }
                             }
                             Err(e) => print_error(&e, format),
@@ -1581,10 +1590,11 @@ fn execute_event_study(
             match event_study_plot(time, estimates, ci_lower, ci_upper, config) {
                 Ok(result) => match decode_base64_image(&result.image_base64) {
                     Ok(png_data) => {
-                        write_png_chart(output, &png_data)?;
+                        let png_warnings = write_png_chart(output, &png_data)?;
                         print_saved(
                             &format!("Event study plot saved to: {}", output.display()),
                             cols.missing(),
+                            &png_warnings,
                             format,
                         );
                     }
@@ -1658,10 +1668,11 @@ fn execute_irf(
             ) {
                 Ok(result) => match decode_base64_image(&result.image_base64) {
                     Ok(png_data) => {
-                        write_png_chart(output, &png_data)?;
+                        let png_warnings = write_png_chart(output, &png_data)?;
                         print_saved(
                             &format!("IRF plot saved to: {}", output.display()),
                             cols.missing(),
+                            &png_warnings,
                             format,
                         );
                     }

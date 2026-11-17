@@ -2102,16 +2102,59 @@ fn test_cli_svm_counts_by_label_and_ml_notes() {
         .iter()
         .map(|w| w.as_str().unwrap())
         .collect();
-    // the text ends with the same notes: a `Warnings:` block, one `  - ` line each
+    // the text ends with the same notes, one `Warning: <w>` line each (print_notes)
     let text = s.ok(&tsne);
     let lines: Vec<&str> = text.lines().filter(|l| !l.is_empty()).collect();
+    let tail: Vec<String> = warnings.iter().map(|w| format!("Warning: {w}")).collect();
+    assert_eq!(lines[lines.len() - tail.len()..], tail[..], "{text}");
     if warnings.is_empty() {
-        assert!(!text.contains("Warnings:"), "{text}");
-    } else {
-        let tail: Vec<String> = warnings.iter().map(|w| format!("  - {w}")).collect();
-        assert_eq!(lines[lines.len() - tail.len() - 1], "Warnings:", "{text}");
-        assert_eq!(lines[lines.len() - tail.len()..], tail[..], "{text}");
+        assert!(!text.contains("Warning:"), "{text}");
     }
+    // a run that warns: 30 exact duplicates cannot reach perplexity 3.9 (their entropy is at
+    // least ln 29), so the bandwidth search reports them, in JSON and as the text's last lines
+    let dup = s.dir().join("dup.csv");
+    let mut csv = String::from("a,b\n");
+    for _ in 0..30 {
+        csv.push_str("0,0\n");
+    }
+    for (a, b) in [
+        (10.0, 10.0),
+        (10.5, 10.2),
+        (9.7, 11.1),
+        (12.3, 9.4),
+        (11.2, 12.6),
+        (8.9, 9.8),
+    ] {
+        csv.push_str(&format!("{a},{b}\n"));
+    }
+    std::fs::write(&dup, csv).unwrap();
+    s.load_as(&dup, "dup", &[]);
+    let tsne_dup = [
+        "ml",
+        "tsne",
+        "dup",
+        "--cols",
+        "a",
+        "b",
+        "--max-iter",
+        "50",
+        "--seed",
+        "1",
+        "--perplexity",
+        "3.9",
+    ];
+    let t = s.json(&tsne_dup);
+    let warnings: Vec<&str> = t["warnings"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no warnings array\n{t}"))
+        .iter()
+        .map(|w| w.as_str().unwrap())
+        .collect();
+    assert!(warnings.iter().any(|w| w.contains("of 36 points")), "{t}");
+    let text = s.ok(&tsne_dup);
+    let lines: Vec<&str> = text.lines().filter(|l| !l.is_empty()).collect();
+    let tail: Vec<String> = warnings.iter().map(|w| format!("Warning: {w}")).collect();
+    assert_eq!(lines[lines.len() - tail.len()..], tail[..], "{text}");
 
     let help = |cmd: &str| {
         let out = p2a().args(["ml", cmd, "--help"]).output().unwrap();
