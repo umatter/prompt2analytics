@@ -30,6 +30,22 @@ use serde_json::{Value, json};
 /// arrives in well under a second.
 const PATIENCE: Duration = Duration::from_secs(60);
 
+/// The most stdout lines a test reads before it fails: a server that keeps
+/// writing lines without answering fails at its deadline, or here, whichever
+/// comes first, so that the recorded lines stay bounded.
+const MAX_LINES: usize = 10_000;
+
+/// The next message on `rx` if one arrives before `deadline`. A passed
+/// deadline is a timeout even when messages are queued, so a server that
+/// writes faster than the test reads cannot extend a wait.
+fn recv_before<T>(rx: &Receiver<T>, deadline: Instant) -> Result<T, RecvTimeoutError> {
+    let now = Instant::now();
+    if now >= deadline {
+        return Err(RecvTimeoutError::Timeout);
+    }
+    rx.recv_timeout(deadline - now)
+}
+
 /// A `p2a-mcp --transport stdio` child process and every line it has
 /// written to stdout so far.
 struct StdioServer {
@@ -116,8 +132,12 @@ impl StdioServer {
     /// ended. Fails if neither arrives before `deadline`, which the caller
     /// sets `PATIENCE` after its wait began; `waiting_for` says for what.
     fn next_line(&mut self, deadline: Instant, waiting_for: &str) -> Option<String> {
-        let left = deadline.saturating_duration_since(Instant::now());
-        match self.stdout.recv_timeout(left) {
+        if self.lines.len() > MAX_LINES {
+            self.fail(&format!(
+                "wrote more than {MAX_LINES} lines while the test waited for it {waiting_for}"
+            ));
+        }
+        match recv_before(&self.stdout, deadline) {
             Ok(Ok(Some(line))) => {
                 self.lines.push(line.clone());
                 Some(line)
@@ -225,6 +245,22 @@ fn tool_text(response: &Value) -> &str {
 /// answers with a JSON-RPC response and the process leaves nothing else on
 /// stdout up to its exit: polars' `pivot` entry point prints a notice to
 /// stdout on every call.
+/// A wait whose deadline has passed ends with a timeout although lines are
+/// queued: a fast writer cannot keep a wait going past its deadline.
+#[test]
+fn a_queued_line_does_not_extend_a_passed_deadline() {
+    let (tx, rx) = channel();
+    for i in 0..3 {
+        tx.send(format!("line {i}\n")).unwrap();
+    }
+    assert_eq!(
+        recv_before(&rx, Instant::now()),
+        Err(RecvTimeoutError::Timeout)
+    );
+    let later = Instant::now() + PATIENCE;
+    assert_eq!(recv_before(&rx, later), Ok("line 0\n".to_string()));
+}
+
 #[test]
 fn munge_pivot_writes_only_json_rpc_to_stdout() {
     let root = tempfile::tempdir().expect("tempdir");
