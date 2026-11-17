@@ -14,7 +14,9 @@ use std::time::Instant;
 pub struct DatasetMeta {
     /// Dataset name/identifier
     pub name: String,
-    /// Original file path
+    /// The file the dataset was loaded from: an absolute path since p2a 0.5.3 (older
+    /// files may hold a path relative to [`Session::working_dir`]); for a derived dataset,
+    /// the stored copy relative to the session file's directory
     pub source_path: PathBuf,
     /// File format (csv, parquet, excel, stata, sas)
     pub format: String,
@@ -34,6 +36,14 @@ pub struct DatasetMeta {
     /// file's directory. Absent in older session files and for loaded files.
     #[serde(default, skip_serializing_if = "is_false")]
     pub derived: bool,
+    /// Size of the source file in bytes at `data load`; a reload warns when it differs.
+    /// `None` for derived datasets, older files and a file whose size could not be read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_bytes: Option<u64>,
+    /// Modification time of the source file at `data load`; a reload warns when it
+    /// differs. `None` as for `source_bytes`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_modified: Option<DateTime<Utc>>,
 }
 
 /// serde: omit `derived` when it is false.
@@ -146,6 +156,10 @@ pub struct CommandRecord {
     pub dataset_refs: Vec<String>,
     /// Output file paths (for viz commands)
     pub output_files: Vec<PathBuf>,
+    /// The working directory of the invocation (`None` in older files); an exported
+    /// script changes into it before replaying the command
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<PathBuf>,
     /// Whether the command succeeded
     pub success: bool,
     /// Optional error message if failed
@@ -165,7 +179,8 @@ pub struct Session {
     pub created_at: DateTime<Utc>,
     /// When the session was last modified
     pub updated_at: DateTime<Utc>,
-    /// Working directory when session was created
+    /// The working directory of the session's first command; older files' relative
+    /// dataset paths are read against it
     pub working_dir: PathBuf,
     /// Datasets loaded during this session
     pub datasets: HashMap<String, DatasetMeta>,
@@ -332,21 +347,81 @@ pub(crate) fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()>
 }
 
 /// Reload a dataset from its source file, with the missing-value strings it was
-/// loaded with. A derived dataset's file is checked by [`derived_file`].
-fn reload_dataset(meta: &DatasetMeta, session_path: &Path) -> anyhow::Result<Dataset> {
+/// loaded with, and the warnings of [`reload_warnings`]. A derived dataset's file is
+/// checked by [`derived_file`]. An absolute source path is read as stored; a relative one
+/// (older session files) against `working_dir` when the file exists there, else against
+/// the current directory.
+fn reload_dataset(
+    meta: &DatasetMeta,
+    session_path: &Path,
+    working_dir: &Path,
+) -> anyhow::Result<(Dataset, Vec<String>)> {
     if meta.derived {
         let df = DataLoader::load_parquet(derived_file(meta, session_path)?)?;
-        return Ok(Dataset::new(df));
+        return Ok((Dataset::new(df), Vec::new()));
     }
+    let path = if meta.source_path.is_absolute() || working_dir.as_os_str().is_empty() {
+        meta.source_path.clone()
+    } else {
+        let in_wd = working_dir.join(&meta.source_path);
+        if in_wd.is_file() {
+            in_wd
+        } else {
+            meta.source_path.clone()
+        }
+    };
+    let file = std::fs::metadata(&path).ok();
     // the markers apply to CSV only; `data load` refuses them for any other format
     let na = match meta.format.as_str() {
         "csv" => meta.na_strings.as_deref(),
         _ => None,
     };
-    Ok(crate::commands::data::load_with_markers(
-        &meta.source_path,
-        na,
-    )?)
+    let dataset = crate::commands::data::load_with_markers(&path, na)?;
+    let warnings = reload_warnings(meta, &path, file.as_ref(), &dataset);
+    Ok((dataset, warnings))
+}
+
+/// Why a reloaded dataset may not match the recording: its file's size or modification
+/// time differ from those recorded at `data load`, or the data have other rows or
+/// columns than recorded. One line each; empty when nothing differs.
+fn reload_warnings(
+    meta: &DatasetMeta,
+    path: &Path,
+    file: Option<&std::fs::Metadata>,
+    dataset: &Dataset,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(file) = file {
+        let size_differs = meta.source_bytes.is_some_and(|b| b != file.len());
+        let time_differs = meta
+            .source_modified
+            .is_some_and(|t| !file.modified().is_ok_and(|m| DateTime::<Utc>::from(m) == t));
+        if size_differs || time_differs {
+            out.push(format!(
+                "the file of dataset '{}' ({}) changed since it was loaded into the session (size or modification time differ); results may not match the recorded ones",
+                meta.name,
+                path.display()
+            ));
+        }
+    }
+    let df = dataset.df();
+    let same_columns = df.width() == meta.columns.len()
+        && df
+            .get_column_names()
+            .iter()
+            .zip(&meta.columns)
+            .all(|(a, b)| a.as_str() == b);
+    if df.height() != meta.nrows || !same_columns {
+        out.push(format!(
+            "dataset '{}' now has {} rows and {} columns; the session recorded {} rows and {} columns",
+            meta.name,
+            df.height(),
+            df.width(),
+            meta.nrows,
+            meta.columns.len()
+        ));
+    }
+    out
 }
 
 /// Estimated memory of the datasets in memory, against `--max-memory`.
@@ -531,6 +606,7 @@ impl SessionManager {
             argv: Vec::new(),
             dataset_refs,
             output_files,
+            cwd: None,
             success,
             error,
             duration_ms,
@@ -575,6 +651,7 @@ impl SessionManager {
             argv,
             dataset_refs: Vec::new(),
             output_files: Vec::new(),
+            cwd: std::env::current_dir().ok(),
             success,
             error,
             duration_ms,
@@ -596,7 +673,12 @@ impl SessionManager {
         na_strings: Option<Vec<String>>,
     ) {
         self.remove_derived_copy(name);
-        let meta = dataset_meta(name, source_path, format, dataset, na_strings, false);
+        let source_path = std::path::absolute(&source_path).unwrap_or(source_path);
+        let mut meta = dataset_meta(name, source_path, format, dataset, na_strings, false);
+        if let Ok(file) = std::fs::metadata(&meta.source_path) {
+            meta.source_bytes = Some(file.len());
+            meta.source_modified = file.modified().ok().map(DateTime::<Utc>::from);
+        }
         self.session.register_dataset(meta);
         self.saved.get_mut().touched.insert(name.to_string());
     }
@@ -666,8 +748,11 @@ impl SessionManager {
         let cell = self.datasets.get(name)?;
         cell.get_or_init(|| {
             let meta = self.session.datasets.get(name)?;
-            match reload_dataset(meta, &self.path) {
-                Ok(ds) => {
+            match reload_dataset(meta, &self.path, &self.session.working_dir) {
+                Ok((ds, warnings)) => {
+                    for w in warnings {
+                        eprintln!("Warning: {w}");
+                    }
                     self.count_bytes(name.to_string(), estimate_dataset_memory(&ds));
                     self.emit_memory_warning();
                     Some(ds)
@@ -786,6 +871,8 @@ fn dataset_meta(
         loaded_at: Utc::now(),
         na_strings,
         derived,
+        source_bytes: None,
+        source_modified: None,
     }
 }
 
@@ -1271,5 +1358,105 @@ mod save_tests {
         );
         assert_eq!(commands(&real.join("s.json")), ["a", "b"]);
         assert!(dir.path().join("s.json.lock").exists());
+    }
+}
+
+#[cfg(test)]
+mod reload_tests {
+    use super::*;
+
+    fn csv(path: &Path, rows: usize) -> Dataset {
+        let mut s = String::from("x,y\n");
+        for i in 0..rows {
+            s.push_str(&format!("{}.5,{}.25\n", i, 2 * i + 1));
+        }
+        std::fs::write(path, s).unwrap();
+        crate::commands::data::load_with_markers(path, None).unwrap()
+    }
+
+    #[test]
+    fn register_dataset_stores_an_absolute_path_and_the_file_stamp() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("d.csv");
+        let ds = csv(&file, 3);
+        let mut m = SessionManager::new(dir.path().join("s.json")).unwrap();
+        m.register_dataset("d", file.clone(), "csv", &ds, None);
+        let meta = &m.session().datasets["d"];
+        let fs_meta = std::fs::metadata(&file).unwrap();
+        assert_eq!(meta.source_path, file);
+        assert_eq!(meta.source_bytes, Some(fs_meta.len()));
+        assert_eq!(
+            meta.source_modified,
+            Some(DateTime::<Utc>::from(fs_meta.modified().unwrap()))
+        );
+
+        let rel = PathBuf::from(format!("p2a_wp33_absent_{}.csv", std::process::id()));
+        m.register_dataset("e", rel.clone(), "csv", &ds, None);
+        let meta = &m.session().datasets["e"];
+        assert_eq!(meta.source_path, std::path::absolute(&rel).unwrap());
+        assert!(meta.source_path.is_absolute());
+        assert_eq!((meta.source_bytes, meta.source_modified), (None, None));
+    }
+
+    #[test]
+    fn legacy_relative_path_resolves_against_working_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        csv(&dir.path().join("d.csv"), 3);
+        let session = format!(
+            r#"{{"id":"x","title":null,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","working_dir":{},"datasets":{{"d":{{"name":"d","source_path":"d.csv","format":"csv","nrows":3,"columns":["x","y"],"loaded_at":"2026-01-01T00:00:00Z"}}}},"commands":[],"version":"0.4.0"}}"#,
+            serde_json::to_string(dir.path()).unwrap()
+        );
+        let path = dir.path().join("s.json");
+        std::fs::write(&path, session).unwrap();
+        let m = SessionManager::new(path).unwrap();
+        assert_eq!(m.get_dataset("d").unwrap().df().height(), 3);
+    }
+
+    #[test]
+    fn changed_source_is_reported_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("d.csv");
+        let ds = csv(&file, 3);
+        let path = dir.path().join("s.json");
+        let mut m = SessionManager::new(path.clone()).unwrap();
+        m.register_dataset("d", file.clone(), "csv", &ds, None);
+        let meta = m.session().datasets["d"].clone();
+        let wd = m.session().working_dir.clone();
+
+        let (_, warnings) = reload_dataset(&meta, &path, &wd).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+
+        csv(&file, 4);
+        let (again, warnings) = reload_dataset(&meta, &path, &wd).unwrap();
+        assert_eq!(again.df().height(), 4, "the data are still used");
+        assert_eq!(
+            warnings,
+            [
+                format!(
+                    "the file of dataset 'd' ({}) changed since it was loaded into the session (size or modification time differ); results may not match the recorded ones",
+                    file.display()
+                ),
+                "dataset 'd' now has 4 rows and 2 columns; the session recorded 3 rows and 2 columns"
+                    .to_string(),
+            ]
+        );
+
+        // a derived dataset is not stamped and gives none
+        m.persist_dataset("e", ds).unwrap();
+        let meta = m.session().datasets["e"].clone();
+        assert_eq!((meta.source_bytes, meta.source_modified), (None, None));
+        let (_, warnings) = reload_dataset(&meta, &path, &wd).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    #[test]
+    fn record_invocation_records_the_working_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut m = SessionManager::new(dir.path().join("s.json")).unwrap();
+        m.record_invocation(vec!["data".into(), "list".into()], true, None);
+        assert_eq!(
+            m.session().commands[0].cwd,
+            Some(std::env::current_dir().unwrap())
+        );
     }
 }

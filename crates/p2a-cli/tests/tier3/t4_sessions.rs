@@ -74,3 +74,29 @@ fn test_cli_mktemp_session_file_works() {
     s.ok(&["data", "load", "d.csv", "--name", "d"]);
     assert_eq!(history(s.path()).len(), 1);
 }
+
+#[test]
+fn test_cli_session_works_from_another_directory() {
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    noisy_csv(&a.path().join("data.csv"), 12);
+    let session = a.path().join("s.json");
+    let out = p2a()
+        .arg("--session")
+        .arg(&session)
+        .args(["data", "load", "data.csv", "--name", "d"])
+        .current_dir(a.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let out = p2a()
+        .arg("--session")
+        .arg(&session)
+        .args(["reg", "ols", "d", "-y", "y", "-x", "x"])
+        .current_dir(b.path())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    assert!(!stderr.contains("Warning"), "{stderr}");
+}

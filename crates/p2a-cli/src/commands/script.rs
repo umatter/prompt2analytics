@@ -525,6 +525,7 @@ mod tests {
             argv: argv.iter().map(|s| s.to_string()).collect(),
             dataset_refs: vec![],
             output_files: vec![],
+            cwd: None,
             success: true,
             error: None,
             duration_ms: 0,
