@@ -3341,7 +3341,7 @@ mod chat_tests {
     /// longer counts toward the session cap or the total dataset quota.
     #[tokio::test]
     async fn llm_executors_refuse_calls_once_the_session_is_gone() {
-        for removal in ["deleted", "expired", "replaced"] {
+        for removal in ["deleted", "expired", "cleaned up", "replaced"] {
             let (governor, chat, sessions) = admitting_parts_with_sessions().await;
             let id = chat.session().id.clone();
             let want = match removal {
@@ -3352,6 +3352,13 @@ mod chat_tests {
                 "expired" => {
                     *chat.session().last_accessed.write().await =
                         chrono::Utc::now() - chrono::Duration::minutes(61);
+                    SessionGone::Expired
+                }
+                // The periodic cleanup removed it for its age before the lookup: expired too.
+                "cleaned up" => {
+                    *chat.session().last_accessed.write().await =
+                        chrono::Utc::now() - chrono::Duration::minutes(61);
+                    assert_eq!(sessions.cleanup_expired().await, 1);
                     SessionGone::Expired
                 }
                 _ => {
@@ -3444,8 +3451,9 @@ mod chat_tests {
     /// The answer of a non-streaming chat whose session went while it ran
     /// (`llm_chat` answers with the response of the reason `run` returns): a
     /// deleted or evicted session answers 404 `session_not_found`, an expired
-    /// one 410 `session_expired`, each as a failed `ApiResponse` whose error
-    /// is the reason's message.
+    /// one 410 `session_expired` (also when the periodic cleanup removed it
+    /// for its age before the lookup), each as a failed `ApiResponse` whose
+    /// error is the reason's message.
     #[tokio::test]
     async fn a_chat_on_a_gone_session_answers_with_the_reasons_status_and_code() {
         for (removal, want, status, code) in [
@@ -3461,6 +3469,12 @@ mod chat_tests {
                 StatusCode::GONE,
                 "session_expired",
             ),
+            (
+                "cleaned up",
+                SessionGone::Expired,
+                StatusCode::GONE,
+                "session_expired",
+            ),
         ] {
             let (governor, chat, sessions) = admitting_parts_with_sessions().await;
             if removal == "deleted" {
@@ -3468,6 +3482,9 @@ mod chat_tests {
             } else {
                 *chat.session().last_accessed.write().await =
                     chrono::Utc::now() - chrono::Duration::minutes(61);
+                if removal == "cleaned up" {
+                    assert_eq!(sessions.cleanup_expired().await, 1);
+                }
             }
             let server = Arc::new(crate::server::AnalyticsServer::new());
             let executor = SessionToolExecutor::new(governor, server, chat.clone(), no_audit());
@@ -3486,33 +3503,6 @@ mod chat_tests {
             assert_eq!(body["success"], false, "{removal}");
             assert_eq!(body["error"], want.message(), "{removal}");
         }
-    }
-
-    /// A session the periodic cleanup removed for its age, before the chat's
-    /// next tool call looked it up, expired: the chat ends with 410
-    /// `session_expired`, as when that lookup finds it expired itself, not
-    /// with the 404 of a deleted session.
-    #[tokio::test]
-    async fn a_chat_whose_session_the_cleanup_expired_answers_session_expired() {
-        let (governor, chat, sessions) = admitting_parts_with_sessions().await;
-        *chat.session().last_accessed.write().await =
-            chrono::Utc::now() - chrono::Duration::minutes(61);
-        assert_eq!(sessions.cleanup_expired().await, 1);
-        let server = Arc::new(crate::server::AnalyticsServer::new());
-        let executor = SessionToolExecutor::new(governor, server, chat.clone(), no_audit());
-        let gone = chat
-            .run(executor.execute("list_datasets", serde_json::json!({})))
-            .await
-            .unwrap_err();
-        assert_eq!(gone, SessionGone::Expired);
-        let resp = gone.into_response();
-        assert_eq!(resp.status(), StatusCode::GONE);
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(body["code"], "session_expired");
-        assert_eq!(body["error"], SessionGone::Expired.message());
     }
 
     /// The argument string of a tool call the model did not finish, as a
