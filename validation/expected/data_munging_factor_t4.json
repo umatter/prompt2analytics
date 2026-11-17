@@ -1,0 +1,35 @@
+{
+  "schema": 1,
+  "id": "data_munging_factor_t4",
+  "area": "data/munging",
+  "method": "One-hot dummies as model.matrix (full set and treatment contrasts, NA rows kept as NA); rank with average ties",
+  "reference": "stats::model.matrix(~ 0 + region) and model.matrix(~ region) under na.action = na.pass; base::rank(ties.method = 'average', na.last = 'keep')",
+  "call": "model.matrix(~ 0 + region, model.frame(~ region, d, na.action = na.pass)); rank(d$r, na.last = 'keep'); rank(-d$r, na.last = 'keep')",
+  "dataset": "validation/datasets/generated/munging_regions.csv",
+  "datasets": ["validation/datasets/generated/munging_regions.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "region_levels": {
+      "names": ["east", "north", "south", "west"],
+      "values": [1, 2, 3, 4]
+    },
+    "region_east": [0, 0, null, 0, 1, 0, 0, 1],
+    "region_north": [0, 0, null, 1, 0, 0, 0, 0],
+    "region_south": [0, 1, null, 0, 0, 1, 0, 0],
+    "region_west": [1, 0, null, 0, 0, 0, 1, 0],
+    "treatment_dropped": {
+      "names": ["east"],
+      "values": [1]
+    },
+    "g_levels": {
+      "names": ["1.5", "2.5", "3"],
+      "values": [1, 2, 3]
+    },
+    "g_1_5": [1, 0, 1, 0, 0, null, 0, 1],
+    "g_2_5": [0, 0, 0, 1, 0, null, 1, 0],
+    "g_3": [0, 1, 0, 0, 1, null, 0, 0],
+    "rank_r": [2, 4, 4, 6.5, null, 4, 1, 6.5],
+    "rank_r_desc": [6, 4, 4, 1.5, null, 4, 7, 1.5]
+  }
+}

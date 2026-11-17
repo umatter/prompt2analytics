@@ -109,12 +109,17 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/mtcars.csv` | 32 × 12 (model, mpg, cyl, disp, hp, drat, wt, qsec, vs, am, gear, carb) | `ols_mtcars` | `r/cases/regression.R` | `datasets::mtcars`, row names as `model` |
 | `generated/mte_boot_indices.csv` | 400 × 25 (b01-b25; 1-based row indices into rows 1-400 of `mte_sim.csv`) | `mte_bootstrap` | `r/cases/econ_mte.R` | seed 20261207 |
 | `generated/mte_sim.csv` | 2000 × 4 (y, d, z1, z2) | `mte_local_iv`, `mte_bootstrap` | `r/cases/econ_mte.R` | seed 20261205 |
+| `generated/munging_bind.csv` | 4 × 6 (frame, id, xi, xd, Income, income) | `data_munging_combine_t4` | `r/cases/data_munging_t4.R` | two frames A, B in one file: integer and double x, names differing in case |
 | `generated/munging_counts.csv` | 10 × 2 (id, g) | `data_munging_value_counts` | `r/cases/data_munging_t3.R` | integer values with NA, distinct counts |
 | `generated/munging_cut.csv` | 12 × 2 (id, x) | `data_munging_cut` | `r/cases/data_munging_t3.R` | integer values with NA and ties |
 | `generated/munging_factor.csv` | 10 × 3 (id, g, w) | `data_munging_model_matrix` | `r/cases/data_munging_t3.R` | integer-coded factor; seed 5012 |
 | `generated/munging_fill.csv` | 10 × 4 (id, k, f, s) | `data_munging_fill_mode`, `data_munging_na_if`, `data_munging_describe` | `r/cases/data_munging_t3.R` | integer, double and text columns with NA and tied modes |
 | `generated/munging_join_frames.csv` | 6 × 4 (frame, k, value, value_right) | `data_munging_join_suffix` | `r/cases/data_munging_t3.R` | three frames A, AB, C in one file |
+| `generated/munging_join_na.csv` | 8 × 4 (id, frame, k, val) | `data_munging_combine_t4` | `r/cases/data_munging_t4.R` | two frames L, R in one file; integer keys with NA on both sides |
 | `generated/munging_long.csv` | 12 × 4 (id, g, x, y) | `data_munging_lag`, `data_munging_filter` | `r/cases/data_munging_t3.R` | interleaved groups, Int64 and Float64 with NA; seed 5011 |
+| `generated/munging_order.csv` | 9 × 4 (id, key, v, g) | `data_munging_combine_t4` | `r/cases/data_munging_t4.R` | duplicated integer keys; integer groups with NA |
+| `generated/munging_panel.csv` | 11 × 6 (id, firm, year, x, z, y) | `data_munging_panel_shift` | `r/cases/data_munging_t4.R` | unsorted interleaved panel, firm 3 lacks 2003; Int64 x and Float64 z with NA; seed 5021 |
+| `generated/munging_regions.csv` | 8 × 4 (id, region, g, r) | `data_munging_factor_t4` | `r/cases/data_munging_t4.R` | text, double and integer factors with NA and ties |
 | `generated/munging_wide.csv` | 4 × 4 (id, a, b, c) | `data_munging_pivot_longer` | `r/cases/data_munging_t3.R` | integer and double columns with NA |
 | `generated/nls_weighted_t4.csv` | 40 × 3 (x, y, w) | `nls_weighted_t4` | `r/cases/regression_smoothers_t4.R` | seed 20261116; y = 10 exp(-0.5 x) + 2 + N(0, (0.2 (1 + x / 2))²), w = 1 / (1 + x / 2)² |
 | `generated/ols_twoway_indefinite.csv` | 36 × 4 (y, x, a, b; 3 × 3 clusters) | `ols_twoway_indefinite` | `r/cases/reg_vcov_t4.R` | seed 1 |
