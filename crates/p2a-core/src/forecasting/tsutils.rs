@@ -901,9 +901,18 @@ pub(crate) fn ar_is_stationary(ar: &[f64]) -> EconResult<bool> {
     if ar.iter().any(|v| !v.is_finite()) {
         return Ok(false);
     }
-    let mut a = try_with_capacity(ar.len(), "the AR step-down recursion")?;
-    a.extend_from_slice(ar);
-    let mut prev = try_vec(ar.len(), 0.0, "the AR step-down recursion")?;
+    // Low orders (all in practice) work in stack buffers.
+    const STACK: usize = 8;
+    let (mut a_stack, mut prev_stack) = ([0.0; STACK], [0.0; STACK]);
+    let (mut a_heap, mut prev_heap);
+    let (a, prev): (&mut [f64], &mut [f64]) = if ar.len() <= STACK {
+        (&mut a_stack[..ar.len()], &mut prev_stack[..ar.len()])
+    } else {
+        a_heap = try_vec(ar.len(), 0.0, "the AR step-down recursion")?;
+        prev_heap = try_vec(ar.len(), 0.0, "the AR step-down recursion")?;
+        (&mut a_heap[..], &mut prev_heap[..])
+    };
+    a.copy_from_slice(ar);
     // Each order costs O(k).
     let stride = checkpoint_stride(ar.len().max(1));
     for k in (1..=ar.len()).rev() {
@@ -1024,24 +1033,88 @@ fn arma_autocorrelation(ar: &[f64], ma: &[f64], lag_max: usize) -> EconResult<Ve
     };
 
     // ρ(k) = Σᵢ φᵢ ρ(k − i) for k > r (each lag costs O(p)).
-    let stride = checkpoint_stride(p);
-    for k in (r_known + 1)..n_lags {
-        if k % stride == 0 {
-            checkpoint()?;
-        }
+    extend_ar_recursion(ar, &mut rho, r_known + 1)?;
+    Ok(rho)
+}
+
+/// 0 for a sum below the normal range, otherwise the sum. Subnormals are flushed because in that
+/// range the AR recursion can cycle through tiny non-zero values instead of reaching 0, and
+/// subnormal arithmetic is slow. Every ±0 becomes +0, so whether a sum started from +0 or from its
+/// first term does not change the result. The flush is rare: a branch keeps it off the recursion's
+/// chain of dependent operations.
+#[inline(always)]
+fn flush_subnormal(sum: f64) -> f64 {
+    #[cold]
+    #[inline(never)]
+    fn zero() -> f64 {
+        0.0
+    }
+    if sum.abs() < f64::MIN_POSITIVE {
+        zero()
+    } else {
+        sum
+    }
+}
+
+/// Fills `rho[from..]` by ρ(k) = Σᵢ φᵢ ρ(k − i) (terms before lag 0 omitted), with each sum taken
+/// in the order of the coefficients and flushed by [`flush_subnormal`]. `rho[from..]` must be 0 on
+/// entry: once p successive values are 0 every later one is, and the fill stops there. Orders 1
+/// and 2 carry the previous values in registers.
+fn extend_ar_recursion(ar: &[f64], rho: &mut [f64], from: usize) -> EconResult<()> {
+    let p = ar.len();
+    let n = rho.len();
+    if p == 0 {
+        return Ok(());
+    }
+    // Lags below p read fewer than p earlier values.
+    let mut k = from;
+    while k < n.min(p) {
         let mut sum = 0.0;
         for (i, &phi) in ar.iter().enumerate().take(k) {
             sum += phi * rho[k - 1 - i];
         }
-        // Flush subnormals: in that range the recursion can cycle through tiny non-zero values
-        // instead of reaching 0, and subnormal arithmetic is slow.
-        rho[k] = if sum.abs() < f64::MIN_POSITIVE {
-            0.0
-        } else {
-            sum
-        };
+        rho[k] = flush_subnormal(sum);
+        k += 1;
     }
-    Ok(rho)
+    // Each lag costs O(p); the budget is checked once per stride of lags.
+    let stride = checkpoint_stride(p);
+    while k < n {
+        checkpoint()?;
+        let end = k.saturating_add(stride).min(n);
+        match *ar {
+            [a1] => {
+                let mut r1 = rho[k - 1];
+                for slot in &mut rho[k..end] {
+                    r1 = flush_subnormal(a1 * r1);
+                    *slot = r1;
+                }
+            }
+            [a1, a2] => {
+                let (mut r1, mut r2) = (rho[k - 1], rho[k - 2]);
+                for slot in &mut rho[k..end] {
+                    let v = flush_subnormal(a1 * r1 + a2 * r2);
+                    *slot = v;
+                    (r1, r2) = (v, r1);
+                }
+            }
+            _ => {
+                for j in k..end {
+                    let (head, tail) = rho.split_at_mut(j);
+                    let mut terms = ar.iter().zip(head[j - p..].iter().rev());
+                    let mut sum = terms.next().map_or(0.0, |(&phi, &r)| phi * r);
+                    for (&phi, &r) in terms {
+                        sum += phi * r;
+                    }
+                    tail[0] = flush_subnormal(sum);
+                }
+            }
+        }
+        if rho[end - p..end].iter().all(|&v| v == 0.0) {
+            break;
+        }
+        k = end;
+    }
+    Ok(())
 }
 
 /// γ(0..=r) of an ARMA(p, q) with σ² = 1 and r = max(p, q + 1) ≥ 2, from the r + 1 linear equations
@@ -1621,31 +1694,7 @@ pub fn arima_sim_with_sd(
 
     // Simulate ARMA part
     let mut x = try_vec(total_length, 0.0, WHAT)?;
-
-    // Each step costs O(p + q).
-    let stride = checkpoint_stride(p + q + 1);
-    for t in 0..total_length {
-        if t % stride == 0 {
-            checkpoint()?;
-        }
-        // MA filter: e[t] + sum(theta_j * e[t-j]); its first q values are 0, as R's.
-        let mut val = if t < q {
-            0.0
-        } else {
-            let mut v = innov[t];
-            for (j, &theta) in ma.iter().enumerate() {
-                v += theta * innov[t - 1 - j];
-            }
-            v
-        };
-
-        // AR recursion: sum(phi_i * x[t-i]), zeros before the start
-        for (i, &phi) in ar.iter().enumerate().take(t) {
-            val += phi * x[t - 1 - i];
-        }
-
-        x[t] = val;
-    }
+    arma_filter(ar, ma, &innov, &mut x)?;
 
     // Remove burn-in
     x.drain(..burn_in);
@@ -1661,6 +1710,94 @@ pub fn arima_sim_with_sd(
         n,
         n_start: burn_in,
     })
+}
+
+/// The ARMA part of [`arima_sim_with_sd`]: `x[t]` is the MA filter e[t] + Σⱼ θⱼ e[t − j] (0 for
+/// the first q steps, as R's `x[seq_along(ma)] <- 0`) plus Σᵢ φᵢ x[t − i] (zeros before the start),
+/// each sum taken in the order of the coefficients. `x` must be as long as `innov`.
+fn arma_filter(ar: &[f64], ma: &[f64], innov: &[f64], x: &mut [f64]) -> EconResult<()> {
+    let (p, q) = (ar.len(), ma.len());
+    let total = innov.len().min(x.len());
+    // The first max(p, q) steps reach before the start.
+    let warm_up = p.max(q).min(total);
+    for t in 0..warm_up {
+        let mut val = if t < q {
+            0.0
+        } else {
+            let mut v = innov[t];
+            for (j, &theta) in ma.iter().enumerate() {
+                v += theta * innov[t - 1 - j];
+            }
+            v
+        };
+        for (i, &phi) in ar.iter().enumerate().take(t) {
+            val += phi * x[t - 1 - i];
+        }
+        x[t] = val;
+    }
+    // Each step costs O(p + q); the budget is checked once per stride of steps.
+    let stride = checkpoint_stride(p + q + 1);
+    let mut t = warm_up;
+    while t < total {
+        checkpoint()?;
+        let end = t.saturating_add(stride).min(total);
+        match p {
+            0 => arma_filter_steps::<0>(ar, ma, innov, x, t, end),
+            1 => arma_filter_steps::<1>(ar, ma, innov, x, t, end),
+            2 => arma_filter_steps::<2>(ar, ma, innov, x, t, end),
+            _ => {
+                for s in t..end {
+                    let mut val = innov[s];
+                    for (&theta, &e) in ma.iter().zip(innov[s - q..s].iter().rev()) {
+                        val += theta * e;
+                    }
+                    for (&phi, &v) in ar.iter().zip(x[s - p..s].iter().rev()) {
+                        val += phi * v;
+                    }
+                    x[s] = val;
+                }
+            }
+        }
+        t = end;
+    }
+    Ok(())
+}
+
+/// Steps `from..to` (`from >= max(p, q)`) of [`arma_filter`] for an AR order of `P` (`ar.len()`),
+/// the last `P` values carried in registers.
+#[inline(always)]
+fn arma_filter_steps<const P: usize>(
+    ar: &[f64],
+    ma: &[f64],
+    innov: &[f64],
+    x: &mut [f64],
+    from: usize,
+    to: usize,
+) {
+    let q = ma.len();
+    let mut phi = [0.0; P];
+    phi.copy_from_slice(&ar[..P]);
+    // last[i] = x[t - 1 - i]
+    let mut last = [0.0; P];
+    for (i, v) in last.iter_mut().enumerate() {
+        *v = x[from - 1 - i];
+    }
+    for t in from..to {
+        let mut val = innov[t];
+        for (&theta, &e) in ma.iter().zip(innov[t - q..t].iter().rev()) {
+            val += theta * e;
+        }
+        for i in 0..P {
+            val += phi[i] * last[i];
+        }
+        x[t] = val;
+        for i in (1..P).rev() {
+            last[i] = last[i - 1];
+        }
+        if P > 0 {
+            last[0] = val;
+        }
+    }
 }
 
 /// Integrate `x` `d` times in place: each pass replaces `x` by its
@@ -2268,6 +2405,125 @@ mod tests {
         // The PACF of ARMA(1, 1) decays like (-0.3)^k: its first lags are unaffected.
         let short = arma_acf(&[0.5], &[0.3], 20, true).unwrap().values;
         assert_eq!(&pacf[..21], &short[..]);
+    }
+
+    /// A seeded uniform draw in (-0.5, 0.5) for the equivalence tests.
+    fn noise_source(seed: u64) -> impl FnMut() -> f64 {
+        let mut state = seed;
+        move || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 11) as f64 / (1u64 << 53) as f64 - 0.5
+        }
+    }
+
+    /// The AR recursion of `arma_autocorrelation` as it was: a sum from 0 for every lag.
+    fn ar_recursion_reference(ar: &[f64], rho: &mut [f64], from: usize) {
+        for k in from..rho.len() {
+            let mut sum = 0.0;
+            for (i, &phi) in ar.iter().enumerate().take(k) {
+                sum += phi * rho[k - 1 - i];
+            }
+            rho[k] = if sum.abs() < f64::MIN_POSITIVE {
+                0.0
+            } else {
+                sum
+            };
+        }
+    }
+
+    #[test]
+    fn test_ar_recursion_matches_the_sum_from_zero() {
+        let mut noise = noise_source(11);
+        let orders: [&[f64]; 8] = [
+            &[0.5],
+            &[-0.97],
+            &[0.5, -0.3],
+            &[1.2, -0.5],
+            &[-0.4, -0.2],
+            &[0.3, 0.2, 0.1],
+            &[0.2, -0.1, 0.3, 0.05, 0.1],
+            &[0.0, 0.0, 0.6],
+        ];
+        for ar in orders {
+            for &len in &[1usize, 2, 3, 6, 200, 5000] {
+                for scale in [1.0, 1e-300] {
+                    let mut new = vec![0.0; len];
+                    for v in new.iter_mut().take(ar.len().min(len)) {
+                        *v = scale * noise();
+                    }
+                    let mut old = new.clone();
+                    let from = ar.len().min(len);
+                    extend_ar_recursion(ar, &mut new, from).unwrap();
+                    ar_recursion_reference(ar, &mut old, from);
+                    let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+                    assert_eq!(
+                        bits(&new),
+                        bits(&old),
+                        "ar = {ar:?}, len = {len}, scale = {scale}"
+                    );
+                }
+            }
+        }
+        // Started below the order too (lags 1.. of an AR(3) from rho[0] alone).
+        let mut new = vec![0.0; 50];
+        new[0] = 1.0;
+        let mut old = new.clone();
+        extend_ar_recursion(&[0.3, 0.2, 0.1], &mut new, 1).unwrap();
+        ar_recursion_reference(&[0.3, 0.2, 0.1], &mut old, 1);
+        assert_eq!(new, old);
+    }
+
+    /// The ARMA filter of `arima_sim_with_sd` as it was: one loop over every step.
+    fn arma_filter_reference(ar: &[f64], ma: &[f64], innov: &[f64]) -> Vec<f64> {
+        let q = ma.len();
+        let mut x = vec![0.0; innov.len()];
+        for t in 0..innov.len() {
+            let mut val = if t < q {
+                0.0
+            } else {
+                let mut v = innov[t];
+                for (j, &theta) in ma.iter().enumerate() {
+                    v += theta * innov[t - 1 - j];
+                }
+                v
+            };
+            for (i, &phi) in ar.iter().enumerate().take(t) {
+                val += phi * x[t - 1 - i];
+            }
+            x[t] = val;
+        }
+        x
+    }
+
+    #[test]
+    fn test_arma_filter_matches_the_single_loop() {
+        let mut noise = noise_source(5);
+        let ars: [&[f64]; 5] = [
+            &[],
+            &[0.95],
+            &[0.5, -0.3],
+            &[0.3, 0.2, 0.1],
+            &[0.1, 0.0, 0.2, -0.1],
+        ];
+        let mas: [&[f64]; 4] = [&[], &[0.4], &[0.4, 0.2], &[0.3, -0.2, 0.1, 0.05, 0.2]];
+        for ar in ars {
+            for ma in mas {
+                for &len in &[1usize, 2, 4, 5, 7, 300] {
+                    let innov: Vec<f64> = (0..len).map(|_| 3.0 * noise()).collect();
+                    let mut x = vec![0.0; len];
+                    arma_filter(ar, ma, &innov, &mut x).unwrap();
+                    let old = arma_filter_reference(ar, ma, &innov);
+                    let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+                    assert_eq!(
+                        bits(&x),
+                        bits(&old),
+                        "ar = {ar:?}, ma = {ma:?}, len = {len}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
