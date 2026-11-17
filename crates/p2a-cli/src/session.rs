@@ -5,7 +5,7 @@ use chrono::{DateTime, Utc};
 use p2a_core::{DataLoader, Dataset};
 use serde::{Deserialize, Serialize};
 use std::cell::{OnceCell, RefCell};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -197,10 +197,17 @@ impl Session {
         Ok(session)
     }
 
-    /// Save the session to a file
+    /// Read a session file for an invocation: `None` when the file does not exist or holds
+    /// only whitespace (an empty file made by `mktemp`, say), the parsed session otherwise.
+    /// [`Session::load`] keeps refusing an empty file.
+    pub fn read(path: &Path) -> anyhow::Result<Option<Session>> {
+        Ok(read_session_file(path)?.0)
+    }
+
+    /// Save the session to a file, atomically ([`write_atomically`]).
     pub fn save(&self, path: &PathBuf) -> anyhow::Result<()> {
         let content = serde_json::to_string_pretty(self)?;
-        std::fs::write(path, content)?;
+        write_atomically(path, content.as_bytes())?;
         Ok(())
     }
 
@@ -221,6 +228,107 @@ impl Default for Session {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// What identifies the contents of a session file between two reads: length,
+/// modification time and, on Unix, device and inode (a rename over the file changes them).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Fingerprint {
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    #[cfg(unix)]
+    dev: u64,
+    #[cfg(unix)]
+    ino: u64,
+}
+
+impl Fingerprint {
+    fn of(meta: &std::fs::Metadata) -> Self {
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt;
+        Self {
+            len: meta.len(),
+            modified: meta.modified().ok(),
+            #[cfg(unix)]
+            dev: meta.dev(),
+            #[cfg(unix)]
+            ino: meta.ino(),
+        }
+    }
+}
+
+/// Reads a session file through one handle, so the fingerprint describes exactly the bytes
+/// read: `(None, None)` when the file does not exist, `(None, Some(_))` when it holds only
+/// whitespace, the parsed session otherwise.
+fn read_session_file(path: &Path) -> anyhow::Result<(Option<Session>, Option<Fingerprint>)> {
+    use std::io::Read as _;
+    let mut file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((None, None)),
+        Err(e) => return Err(e.into()),
+    };
+    let fingerprint = Fingerprint::of(&file.metadata()?);
+    let mut content = String::new();
+    file.read_to_string(&mut content)?;
+    if content.trim().is_empty() {
+        return Ok((None, Some(fingerprint)));
+    }
+    Ok((Some(serde_json::from_str(&content)?), Some(fingerprint)))
+}
+
+/// `<session file>.lock`, beside the session file: the file [`SessionManager::save`] locks.
+/// Created at the first save and never removed.
+fn lock_path(session_path: &Path) -> PathBuf {
+    let mut name = session_path
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_default();
+    name.push(".lock");
+    session_path.with_file_name(name)
+}
+
+/// Writes `bytes` to `path` so that a reader sees the old file or the new one, never a
+/// part: a temporary file `.<name>.<uuid>.tmp` in the target's directory (with the
+/// existing file's permissions), then a rename over the target. A symbolic link is
+/// followed (the file it points to is replaced, the link stays). The temporary file is
+/// removed on any error. No fsync: the rename is what makes the write atomic for readers.
+pub(crate) fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let target = match std::fs::symlink_metadata(path) {
+        Ok(m) if m.file_type().is_symlink() => std::fs::canonicalize(path)?,
+        _ => path.to_path_buf(),
+    };
+    let name = target.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{} is not a file name", target.display()),
+        )
+    })?;
+    let dir = match target.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    let tmp = dir.join(format!(
+        ".{}.{}.tmp",
+        name.to_string_lossy(),
+        uuid::Uuid::new_v4()
+    ));
+    let written = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)?;
+        file.write_all(bytes)?;
+        if let Ok(old) = std::fs::metadata(&target) {
+            file.set_permissions(old.permissions())?;
+        }
+        drop(file);
+        std::fs::rename(&tmp, &target)
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written
 }
 
 /// Reload a dataset from its source file, with the missing-value strings it was
@@ -253,7 +361,13 @@ struct MemoryState {
     warned: bool,
 }
 
-/// Manages session state during CLI execution
+/// Manages session state during CLI execution.
+///
+/// Parallel invocations on one session file all record their commands: a save locks
+/// `<session>.lock`, reads the file again when another invocation wrote it since this one
+/// read it, appends this invocation's commands and its registered datasets to what is
+/// there, and replaces the file atomically. A command does not see datasets that a
+/// parallel command registers after it started.
 pub struct SessionManager {
     /// Path to the session file
     path: PathBuf,
@@ -266,18 +380,36 @@ pub struct SessionManager {
     command_start: Option<Instant>,
     /// Memory accounting; charged when a dataset is loaded or stored
     memory: RefCell<MemoryState>,
+    /// What [`SessionManager::save`] merges into the file
+    saved: RefCell<SaveState>,
+}
+
+/// What a save needs to merge this invocation into a file that another invocation wrote.
+struct SaveState {
+    /// The file as this invocation last read or wrote it: `None` when there was no file;
+    /// `Some(None)` after a merge (the file then differs from the session in memory, so
+    /// the next save reads it again)
+    file: Option<Option<Fingerprint>>,
+    /// Commands of `session.commands` already in the file
+    base_commands: usize,
+    /// Datasets this invocation registered since the last save; their entries replace
+    /// the file's
+    touched: BTreeSet<String>,
 }
 
 impl SessionManager {
     /// Create a new session manager, loading existing session if file exists
     /// The session file is read now; its datasets are read when a command first asks for
     /// them ([`SessionManager::get_dataset`]).
+    /// An empty or blank file (made by `mktemp`, say) is a new session.
     pub fn new(path: PathBuf) -> anyhow::Result<Self> {
-        let session = if path.exists() {
-            Session::load(&path)?
-        } else {
-            Session::new()
-        };
+        let (session, fingerprint) = read_session_file(&path)?;
+        let session = session.unwrap_or_default();
+        let saved = RefCell::new(SaveState {
+            file: fingerprint.map(Some),
+            base_commands: session.commands.len(),
+            touched: BTreeSet::new(),
+        });
         let datasets = session
             .datasets
             .keys()
@@ -295,6 +427,7 @@ impl SessionManager {
                 max_mb: 0,
                 warned: false,
             }),
+            saved,
         })
     }
 
@@ -465,6 +598,7 @@ impl SessionManager {
         self.remove_derived_copy(name);
         let meta = dataset_meta(name, source_path, format, dataset, na_strings, false);
         self.session.register_dataset(meta);
+        self.saved.get_mut().touched.insert(name.to_string());
     }
 
     /// Removes the stored file of `name` when the session entry it is about to replace
@@ -513,6 +647,7 @@ impl SessionManager {
         .map_err(|e| anyhow::anyhow!("Could not store dataset '{name}' in the session: {e}"))?;
         let meta = dataset_meta(name, stored, "parquet", &dataset, None, true);
         self.session.register_dataset(meta);
+        self.saved.get_mut().touched.insert(name.to_string());
         self.store_dataset(name.to_string(), dataset);
         Ok(())
     }
@@ -551,9 +686,75 @@ impl SessionManager {
         self.datasets.keys().collect()
     }
 
-    /// Save the session to disk
+    /// Save the session to disk, under an exclusive lock on [`lock_path`]: when another
+    /// invocation wrote the file since this one read it, this invocation's commands are
+    /// appended to the file's and the datasets it registered replace the file's entries
+    /// (the file's id, title, creation time, working directory and version are kept). The
+    /// file is replaced atomically. A file system without locking saves without the lock,
+    /// after a warning.
     pub fn save(&self) -> anyhow::Result<()> {
-        self.session.save(&self.path)
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(lock_path(&self.path))?;
+        match lock.lock() {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::Unsupported => eprintln!(
+                "Warning: the file system does not support file locks; saving {} without one",
+                self.path.display()
+            ),
+            Err(e) => return Err(e.into()),
+        }
+        let mut state = self.saved.borrow_mut();
+        let (on_disk, now) = match std::fs::metadata(&self.path) {
+            Ok(m) => (true, Some(Fingerprint::of(&m))),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (false, None),
+            Err(e) => return Err(e.into()),
+        };
+        let unchanged = match state.file {
+            None => !on_disk,
+            Some(Some(fp)) => now == Some(fp),
+            Some(None) => false,
+        };
+        let merged = if unchanged {
+            None
+        } else {
+            match read_session_file(&self.path)?.0 {
+                Some(disk) => Some(self.merge_into(disk, &state)),
+                None => None,
+            }
+        };
+        let content = serde_json::to_string_pretty(merged.as_ref().unwrap_or(&self.session))?;
+        write_atomically(&self.path, content.as_bytes())?;
+        state.file = if merged.is_some() {
+            Some(None)
+        } else {
+            Some(
+                std::fs::metadata(&self.path)
+                    .ok()
+                    .map(|m| Fingerprint::of(&m)),
+            )
+        };
+        state.base_commands = self.session.commands.len();
+        state.touched.clear();
+        drop(lock); // unlocks
+        Ok(())
+    }
+
+    /// `disk` with this invocation's commands since the last save appended and the
+    /// datasets it registered since then replacing their entries.
+    fn merge_into(&self, mut disk: Session, state: &SaveState) -> Session {
+        let start = state.base_commands.min(self.session.commands.len());
+        disk.commands
+            .extend(self.session.commands[start..].iter().cloned());
+        for name in &state.touched {
+            if let Some(meta) = self.session.datasets.get(name) {
+                disk.datasets.insert(name.clone(), meta.clone());
+            }
+        }
+        disk.updated_at = Utc::now();
+        disk
     }
 
     /// Get reference to the session
@@ -888,5 +1089,187 @@ mod derived_dataset_tests {
         let mut names = again.list_datasets();
         names.sort();
         assert_eq!(names, ["a", "b"]);
+    }
+}
+
+#[cfg(test)]
+mod save_tests {
+    use super::*;
+
+    /// A manager on `path` with one recorded command and a registered dataset `name`.
+    fn record_one(m: &mut SessionManager, cmd: &str, name: &str, dir: &Path) {
+        m.start_command();
+        m.record_invocation(vec!["data".into(), cmd.into()], true, None);
+        let ds = Dataset::new(polars::df! { "x" => [1.5, 2.25] }.unwrap());
+        m.register_dataset(name, dir.join(format!("{name}.csv")), "csv", &ds, None);
+    }
+
+    fn commands(path: &Path) -> Vec<String> {
+        let s = Session::load(&path.to_path_buf()).unwrap();
+        s.commands.iter().map(|c| c.subcommand.clone()).collect()
+    }
+
+    #[test]
+    fn save_merges_concurrent_invocations() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.json");
+        let mut first = SessionManager::new(path.clone()).unwrap();
+        first.record_invocation(vec!["data".into(), "original".into()], true, None);
+        first.save().unwrap();
+
+        let mut a = SessionManager::new(path.clone()).unwrap();
+        let mut b = SessionManager::new(path.clone()).unwrap();
+        record_one(&mut a, "a", "da", dir.path());
+        record_one(&mut b, "b", "db", dir.path());
+        a.save().unwrap();
+        b.save().unwrap();
+
+        assert_eq!(commands(&path), ["original", "a", "b"]);
+        let s = Session::load(&path).unwrap();
+        let mut names: Vec<&String> = s.datasets.keys().collect();
+        names.sort();
+        assert_eq!(names, ["da", "db"]);
+        assert_eq!(s.id, first.session().id);
+    }
+
+    #[test]
+    fn save_merges_into_a_file_created_meanwhile() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.json");
+        let mut a = SessionManager::new(path.clone()).unwrap();
+        let mut b = SessionManager::new(path.clone()).unwrap();
+        record_one(&mut a, "a", "da", dir.path());
+        record_one(&mut b, "b", "db", dir.path());
+        a.save().unwrap();
+        b.save().unwrap();
+        assert_eq!(commands(&path), ["a", "b"]);
+        let s = Session::load(&path).unwrap();
+        assert_eq!(s.id, a.session().id);
+        assert_eq!(s.created_at, a.session().created_at);
+    }
+
+    /// Two saves of one manager write its commands once (the second save re-reads the
+    /// file a merge wrote and adds nothing twice).
+    #[test]
+    fn repeated_saves_do_not_duplicate_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.json");
+        let mut a = SessionManager::new(path.clone()).unwrap();
+        let mut b = SessionManager::new(path.clone()).unwrap();
+        record_one(&mut a, "a", "da", dir.path());
+        record_one(&mut b, "b", "db", dir.path());
+        a.save().unwrap();
+        b.save().unwrap();
+        b.save().unwrap();
+        a.save().unwrap();
+        record_one(&mut a, "c", "dc", dir.path());
+        a.save().unwrap();
+        assert_eq!(commands(&path), ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn save_is_atomic() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.json");
+        let mut m = SessionManager::new(path.clone()).unwrap();
+        record_one(&mut m, "a", "da", dir.path());
+        m.save().unwrap();
+        let mut names: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["s.json", "s.json.lock"]);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let before = std::fs::read(&path).unwrap();
+            let mut m = SessionManager::new(path.clone()).unwrap();
+            record_one(&mut m, "b", "db", dir.path());
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+            let probe = dir.path().join("probe");
+            let root = std::fs::write(&probe, b"x").is_ok();
+            let saved = if root {
+                let _ = std::fs::remove_file(&probe);
+                None
+            } else {
+                Some(m.save())
+            };
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+            if let Some(saved) = saved {
+                assert!(
+                    saved.is_err(),
+                    "a save into a read-only directory must fail"
+                );
+                assert_eq!(std::fs::read(&path).unwrap(), before);
+            }
+        }
+    }
+
+    #[test]
+    fn empty_or_blank_file_is_a_new_session() {
+        let dir = tempfile::tempdir().unwrap();
+        for (i, body) in ["", "\n  \n"].iter().enumerate() {
+            let path = dir.path().join(format!("s{i}.json"));
+            std::fs::write(&path, body).unwrap();
+            let mut m = SessionManager::new(path.clone()).unwrap();
+            assert!(m.session().commands.is_empty());
+            assert!(
+                Session::load(&path).is_err(),
+                "load keeps refusing {body:?}"
+            );
+            assert!(Session::read(&path).unwrap().is_none());
+            record_one(&mut m, "a", "da", dir.path());
+            m.save().unwrap();
+            assert_eq!(commands(&path), ["a"]);
+        }
+    }
+
+    /// The rule-5 shortcut: a file unchanged since `new` (length, modification time,
+    /// inode) is not read again; the save uses the session in memory.
+    #[test]
+    fn unchanged_file_is_not_reread() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.json");
+        let mut m = SessionManager::new(path.clone()).unwrap();
+        record_one(&mut m, "a", "da", dir.path());
+        m.save().unwrap();
+
+        let mut m = SessionManager::new(path.clone()).unwrap();
+        let meta = std::fs::metadata(&path).unwrap();
+        let garbage = vec![b'!'; meta.len() as usize];
+        let f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        use std::io::Write as _;
+        (&f).write_all(&garbage).unwrap();
+        f.set_modified(meta.modified().unwrap()).unwrap();
+        drop(f);
+        record_one(&mut m, "b", "db", dir.path());
+        m.save().unwrap();
+        assert_eq!(commands(&path), ["a", "b"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_keeps_a_symlinked_session_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let mut m = SessionManager::new(real.join("s.json")).unwrap();
+        record_one(&mut m, "a", "da", dir.path());
+        m.save().unwrap();
+        let link = dir.path().join("s.json");
+        std::os::unix::fs::symlink(real.join("s.json"), &link).unwrap();
+        let mut m = SessionManager::new(link.clone()).unwrap();
+        record_one(&mut m, "b", "db", dir.path());
+        m.save().unwrap();
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(commands(&real.join("s.json")), ["a", "b"]);
+        assert!(dir.path().join("s.json.lock").exists());
     }
 }
