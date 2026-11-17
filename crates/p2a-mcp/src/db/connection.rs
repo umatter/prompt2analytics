@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use surrealdb::Surreal;
 use surrealdb::engine::local::{Db, Mem, SurrealKv};
+use surrealdb::opt::Config;
 use surrealdb::types::SurrealValue;
 use thiserror::Error;
 
@@ -79,6 +80,31 @@ impl Default for PersistenceLimits {
             rss_soft_limit_bytes: None,
         }
     }
+}
+
+/// The memtable size of the persistent (SurrealKV) store: 64 MiB.
+pub(crate) const SURREALKV_MAX_MEMTABLE_BYTES: usize = 64 << 20;
+/// The block cache of the persistent (SurrealKV) store: 64 MiB.
+pub(crate) const SURREALKV_BLOCK_CACHE_BYTES: usize = 64 << 20;
+
+/// The options the persistent store is opened with. SurrealKV otherwise
+/// sizes both from the host's memory (cgroup-aware): the block cache at half
+/// the memory less 1 GiB, with a 16 MiB floor, and the memtable between
+/// 64 MiB and 4 GiB, so gigabytes on a large host. The embedded engine reads
+/// no environment variables for them, so they are set here. On hosts below
+/// about 2 GiB the default cache is the 16 MiB floor, which the fixed 64 MiB
+/// raises.
+///
+/// The in-memory store (kv-mem, the demo's) reads only its own `datastore_*`
+/// keys: this cap does not apply to it, and its memory grows with the
+/// stored conversations.
+fn surrealkv_config() -> Config {
+    Config::new()
+        .datastore_option("surrealkv_max_memtable_size", SURREALKV_MAX_MEMTABLE_BYTES)
+        .datastore_option(
+            "surrealkv_block_cache_capacity",
+            SURREALKV_BLOCK_CACHE_BYTES,
+        )
 }
 
 /// Database connection wrapper
@@ -401,7 +427,7 @@ impl DbConnection {
             })?;
         }
 
-        let db = match Surreal::new::<SurrealKv>(path).await {
+        let db = match Surreal::new::<SurrealKv>((path, surrealkv_config())).await {
             Ok(db) => db,
             Err(e) if holds_rocksdb_files(path) => {
                 let aside = set_aside_rocksdb_store(path).map_err(|reason| {
@@ -419,7 +445,7 @@ impl DbConnection {
                      empty store was started in its place; export the old one with \
                      SurrealDB 2's `surreal export`"
                 );
-                Surreal::new::<SurrealKv>(path)
+                Surreal::new::<SurrealKv>((path, surrealkv_config()))
                     .await
                     .map_err(|e| DbError::Connection(e.to_string()))?
             }

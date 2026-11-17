@@ -4013,3 +4013,41 @@ async fn dataset_meta_rows_per_session_are_capped_under_a_budget() {
         CAP + 1
     );
 }
+
+/// The persistent store opens with a 64 MiB memtable and block cache, as
+/// the storage engine's own log lines say, and round-trips a record.
+#[test]
+fn test_surrealkv_config_caps_memory() {
+    use super::connection::{SURREALKV_BLOCK_CACHE_BYTES, SURREALKV_MAX_MEMTABLE_BYTES};
+    assert_eq!(SURREALKV_MAX_MEMTABLE_BYTES, 64 * 1024 * 1024);
+    assert_eq!(SURREALKV_BLOCK_CACHE_BYTES, 64 * 1024 * 1024);
+    share_callsite_interest();
+    let logs = Logs::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(logs.clone())
+        .with_max_level(tracing::Level::INFO)
+        .with_ansi(false)
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    rt.block_on(async {
+        let db = DbConnection::connect_surrealkv(dir.path().join("db"))
+            .await
+            .unwrap();
+        let id = filled_conversation(&db, "s1", "kept").await;
+        assert!(!db.get_messages(&id).await.unwrap().is_empty());
+    });
+    let text = logs.text();
+    assert!(
+        text.contains("Setting max memtable size: 67108864"),
+        "{text}"
+    );
+    assert!(
+        text.contains("Setting block cache capacity: 67108864"),
+        "{text}"
+    );
+}
