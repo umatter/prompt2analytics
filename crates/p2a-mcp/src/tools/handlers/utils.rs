@@ -99,7 +99,9 @@ const SESSION_VERSIONS: [&str; 2] = ["1.0", "1.1"];
 /// in column order).
 ///
 /// Format 1.1: each schema entry has the 1.0 `name` and `dtype` (polars' debug
-/// text) plus `type` and its parameters ([`encode_dtype`]). Cells are written
+/// text) plus `type` and its parameters ([`encode_dtype`]). The schema is
+/// written before the data, and the import requires that order: a typed
+/// schema after a dataset's `data` is refused. Cells are written
 /// as the type's physical value: temporal columns as integer ticks,
 /// categorical and enum columns as labels, decimals as exact decimal text,
 /// non-finite floats as "NaN", "Inf" or "-Inf", and any other type as its
@@ -233,7 +235,8 @@ fn time_unit_of(name: &str) -> Result<TimeUnit, String> {
 /// The session-file type of a column (format 1.1): `{"type": ...}` plus the
 /// type's parameters (`unit` and `tz` of a datetime, `unit` of a duration,
 /// `categories` (the name of polars' categories object, empty for the global one),
-/// `namespace` and `physical` of a categorical, `levels` of an enum,
+/// `namespace` and `physical` of a categorical (the import keeps the global
+/// one and gives any other name a fresh object private to the import), `levels` of an enum,
 /// `precision` and `scale` of a decimal). A type with no file form (nested,
 /// binary, null, object, 128-bit integers) is `text`, with a `note` naming it.
 pub(crate) fn encode_dtype(dtype: &DataType) -> serde_json::Value {
@@ -281,6 +284,9 @@ pub(crate) fn encode_dtype(dtype: &DataType) -> serde_json::Value {
     }
 }
 
+/// The largest precision of a polars decimal (128-bit).
+const DECIMAL_MAX_PRECISION: usize = 38;
+
 /// The column type a 1.1 schema entry names ([`encode_dtype`]'s inverse). A
 /// `text` entry is a string column.
 pub(crate) fn decode_dtype(entry: &serde_json::Value) -> Result<DataType, String> {
@@ -324,11 +330,17 @@ pub(crate) fn decode_dtype(entry: &serde_json::Value) -> Result<DataType, String
                 "u32" => CategoricalPhysical::U32,
                 other => return Err(format!("categorical: unknown physical type '{other}'")),
             };
-            DataType::from_categories(Categories::new(
-                field("categories").unwrap_or_default().into(),
-                field("namespace").unwrap_or_default().into(),
-                physical,
-            ))
+            let name = field("categories").unwrap_or_default();
+            let namespace = field("namespace").unwrap_or_default();
+            // The global categories when the file names them; otherwise a
+            // fresh categories object private to this import. A name from
+            // the file is not looked up in polars' process-wide registry,
+            // where another session's mapping of the same name lives.
+            if name.is_empty() && namespace.is_empty() && physical == CategoricalPhysical::U32 {
+                DataType::from_categories(Categories::global())
+            } else {
+                DataType::from_categories(Categories::random(namespace.into(), physical))
+            }
         }
         "enum" => {
             let levels: Vec<&str> = entry
@@ -345,7 +357,17 @@ pub(crate) fn decode_dtype(entry: &serde_json::Value) -> Result<DataType, String
                 FrozenCategories::new(levels).map_err(|e| format!("enum: {e}"))?,
             )
         }
-        "decimal" => DataType::Decimal(usize_field("precision")?, usize_field("scale")?),
+        "decimal" => {
+            let (precision, scale) = (usize_field("precision")?, usize_field("scale")?);
+            // polars asserts this bound when it casts text to a decimal.
+            if !(1..=DECIMAL_MAX_PRECISION).contains(&precision) || scale > precision {
+                return Err(format!(
+                    "decimal: precision must be 1..={DECIMAL_MAX_PRECISION} and scale at most \
+                     precision, got ({precision}, {scale})"
+                ));
+            }
+            DataType::Decimal(precision, scale)
+        }
         other => return Err(format!("unknown type '{other}'")),
     })
 }
@@ -370,9 +392,12 @@ fn nonfinite_float(s: &str) -> Option<f64> {
 
 /// `series` (as the parser built it: i64, u64, f64, bool or str) cast to the
 /// schema's type. Integer ticks become dates, datetimes, durations and times;
-/// text becomes categorical, enum and decimal values; a float column read as
-/// text (its first value was "NaN") takes "NaN", "Inf" and "-Inf" as floats.
-/// Values that do not fit the type are an error naming the column.
+/// text becomes categorical, enum and decimal values; a string column cast
+/// to a float type takes "NaN", "Inf" and "-Inf" as floats. The schema must
+/// precede the data (the import refuses it otherwise), so the parser has
+/// already read each declared column as its type's vector: a declared float
+/// column reads the non-finite strings and a declared u64 column values above
+/// `i64::MAX`. Values that do not fit the type are an error naming the column.
 pub(crate) fn cast_to_schema(series: Series, dtype: &DataType) -> Result<Series, String> {
     use p2a_core::polars::prelude::{IntoSeries, NamedFrom};
     if series.dtype() == dtype {
@@ -520,6 +545,8 @@ enum ParsedDataset {
     /// The `data` object's columns, in file order, and the column types the
     /// schema names (format 1.1; empty for 1.0).
     Columns(Vec<(String, ParsedColumn)>, SessionSchema),
+    /// A typed (1.1) schema that follows the `data` object.
+    SchemaAfterData,
 }
 
 /// The column types of a dataset's schema (format 1.1), by column name; an
@@ -823,6 +850,7 @@ impl<'de> serde::de::Visitor<'de> for DatasetSeed<'_> {
     fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
         let mut data = None;
         let mut schema = SessionSchema::new();
+        let mut schema_after_data = false;
         while let Some(key) = map.next_key::<String>()? {
             if key == "data" {
                 data = map.next_value_seed(DataSeed(self.0, &schema))?;
@@ -830,12 +858,16 @@ impl<'de> serde::de::Visitor<'de> for DatasetSeed<'_> {
                 // Charged as it is read, as a column element is.
                 let entries = map.next_value_seed(ElementSeed(self.0))?;
                 schema = read_schema(&entries);
+                // The columns were read without the types: a typed schema
+                // after the data is refused (format 1.1 writes it first).
+                schema_after_data |= data.is_some() && !schema.is_empty();
             } else {
                 map.next_value::<serde::de::IgnoredAny>()?;
             }
         }
         Ok(match data {
             None => ParsedDataset::NoData,
+            Some(_) if schema_after_data => ParsedDataset::SchemaAfterData,
             Some(columns) => ParsedDataset::Columns(columns, schema),
         })
     }
@@ -1156,6 +1188,11 @@ fn build_dataset(parsed: ParsedDataset) -> Result<DataFrame, String> {
     let (columns, schema) = match parsed {
         ParsedDataset::Invalid => return Err("invalid format".to_string()),
         ParsedDataset::NoData => return Err("no data field (metadata-only session)".to_string()),
+        ParsedDataset::SchemaAfterData => {
+            return Err(
+                "the typed schema follows the data (format 1.1 needs the schema first)".to_string(),
+            );
+        }
         ParsedDataset::Columns(columns, schema) => (columns, schema),
     };
     let mut out: Vec<Column> = Vec::with_capacity(columns.len());
@@ -2824,6 +2861,84 @@ mod tests {
                 "{version}"
             );
         }
+    }
+
+    /// A decimal type polars cannot hold is an error naming the column, not
+    /// polars' assertion when it casts the text.
+    #[test]
+    fn test_session_import_refuses_impossible_decimal() {
+        for (precision, scale) in [(100, 2), (5, 7), (0, 0)] {
+            let json = format!(
+                r#"{{"version":"1.1","datasets":{{"a":{{"schema":[{{"name":"d","dtype":"Decimal",
+                "type":"decimal","precision":{precision},"scale":{scale}}}],
+                "data":{{"d":["1.25",null]}}}}}}}}"#
+            );
+            let mut parsed = parse_session_json(json.as_bytes(), None).unwrap();
+            let err = build_dataset(parsed.remove(0).1).unwrap_err();
+            assert!(err.contains("column 'd'"), "{err}");
+            assert!(
+                err.contains(&format!("got ({precision}, {scale})")),
+                "{err}"
+            );
+        }
+    }
+
+    /// Format 1.1 needs the schema before the data: a typed schema after it
+    /// is refused, where the columns would have been read without their
+    /// types ("NaN" as null, a u64 above `i64::MAX` as null).
+    #[test]
+    fn test_session_import_refuses_schema_after_data() {
+        let json = r#"{"version":"1.1","datasets":{"a":{"data":{"x":[1.5,"NaN"],"u":[1,18446744073709551615]},
+            "schema":[{"name":"x","dtype":"Float64","type":"f64"},{"name":"u","dtype":"UInt64","type":"u64"}]}}}"#;
+        let mut parsed = parse_session_json(json.as_bytes(), None).unwrap();
+        let err = build_dataset(parsed.remove(0).1).unwrap_err();
+        assert!(err.contains("schema follows the data"), "{err}");
+        // Schema first, the same cells read as their types.
+        let json = r#"{"version":"1.1","datasets":{"a":{
+            "schema":[{"name":"x","dtype":"Float64","type":"f64"},{"name":"u","dtype":"UInt64","type":"u64"}],
+            "data":{"x":[1.5,"NaN"],"u":[1,18446744073709551615]}}}}"#;
+        let mut parsed = parse_session_json(json.as_bytes(), None).unwrap();
+        let df = build_dataset(parsed.remove(0).1).unwrap();
+        assert!(
+            df.column("x")
+                .unwrap()
+                .f64()
+                .unwrap()
+                .get(1)
+                .unwrap()
+                .is_nan()
+        );
+        assert_eq!(
+            df.column("u").unwrap().u64().unwrap().get(1),
+            Some(u64::MAX)
+        );
+        // A 1.0 schema (no types) after the data is still read as before.
+        let json = r#"{"version":"1.0","datasets":{"a":{"data":{"x":[1,2]},
+            "schema":[{"name":"x","dtype":"Int64"}]}}}"#;
+        let mut parsed = parse_session_json(json.as_bytes(), None).unwrap();
+        assert!(build_dataset(parsed.remove(0).1).is_ok());
+    }
+
+    /// A categorical type the file names gets categories private to the
+    /// import, so two imports naming the same categories do not share a
+    /// mapping; the unnamed u32 categories stay the global ones.
+    #[test]
+    fn test_session_import_named_categories_are_private() {
+        let entry = |name: &str, physical: &str| {
+            serde_json::json!({"type": "categorical", "categories": name,
+                "namespace": "", "physical": physical})
+        };
+        let cats = |dt: DataType| match dt {
+            DataType::Categorical(cats, _) => cats,
+            other => panic!("{other:?}"),
+        };
+        let a = cats(decode_dtype(&entry("shared", "u8")).unwrap());
+        let b = cats(decode_dtype(&entry("shared", "u8")).unwrap());
+        assert!(!std::sync::Arc::ptr_eq(&a, &b));
+        assert_ne!(a.name(), b.name());
+        assert_eq!(a.physical(), CategoricalPhysical::U8);
+        let g = cats(decode_dtype(&entry("", "u32")).unwrap());
+        assert!(g.is_global());
     }
 
     #[test]
