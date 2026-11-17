@@ -14,9 +14,9 @@ use std::time::Instant;
 pub struct DatasetMeta {
     /// Dataset name/identifier
     pub name: String,
-    /// The file the dataset was loaded from: an absolute path since p2a 0.5.3 (older
-    /// files may hold a path relative to [`Session::working_dir`]); for a derived dataset,
-    /// the stored copy relative to the session file's directory
+    /// The file the dataset was loaded from, as an absolute path (session files written by
+    /// older p2a versions may hold a path relative to [`Session::working_dir`]); for a
+    /// derived dataset, the stored copy relative to the session file's directory
     pub source_path: PathBuf,
     /// File format (csv, parquet, excel, stata, sas)
     pub format: String,
@@ -145,7 +145,7 @@ pub struct CommandRecord {
     pub category: String,
     /// Subcommand name (load, ols, fe, etc.)
     pub subcommand: String,
-    /// Not filled since p2a 0.2 (recorded as `null`); [`CommandRecord::argv`] is the
+    /// Not filled any more (recorded as `null`); [`CommandRecord::argv`] is the
     /// canonical record of a command, and `script export` reads only `argv` (or this field
     /// for records older than `argv`). Still written, because older p2a versions require it.
     #[serde(default)]
@@ -156,10 +156,10 @@ pub struct CommandRecord {
     /// Preferred over `arguments` for faithful, injection-safe script export.
     #[serde(default)]
     pub argv: Vec<String>,
-    /// Not filled since p2a 0.2 (recorded empty); see [`CommandRecord::arguments`]
+    /// Not filled any more (recorded empty); see [`CommandRecord::arguments`]
     #[serde(default)]
     pub dataset_refs: Vec<String>,
-    /// Not filled since p2a 0.2 (recorded empty); see [`CommandRecord::arguments`]
+    /// Not filled any more (recorded empty); see [`CommandRecord::arguments`]
     #[serde(default)]
     pub output_files: Vec<PathBuf>,
     /// The working directory of the invocation (`None` in older files); an exported
@@ -774,10 +774,9 @@ impl SessionManager {
         let merged = if unchanged {
             None
         } else {
-            match read_session_file(&self.path)?.0 {
-                Some(disk) => Some(self.merge_into(disk, &state)),
-                None => None,
-            }
+            read_session_file(&self.path)?
+                .0
+                .map(|disk| self.merge_into(disk, &state))
         };
         let content = serde_json::to_string_pretty(merged.as_ref().unwrap_or(&self.session))?;
         write_atomically(&self.path, content.as_bytes())?;
