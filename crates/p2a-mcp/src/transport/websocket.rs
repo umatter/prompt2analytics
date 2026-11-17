@@ -14,17 +14,17 @@
 //!   the message cap in bytes; one more is refused with an `error` whose code
 //!   is `connection_busy`.
 //!
-//! An answer echoes at most [`MAX_ID_BYTES`] of a message's `id`: a message
-//! with a longer one is refused with the code `id_too_long`, and that
+//! An answer echoes a message's `id` whole: a message whose id is longer
+//! than [`MAX_ID_BYTES`] is refused with the code `id_too_long`, and that
 //! refusal, like any answer that has no id to echo, carries the id `system`.
 //! A parse error, and a tool's refusal of arguments that do not deserialise,
 //! give serde's message, which quotes the offending value, cut to
 //! [`MAX_QUOTE_BYTES`](crate::server::MAX_QUOTE_BYTES) of it
-//! ([`quote_cut`]). Nothing else is cut here: a
-//! tool's own error or result can still quote argument values, such as a
-//! dataset or column name, in full (a result can hold such a quote twice,
-//! in its content and in its `error`), up to the size of the message and,
-//! for a result where a `response_bytes` cap is set, that cap.
+//! ([`quote_cut`]). Nothing else is cut here: a tool's own error or result
+//! can still quote argument values, such as a dataset or column name, in
+//! full, up to the size of the message; where a `response_bytes` cap is set,
+//! a result's content and its `error` copy together, and an error message,
+//! stay within it.
 
 use std::borrow::Cow;
 use std::collections::VecDeque;
@@ -43,12 +43,12 @@ use futures::{
     sink::SinkExt,
     stream::{Stream, StreamExt},
 };
-use p2a_core::memory::format_bytes;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
 use crate::exec::{CallOrigin, ToolGovernor};
 use crate::server::{AnalyticsServer, quote_cut};
+use crate::session::fmt_bytes;
 use crate::session::{Session, SessionError, SessionManager};
 use crate::transport::http::ToolResult;
 
@@ -103,7 +103,7 @@ fn answer_id(id: Option<&str>) -> String {
 fn id_too_long(id: &str) -> String {
     format!(
         "Invalid message: its id is {} long, and an id may be at most {MAX_ID_BYTES} bytes.",
-        format_bytes(id.len())
+        fmt_bytes(id.len() as u64)
     )
 }
 
@@ -442,9 +442,9 @@ impl Waiting {
                  does not fit behind the messages already waiting: together they may take \
                  at most the message cap, {} ({MESSAGE_CAP_VAR}), and those take {}; send \
                  it again once their answers arrive.",
-                format_bytes(text.len()),
-                format_bytes(self.max_bytes),
-                format_bytes(self.bytes)
+                fmt_bytes(text.len() as u64),
+                fmt_bytes(self.max_bytes as u64),
+                fmt_bytes(self.bytes as u64)
             ))
         } else {
             None
@@ -466,12 +466,17 @@ impl Waiting {
 }
 
 /// Handle a client message whose id, if it has one, [`handle_text`] has
-/// checked against [`MAX_ID_BYTES`]: every answer to it carries that id.
+/// checked against [`MAX_ID_BYTES`]: every answer to it carries that id. A
+/// debug build asserts the bound.
 async fn handle_client_message(
     state: &mut WsState,
     msg: ClientMessage,
     tx: &mpsc::Sender<ServerMessage>,
 ) -> Result<(), String> {
+    debug_assert!(
+        msg.id().is_none_or(|id| id.len() <= MAX_ID_BYTES),
+        "an id longer than MAX_ID_BYTES reached handle_client_message"
+    );
     match msg {
         ClientMessage::Auth { session_id } => {
             let answer = match state.session_for_auth(&session_id).await {
@@ -1003,7 +1008,7 @@ mod tests {
                 assert_eq!(code.as_deref(), Some("connection_busy"));
                 // The refusal names the bound that applied, not the other.
                 assert!(message.contains("16 messages"), "{message}");
-                assert!(!message.contains(&format_bytes(usize::MAX)), "{message}");
+                assert!(!message.contains(&fmt_bytes(u64::MAX)), "{message}");
                 assert!(!message.contains(MESSAGE_CAP_VAR), "{message}");
             }
             other => panic!("expected a refusal, got {other:?}"),
@@ -1090,6 +1095,41 @@ mod tests {
             }
             other => panic!("expected a refusal, got {other:?}"),
         }
+    }
+
+    /// Sizes in a byte refusal are binary: a cap of 1 MiB prints as such.
+    #[test]
+    fn a_byte_refusal_prints_binary_units() {
+        const MIB: usize = 1 << 20;
+        let mut waiting = Waiting::new(MIB);
+        let text = tool_text("big", MIB);
+        let size = text.len();
+        match waiting.admit(text) {
+            Some(ServerMessage::Error { message, .. }) => {
+                assert!(
+                    message.contains("at most the message cap, 1.00 MiB (")
+                        && message.contains(&format!("({})", fmt_bytes(size as u64)))
+                        && message.contains(" MiB) does not fit"),
+                    "{message}"
+                );
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    /// [`handle_client_message`] relies on [`handle_text`] for the id bound; a debug build
+    /// asserts it.
+    #[cfg(debug_assertions)]
+    #[tokio::test]
+    #[should_panic(expected = "longer than MAX_ID_BYTES")]
+    async fn handle_client_message_refuses_an_unchecked_long_id() {
+        let (mut state, _session, tx, _rx) = authenticated(Default::default()).await;
+        let msg = ClientMessage::Tool {
+            id: "i".repeat(MAX_ID_BYTES + 1),
+            name: "set_seed".to_string(),
+            args: json!({"seed": 1}),
+        };
+        let _ = handle_client_message(&mut state, msg, &tx).await;
     }
 
     /// Every answer to a message echoes its id: one longer than the bound is
