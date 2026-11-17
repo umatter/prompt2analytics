@@ -1,0 +1,43 @@
+{
+  "schema": 1,
+  "id": "export_ols_grunfeld_usd",
+  "area": "export",
+  "method": "CSV and table exporters on a dollar-scaled regressor (stats::lm, classical SEs)",
+  "reference": "stats::lm; summary.lm; confint.lm (classical SEs)",
+  "call": "lm(inv ~ value_usd + capital, grunfeld) with value_usd = value * 1e6",
+  "dataset": "validation/datasets/grunfeld.csv",
+  "datasets": ["validation/datasets/grunfeld.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "n_obs": 200,
+    "coef": {
+      "names": ["(Intercept)", "value_usd", "capital"],
+      "values": [-42.714369436559203, 1.1556215636055214e-07, 0.23067848873196944]
+    },
+    "se": {
+      "names": ["(Intercept)", "value_usd", "capital"],
+      "values": [9.5116760314238693, 5.8357095572206334e-09, 0.025475801476508932]
+    },
+    "t": {
+      "names": ["(Intercept)", "value_usd", "capital"],
+      "values": [-4.4907300559273766, 19.802588738770407, 9.0548079103488277]
+    },
+    "p": {
+      "names": ["(Intercept)", "value_usd", "capital"],
+      "values": [1.2073565413849122e-05, 9.5427026857841049e-49, 1.3473701051204578e-16]
+    },
+    "ci_lower": {
+      "names": ["(Intercept)", "value_usd", "capital"],
+      "values": [-61.472146314223721, 1.0405367589553651e-07, 0.18043819477144279]
+    },
+    "ci_upper": {
+      "names": ["(Intercept)", "value_usd", "capital"],
+      "values": [-23.956592558894688, 1.2707063682556777e-07, 0.28091878269249609]
+    },
+    "r2": 0.81240801254472839,
+    "adj_r2": 0.8105035253624413,
+    "f_stat": 426.5757313048129,
+    "sigma": 94.408403332254977
+  }
+}
