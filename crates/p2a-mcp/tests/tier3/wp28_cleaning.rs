@@ -114,7 +114,8 @@ fn messy() -> Dataset {
 }
 
 /// The `Arguments:` blocks of a suggest_cleaning reply as request objects ("- key: value"
-/// lines; `columns` is JSON). A fill value shown for reference only is left out.
+/// lines; `columns` is JSON, an empty text `""`). A fill value shown for reference only is left
+/// out.
 fn suggested_arguments(t: &str) -> Vec<serde_json::Map<String, Value>> {
     let mut out = Vec::new();
     let mut lines = t.lines();
@@ -134,7 +135,7 @@ fn suggested_arguments(t: &str) -> Vec<serde_json::Map<String, Value>> {
             if v.contains("(shown for reference") {
                 continue;
             }
-            let v = if k == "columns" {
+            let v = if k == "columns" || v == "\"\"" {
                 serde_json::from_str(v).unwrap()
             } else {
                 Value::from(v)
@@ -217,7 +218,7 @@ async fn preview_and_apply_drop_column() {
                 "output_dataset": "after" }),
     )
     .await;
-    assert!(t.contains("drop_column constant"), "{t}");
+    assert!(t.contains("(20 rows x 3 columns)"), "{t}");
     let r = call(
         &server,
         &session,

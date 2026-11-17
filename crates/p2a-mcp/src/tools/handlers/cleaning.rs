@@ -864,8 +864,8 @@ pub(crate) fn suggestion_arguments(
 }
 
 /// The `Arguments:` block of a suggestion in `suggest_cleaning`'s reply: one `- key: value` line
-/// per [`suggestion_arguments`] entry (arrays as JSON), the operation first; a computed fill
-/// value is shown for reference after them.
+/// per [`suggestion_arguments`] entry (arrays as JSON, an empty text as `""`), the operation
+/// first; a computed fill value is shown for reference after them.
 fn suggestion_argument_lines(s: &CleaningSuggestion) -> String {
     let mut out = String::new();
     let args = suggestion_arguments(s);
@@ -879,7 +879,13 @@ fn suggestion_argument_lines(s: &CleaningSuggestion) -> String {
     });
     for k in keys {
         let v = &args[k];
-        let text = v.as_str().map_or_else(|| v.to_string(), str::to_string);
+        // Text as is, an empty text as "" (so the line does not end in a bare colon), arrays
+        // as JSON.
+        let text = match v.as_str() {
+            Some("") => "\"\"".to_string(),
+            Some(t) => t.to_string(),
+            None => v.to_string(),
+        };
         out.push_str(&format!("- {k}: {text}\n"));
     }
     if s.operation == "fill_na" && !args.contains_key("value") && s.parameters.value.is_some() {
