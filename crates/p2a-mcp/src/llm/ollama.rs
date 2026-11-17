@@ -5,6 +5,7 @@
 
 use super::LlmSettings;
 use super::retry::{MAX_UPSTREAM_BODY_BYTES, count_streamed, read_json_capped, upstream_error};
+use super::stream::LineBuffer;
 use super::tool_loop::{
     AssistantTurn, StreamSink, ToolLoopConfig, ToolLoopProvider, run_tool_loop,
 };
@@ -251,41 +252,46 @@ impl OllamaProvider {
         }
 
         let mut stream = response.bytes_stream();
+        let mut lines = LineBuffer::new();
         let mut full_content = String::new();
         let mut tool_calls: Vec<ToolCall> = Vec::new();
         let mut received = 0usize;
+        let mut done = false;
 
-        while let Some(chunk_result) = stream.next().await {
+        // Ollama streams JSON objects, one per line; true at the object marked done.
+        let mut handle = |line: &str| -> bool {
+            if line.trim().is_empty() {
+                return false;
+            }
+            let Ok(chunk_response) = serde_json::from_str::<OllamaChatResponse>(line) else {
+                return false;
+            };
+            if !chunk_response.message.content.is_empty() {
+                full_content.push_str(&chunk_response.message.content);
+                callback(StreamChunk::Text {
+                    content: chunk_response.message.content,
+                });
+            }
+            // Each object carries its own calls: keep them all, in order.
+            if let Some(tcs) = chunk_response.message.tool_calls {
+                tool_calls.extend(tcs.into_iter().map(OllamaToolCall::into_call));
+            }
+            chunk_response.done
+        };
+
+        'read: while let Some(chunk_result) = stream.next().await {
             let chunk = chunk_result?;
             count_streamed(&mut received, chunk.len())?;
-            let text = String::from_utf8_lossy(&chunk);
-
-            // Ollama streams JSON objects, one per line
-            for line in text.lines() {
-                if line.trim().is_empty() {
-                    continue;
-                }
-
-                if let Ok(chunk_response) = serde_json::from_str::<OllamaChatResponse>(line) {
-                    // Append content if present
-                    if !chunk_response.message.content.is_empty() {
-                        full_content.push_str(&chunk_response.message.content);
-                        callback(StreamChunk::Text {
-                            content: chunk_response.message.content.clone(),
-                        });
-                    }
-
-                    // Handle tool calls if present
-                    if let Some(tcs) = chunk_response.message.tool_calls {
-                        tool_calls = tcs.into_iter().map(OllamaToolCall::into_call).collect();
-                    }
-
-                    // Check if done
-                    if chunk_response.done {
-                        break;
-                    }
+            lines.push(&chunk);
+            while let Some(line) = lines.next_line() {
+                if handle(&line?) {
+                    done = true;
+                    break 'read;
                 }
             }
+        }
+        if !done && let Some(line) = lines.finish() {
+            handle(&line?);
         }
 
         Ok(AssistantTurn {
@@ -463,12 +469,14 @@ struct OllamaToolFunction {
 
 #[derive(Debug, Deserialize)]
 struct OllamaChatResponse {
+    /// Absent from the final object of some versions, and from an error object.
+    #[serde(default)]
     message: OllamaResponseMessage,
     #[serde(default)]
     done: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 struct OllamaResponseMessage {
     #[serde(default)]
     content: String,

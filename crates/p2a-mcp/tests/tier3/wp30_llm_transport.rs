@@ -235,3 +235,67 @@ async fn a_character_split_across_reads_reaches_the_answer_whole() {
         );
     }
 }
+
+// ---------- LLM-11: Ollama objects across reads ----------
+
+/// Ollama's NDJSON: an object cut across two reads is kept (text and tool calls), the tool calls of
+/// every object are kept in order, and the last object needs no line break.
+#[tokio::test]
+async fn ollama_keeps_objects_that_span_reads_and_every_tool_call() {
+    let first = format!(
+        "{}\n",
+        json!({"message": {"role": "assistant", "content": "HELLO-PART "}, "done": false})
+    );
+    let second = format!(
+        "{}\n",
+        json!({"message": {"role": "assistant", "content": "WORLD-PART"}, "done": false})
+    );
+    let done = json!({"message": {"role": "assistant", "content": ""}, "done": true, "done_reason": "stop"})
+        .to_string();
+    let (head, tail) = second.as_bytes().split_at(20);
+    let chunks = vec![
+        first.into_bytes(),
+        head.to_vec(),
+        tail.to_vec(),
+        done.clone().into_bytes(),
+    ];
+    let (addr, _) = chunked_stub("/api/chat", vec![chunks]).await;
+    let (reply, texts) = stream_chat(
+        provider(ProviderType::Ollama, addr).as_ref(),
+        &Recorder::default(),
+        true,
+    )
+    .await;
+    let reply = reply.unwrap();
+    assert_eq!(reply.content, "HELLO-PART WORLD-PART");
+    assert_eq!(texts.concat(), "HELLO-PART WORLD-PART");
+
+    let call = |name: &str| {
+        format!(
+            "{}\n",
+            json!({"message": {"role": "assistant", "content": "",
+                   "tool_calls": [{"function": {"name": name, "arguments": {"k": name}}}]}, "done": false})
+        )
+        .into_bytes()
+    };
+    let (addr, _) = chunked_stub(
+        "/api/chat",
+        vec![vec![
+            call("first_tool"),
+            call("second_tool"),
+            done.into_bytes(),
+        ]],
+    )
+    .await;
+    let tools = Recorder::default();
+    let (reply, _) =
+        stream_chat(provider(ProviderType::Ollama, addr).as_ref(), &tools, false).await;
+    reply.unwrap();
+    assert_eq!(
+        *tools.0.lock().unwrap(),
+        [
+            ("first_tool".to_string(), json!({"k": "first_tool"})),
+            ("second_tool".to_string(), json!({"k": "second_tool"}))
+        ]
+    );
+}
