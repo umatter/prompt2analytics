@@ -2061,7 +2061,8 @@ mod tests {
         // The allowed file stays writable by the engine (Fact 5). The keyword
         // check must see through nested block comments as DuckDB does, and
         // EXPLAIN ANALYZE executes the statement it explains. Both with and
-        // without a row budget (only SELECT/WITH are wrapped in a LIMIT).
+        // without a row budget (SELECT/WITH always run as a subquery; only a
+        // row budget adds the LIMIT).
         let write = "COPY (SELECT 9 AS a) TO {file} (HEADER false, USE_TMP_FILE false)";
         let queries = [
             format!("/* /* */ SELECT */ {write}"),
@@ -2455,7 +2456,7 @@ mod tests {
     }
 
     #[test]
-    fn duckdb_bounded_metadata_statements_still_work() {
+    fn duckdb_metadata_and_wrapped_statements_work_with_and_without_a_row_budget() {
         for q in [
             "EXPLAIN SELECT 1",
             "PRAGMA database_list",

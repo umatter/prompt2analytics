@@ -1654,15 +1654,27 @@ mod tests {
 
     #[test]
     fn test_stata_cell_check_covers_every_declared_row() {
-        // The buffers start at 2^20 rows at most, and the rest grows in the read. 1.5 x 2^20 rows
-        // of 6 cells need 226 MiB: above this ceiling, while the first 2^20 rows' 151 MiB are not.
-        let mut b = fixture_bytes("dta118_haven.dta");
+        // The buffers start at 2^20 rows at most, and the rest grows in the read. dta118_str1 has
+        // one str1 column, a 1-byte row (same <K>, <N> and <map> offsets as dta118_haven):
+        // 1.5 x 2^20 declared rows need 36 MiB of cells, above this 32 MiB ceiling, while the
+        // first buffer's 2^20 cells (24 MiB) are not.
+        let mut b = fixture_bytes("dta118_str1.dta");
+        assert_eq!(&b[K118 - 3..K118], b"<K>");
+        assert_eq!(&b[N118 - 3..N118], b"<N>");
+        assert_eq!(&b[MAP118 - 5..MAP118], b"<map>");
+        assert_eq!(u16::from_le_bytes([b[K118], b[K118 + 1]]), 1);
         let n = 3u64 << 19;
-        let end = b.len() + n as usize * 57;
+        let end = b.len() + n as usize;
         b.resize(end, 0);
         put(&mut b, N118, &n.to_le_bytes());
         put(&mut b, MAP118 + 8 * 10, &(end as u64).to_le_bytes()); // <strls>, after the rows
-        let e = crate::resource::with_alloc_ceiling(Some(160 << 20), || load(b).unwrap_err());
+        let first_buffer = (1usize << 20) * std::mem::size_of::<Option<String>>();
+        let ceiling = 32usize << 20;
+        assert!(
+            first_buffer < ceiling
+                && (n as usize) * std::mem::size_of::<Option<String>>() > ceiling
+        );
+        let e = crate::resource::with_alloc_ceiling(Some(ceiling), || load(b).unwrap_err());
         match e {
             StataError::ParseError(m) => assert!(m.contains("Stata columns"), "{m}"),
             other => panic!("expected ParseError, got {other:?}"),
