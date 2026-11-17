@@ -321,11 +321,6 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/tsne_unit.csv` | 300 × 22 (u1..u20, y0_1, y0_2) | `tsne_rtsne_exact` | `r/cases/ml_reduction_t4.R` | seed 20261118 |
 | `generated/ts_utils.csv` | 210 × 6 (t, x, s, lev, wn, ar1; x, s, wn and ar1 end in missing cells) | `ts_filter_ar_cpt` | `r/cases/ts_utils.R` | seed 20261123 |
 | `generated/ts_utils_t4.csv` | 144 × 4 (t, x50, e, y; x50 and e end in missing cells) | `ts_utils_t4` | `r/cases/ts_utils_t4.R` | seed 20261115 |
-| `generated/modeltables_t4_oneway.csv` | 12 × 4 (y, g, yu, gu) | `stats_mcp_t4` | `r/cases/stats_mcp_t4.R` | seed 20261117; y in three groups of 4 (balanced), yu in groups of 3, 4 and 5; group means 5, 7, 9 plus N(0, 0.49) |
-| `generated/modeltables_t4_bal.csv` | 18 × 3 (y, a, b) | `stats_mcp_t4` | `r/cases/stats_mcp_t4.R` | seed 20261118; a 2 × 3 layout, 3 rows per cell, additive means plus 1 in a2:b3, N(0, 0.64) noise |
-| `generated/modeltables_t4_unbal.csv` | 15 × 3 (y, a, b) | `stats_mcp_t4` | `r/cases/stats_mcp_t4.R` | the balanced layout without rows 1, 2 and 13 |
-| `generated/modeltables_t4_empty.csv` | 15 × 3 (y, a, b) | `stats_mcp_t4` | `r/cases/stats_mcp_t4.R` | the balanced layout without the a2:b3 cell |
-| `generated/cov_wt_t4.csv` | 25 × 4 (x1, x2, x3, w) | `stats_mcp_t4` | `r/cases/stats_mcp_t4.R` | seed 20261119; x2 correlated with x1, weights in [0.2, 2] |
 | `generated/var_canada.csv` | 84 × 4 (e, prod, rw, U) | `var_canada` | `r/cases/ts_var.R` | `vars::Canada` |
 | `generated/varma_sim.csv` | 400 × 2 (y1, y2) | `varma_hr` | `r/cases/ts_varma.R` | seed 20261114 |
 | `generated/vecm_denmark.csv` | 55 × 4 (LRM, LRY, IBO, IDE) | `vecm_denmark` | `r/cases/ts_vecm.R` | `urca::denmark`, the four model columns |
