@@ -524,7 +524,7 @@ fn without_polars_metadata(ipc: &str) -> String {
     engine.encode(ipc)
 }
 
-/// The footer entry of the parquet file at `path` holding its ARROW:schema.
+/// The value of `footer`'s ARROW:schema key-value entry.
 fn arrow_schema(footer: &mut FileMetaData) -> &mut Option<String> {
     &mut footer
         .key_value_metadata
@@ -1123,8 +1123,9 @@ async fn a_time_zone_polars_cannot_parse_is_refused_alike_with_and_without_quota
         let schema = arrow_schema(footer);
         let engine = base64::engine::general_purpose::STANDARD;
         let mut ipc = engine.decode(schema.as_ref().unwrap()).unwrap();
-        let at = ipc.windows(12).position(|w| w == b"Europe/Paris").unwrap();
-        ipc[at..at + 12].copy_from_slice(b"Europe/Parix");
+        let (from, to) = (b"Europe/Paris", b"Europe/Parix");
+        let at = ipc.windows(from.len()).position(|w| w == from).unwrap();
+        ipc[at..at + to.len()].copy_from_slice(to);
         *schema = Some(engine.encode(ipc));
     });
     let content = base64::engine::general_purpose::STANDARD.encode(std::fs::read(&path).unwrap());
@@ -1152,6 +1153,17 @@ async fn a_time_zone_polars_cannot_parse_is_refused_alike_with_and_without_quota
             );
             assert!(
                 text.contains("its time zone 'Europe/Parix' is not one polars can parse"),
+                "{mode}, {tool}: {body}"
+            );
+            assert!(
+                text.contains(
+                    "(setting POLARS_IGNORE_TIMEZONE_PARSE_ERROR=1 lets polars accept it)"
+                ),
+                "{mode}, {tool}: {body}"
+            );
+            // Not polars' own parse error.
+            assert!(
+                !text.contains("Time Zone Database"),
                 "{mode}, {tool}: {body}"
             );
         }

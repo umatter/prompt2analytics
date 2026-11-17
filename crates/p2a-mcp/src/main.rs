@@ -17,6 +17,11 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use p2a_mcp::config::{CliArgs, ServerConfig};
 
+/// The log filter when `RUST_LOG` is unset: the server's own messages from
+/// info up, and warnings from the analytics library (a parquet file loaded
+/// after a caught polars panic, for one).
+const DEFAULT_LOG_FILTER: &str = "p2a_mcp=info,p2a_core=warn";
+
 fn main() -> Result<()> {
     // Parse command-line arguments
     let args = CliArgs::parse();
@@ -26,7 +31,7 @@ fn main() -> Result<()> {
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "p2a_mcp=info".into()),
+                .unwrap_or_else(|_| DEFAULT_LOG_FILTER.into()),
         )
         .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
         .init();
@@ -53,4 +58,50 @@ fn main() -> Result<()> {
 
     tracing::info!("MCP server shutting down");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DEFAULT_LOG_FILTER;
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Default)]
+    struct Captured(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for Captured {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn default_log_filter_shows_core_warnings() {
+        // Pre-fix the default filter was "p2a_mcp=info", which drops every
+        // event of the p2a_core target.
+        let captured = Captured::default();
+        let writer = captured.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_env_filter(tracing_subscriber::EnvFilter::new(DEFAULT_LOG_FILTER))
+            .with_writer(move || writer.clone())
+            .finish();
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../p2a-core/tests/data/arrow_schema_short.parquet");
+        let loaded = tracing::subscriber::with_default(subscriber, || {
+            tracing::callsite::rebuild_interest_cache();
+            p2a_core::data::DataLoader::load(&path)
+        });
+        assert!(loaded.is_err(), "the fixture loaded");
+        let log = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            log.contains("polars panicked reading a parquet file"),
+            "nothing logged: {log}"
+        );
+        assert!(log.contains("WARN"), "{log}");
+    }
 }
