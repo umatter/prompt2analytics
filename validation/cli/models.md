@@ -120,6 +120,28 @@ any other method is an error.
 - `stats pp-test` defaults to `--lshort true`, `PP.test`'s short truncation lag trunc(4 (n/100)^(1/4)) (CLI-21);
   `--lshort false` is the long lag. Z(tau) and its p-value are not pinned (STAT-6, STAT-35).
 
+
+## Timing
+
+Release builds of `p2a` (`--no-default-features --features spectral-analysis`) at the v0.5.0 base f80b0131 and at the lane head, one process per invocation (`p2a --session s.json <command>`, the session's datasets loaded from CSV each time, so about 20-40 ms of every number is start-up and loading), pinned with `taskset -c 10`, `RAYON_NUM_THREADS=1`; per row and n, 9 rounds per side interleaved, each the median of 21 invocations after 3 warm-ups; the table shows the median of the medians and the 1-minute load average of the (shared, busy) machine. Data: n rows of simulated noise data (head: 5 mixed columns; describe: 20 columns; acf/pacf/ccf/box/pp: AR(1) series; moran: n random points, k = 4; gsynth: n/20 units x 20 periods, at least 5 units; iv: 2 instruments; km: 4 groups; chisq-gof: 6 categories; coefplot and hac: 3 regressors, hac with 4 lags). Lane timing, preliminary until the integration re-times it. The v0.5.2 (90a99318) column of the causal, survival and regression rows is left to the integration.
+
+| Command | n | f80b0131 (ms) | lane head (ms) | head/base | load |
+|---|---:|---:|---:|---:|---:|
+| `causal gsynth default` | 100 | 44.6 | 42.1 | 0.95x | 51 |
+| `causal gsynth default` | 1,000 | 72.1 | 55.3 | 0.77x | 46 |
+| `causal gsynth default` | 10,000 | 98.8 | 76.4 | 0.77x | 43 |
+| `causal iv default` | 100 | 44.0 | 42.1 | 0.96x | 42 |
+| `causal iv default` | 1,000 | 43.2 | 43.0 | 0.99x | 41 |
+| `causal iv default` | 10,000 | 57.3 | 57.0 | 0.99x | 39 |
+| `survival km --group -F json` | 100 | 40.5 | 39.0 | 0.97x | 36 |
+| `survival km --group -F json` | 1,000 | 39.0 | 38.8 | 1.00x | 31 |
+| `survival km --group -F json` | 10,000 | 61.4 | 68.9 | 1.12x | 28 |
+| `reg hac` | 100 | 47.0 | 45.9 | 0.98x | 31 |
+| `reg hac` | 1,000 | 46.5 | 45.9 | 0.99x | 29 |
+| `reg hac` | 10,000 | 56.7 | 54.2 | 0.96x | 28 |
+
+`survival km --group -F json` at n = 10,000 was re-run alone: 78.7 ms base, 86.8 ms head (1.10x). The head prints one JSON document where the base printed one per group; the nested, pretty-printed curves are about 24% more bytes (1.67 MB against 1.35 MB), the likely cause of the difference.
+
 ## Reproduce
 
 ```bash
