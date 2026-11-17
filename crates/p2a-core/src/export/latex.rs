@@ -1028,9 +1028,9 @@ mod tests {
     }
 
     /// Case `export_ols_grunfeld_usd`'s model: `inv ~ value_usd + capital`, value in dollars.
-    fn ols_grunfeld_usd() -> (p2a_validation::Case, OlsResult) {
+    fn ols_grunfeld_usd(case_id: &str) -> (p2a_validation::Case, OlsResult) {
         use polars::prelude::*;
-        let (case, mut ds) = crate::test_support::load_case("export_ols_grunfeld_usd");
+        let (case, mut ds) = crate::test_support::load_case(case_id);
         let value = ds
             .df()
             .column("value")
@@ -1055,7 +1055,7 @@ mod tests {
     #[test]
     fn test_validate_latex_small_coefficient_grunfeld_usd() {
         use p2a_validation::{Check, Tol};
-        let (case, fit) = ols_grunfeld_usd();
+        let (case, fit) = ols_grunfeld_usd("export_ols_grunfeld_usd");
         let tex = LatexTableBuilder::new().add_model("(1)", fit).build();
         let rows = latex_rows(&tex);
         let row = |label: &str| {
@@ -1104,7 +1104,7 @@ mod tests {
     #[test]
     fn test_html_and_markdown_small_coefficient_cells() {
         use crate::export::{HtmlTableBuilder, MarkdownTableBuilder};
-        let (_, fit) = ols_grunfeld_usd();
+        let (_, fit) = ols_grunfeld_usd("export_ols_grunfeld_usd");
         let html = HtmlTableBuilder::new()
             .add_model("(1)", fit.clone())
             .build();
