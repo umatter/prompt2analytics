@@ -1508,10 +1508,13 @@ mod tests {
         }
         // Not a directory, though named like a kept session.
         fs::write(sessions.join(&kept_file), "x").unwrap();
-        // A kept id in another spelling is not that session's directory.
-        let spelled = kept.to_uppercase();
+        // A kept id in another spelling is not that session's directory. Only
+        // the other spelling exists, so a case-insensitive file system holds
+        // the same entries as a case-sensitive one.
+        let other = "6f1c0b9e-3a4d-4c2b-9e7f-0a1b2c3d4e5f".to_string();
+        let spelled = other.to_uppercase();
         fs::create_dir_all(sessions.join(&spelled)).unwrap();
-        let keep: HashSet<u128> = [&kept, &kept_file]
+        let keep: HashSet<u128> = [&kept, &kept_file, &other]
             .into_iter()
             .map(|id| session_uuid(id).unwrap())
             .collect();
