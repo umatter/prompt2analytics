@@ -588,3 +588,43 @@ async fn the_model_lists_come_from_the_providers() {
         .unwrap();
     assert_eq!(models, ids);
 }
+
+/// `POST /api/llm/models` lists the caller's provider (here an Ollama stub), and refuses a
+/// provider the egress policy refuses with 400 `invalid_provider`. The route is registered at the
+/// integration; this router has only it, on the app's state.
+#[tokio::test]
+async fn the_models_route_lists_the_callers_provider() {
+    let (_, state) = http_app().await;
+    let app = axum::Router::new()
+        .route(
+            "/api/llm/models",
+            axum::routing::post(p2a_mcp::transport::llm_routes::llm_list_models_for),
+        )
+        .with_state(state);
+    let (addr, _) = models_stub(
+        "/api/tags",
+        json!({"models": [{"name": "llama3.2:3b"}, {"name": "qwen2.5:7b"}]}),
+    )
+    .await;
+    let (status, body) = post_json(
+        &app,
+        "/api/llm/models",
+        json!({"provider": provider_json(ProviderType::Ollama, addr)}),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["data"]["provider"], "ollama", "{body}");
+    assert_eq!(body["data"]["models"], json!(["llama3.2:3b", "qwen2.5:7b"]));
+
+    let (status, body) = post_json(
+        &app,
+        "/api/llm/models",
+        json!({"provider": {"provider_type": "ollama", "base_url": "ftp://127.0.0.1:1", "model": "m"}}),
+    )
+    .await;
+    assert_eq!(
+        (status.as_u16(), body["code"].as_str()),
+        (400, Some("invalid_provider")),
+        "{body}"
+    );
+}

@@ -799,6 +799,27 @@ fn llm_error_status(e: &LlmError) -> StatusCode {
     }
 }
 
+/// The code of a failed LLM call, beside [`llm_error_status`]: `upstream_error` for a failure on
+/// the provider's side, `upstream_timeout` for its silence, `provider_unavailable` when it cannot
+/// be reached at all, `invalid_provider` for a refused endpoint or key, `internal` otherwise.
+fn llm_error_code(e: &LlmError) -> &'static str {
+    match e {
+        LlmError::Timeout => "upstream_timeout",
+        LlmError::NotAvailable(_) => "provider_unavailable",
+        LlmError::EgressDenied(_) | LlmError::InvalidApiKey => "invalid_provider",
+        LlmError::ToolError(_) => "internal",
+        LlmError::Upstream { .. }
+        | LlmError::StreamFailed { .. }
+        | LlmError::StreamIncomplete { .. }
+        | LlmError::NetworkError(_)
+        | LlmError::ResponseTooLarge(_)
+        | LlmError::SerializationError(_)
+        | LlmError::ApiError(_)
+        | LlmError::RateLimited
+        | LlmError::ModelNotFound(_) => "upstream_error",
+    }
+}
+
 /// The prompt of a title request: the user's message (at most 2,000 bytes)
 /// and the assistant's reply (at most 500), cut on char boundaries.
 fn title_prompt(user: &str, assistant: Option<&str>) -> String {
@@ -1102,22 +1123,78 @@ pub async fn llm_chat(
     }
 }
 
-/// List available LLM models.
-pub async fn llm_list_models(State(_state): State<AppState>) -> impl IntoResponse {
-    // The model list comes from the default local Ollama endpoint, which the
-    // egress policy may not allow (hosted profile, explicit allowlist).
-    let settings = LlmSettings::current();
-    let config = ProviderConfig::default();
-    if settings.egress.check_provider_config(&config).is_err() {
-        return (
+/// Request of `POST /api/llm/models`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LlmModelsRequest {
+    /// The provider whose models are listed, with the settings the chat routes take; absent: the
+    /// server's default local Ollama, as `GET`.
+    #[serde(default)]
+    pub provider: Option<ProviderConfig>,
+}
+
+/// List the models of the server's default local Ollama endpoint: 503 `provider_unavailable` when
+/// the egress policy does not admit it (hosted profile, explicit allowlist) or it does not answer.
+pub async fn llm_list_models(State(_state): State<AppState>) -> Response {
+    list_models_response(None, &LlmSettings::current()).await
+}
+
+/// List the models of the caller's provider (`POST /api/llm/models`), checked by the egress and
+/// key policy of the chat routes (`resolve_provider_config`): 400 `invalid_provider` for a refused
+/// endpoint or a missing key, and the chat routes' status and code for a failed list. Without a
+/// provider it answers as `GET`.
+pub async fn llm_list_models_for(
+    State(_state): State<AppState>,
+    Json(request): Json<LlmModelsRequest>,
+) -> Response {
+    list_models_response(request.provider, &LlmSettings::current()).await
+}
+
+/// The answer of the model routes for `provider` under `settings`.
+async fn list_models_response(
+    provider: Option<ProviderConfig>,
+    settings: &LlmSettings,
+) -> Response {
+    let unavailable = |message: String| {
+        (
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(ApiResponse::error(
-                "LLM provider not available: the default local Ollama endpoint is not enabled \
-                 on this server",
+            Json(ApiResponse::<()>::error_with_code(
+                message,
+                "provider_unavailable",
+                None,
             )),
-        );
-    }
-    let provider = build_provider(config, &settings);
+        )
+            .into_response()
+    };
+    let default_ollama = provider.is_none();
+    let config = match provider {
+        None => {
+            let config = ProviderConfig::default();
+            if settings.egress.check_provider_config(&config).is_err() {
+                return unavailable(
+                    "LLM provider not available: the default local Ollama endpoint is not \
+                     enabled on this server"
+                        .to_string(),
+                );
+            }
+            config
+        }
+        Some(cfg) => match resolve_provider_config(Some(cfg), None, settings, &server_env) {
+            Ok(cfg) => cfg,
+            Err(msg) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(ApiResponse::<()>::error_with_code(
+                        msg,
+                        "invalid_provider",
+                        None,
+                    )),
+                )
+                    .into_response();
+            }
+        },
+    };
+    let provider = build_provider(config, settings);
 
     match provider.list_models().await {
         Ok(models) => (
@@ -1126,14 +1203,18 @@ pub async fn llm_list_models(State(_state): State<AppState>) -> impl IntoRespons
                 provider: provider.provider_type().to_string(),
                 models,
             })),
-        ),
+        )
+            .into_response(),
+        Err(e) if default_ollama => unavailable(format!("LLM provider not available: {e}")),
         Err(e) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(ApiResponse::error(format!(
-                "LLM provider not available: {}",
-                e
-            ))),
-        ),
+            llm_error_status(&e),
+            Json(ApiResponse::<()>::error_with_code(
+                format!("Could not list the provider's models: {e}"),
+                llm_error_code(&e),
+                None,
+            )),
+        )
+            .into_response(),
     }
 }
 
@@ -2872,6 +2953,47 @@ mod chat_tests {
         ];
         for (e, want) in cases {
             assert_eq!(llm_error_status(&e), want, "{e}");
+        }
+    }
+
+    /// LLM-25: the model routes under the hosted profile: without a provider the local Ollama is
+    /// not admitted (503 `provider_unavailable`); a provider whose endpoint the egress policy
+    /// refuses, or that has no key, is the caller's 400 `invalid_provider`. No request is made.
+    #[tokio::test]
+    async fn the_model_routes_refuse_what_the_hosted_profile_does_not_admit() {
+        let hosted = LlmSettings::from_limits(&Limits::hosted(), None);
+        let answer = |r: Response| async move {
+            let status = r.status();
+            let body = axum::body::to_bytes(r.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            (
+                status,
+                body["code"].as_str().unwrap_or_default().to_string(),
+            )
+        };
+        assert_eq!(
+            answer(list_models_response(None, &hosted).await).await,
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "provider_unavailable".into()
+            )
+        );
+        let refused = ProviderConfig {
+            base_url: Some("http://10.0.0.5:11434".into()),
+            ..ProviderConfig::default()
+        };
+        let no_key = ProviderConfig {
+            provider_type: ProviderType::Anthropic,
+            model: "m".into(),
+            ..ProviderConfig::default()
+        };
+        for cfg in [refused, no_key] {
+            assert_eq!(
+                answer(list_models_response(Some(cfg), &hosted).await).await,
+                (StatusCode::BAD_REQUEST, "invalid_provider".into())
+            );
         }
     }
 
