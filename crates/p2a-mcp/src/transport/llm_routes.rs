@@ -990,6 +990,11 @@ async fn build_chat_messages(
     cfg: &ProviderConfig,
     settings: &LlmSettings,
 ) -> Result<Vec<Message>, ToolCallError> {
+    // A history that already ends with the prompt (a client that sends it in both fields, or a
+    // stored conversation the client posted the prompt to) would give the model the question
+    // twice. Dropped before the history is fitted, so a long duplicate costs no budget.
+    let mut history = history;
+    drop_repeated_prompt(&mut history, &user_message);
     let dataset_context =
         governed_dataset_context(governor, session, settings.context_bytes).await?;
     let system_prompt = get_system_prompt_with_context(dataset_context.as_deref(), tools);
@@ -1014,6 +1019,18 @@ async fn build_chat_messages(
     messages.extend(processed.messages);
     messages.push(Message::user(user_message));
     Ok(messages)
+}
+
+/// Drop the last message of `history` when it is a user turn without tool results whose text is
+/// `prompt`: the chat routes append the prompt after the history themselves.
+fn drop_repeated_prompt(history: &mut Vec<Message>, prompt: &str) {
+    if history.last().is_some_and(|m| {
+        m.role == crate::llm::MessageRole::User
+            && m.tool_results.as_ref().is_none_or(Vec::is_empty)
+            && m.content == prompt
+    }) {
+        history.pop();
+    }
 }
 
 /// LLM chat endpoint.
@@ -2952,6 +2969,60 @@ mod chat_tests {
         );
         assert_eq!(hist.last().unwrap().content, last);
         assert_eq!(msgs.last().unwrap().content, "now");
+    }
+
+    /// MCP-20: a history that ends with the prompt gives the model the prompt once, also when the
+    /// prompt is longer than the hosted history budget (the duplicate is dropped before the history
+    /// is fitted). A different last turn, and one with tool results, stay.
+    #[tokio::test]
+    async fn a_history_that_ends_with_the_prompt_sends_it_once() {
+        let (governor, chat) = admitting_parts().await;
+        let session = chat.session().clone();
+        let settings = LlmSettings::from_limits(&Limits::hosted(), None);
+        let long = format!(
+            "Regress price on size. {}",
+            "w".repeat(settings.history_bytes + 1_000)
+        );
+        for prompt in ["Describe the data".to_string(), long] {
+            let history = vec![
+                Message::user("earlier"),
+                Message::assistant("an answer"),
+                Message::user(prompt.clone()),
+            ];
+            let msgs = build_chat_messages(
+                &governor,
+                &session,
+                history,
+                prompt.clone(),
+                &[],
+                &ProviderConfig::default(),
+                &settings,
+            )
+            .await
+            .unwrap();
+            let copies = msgs.iter().filter(|m| m.content.contains(&prompt)).count();
+            assert_eq!(copies, 1, "{}", prompt.len());
+            assert_eq!(msgs.last().unwrap().content, prompt);
+            assert!(msgs.iter().any(|m| m.content == "earlier"));
+        }
+
+        let mut with_results = Message::user("same");
+        with_results.tool_results = Some(vec![crate::llm::ToolResult {
+            tool_call_id: "c".into(),
+            content: "r".into(),
+            is_error: false,
+        }]);
+        for (last, kept) in [(Message::user("other"), true), (with_results, true)] {
+            let mut history = vec![last];
+            drop_repeated_prompt(&mut history, "same");
+            assert_eq!(history.len() == 1, kept);
+        }
+        let mut history = vec![Message::assistant("same")];
+        drop_repeated_prompt(&mut history, "same");
+        assert_eq!(history.len(), 1);
+        let mut history = vec![Message::user("same")];
+        drop_repeated_prompt(&mut history, "same");
+        assert!(history.is_empty());
     }
 
     #[tokio::test]
