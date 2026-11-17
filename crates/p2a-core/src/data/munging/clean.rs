@@ -3419,6 +3419,91 @@ mod tests {
     }
 
     #[test]
+    fn test_integer_literals_above_two_to_the_53() {
+        // 2^53 + 1 as a float literal rounds to 2^53, so it is refused; as digits it is exact.
+        let ds = Dataset::new(df!("k" => [9_007_199_254_740_993i64, 1000, 7]).unwrap());
+        let opts = ReplaceOptions::default();
+        match replace_with(&ds, "k", "9007199254740993.0", Some("1"), &opts) {
+            Err(MungeError::InvalidValue { reason, .. }) => {
+                assert!(reason.contains("write it as an integer"), "{reason}")
+            }
+            other => panic!("{:?}", other.map(|o| o.n_replaced)),
+        }
+        let exact = replace_with(&ds, "k", "9007199254740993", Some("1"), &opts).unwrap();
+        assert_eq!(exact.n_replaced, 1);
+        let cells: Vec<Option<i64>> = exact
+            .dataset
+            .df()
+            .column("k")
+            .unwrap()
+            .i64()
+            .unwrap()
+            .into_iter()
+            .collect();
+        assert_eq!(cells, [Some(1), Some(1000), Some(7)]);
+        // An integral float literal below 2^53 still reads as the integer.
+        assert_eq!(
+            replace_with(&ds, "k", "1e3", Some("2"), &opts)
+                .unwrap()
+                .n_replaced,
+            1
+        );
+        let gaps = Dataset::new(df!("k" => [Some(4i64), None]).unwrap());
+        let filled =
+            fill_na_with(&gaps, Some(&["k"]), &FillStrategy::Constant("1e3".into())).unwrap();
+        assert_eq!(
+            filled
+                .dataset
+                .df()
+                .column("k")
+                .unwrap()
+                .i64()
+                .unwrap()
+                .get(1),
+            Some(1000)
+        );
+    }
+
+    #[test]
+    fn test_fill_constant_nan_is_refused_on_float_columns() {
+        let ds = Dataset::new(
+            DataFrame::new(vec![
+                Column::new("f64".into(), [Some(1.5f64), None]),
+                Column::new("f32".into(), [Some(1.5f32), None]),
+            ])
+            .unwrap(),
+        );
+        for column in ["f64", "f32"] {
+            for nan in ["NaN", "nan"] {
+                match fill_na_with(&ds, Some(&[column]), &FillStrategy::Constant(nan.into())) {
+                    Err(MungeError::InvalidValue { reason, .. }) => {
+                        assert!(reason.contains("NaN is a missing value"), "{reason}")
+                    }
+                    other => panic!("{column} {nan}: {:?}", other.map(|o| o.filled)),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_fill_mode_float32_label_and_complete_columns() {
+        // A Float32 mode is labelled as the f32 it is.
+        let ds = Dataset::new(df!("x" => [Some(0.1f32), Some(0.1), None]).unwrap());
+        let o = fill_na_with(&ds, None, &FillStrategy::Mode).unwrap();
+        assert_eq!(o.fill_values, [("x".to_string(), "0.1".to_string())]);
+        assert!(o.summary().contains("with 0.1)"), "{}", o.summary());
+        // A column without missing cells is returned untouched and its mode is never computed:
+        // the mode of these Int128 values (beyond Int64) would be an error.
+        let wide = Dataset::new(
+            DataFrame::new(vec![Column::new("w".into(), [i128::MAX, i128::MAX - 3, 5])]).unwrap(),
+        );
+        assert!(crate::data::columns::factor_mode(wide.df(), "w").is_err());
+        let o = fill_na_with(&wide, Some(&["w"]), &FillStrategy::Mode).unwrap();
+        assert_eq!(o.filled, [("w".to_string(), 0)]);
+        assert!(o.dataset.df().equals_missing(wide.df()));
+    }
+
+    #[test]
     fn test_validate_fill_mode() {
         use p2a_validation::{Check, Tol};
         // validation/r/cases/data_munging_t3.R, case data_munging_fill_mode:

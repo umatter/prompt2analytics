@@ -840,12 +840,17 @@ pub fn concat_types(datasets: &[&Dataset]) -> MungeResult<Vec<(String, DataType)
     let combines = |dt: &DataType| dt.is_bool() || dt.is_primitive_numeric();
     // name -> (common type, the dataset (1-based) that set it)
     let mut types: Vec<(String, DataType, usize)> = Vec::new();
+    // name -> its index in `types`, so a wide bind does not search the list per column
+    let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for (i, ds) in datasets.iter().enumerate() {
         for c in ds.df().get_columns() {
             let name = c.name().as_str();
             let dtype = c.dtype();
-            match types.iter_mut().find(|(n, ..)| n == name) {
-                None => types.push((name.to_string(), dtype.clone(), i + 1)),
+            match index.get(name).map(|&at| &mut types[at]) {
+                None => {
+                    index.insert(name.to_string(), types.len());
+                    types.push((name.to_string(), dtype.clone(), i + 1));
+                }
                 Some((_, common, from)) => {
                     if common == dtype || dtype.is_null() {
                         continue;

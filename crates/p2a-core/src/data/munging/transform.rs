@@ -174,9 +174,7 @@ pub fn filter(dataset: &Dataset, column: &str, op: &str, value: &str) -> MungeRe
             }
         }
         DataType::Float64 | DataType::Float32 => {
-            let val: f64 = value
-                .parse()
-                .map_err(|_| invalid("Cannot parse as float"))?;
+            let val = as_float()?;
             // Float32 compares as Float64 (`f64()` refused a Float32 column).
             let as_f64 = col_series.cast(&DataType::Float64)?;
             apply_numeric_filter_f64(&as_f64, op, val)?
@@ -802,6 +800,17 @@ mod tests {
         let ds = test_dataset();
         let filtered = filter(&ds, "score", "gt", "90.0").unwrap();
         assert_eq!(filtered.nrows(), 2);
+        // The float arm trims and refuses NaN as the integer arms do.
+        assert_eq!(filter(&ds, "score", "gt", " 90.0 ").unwrap().nrows(), 2);
+        for nan in ["NaN", "nan"] {
+            assert!(
+                matches!(
+                    filter(&ds, "score", "gt", nan),
+                    Err(MungeError::InvalidValue { .. })
+                ),
+                "{nan}"
+            );
+        }
     }
 
     #[test]

@@ -84,6 +84,11 @@ fn shift_expr(
     check_shift_columns(df, column, opts)?;
     let groups = opts.group_by.filter(|g| !g.is_empty());
     if let Some(time) = opts.time {
+        if df.column(SHIFTED).is_ok() {
+            return Err(MungeError::InvalidExpression(format!(
+                "a time-indexed shift uses the column name '{SHIFTED}' internally; rename that column first"
+            )));
+        }
         let shifted = shifted_column_by_time(df, column, periods, groups.unwrap_or(&[]), time)?;
         return Ok((Some(shifted.with_name(SHIFTED.into())), col(SHIFTED)));
     }
@@ -1985,8 +1990,6 @@ mod tests {
         assert_eq!(codes_of(&all_na, "x_binned"), vec![-1., -1.]);
     }
 
-    /// The pre-fix algorithm, verbatim, as the reference (formats every cell
-    /// once per category).
     /// The dummies by the definition, cell by cell: level `l` of R's factor order is 1 where the
     /// cell's code is `l`, 0 elsewhere, and missing in every dummy where the cell is missing.
     fn one_hot_reference(ds: &Dataset, column: &str, drop_first: bool) -> DataFrame {
@@ -2667,6 +2670,19 @@ mod tests {
             lag_with(&ds, "y", usize::MAX, &by),
             Err(MungeError::InvalidExpression(_))
         ));
+
+        // a user column with the internal name is refused, not overwritten and dropped
+        let clash = Dataset::new(
+            df!("t" => [1i64, 2, 3], "v" => [1.5, 2.5, 3.5], SHIFTED => [7.5, 8.5, 9.5]).unwrap(),
+        );
+        let one_series = ShiftOptions {
+            group_by: None,
+            time: Some("t"),
+        };
+        match lag_with(&clash, "v", 1, &one_series) {
+            Err(MungeError::InvalidExpression(m)) => assert!(m.contains(SHIFTED), "{m}"),
+            other => panic!("{:?}", other.map(|d| d.df().get_column_names_str().len())),
+        }
 
         // without groups, the time column indexes one series
         let one =
