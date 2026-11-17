@@ -73,7 +73,8 @@ impl MarkdownTableBuilder {
     /// Add a model result to the table.
     ///
     /// # Arguments
-    /// * `name` - Column header for this model (e.g., "(1)", "OLS", "FE")
+    /// * `name` - Column header for this model (e.g., "(1)", "OLS", "FE"). Plain text:
+    ///   Markdown characters in it are escaped.
     /// * `result` - The OLS regression result
     pub fn add_model(mut self, name: impl Into<String>, result: OlsResult) -> Self {
         self.results.push((name.into(), result));
@@ -86,7 +87,7 @@ impl MarkdownTableBuilder {
         self
     }
 
-    /// Set the table caption.
+    /// Set the table caption. Plain text: Markdown characters in it are escaped.
     pub fn caption(mut self, caption: impl Into<String>) -> Self {
         self.style.caption = Some(caption.into());
         self
@@ -114,13 +115,13 @@ impl MarkdownTableBuilder {
 
         // Caption
         if let Some(cap) = &self.style.caption {
-            md.push_str(&format!("**{}**\n\n", cap));
+            md.push_str(&format!("**{}**\n\n", escape_markdown(cap.trim())));
         }
 
         // Header row
         md.push_str("| Variable |");
         for (name, _) in &self.results {
-            md.push_str(&format!(" {} |", name));
+            md.push_str(&format!(" {} |", escape_markdown(name)));
         }
         md.push('\n');
 
@@ -236,12 +237,29 @@ fn significance_stars(level: &SignificanceLevel) -> String {
     }
 }
 
-/// Escape special Markdown characters.
+/// Escape text for a Markdown table cell or the caption, in one pass: a backslash first (so
+/// an escape in the text stays literal), then `|`, `*`, `_` and `` ` ``; a line break (CR, LF
+/// or CRLF) and any other control character become a space.
 fn escape_markdown(s: &str) -> String {
-    s.replace('|', "\\|")
-        .replace('*', "\\*")
-        .replace('_', "\\_")
-        .replace('`', "\\`")
+    let mut out = String::with_capacity(s.len() + 4);
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' | '|' | '*' | '_' | '`' => {
+                out.push('\\');
+                out.push(c);
+            }
+            '\r' => {
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                out.push(' ');
+            }
+            c if c.is_control() => out.push(' '),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 impl OlsResult {
@@ -284,6 +302,63 @@ mod tests {
         assert_eq!(significance_stars(&SignificanceLevel::FivePercent), "\\*");
         assert_eq!(significance_stars(&SignificanceLevel::TenPercent), "†");
         assert_eq!(significance_stars(&SignificanceLevel::NotSignificant), "");
+    }
+
+    /// The cells of a GFM table row: split at `|` not preceded by a backslash (a `\\` before a
+    /// pipe is an escaped backslash, so the pipe after it splits).
+    fn gfm_cells(line: &str) -> Vec<String> {
+        let inner = line.trim().trim_start_matches('|');
+        let mut cells = Vec::new();
+        let mut cell = String::new();
+        let mut chars = inner.chars();
+        while let Some(c) = chars.next() {
+            match c {
+                '\\' => {
+                    cell.push(c);
+                    if let Some(next) = chars.next() {
+                        cell.push(next);
+                    }
+                }
+                '|' => cells.push(std::mem::take(&mut cell)),
+                _ => cell.push(c),
+            }
+        }
+        if !cell.trim().is_empty() {
+            cells.push(cell);
+        }
+        cells
+    }
+
+    fn small_ols() -> OlsResult {
+        use ndarray::{Array1, Array2};
+        let x = Array2::from_shape_fn((8, 2), |(i, j)| if j == 0 { 1.0 } else { (i + 1) as f64 });
+        let y = Array1::from(vec![1.1, 1.9, 3.2, 3.8, 5.1, 6.2, 6.8, 8.1]);
+        let names = vec!["(Intercept)".to_string(), "x".to_string()];
+        crate::regression::run_ols_raw(&x, &y, &names, "y", crate::regression::CovarianceType::HC1)
+            .unwrap()
+    }
+
+    #[test]
+    fn test_markdown_escapes_headers_and_caption() {
+        let md = MarkdownTableBuilder::new()
+            .add_model("OLS|robust", small_ols())
+            .add_model("a\\|b", small_ols())
+            .add_model("x\ny", small_ols())
+            .add_model("x\r\ny", small_ols())
+            .caption("**bold** caption")
+            .build();
+        let lines: Vec<&str> = md.lines().collect();
+        let header = lines.iter().position(|l| l.starts_with("| Variable")).unwrap();
+        let cells = gfm_cells(lines[header]);
+        assert_eq!(cells.len(), 5, "{md}");
+        assert_eq!(cells.len(), gfm_cells(lines[header + 1]).len(), "{md}");
+        assert_eq!(cells[1].trim(), "OLS\\|robust", "{md}");
+        assert_eq!(cells[2].trim(), "a\\\\\\|b", "{md}");
+        assert_eq!(cells[3].trim(), "x y", "{md}");
+        assert_eq!(cells[4].trim(), "x y", "{md}");
+        assert!(md.starts_with("**\\*\\*bold\\*\\* caption**\n\n"), "{md}");
+        assert_eq!(escape_markdown("a\\b_c`d"), "a\\\\b\\_c\\`d");
+        assert_eq!(escape_markdown("t\tab"), "t ab");
     }
 
     #[test]
