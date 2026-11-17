@@ -172,7 +172,7 @@ pub use tokens::{
     get_model_context_size, known_model_context_size,
 };
 pub use tool_loop::{
-    AssistantTurn, MAX_CALLS_PER_TOOL, MAX_ITERATIONS_NOTE, REPEATED_CALLS_NOTE, StreamSink,
+    AssistantTurn, MAX_ITERATIONS_NOTE, MAX_ROUNDS_PER_TOOL, REPEATED_CALLS_NOTE, StreamSink,
     ToolLoopConfig, ToolLoopProvider, new_request_id, repeated_tool_note, run_tool_loop,
     tool_call_id,
 };

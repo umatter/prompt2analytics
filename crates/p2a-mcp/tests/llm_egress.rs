@@ -859,7 +859,7 @@ async fn provider_honours_iteration_cap() {
         .await
         .unwrap();
     assert!(
-        m.content.contains("maximum number of tool calls"),
+        m.content.contains("limit of model calls for one request"),
         "{}",
         m.content
     );
