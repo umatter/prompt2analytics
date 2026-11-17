@@ -2347,7 +2347,7 @@ impl AnalyticsServer {
 
     /// Create lag or lead columns for time series data.
     #[tool(
-        description = "Create a lag or lead column for time series or panel data: a lag takes the value k periods back, a lead the value k periods ahead. Without 'direction' the sign of periods decides (positive: lag, negative: lead); a negative periods with direction 'lag' is an error. The shift is by row position within the 'group_by' groups, in row order (dplyr::lag), unless 'time' names an integer time column: then the lag of period t is the value of period t - k of the same group, missing when that period is not in the data (plm::lag), and rows keep their order."
+        description = "Create a lag or lead column for time series or panel data: a lag takes the value k periods back, a lead the value k periods ahead. Without 'direction' the sign of periods decides (positive: lag, negative: lead). With direction 'lead', the absolute value of periods is used; direction 'lag' with a negative periods is an error. The shift is by row position within the 'group_by' groups, in row order (dplyr::lag), unless 'time' names an integer time column: then the lag of period t is the value of period t - k of the same group, missing when that period is not in the data (plm::lag), and rows keep their order."
     )]
     pub async fn munge_lag_lead(
         &self,
@@ -2690,7 +2690,7 @@ impl AnalyticsServer {
             && let Ok(column) = dataset.df().column(&request.column)
         {
             let levels = match column.n_unique() {
-                Ok(levels) => levels - usize::from(column.null_count() > 0),
+                Ok(levels) => levels.saturating_sub(usize::from(column.null_count() > 0)),
                 Err(e) => {
                     return Ok(CallToolResult::error(vec![Content::text(format!(
                         "One-hot encode failed: {}",
@@ -3233,8 +3233,6 @@ impl AnalyticsServer {
     }
 }
 
-/// The bin count of the `uniform` and `quantile` strategies: `bins[0]`, which
-/// must be a whole number of at least 1 (5 when `bins` is empty).
 /// The reply of `munge_one_hot_encode`: the dummy columns (the first 20 when there are more), the
 /// dropped level and, when the column has missing values, what their rows hold.
 fn one_hot_reply(
@@ -3276,6 +3274,8 @@ fn one_hot_reply(
     text
 }
 
+/// The bin count of the `uniform` and `quantile` strategies: `bins[0]`, which
+/// must be a whole number of at least 1 (5 when `bins` is empty).
 fn bin_count(bins: &[f64], strategy: &str) -> Result<usize, String> {
     let Some(&v) = bins.first() else {
         return Ok(5);
@@ -3292,11 +3292,6 @@ fn bin_count(bins: &[f64], strategy: &str) -> Result<usize, String> {
     usize::try_from(v as u64).map_err(|_| invalid())
 }
 
-/// A join the core refused, as an in-band tool error that says "Join failed:"
-/// once: the core's join refusals are [`MungeError::JoinError`]s, which already
-/// read that way, so only another error variant would get the prefix here.
-/// One printed row of a value-count table: the count, or the proportion with its percentage; a
-/// tally that is not a number prints as its text.
 /// " (replaced the existing dataset 'name')" when `result_name` names a dataset other than the
 /// `source` the tool read, so a call that overwrites says so; "" otherwise. Read under the write
 /// lock, just before the insert.
@@ -3409,6 +3404,8 @@ fn correlation_difference(
     out
 }
 
+/// One printed row of a value-count table: the count, or the proportion with its percentage; a
+/// tally that is not a number prints as its text.
 fn tally_line(label: &str, tally: &p2a_core::polars::prelude::AnyValue, normalize: bool) -> String {
     match tally.extract::<f64>() {
         Some(p) if normalize => {
@@ -3418,6 +3415,9 @@ fn tally_line(label: &str, tally: &p2a_core::polars::prelude::AnyValue, normaliz
     }
 }
 
+/// A join the core refused, as an in-band tool error that says "Join failed:"
+/// once: the core's join refusals are [`MungeError::JoinError`]s, which already
+/// read that way, so only another error variant would get the prefix here.
 fn join_failed(e: &MungeError) -> CallToolResult {
     let text = match e {
         MungeError::JoinError(_) => e.to_string(),
@@ -5403,6 +5403,18 @@ mod tests {
             "munge_concat",
             Some(bound::concat(&[&df, other.df(), extra.df(), &df])),
             concat(&[&ds, &other, &extra, &ds]),
+        );
+        // A null-free String column bound with a frame that lacks it gains nulls, and so a
+        // validity bitmap.
+        let texts: Vec<String> = (0..9)
+            .map(|i| format!("a text value {i} stored out of line"))
+            .collect();
+        let s_only = Dataset::new(df!("k" => vec![1i64; 9], "s" => texts).unwrap());
+        let no_s = Dataset::new(df!("k" => vec![2i64; 9]).unwrap());
+        covers(
+            "munge_concat text gains nulls",
+            Some(bound::concat(&[s_only.df(), no_s.df()])),
+            concat(&[&s_only, &no_s]),
         );
         covers(
             "munge_melt",

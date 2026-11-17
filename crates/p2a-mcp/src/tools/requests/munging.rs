@@ -725,7 +725,7 @@ pub struct LagLeadRequest {
 
     /// Direction: 'lag' or 'lead'
     #[schemars(
-        description = "Direction: 'lag' (past values) or 'lead' (future values). Without it the sign of periods decides: positive is a lag, negative a lead. A direction that contradicts the sign is an error."
+        description = "Direction: 'lag' (past values) or 'lead' (future values). Without it the sign of periods decides: positive is a lag, negative a lead. With direction 'lead', the absolute value of periods is used; direction 'lag' with a negative periods is an error."
     )]
     pub direction: Option<String>,
 

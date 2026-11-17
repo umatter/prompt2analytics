@@ -21,7 +21,7 @@
 //! off profile, HTTP without quotas) nothing is predicted: [`active`] is
 //! false.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use p2a_core::data::munging::{
     AggFn, AggSpec, FillStrategy, JoinShape, MutateExpr, join::concat_types, one_hot_levels,
@@ -845,8 +845,9 @@ pub(super) fn concat(frames: &[&DataFrame]) -> u64 {
         .collect();
     let refs: Vec<&p2a_core::data::Dataset> = datasets.iter().collect();
     if let Ok(types) = concat_types(&refs) {
+        let types: HashMap<String, DataType> = types.into_iter().collect();
         for (name, dtype) in &mut schema {
-            if let Some((_, t)) = types.iter().find(|(n, _)| n == name) {
+            if let Some(t) = types.get(*name) {
                 *dtype = t.clone();
             }
         }
@@ -1359,5 +1360,79 @@ mod tests {
             .unwrap()
             .expect("a bound");
         assert!(bound >= charged, "fill: bound {bound} < charged {charged}");
+    }
+
+    /// A forward or backward fill within groups takes a null's value from its own group: here a
+    /// long value of group `a` fills every null of `a`, while the row before (forward) or after
+    /// (backward) each null in data order holds a short value, so the row-order count of
+    /// [`filled_text`] undercounts and the grouped branch charges the longest value per null.
+    #[test]
+    fn grouped_text_fill_bound_covers_values_from_the_own_group() {
+        use p2a_core::data::munging::{FillStrategy, fill_na_by};
+        let long = "a value of group a, long enough to be stored out of line";
+        let pairs = 40;
+        for strategy in [FillStrategy::Forward, FillStrategy::Backward] {
+            let forward = matches!(strategy, FillStrategy::Forward);
+            let mut g: Vec<&str> = Vec::new();
+            let mut s: Vec<Option<&str>> = Vec::new();
+            let observed = [("a", Some(long)), ("b", Some("x"))];
+            let observed: Vec<_> = if forward {
+                observed.to_vec()
+            } else {
+                observed.iter().rev().copied().collect()
+            };
+            if forward {
+                for (gi, si) in &observed {
+                    g.push(gi);
+                    s.push(*si);
+                }
+            }
+            for _ in 0..pairs {
+                g.extend(["a", "b"]);
+                s.extend([None, None]);
+            }
+            if !forward {
+                for (gi, si) in &observed {
+                    g.push(gi);
+                    s.push(*si);
+                }
+            }
+            // Two arrays: polars copies each value it gathers from several (from one array it
+            // shares the buffers, and the copies cost nothing).
+            let whole = df!("g" => g, "s" => s).unwrap();
+            let half = whole.height() / 2;
+            let mut df = whole.slice(0, half);
+            df.vstack_mut(&whole.slice(half as i64, whole.height() - half))
+                .unwrap();
+            assert_eq!(df.max_n_chunks(), 2);
+            let ds = Dataset::new(df.clone());
+            let filled = fill_na_by(&ds, Some(&["s"]), &strategy, &["g"]).unwrap();
+            let cells: Vec<Option<&str>> = filled
+                .dataset
+                .df()
+                .column("s")
+                .unwrap()
+                .str()
+                .unwrap()
+                .into_iter()
+                .collect();
+            let a_row = if forward { 2 } else { 0 };
+            assert_eq!(cells[a_row], Some(long), "{strategy:?}");
+            let charged = session::datasets_bytes_of([("", &filled.dataset)]);
+            let grouped = fill_na(&df, Some(&["s"]), &strategy, true)
+                .unwrap()
+                .expect("a bound");
+            assert!(
+                grouped >= charged,
+                "{strategy:?}: grouped bound {grouped} < charged {charged}"
+            );
+            let row_order = fill_na(&df, Some(&["s"]), &strategy, false)
+                .unwrap()
+                .expect("a bound");
+            assert!(
+                row_order < charged,
+                "{strategy:?}: the row-order bound {row_order} should undercount {charged}"
+            );
+        }
     }
 }
