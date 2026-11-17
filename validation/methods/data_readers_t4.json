@@ -19,7 +19,8 @@
         "p2a-core::data::stata::tests::test_validate_read_dta_formats_118",
         "p2a-core::data::stata::tests::test_validate_read_dta_formats_119",
         "p2a-core::data::stata::tests::test_validate_read_dta_formats_119_big_endian",
-        "p2a-core::data::stata::tests::test_validate_data_readers_t4_manifest_lists_every_fixture"
+        "p2a-core::data::stata::tests::test_validate_data_readers_t4_manifest_lists_every_fixture",
+        "p2a-core::data::stata::tests::test_validate_read_dta_strl_119_stata_split"
       ],
       "quantities": [
         "dates (%td, days since 1970-01-01)",

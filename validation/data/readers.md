@@ -249,7 +249,7 @@ Tests that do not load `data_readers_values` (byte offsets, decoders, guards) ar
 | `p2a-core::data::stata::tests::test_validate_read_dta_strl_119` | `dta119_formats` strL text = haven (DATA-74) |
 | `p2a-core::data::stata::tests::test_validate_read_dta_strl_119_big_endian` | `dta119_formats_msf` strL text = haven (DATA-74) |
 | `p2a-core::data::stata::tests::test_stata_strl_unresolved_reference_is_an_error` | a reference (7, 99) fails naming `sl` and row 1; (0, 0) is `""` (DATA-74) |
-| `p2a-core::data::stata::tests::test_stata_strl_119_stata_split_resolves` | a release-119 reference in Stata's 3/5 split resolves (DATA-74) |
+| `p2a-core::data::stata::tests::test_validate_read_dta_strl_119_stata_split` | a release-119 reference in Stata's 3/5 split resolves (DATA-74) |
 | `p2a-core::data::stata::tests::test_stata_strl_respects_the_allocation_ceiling` | the 3,000-byte GSO is refused under a 1,024-byte ceiling, naming the strL context (DATA-74) |
 | `p2a-core::data::stata::tests::test_validate_read_dta_formats_117` | `dta117_formats`: dates, datetimes, `%tm` numeric with a note, label codes, text and sets = haven (DATA-75) |
 | `p2a-core::data::stata::tests::test_validate_read_dta_formats_118` | the same for `dta118_formats` (DATA-75) |

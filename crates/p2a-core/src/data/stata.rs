@@ -1354,8 +1354,8 @@ mod tests {
         }
     }
 
-    fn check_strl(stem: &str) {
-        let case = Case::load("data_readers_formats_values");
+    fn check_strl(case_id: &str, stem: &str) {
+        let case = Case::load(case_id);
         let load = load_stata_with(
             fixture_path(&format!("{stem}.dta")),
             &StataOptions::default(),
@@ -1372,26 +1372,26 @@ mod tests {
     #[test]
     fn test_validate_read_dta_strl_117() {
         // DATA-74: before the fix every strL cell was the placeholder "<strL>".
-        check_strl("dta117_formats");
+        check_strl("data_readers_formats_values", "dta117_formats");
     }
 
     #[test]
     fn test_validate_read_dta_strl_118() {
-        check_strl("dta118_formats");
+        check_strl("data_readers_formats_values", "dta118_formats");
     }
 
     #[test]
     fn test_validate_read_dta_strl_119() {
-        check_strl("dta119_formats");
+        check_strl("data_readers_formats_values", "dta119_formats");
     }
 
     #[test]
     fn test_validate_read_dta_strl_119_big_endian() {
-        check_strl("dta119_formats_msf");
+        check_strl("data_readers_formats_values", "dta119_formats_msf");
     }
 
-    fn check_formats(stem: &str) {
-        let case = Case::load("data_readers_formats_values");
+    fn check_formats(case_id: &str, stem: &str) {
+        let case = Case::load(case_id);
         let path = fixture_path(&format!("{stem}.dta"));
         let load = load_stata_with(&path, &StataOptions::default()).unwrap();
         let df = &load.df;
@@ -1507,22 +1507,22 @@ mod tests {
     #[test]
     fn test_validate_read_dta_formats_117() {
         // DATA-75: before the fix dt loaded as Float64 day counts from 1960 and labels were lost.
-        check_formats("dta117_formats");
+        check_formats("data_readers_formats_values", "dta117_formats");
     }
 
     #[test]
     fn test_validate_read_dta_formats_118() {
-        check_formats("dta118_formats");
+        check_formats("data_readers_formats_values", "dta118_formats");
     }
 
     #[test]
     fn test_validate_read_dta_formats_119() {
-        check_formats("dta119_formats");
+        check_formats("data_readers_formats_values", "dta119_formats");
     }
 
     #[test]
     fn test_validate_read_dta_formats_119_big_endian() {
-        check_formats("dta119_formats_msf");
+        check_formats("data_readers_formats_values", "dta119_formats_msf");
     }
 
     #[test]
@@ -1536,7 +1536,8 @@ mod tests {
             "dta119_formats_msf",
         ] {
             assert!(manifest.contains(&format!("\"{stem}.dta\"")), "{stem}");
-            assert!(case.keys().any(|k| k == format!("{stem}__sl")), "{stem}");
+            assert_eq!(case.names(&format!("{stem}__sl")).len(), 5, "{stem}");
+            assert_eq!(case.vector(&format!("{stem}__sl")).len(), 5, "{stem}");
         }
     }
 
@@ -1562,10 +1563,11 @@ mod tests {
     }
 
     #[test]
-    fn test_stata_strl_119_stata_split_resolves() {
+    fn test_validate_read_dta_strl_119_stata_split() {
         // Stata describes release 119 references as v in 3 bytes and o in 5 (pandas reads them
         // so); haven writes and reads 2/6. Rewritten to 3/5, every reference still resolves.
-        // Not R-certified: haven reads "" for every cell of the rewritten file.
+        // The text is compared with haven's reading of the original file; haven itself reads ""
+        // for every cell of the rewritten one.
         let case = Case::load("data_readers_formats_values");
         let mut b = fixture_bytes("dta119_formats.dta");
         let (data, row, offsets) = row_layout(&b);
