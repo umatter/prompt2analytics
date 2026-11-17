@@ -299,3 +299,184 @@ async fn ollama_keeps_objects_that_span_reads_and_every_tool_call() {
         ]
     );
 }
+
+// ---------- LLM-18: stream errors and cut-off streams ----------
+
+/// Whether `reply` failed with the variant whose debug text starts with `want` (the variant name
+/// and its fields), and its message carries none of the provider's own text.
+fn failed_with(t: ProviderType, reply: Result<Message, LlmError>, want: &str) {
+    let e = match reply {
+        Ok(m) => panic!(
+            "{t}: answered {:?} instead of failing with {want}",
+            m.content
+        ),
+        Err(e) => e,
+    };
+    let debug = format!("{e:?}");
+    assert!(debug.starts_with(want), "{t}: {debug}");
+    let text = e.to_string();
+    assert!(
+        !text.contains("Overloaded") && !text.contains("STUB-SECRET"),
+        "{t}: {text}"
+    );
+}
+
+/// A provider's error event in the middle of an answer fails the call with the provider's error
+/// type (`unknown` when it has none of the expected shape), never with its message text.
+#[tokio::test]
+async fn a_stream_error_event_fails_the_call() {
+    let mut anthropic = anthropic_sse(&anthropic_text("half a sen", false)[..4]);
+    anthropic.push_str(&format!(
+        "event: error\ndata: {}\n\n",
+        json!({"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}})
+    ));
+    let mut openai = openai_sse(&openai_text("half a sen", false), false);
+    openai.push_str(&format!(
+        "data: {}\n\n",
+        json!({"error": {"type": "server_error", "message": "STUB-SECRET"}})
+    ));
+    let ollama = format!(
+        "{}\n{}\n",
+        json!({"message": {"role": "assistant", "content": "half a sen"}, "done": false}),
+        json!({"error": "STUB-SECRET went wrong"})
+    );
+    for (t, path, body, want) in [
+        (
+            ProviderType::Anthropic,
+            "/v1/messages",
+            anthropic,
+            r#"StreamFailed { provider: "Anthropic", kind: "overloaded_error" }"#,
+        ),
+        (
+            ProviderType::OpenAI,
+            "/chat/completions",
+            openai,
+            r#"StreamFailed { provider: "OpenAI", kind: "server_error" }"#,
+        ),
+        (
+            ProviderType::Ollama,
+            "/api/chat",
+            ollama,
+            r#"StreamFailed { provider: "Ollama", kind: "unknown" }"#,
+        ),
+    ] {
+        let (addr, _) = chunked_stub(path, vec![vec![body.into_bytes()]]).await;
+        let (reply, _) = stream_chat(provider(t, addr).as_ref(), &Recorder::default(), true).await;
+        failed_with(t, reply, want);
+    }
+}
+
+/// A stream that ends without its end marker (Anthropic's `message_stop`, OpenAI's `[DONE]` or a
+/// finish reason, Ollama's `done: true`) fails as incomplete instead of returning the half answer.
+/// OpenAI's finish reason alone, without `[DONE]`, is a complete answer.
+#[tokio::test]
+async fn a_cut_off_stream_fails_as_incomplete() {
+    let ollama = format!(
+        "{}\n",
+        json!({"message": {"role": "assistant", "content": "half a sen"}, "done": false})
+    );
+    for (t, path, body) in [
+        (
+            ProviderType::Anthropic,
+            "/v1/messages",
+            anthropic_sse(&anthropic_text("half a sen", false)),
+        ),
+        (
+            ProviderType::OpenAI,
+            "/chat/completions",
+            openai_sse(&openai_text("half a sen", false), false),
+        ),
+        (ProviderType::Ollama, "/api/chat", ollama),
+    ] {
+        let (addr, _) = chunked_stub(path, vec![vec![body.into_bytes()]]).await;
+        let (reply, _) = stream_chat(provider(t, addr).as_ref(), &Recorder::default(), true).await;
+        failed_with(t, reply, "StreamIncomplete {");
+    }
+    let finished = openai_sse(&openai_text("a whole sentence.", true), false);
+    let (addr, _) = chunked_stub("/chat/completions", vec![vec![finished.into_bytes()]]).await;
+    let (reply, _) = stream_chat(
+        provider(ProviderType::OpenAI, addr).as_ref(),
+        &Recorder::default(),
+        true,
+    )
+    .await;
+    assert_eq!(reply.unwrap().content, "a whole sentence.");
+}
+
+// ---------- the chat routes over HTTP ----------
+
+/// `POST /api/llm/chat/stream` with `body` on `app`: every SSE event's JSON, in order. The stream
+/// ends at its `done` or `error` event.
+async fn stream_events(app: &axum::Router, body: Value) -> Vec<Value> {
+    use tower::ServiceExt;
+    let req = axum::http::Request::post("/api/llm/chat/stream")
+        .header(axum::http::header::HOST, "localhost")
+        .header(axum::http::header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let read = async {
+        let resp = app.clone().oneshot(req).await.unwrap();
+        axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap()
+    };
+    let bytes = tokio::time::timeout(Duration::from_secs(30), read)
+        .await
+        .expect("no end of the stream within 30 s");
+    String::from_utf8(bytes.to_vec())
+        .unwrap()
+        .lines()
+        .filter_map(|l| l.strip_prefix("data: ").or_else(|| l.strip_prefix("data:")))
+        .map(|d| serde_json::from_str(d).unwrap())
+        .collect()
+}
+
+/// The provider settings of a chat request to the stub of `t` at `addr`.
+fn provider_json(t: ProviderType, addr: SocketAddr) -> Value {
+    json!({
+        "provider_type": t.to_string().to_lowercase(),
+        "base_url": format!("http://{addr}"),
+        "api_key": "wp30-key",
+        "model": "stub",
+    })
+}
+
+/// The last event of a stream, which must be an `error`: its message and code.
+fn stream_error(events: &[Value]) -> (String, String) {
+    let last = events.last().expect("no events");
+    assert_eq!(last["type"], "error", "{events:?}");
+    (
+        last["error"].as_str().unwrap_or_default().to_string(),
+        last["code"].as_str().unwrap_or_default().to_string(),
+    )
+}
+
+/// LLM-18 through the stream route: an Ollama error object and a cut-off Ollama stream end the
+/// stream with an `error` event coded `upstream_error`, never with a `done` carrying half an answer.
+#[tokio::test]
+async fn the_stream_route_reports_a_failed_or_cut_off_provider_stream() {
+    let (app, _) = http_app().await;
+    let half = json!({"message": {"role": "assistant", "content": "half a sen"}, "done": false});
+    for (body, want) in [
+        (
+            format!("{half}\n{}\n", json!({"error": "STUB-SECRET went wrong"})),
+            "Ollama reported an error during its answer (unknown); try again",
+        ),
+        (
+            format!("{half}\n"),
+            "Ollama's answer ended before it was complete; try again",
+        ),
+    ] {
+        let (addr, _) = chunked_stub("/api/chat", vec![vec![body.into_bytes()]]).await;
+        let sid = new_session(&app).await;
+        let events = stream_events(
+            &app,
+            json!({"session_id": sid, "message": "go",
+                   "provider": provider_json(ProviderType::Ollama, addr)}),
+        )
+        .await;
+        assert!(!events.iter().any(|e| e["type"] == "done"), "{events:?}");
+        let (error, _) = stream_error(&events);
+        assert_eq!(error, want);
+    }
+}

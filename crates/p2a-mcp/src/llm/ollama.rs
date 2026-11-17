@@ -5,7 +5,7 @@
 
 use super::LlmSettings;
 use super::retry::{MAX_UPSTREAM_BODY_BYTES, count_streamed, read_json_capped, upstream_error};
-use super::stream::LineBuffer;
+use super::stream::{LineBuffer, stream_failed};
 use super::tool_loop::{
     AssistantTurn, StreamSink, ToolLoopConfig, ToolLoopProvider, run_tool_loop,
 };
@@ -258,14 +258,19 @@ impl OllamaProvider {
         let mut received = 0usize;
         let mut done = false;
 
-        // Ollama streams JSON objects, one per line; true at the object marked done.
-        let mut handle = |line: &str| -> bool {
+        // Ollama streams JSON objects, one per line; true at the object marked done, an error
+        // object fails the call.
+        let mut handle = |line: &str| -> Result<bool, LlmError> {
             if line.trim().is_empty() {
-                return false;
+                return Ok(false);
             }
             let Ok(chunk_response) = serde_json::from_str::<OllamaChatResponse>(line) else {
-                return false;
+                return Ok(false);
             };
+            if let Some(error) = chunk_response.error {
+                // Ollama's error is a text with no type.
+                return Err(stream_failed(PROVIDER, None, &error.to_string()));
+            }
             if !chunk_response.message.content.is_empty() {
                 full_content.push_str(&chunk_response.message.content);
                 callback(StreamChunk::Text {
@@ -276,7 +281,7 @@ impl OllamaProvider {
             if let Some(tcs) = chunk_response.message.tool_calls {
                 tool_calls.extend(tcs.into_iter().map(OllamaToolCall::into_call));
             }
-            chunk_response.done
+            Ok(chunk_response.done)
         };
 
         'read: while let Some(chunk_result) = stream.next().await {
@@ -284,14 +289,17 @@ impl OllamaProvider {
             count_streamed(&mut received, chunk.len())?;
             lines.push(&chunk);
             while let Some(line) = lines.next_line() {
-                if handle(&line?) {
+                if handle(&line?)? {
                     done = true;
                     break 'read;
                 }
             }
         }
         if !done && let Some(line) = lines.finish() {
-            handle(&line?);
+            done = handle(&line?)?;
+        }
+        if !done {
+            return Err(LlmError::StreamIncomplete { provider: PROVIDER });
         }
 
         Ok(AssistantTurn {
@@ -474,6 +482,9 @@ struct OllamaChatResponse {
     message: OllamaResponseMessage,
     #[serde(default)]
     done: bool,
+    /// An error in the middle of the stream (a text).
+    #[serde(default)]
+    error: Option<Value>,
 }
 
 #[derive(Debug, Default, Deserialize)]

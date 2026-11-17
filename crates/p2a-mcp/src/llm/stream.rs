@@ -70,6 +70,26 @@ fn decode(line: &[u8]) -> Result<String, LlmError> {
     })
 }
 
+/// The error of a provider's error event in a stream. `kind` is the provider's error type when it
+/// is 1 to 64 characters of `[a-z0-9_]`, otherwise `unknown`; `message`, the provider's own text,
+/// goes to the debug log only (cut to 512 characters), as `retry::upstream_error` does with an
+/// error body.
+pub(crate) fn stream_failed(provider: &'static str, kind: Option<&str>, message: &str) -> LlmError {
+    let preview: String = message.chars().take(512).collect();
+    tracing::debug!(provider, kind = ?kind.map(|k| k.chars().take(64).collect::<String>()), message = %preview, "LLM provider reported an error in its stream");
+    let kind = kind
+        .filter(|k| {
+            (1..=64).contains(&k.len())
+                && k.bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+        })
+        .unwrap_or("unknown");
+    LlmError::StreamFailed {
+        provider,
+        kind: kind.to_string(),
+    }
+}
+
 /// The payload of a server-sent event's `data:` line (one optional space after the colon); `None`
 /// for any other line (`event:`, `id:`, a `:` comment, a blank line).
 pub(crate) fn sse_data(line: &str) -> Option<&str> {
@@ -147,6 +167,21 @@ mod tests {
         }
         assert_eq!(got.len(), 2_000);
         assert_eq!(got[1_999], "line 1999 ü");
+    }
+
+    #[test]
+    fn a_stream_error_carries_only_a_well_formed_kind() {
+        let kind = |k: Option<&str>| match stream_failed("P", k, "secret text") {
+            LlmError::StreamFailed { kind, .. } => kind,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(kind(Some("overloaded_error")), "overloaded_error");
+        assert_eq!(kind(Some("Overloaded")), "unknown");
+        assert_eq!(kind(Some("")), "unknown");
+        assert_eq!(kind(Some(&"a".repeat(65))), "unknown");
+        assert_eq!(kind(None), "unknown");
+        let text = stream_failed("P", Some("x"), "secret text").to_string();
+        assert_eq!(text, "P reported an error during its answer (x); try again");
     }
 
     /// A long line over many reads is searched once: `scanned` follows the end of the buffer.

@@ -446,6 +446,20 @@ pub enum LlmError {
     /// The provider's response body exceeded the size cap.
     #[error("The LLM provider's response exceeded {0} bytes")]
     ResponseTooLarge(usize),
+
+    /// The provider reported an error in the middle of a streamed answer. `kind` is its error
+    /// type (`overloaded_error`, `server_error`, ...), or `unknown`; its message is logged at
+    /// debug only and never part of the error.
+    #[error("{provider} reported an error during its answer ({kind}); try again")]
+    StreamFailed {
+        provider: &'static str,
+        kind: String,
+    },
+
+    /// The provider's stream ended without its end marker (a dropped connection or a proxy that
+    /// cut it), so the answer is not complete.
+    #[error("{provider}'s answer ended before it was complete; try again")]
+    StreamIncomplete { provider: &'static str },
 }
 
 /// What a caller can do about an upstream status.

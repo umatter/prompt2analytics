@@ -5,7 +5,7 @@
 
 use super::LlmSettings;
 use super::retry::{MAX_UPSTREAM_BODY_BYTES, count_streamed, read_json_capped, upstream_error};
-use super::stream::{LineBuffer, sse_data};
+use super::stream::{LineBuffer, sse_data, stream_failed};
 use super::tool_loop::{
     AssistantTurn, StreamSink, ToolLoopConfig, ToolLoopProvider, run_tool_loop,
 };
@@ -328,18 +328,29 @@ impl OpenAIProvider {
         // For accumulating tool calls across chunks
         let mut tool_calls_map: HashMap<usize, (String, String, String)> = HashMap::new(); // index -> (id, name, arguments)
 
-        let mut handle = |line: &str| {
+        let mut finished = false;
+
+        // One line of the stream: an error object fails the call; true once `[DONE]` or a finish
+        // reason has arrived (an OpenAI-compatible endpoint may send only one of them).
+        let mut handle = |line: &str| -> Result<bool, LlmError> {
             let Some(data) = sse_data(line) else {
-                return;
+                return Ok(false);
             };
             if data.trim() == "[DONE]" {
-                return;
+                return Ok(true);
             }
             let Ok(chunk_response) = serde_json::from_str::<OpenAIStreamChunk>(data) else {
-                return;
+                return Ok(false);
             };
+            if let Some(error) = chunk_response.error {
+                return Err(stream_failed(
+                    PROVIDER,
+                    error.kind.as_deref(),
+                    error.message.as_deref().unwrap_or_default(),
+                ));
+            }
             let Some(choice) = chunk_response.choices.first() else {
-                return;
+                return Ok(false);
             };
             // Handle content delta
             if let Some(ref delta_content) = choice.delta.content {
@@ -369,6 +380,7 @@ impl OpenAIProvider {
                     }
                 }
             }
+            Ok(choice.finish_reason.is_some())
         };
 
         while let Some(chunk_result) = stream.next().await {
@@ -376,11 +388,14 @@ impl OpenAIProvider {
             count_streamed(&mut received, chunk.len())?;
             lines.push(&chunk);
             while let Some(line) = lines.next_line() {
-                handle(&line?);
+                finished |= handle(&line?)?;
             }
         }
         if let Some(line) = lines.finish() {
-            handle(&line?);
+            finished |= handle(&line?)?;
+        }
+        if !finished {
+            return Err(LlmError::StreamIncomplete { provider: PROVIDER });
         }
 
         // Convert accumulated tool calls to our format
@@ -599,7 +614,20 @@ struct OpenAIModel {
 
 #[derive(Debug, Deserialize)]
 struct OpenAIStreamChunk {
+    #[serde(default)]
     choices: Vec<OpenAIStreamChoice>,
+    /// An error in the middle of the stream.
+    #[serde(default)]
+    error: Option<OpenAIStreamError>,
+}
+
+/// The `error` object of a stream chunk.
+#[derive(Debug, Deserialize)]
+struct OpenAIStreamError {
+    #[serde(rename = "type", default)]
+    kind: Option<String>,
+    #[serde(default)]
+    message: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

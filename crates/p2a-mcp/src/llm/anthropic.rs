@@ -5,7 +5,7 @@
 
 use super::LlmSettings;
 use super::retry::{MAX_UPSTREAM_BODY_BYTES, count_streamed, read_json_capped, upstream_error};
-use super::stream::{LineBuffer, sse_data};
+use super::stream::{LineBuffer, sse_data, stream_failed};
 use super::tool_loop::{
     AssistantTurn, StreamSink, ToolLoopConfig, ToolLoopProvider, run_tool_loop,
 };
@@ -343,13 +343,16 @@ impl AnthropicProvider {
         let mut current_tool_name = String::new();
         let mut current_tool_input = String::new();
         let mut received = 0usize;
+        let mut stopped = false;
 
-        let mut handle = |line: &str| {
+        // One line of the stream: an error event fails the call, and `message_stop` ends the
+        // answer (true).
+        let mut handle = |line: &str| -> Result<bool, LlmError> {
             let Some(data) = sse_data(line) else {
-                return;
+                return Ok(false);
             };
             let Ok(event) = serde_json::from_str::<AnthropicStreamEvent>(data) else {
-                return;
+                return Ok(false);
             };
             match event {
                 AnthropicStreamEvent::ContentBlockStart { content_block, .. } => {
@@ -384,20 +387,35 @@ impl AnthropicProvider {
                         current_tool_input.clear();
                     }
                 }
+                AnthropicStreamEvent::MessageStop => return Ok(true),
+                AnthropicStreamEvent::Error { error } => {
+                    return Err(stream_failed(
+                        PROVIDER,
+                        error.kind.as_deref(),
+                        error.message.as_deref().unwrap_or_default(),
+                    ));
+                }
                 _ => {}
             }
+            Ok(false)
         };
 
-        while let Some(chunk_result) = stream.next().await {
+        'read: while let Some(chunk_result) = stream.next().await {
             let chunk = chunk_result?;
             count_streamed(&mut received, chunk.len())?;
             lines.push(&chunk);
             while let Some(line) = lines.next_line() {
-                handle(&line?);
+                if handle(&line?)? {
+                    stopped = true;
+                    break 'read;
+                }
             }
         }
-        if let Some(line) = lines.finish() {
-            handle(&line?);
+        if !stopped && let Some(line) = lines.finish() {
+            stopped = handle(&line?)?;
+        }
+        if !stopped {
+            return Err(LlmError::StreamIncomplete { provider: PROVIDER });
         }
 
         Ok(AssistantTurn {
@@ -599,8 +617,22 @@ enum AnthropicStreamEvent {
     },
     MessageStop,
     Ping,
+    /// An error in the middle of the stream (`overloaded_error`, `api_error`, ...).
+    Error {
+        #[serde(default)]
+        error: AnthropicStreamError,
+    },
     #[serde(other)]
     Unknown,
+}
+
+/// The `error` object of a stream's error event.
+#[derive(Debug, Default, Deserialize)]
+struct AnthropicStreamError {
+    #[serde(rename = "type", default)]
+    kind: Option<String>,
+    #[serde(default)]
+    message: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

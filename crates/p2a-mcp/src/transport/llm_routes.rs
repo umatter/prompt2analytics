@@ -790,7 +790,9 @@ fn build_provider(cfg: ProviderConfig, settings: &LlmSettings) -> Box<dyn LlmPro
 /// message is the error's text, which never carries an upstream body.
 fn llm_error_status(e: &LlmError) -> StatusCode {
     match e {
-        LlmError::Upstream { .. } => StatusCode::BAD_GATEWAY,
+        LlmError::Upstream { .. }
+        | LlmError::StreamFailed { .. }
+        | LlmError::StreamIncomplete { .. } => StatusCode::BAD_GATEWAY,
         LlmError::Timeout => StatusCode::GATEWAY_TIMEOUT,
         LlmError::EgressDenied(_) | LlmError::InvalidApiKey => StatusCode::BAD_REQUEST,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
