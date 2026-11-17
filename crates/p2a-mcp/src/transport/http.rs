@@ -1302,6 +1302,70 @@ mod serve_tests {
         assert!(SLOT.lock().unwrap().is_none());
     }
 
+    /// A chat stream keeps the server's hold while it runs, past the return
+    /// of its handler (its task outlives the connection's request), and
+    /// releases it once its client is gone (PR-18-4). The hold is taken on a
+    /// private slot; the provider is a loopback Ollama stub that accepts the
+    /// chat's request and never answers.
+    #[cfg(feature = "llm")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_chat_stream_keeps_the_servers_hold_while_it_runs() {
+        use crate::transport::llm_routes::{LlmChatRequest, llm_chat_stream};
+        static SLOT: Serving = Mutex::new(None);
+
+        let stub = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let stub_addr = stub.local_addr().unwrap();
+        let (asked, mut asked_rx) = tokio::sync::mpsc::channel::<()>(4);
+        let silent = tokio::spawn(async move {
+            let mut open = Vec::new();
+            while let Ok((stream, _)) = stub.accept().await {
+                open.push(stream);
+                let _ = asked.try_send(());
+            }
+        });
+
+        let config = ServerConfig {
+            transport: TransportType::Http,
+            ..Default::default()
+        };
+        let (_app, state) = build_app_with(&config, ExecConfig::default())
+            .await
+            .unwrap();
+        let session_id = state.session_manager.create_session(None).await.unwrap();
+        let hold = hold_in(&SLOT, &Limits::off(), None, DirsSetting::Off).unwrap();
+        let request: LlmChatRequest = serde_json::from_value(json!({
+            "session_id": session_id,
+            "message": "hello",
+            "provider": {
+                "provider_type": "ollama",
+                "base_url": format!("http://{stub_addr}"),
+                "model": "stub",
+            },
+        }))
+        .unwrap();
+        let response = llm_chat_stream(
+            axum::extract::State(state),
+            Some(axum::Extension(Arc::new(hold))),
+            Json(request),
+        )
+        .await;
+        // The handler has returned; the chat is waiting on the provider.
+        tokio::time::timeout(Duration::from_secs(30), asked_rx.recv())
+            .await
+            .expect("the chat never asked the provider");
+        assert!(
+            SLOT.lock().unwrap().is_some(),
+            "released while the chat runs"
+        );
+
+        drop(response);
+        assert!(
+            released_within_a_bound(&SLOT).await,
+            "the hold outlived the chat's client"
+        );
+        silent.abort();
+    }
+
     /// Whether `slot` is released within a bound (a liveness guard, not a
     /// timing assertion).
     async fn released_within_a_bound(slot: &'static Serving) -> bool {
