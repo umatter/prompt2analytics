@@ -309,10 +309,12 @@ async fn serve_refuses_other_process_policies_under_the_same_limits() {
         .await
         .expect_err("serve turned off the session directories of an open public server");
     let message = e.to_string();
+    // The refusal names the setting that differs, not the one that is equal.
     assert!(
         message.contains("same request limits")
-            && message.contains("--max-alloc-mb")
-            && message.contains("--session-dirs"),
+            && message.contains("--session-dirs")
+            && message.contains("running: on, requested: off")
+            && !message.contains("--max-alloc-mb"),
         "{message}"
     );
     assert_eq!(*limits::current(), expected());
@@ -325,7 +327,10 @@ async fn serve_refuses_other_process_policies_under_the_same_limits() {
     let e = p2a_mcp::transport::http::serve(listener, cfg, std::future::ready(()))
         .await
         .expect_err("serve changed the allocation ceiling of an open public server");
-    assert!(e.to_string().contains("same request limits"), "{e}");
+    assert!(
+        e.to_string().contains("same request limits") && e.to_string().contains("--max-alloc-mb"),
+        "{e}"
+    );
     assert_eq!(p2a_core::resource::alloc_ceiling_bytes(), ceiling);
 
     assert_serves_open_public_limits(addr).await;
@@ -358,7 +363,9 @@ async fn start_transport_refuses_a_stdio_server_beside_session_directories() {
         .expect_err("start_transport returned Ok")
         .to_string();
     assert!(
-        message.contains("same request limits") && message.contains("--session-dirs"),
+        message.contains("same request limits")
+            && message.contains("--session-dirs")
+            && message.contains("running: on, requested: off"),
         "{message}"
     );
     assert_eq!(*limits::current(), expected());

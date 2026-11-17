@@ -203,16 +203,39 @@ enum DirsSetting {
 /// The refusal of a start whose request limits differ from those of a server
 /// still running in this process.
 const LIMITS_CONFLICT: &str = "another server in this process is running under different request \
-     limits (another resource profile, or other --limit-override (P2A_LIMIT_OVERRIDES) entries); \
-     the request limits are process-wide, so stop that server first or serve this configuration \
-     from a process of its own";
+     limits (another resource profile (--limits, P2A_LIMITS, or the deployment mode: open public \
+     servers run hosted), or other --limit-override (P2A_LIMIT_OVERRIDES) entries); the request \
+     limits are process-wide, so stop that server first or serve this configuration from a \
+     process of its own";
 
 /// The refusal of a start whose request limits equal those of a running
-/// server but whose allocation ceiling or session-directory setting differs.
-const POLICIES_CONFLICT: &str = "another server in this process is running under the same request \
-     limits but another allocation ceiling (--max-alloc-mb, P2A_MAX_ALLOC_MB) or session-directory \
-     setting (--session-dirs, P2A_SESSION_DIRS); both are process-wide, so stop that server first \
-     or serve this configuration from a process of its own";
+/// server but whose allocation ceiling or session-directory setting differs,
+/// naming the setting that differs (`setting`, with the running and the
+/// requested value).
+fn policies_conflict(setting: &str) -> String {
+    format!(
+        "another server in this process is running under the same request limits but another \
+         {setting}; it is process-wide, so stop that server first or serve this configuration \
+         from a process of its own"
+    )
+}
+
+/// An allocation ceiling as the refusals name it.
+fn ceiling_text(bytes: Option<usize>) -> String {
+    match bytes {
+        None => "unlimited".to_string(),
+        Some(b) if b % (1 << 20) == 0 => format!("{} MiB", b >> 20),
+        Some(b) => format!("{b} bytes"),
+    }
+}
+
+/// A session-directory setting as the refusals name it.
+fn dirs_text(dirs: DirsSetting) -> &'static str {
+    match dirs {
+        DirsSetting::Off => "off",
+        DirsSetting::On => "on",
+    }
+}
 
 /// A running server's hold on the process-wide request limits and process
 /// policies (the p2a-core allocation ceiling and the session-directory
@@ -321,8 +344,24 @@ fn hold_in(
     if held.limits != *limits {
         return Err(TransportError::Config(LIMITS_CONFLICT.to_string()));
     }
-    if held.alloc_ceiling_bytes != alloc_ceiling_bytes || other_dirs > 0 {
-        return Err(TransportError::Config(POLICIES_CONFLICT.to_string()));
+    if held.alloc_ceiling_bytes != alloc_ceiling_bytes {
+        return Err(TransportError::Config(policies_conflict(&format!(
+            "allocation ceiling (--max-alloc-mb, P2A_MAX_ALLOC_MB; running: {}, requested: {})",
+            ceiling_text(held.alloc_ceiling_bytes),
+            ceiling_text(alloc_ceiling_bytes)
+        ))));
+    }
+    if other_dirs > 0 {
+        let running = match dirs {
+            DirsSetting::Off => DirsSetting::On,
+            DirsSetting::On => DirsSetting::Off,
+        };
+        return Err(TransportError::Config(policies_conflict(&format!(
+            "session-directory setting (--session-dirs, P2A_SESSION_DIRS; running: {}, \
+             requested: {})",
+            dirs_text(running),
+            dirs_text(dirs)
+        ))));
     }
     held.holders[dirs as usize] += 1;
     Ok(LimitsHold { slot, dirs })
@@ -1179,7 +1218,7 @@ mod serve_tests {
         let ceiling = Some(256 << 20);
         let policies = |result| {
             refusal(result).map(|message| {
-                assert_eq!(message, POLICIES_CONFLICT);
+                assert!(message.contains("same request limits"), "{message}");
             })
         };
         let public = hold_in(&SLOT, &hosted, ceiling, DirsSetting::On).unwrap();
@@ -1187,6 +1226,21 @@ mod serve_tests {
             policies(hold_in(&SLOT, &hosted, None, DirsSetting::On)),
             Some(()),
             "another allocation ceiling"
+        );
+        // The refusal names the setting that differs, with both values.
+        let message = refusal(hold_in(&SLOT, &hosted, None, DirsSetting::On)).unwrap();
+        assert!(
+            message.contains("--max-alloc-mb")
+                && message.contains("running: 256 MiB, requested: unlimited")
+                && !message.contains("--session-dirs"),
+            "{message}"
+        );
+        let message = refusal(hold_in(&SLOT, &hosted, ceiling, DirsSetting::Off)).unwrap();
+        assert!(
+            message.contains("--session-dirs")
+                && message.contains("running: on, requested: off")
+                && !message.contains("--max-alloc-mb"),
+            "{message}"
         );
         assert_eq!(
             policies(hold_in(&SLOT, &hosted, ceiling, DirsSetting::Off)),
