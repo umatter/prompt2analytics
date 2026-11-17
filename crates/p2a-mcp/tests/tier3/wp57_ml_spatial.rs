@@ -2418,14 +2418,65 @@ fn test_mcp_spatial_probit_effects_add_up() {
     }
     let sem = run_sem_probit(&ds, "yb", &["x1", "x2"], &mut weights(), config()).unwrap();
     in_unit(sem.rho_draws.as_slice().unwrap(), "lambda");
-    if let Some(impacts) = &sem.impacts {
-        for i in 0..impacts.var_names.len() {
-            assert_eq!(impacts.indirect[i], 0.0, "{}", impacts.var_names[i]);
-            assert_eq!(
-                impacts.total[i], impacts.direct[i],
-                "{}",
-                impacts.var_names[i]
-            );
-        }
+    // The core computes semprobit impacts when asked (the default config does).
+    let impacts = sem.impacts.as_ref().expect("semprobit impacts");
+    assert_eq!(impacts.var_names, ["x1", "x2"]);
+    for i in 0..impacts.var_names.len() {
+        assert_eq!(impacts.indirect[i], 0.0, "{}", impacts.var_names[i]);
+        assert_eq!(
+            impacts.total[i], impacts.direct[i],
+            "{}",
+            impacts.var_names[i]
+        );
     }
+}
+
+/// The same property through the tools (dispatch path, fixed seed, few draws):
+/// sar_probit_model's printed impacts add up (total = direct + indirect within
+/// the printed six decimals) and its rho interval lies in (-1, 1);
+/// sem_probit_model prints no impacts block (the handler asks for none: an
+/// error model has no spatial multiplier) and its lambda interval lies in (-1, 1).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_mcp_spatial_probit_tools_effects_add_up() {
+    let (s, server) = probit_session().await;
+    let a = json!({"dataset": "spatial_sim", "y": "yb", "x": ["x1", "x2"], "weights": "w4",
+                   "n_draws": 80, "burn_in": 20, "seed": 11});
+    let interval = |t: &str| -> (f64, f64) {
+        let l = line(t, "95% Credible Interval:");
+        let inner = l
+            .split('(')
+            .nth(1)
+            .and_then(|r| r.split(')').next())
+            .unwrap_or_else(|| panic!("no interval in {l}"));
+        let mut it = inner.split(',').map(|v| v.trim().parse::<f64>().unwrap());
+        (it.next().unwrap(), it.next().unwrap())
+    };
+    let sar = ok(&call(&server, &s, "sar_probit_model", a.clone()).await);
+    let (lo, hi) = interval(&sar);
+    assert!(
+        -1.0 < lo && lo <= hi && hi < 1.0,
+        "rho interval ({lo}, {hi})"
+    );
+    let block = sar
+        .split("Spatial impacts")
+        .nth(1)
+        .unwrap_or_else(|| panic!("no impacts in {sar}"));
+    for name in ["x1", "x2"] {
+        // Direct (SD) Indirect (SD) Total (SD)
+        let v = row(block, name);
+        assert_eq!(v.len(), 6, "{name}: {block}");
+        let sum = v[0] + v[2];
+        assert!(
+            (v[4] - sum).abs() <= 1.5e-6,
+            "{name}: total {} vs direct + indirect {sum}\n{block}",
+            v[4]
+        );
+    }
+    let sem = ok(&call(&server, &s, "sem_probit_model", a).await);
+    assert!(!sem.contains("Spatial impacts"), "{sem}");
+    let (lo, hi) = interval(&sem);
+    assert!(
+        -1.0 < lo && lo <= hi && hi < 1.0,
+        "lambda interval ({lo}, {hi})"
+    );
 }
