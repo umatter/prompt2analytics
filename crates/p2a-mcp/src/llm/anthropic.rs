@@ -5,6 +5,7 @@
 
 use super::LlmSettings;
 use super::retry::{MAX_UPSTREAM_BODY_BYTES, count_streamed, read_json_capped, upstream_error};
+use super::stream::{LineBuffer, sse_data};
 use super::tool_loop::{
     AssistantTurn, StreamSink, ToolLoopConfig, ToolLoopProvider, run_tool_loop,
 };
@@ -335,7 +336,7 @@ impl AnthropicProvider {
 
         // Process SSE stream
         let mut stream = response.bytes_stream();
-        let mut buffer = String::new();
+        let mut lines = LineBuffer::new();
         let mut text_content = String::new();
         let mut tool_calls: Vec<ToolCall> = Vec::new();
         let mut current_tool_id = String::new();
@@ -343,66 +344,60 @@ impl AnthropicProvider {
         let mut current_tool_input = String::new();
         let mut received = 0usize;
 
-        while let Some(chunk_result) = stream.next().await {
-            let chunk = chunk_result?;
-            count_streamed(&mut received, chunk.len())?;
-            let chunk_str = String::from_utf8_lossy(&chunk);
-            buffer.push_str(&chunk_str);
-
-            // Process complete SSE lines
-            while let Some(line_end) = buffer.find('\n') {
-                let line = buffer[..line_end].trim().to_string();
-                buffer = buffer[line_end + 1..].to_string();
-
-                if line.is_empty() {
-                    continue;
-                }
-
-                if let Some(data) = line.strip_prefix("data: ") {
-                    if let Ok(event) = serde_json::from_str::<AnthropicStreamEvent>(data) {
-                        match event {
-                            AnthropicStreamEvent::ContentBlockStart { content_block, .. } => {
-                                match content_block {
-                                    AnthropicStreamContentBlock::Text { .. } => {}
-                                    AnthropicStreamContentBlock::ToolUse { id, name } => {
-                                        current_tool_id = id;
-                                        current_tool_name = name;
-                                        current_tool_input.clear();
-                                    }
-                                }
-                            }
-                            AnthropicStreamEvent::ContentBlockDelta { delta, .. } => match delta {
-                                AnthropicStreamDelta::TextDelta { text } => {
-                                    text_content.push_str(&text);
-                                    callback(StreamChunk::Text { content: text });
-                                }
-                                AnthropicStreamDelta::InputJsonDelta { partial_json } => {
-                                    current_tool_input.push_str(&partial_json);
-                                }
-                            },
-                            AnthropicStreamEvent::ContentBlockStop { .. } => {
-                                // If we were building a tool call, finalize it
-                                if !current_tool_id.is_empty() {
-                                    // Empty for a tool without parameters.
-                                    let input = ToolCall::parse_arguments(&current_tool_input);
-                                    tool_calls.push(ToolCall {
-                                        id: current_tool_id.clone(),
-                                        name: current_tool_name.clone(),
-                                        arguments: input,
-                                    });
-                                    current_tool_id.clear();
-                                    current_tool_name.clear();
-                                    current_tool_input.clear();
-                                }
-                            }
-                            AnthropicStreamEvent::MessageStop => {
-                                // End of message
-                            }
-                            _ => {}
+        let mut handle = |line: &str| {
+            let Some(data) = sse_data(line) else {
+                return;
+            };
+            let Ok(event) = serde_json::from_str::<AnthropicStreamEvent>(data) else {
+                return;
+            };
+            match event {
+                AnthropicStreamEvent::ContentBlockStart { content_block, .. } => {
+                    match content_block {
+                        AnthropicStreamContentBlock::Text { .. } => {}
+                        AnthropicStreamContentBlock::ToolUse { id, name } => {
+                            current_tool_id = id;
+                            current_tool_name = name;
+                            current_tool_input.clear();
                         }
                     }
                 }
+                AnthropicStreamEvent::ContentBlockDelta { delta, .. } => match delta {
+                    AnthropicStreamDelta::TextDelta { text } => {
+                        text_content.push_str(&text);
+                        callback(StreamChunk::Text { content: text });
+                    }
+                    AnthropicStreamDelta::InputJsonDelta { partial_json } => {
+                        current_tool_input.push_str(&partial_json);
+                    }
+                },
+                AnthropicStreamEvent::ContentBlockStop { .. } => {
+                    // If we were building a tool call, finalize it
+                    if !current_tool_id.is_empty() {
+                        // Empty for a tool without parameters.
+                        let input = ToolCall::parse_arguments(&current_tool_input);
+                        tool_calls.push(ToolCall {
+                            id: std::mem::take(&mut current_tool_id),
+                            name: std::mem::take(&mut current_tool_name),
+                            arguments: input,
+                        });
+                        current_tool_input.clear();
+                    }
+                }
+                _ => {}
             }
+        };
+
+        while let Some(chunk_result) = stream.next().await {
+            let chunk = chunk_result?;
+            count_streamed(&mut received, chunk.len())?;
+            lines.push(&chunk);
+            while let Some(line) = lines.next_line() {
+                handle(&line?);
+            }
+        }
+        if let Some(line) = lines.finish() {
+            handle(&line?);
         }
 
         Ok(AssistantTurn {

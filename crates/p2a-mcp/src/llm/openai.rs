@@ -5,6 +5,7 @@
 
 use super::LlmSettings;
 use super::retry::{MAX_UPSTREAM_BODY_BYTES, count_streamed, read_json_capped, upstream_error};
+use super::stream::{LineBuffer, sse_data};
 use super::tool_loop::{
     AssistantTurn, StreamSink, ToolLoopConfig, ToolLoopProvider, run_tool_loop,
 };
@@ -320,64 +321,66 @@ impl OpenAIProvider {
 
         // Process SSE stream
         let mut stream = response.bytes_stream();
-        let mut buffer = String::new();
+        let mut lines = LineBuffer::new();
         let mut content = String::new();
         let mut received = 0usize;
 
         // For accumulating tool calls across chunks
         let mut tool_calls_map: HashMap<usize, (String, String, String)> = HashMap::new(); // index -> (id, name, arguments)
 
-        while let Some(chunk_result) = stream.next().await {
-            let chunk = chunk_result?;
-            count_streamed(&mut received, chunk.len())?;
-            let chunk_str = String::from_utf8_lossy(&chunk);
-            buffer.push_str(&chunk_str);
+        let mut handle = |line: &str| {
+            let Some(data) = sse_data(line) else {
+                return;
+            };
+            if data.trim() == "[DONE]" {
+                return;
+            }
+            let Ok(chunk_response) = serde_json::from_str::<OpenAIStreamChunk>(data) else {
+                return;
+            };
+            let Some(choice) = chunk_response.choices.first() else {
+                return;
+            };
+            // Handle content delta
+            if let Some(ref delta_content) = choice.delta.content {
+                content.push_str(delta_content);
+                callback(StreamChunk::Text {
+                    content: delta_content.clone(),
+                });
+            }
 
-            // Process complete SSE lines
-            while let Some(line_end) = buffer.find('\n') {
-                let line = buffer[..line_end].trim().to_string();
-                buffer = buffer[line_end + 1..].to_string();
+            // Handle tool call deltas
+            if let Some(ref tool_calls) = choice.delta.tool_calls {
+                for tc in tool_calls {
+                    let entry = tool_calls_map
+                        .entry(tc.index)
+                        .or_insert_with(|| (String::new(), String::new(), String::new()));
 
-                if line.is_empty() || line == "data: [DONE]" {
-                    continue;
-                }
-
-                if let Some(data) = line.strip_prefix("data: ") {
-                    if let Ok(chunk_response) = serde_json::from_str::<OpenAIStreamChunk>(data) {
-                        if let Some(choice) = chunk_response.choices.first() {
-                            // Handle content delta
-                            if let Some(ref delta_content) = choice.delta.content {
-                                content.push_str(delta_content);
-                                callback(StreamChunk::Text {
-                                    content: delta_content.clone(),
-                                });
-                            }
-
-                            // Handle tool call deltas
-                            if let Some(ref tool_calls) = choice.delta.tool_calls {
-                                for tc in tool_calls {
-                                    let entry =
-                                        tool_calls_map.entry(tc.index).or_insert_with(|| {
-                                            (String::new(), String::new(), String::new())
-                                        });
-
-                                    if let Some(ref id) = tc.id {
-                                        entry.0 = id.clone();
-                                    }
-                                    if let Some(ref func) = tc.function {
-                                        if let Some(ref name) = func.name {
-                                            entry.1 = name.clone();
-                                        }
-                                        if let Some(ref args) = func.arguments {
-                                            entry.2.push_str(args);
-                                        }
-                                    }
-                                }
-                            }
+                    if let Some(ref id) = tc.id {
+                        entry.0 = id.clone();
+                    }
+                    if let Some(ref func) = tc.function {
+                        if let Some(ref name) = func.name {
+                            entry.1 = name.clone();
+                        }
+                        if let Some(ref args) = func.arguments {
+                            entry.2.push_str(args);
                         }
                     }
                 }
             }
+        };
+
+        while let Some(chunk_result) = stream.next().await {
+            let chunk = chunk_result?;
+            count_streamed(&mut received, chunk.len())?;
+            lines.push(&chunk);
+            while let Some(line) = lines.next_line() {
+                handle(&line?);
+            }
+        }
+        if let Some(line) = lines.finish() {
+            handle(&line?);
         }
 
         // Convert accumulated tool calls to our format

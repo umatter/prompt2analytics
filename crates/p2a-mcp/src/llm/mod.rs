@@ -12,6 +12,7 @@ mod ollama;
 mod openai;
 mod provider;
 mod retry;
+mod stream;
 mod tokens;
 pub mod tool_loop;
 mod tools;

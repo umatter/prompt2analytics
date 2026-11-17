@@ -3,6 +3,7 @@
 #![cfg(feature = "http")]
 mod common;
 mod wp05_mechanics;
+mod wp30_llm_transport;
 mod wp53_llm_routes;
 mod wp54_ui_persistence;
 mod wp55_causal;
