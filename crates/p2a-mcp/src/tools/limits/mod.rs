@@ -1691,10 +1691,11 @@ impl Limits {
     /// Arguments of another shape, an empty index and a column `df` lacks (an index column, `on`
     /// or the values column) pass, so that serde or the core refuses them as usual. A column
     /// whose distinct values cannot be counted is refused, so that the check fails closed. The
-    /// refusal names `on` for the column budget. For the cell budget it names the dataset field
-    /// when `df` alone has too many rows, `index` when the index columns make too many values to
-    /// group or, counted, too many rows, and `on` when its distinct values alone make too many
-    /// columns for one row (`index` when the index columns alone do).
+    /// refusal names `on` for the column budget (`index` when the index columns alone fill it).
+    /// For the cell budget it names the dataset field when `df` alone has too many rows, `index`
+    /// when the index columns make too many values to group or, counted, too many rows, and `on`
+    /// when its distinct values alone make too many columns for one row (`index` when the index
+    /// columns alone do).
     ///
     /// On the governed paths (the HTTP route, the LLM tool loop and websocket) this runs on the
     /// governor's blocking thread, within the call's slot and deadline; over stdio it runs on the
@@ -1758,9 +1759,10 @@ impl Limits {
                          {index_columns} `index` values and its `on` value, {keys} values in all, \
                          which exceeds this server's limit of {keys_cap} values to group \
                          ({PIVOT_KEYS_PER_CELL} for each of its {cap} cells, pivot_cells). Name \
-                         fewer `index` columns (one that identifies each row is enough; join the \
-                         others back afterwards with munge_join), or pivot fewer rows, for \
-                         example after munge_filter or munge_sample."
+                         fewer `index` columns (one column that identifies each row of the wide \
+                         table, such as a unit id, is enough; join the others back afterwards \
+                         with munge_join), or pivot fewer rows, for example after munge_filter \
+                         or munge_sample."
                     ),
                     tool: tool.to_string(),
                     parameter: "index".to_string(),
@@ -1786,6 +1788,22 @@ impl Limits {
         if let Some(cap) = columns_cap
             && columns.n > cap
         {
+            // The index columns alone fill the budget: no `on` column can help.
+            if index_columns >= cap {
+                return Err(LimitViolation {
+                    message: format!(
+                        "Parameter `index` names {index_columns} columns, so `{tool}` would make \
+                         {columns} output columns (one more for each distinct value of the `on` \
+                         column `{on}`), which exceeds this server's limit of {cap} columns \
+                         (pivot_columns). Name fewer `index` columns."
+                    ),
+                    tool: tool.to_string(),
+                    parameter: "index".to_string(),
+                    requested: columns.to_string(),
+                    limit: cap.to_string(),
+                    override_key: "pivot_columns",
+                });
+            }
             return Err(LimitViolation {
                 message: format!(
                     "Parameter `on` names column `{on}`, which has {on_values} distinct values, \
@@ -1853,10 +1871,11 @@ impl Limits {
         if cells.n <= cap {
             return Ok(());
         }
-        let row_noun = if rows.n == 1 { "row" } else { "rows" };
+        // At least two rows: with one, the cells are the columns, which the exact count above
+        // kept within the cap.
         Err(LimitViolation {
             message: format!(
-                "`{tool}` would make {rows} {row_noun} (one per distinct combination of the \
+                "`{tool}` would make {rows} rows (one per distinct combination of the \
                  `index` columns {index_echo}) by {columns} columns (the `on` column `{on}` has \
                  {on_values} distinct values), {cells} cells, which exceeds this server's limit \
                  of {cap} cells (pivot_cells). Pivot fewer rows or fewer `on` values, for example \
@@ -3725,7 +3744,43 @@ mod tests {
         }
 
         #[test]
-        fn the_row_noun_follows_the_count() {
+        fn index_columns_that_fill_the_column_budget_are_named() {
+            // Two rows with one `key` value: 3 index columns and 1 `on` column, 4 in all.
+            let df = df!(
+                "a" => [1i64, 2], "b" => [5i64, 7], "c" => [3i64, 4], "key" => ["k", "k"],
+                "val" => [0.7, 1.3]
+            )
+            .unwrap();
+            assert_eq!(pivoted(&df, &["a", "b", "c"]), (2, 4));
+            let v = with("pivot_columns=3")
+                .check_pivot(rule(), &args(&["a", "b", "c"]), &df)
+                .unwrap_err();
+            assert_eq!(
+                (
+                    v.tool.as_str(),
+                    v.parameter.as_str(),
+                    v.requested.as_str(),
+                    v.limit.as_str(),
+                    v.override_key
+                ),
+                ("munge_pivot", "index", "at least 4", "3", "pivot_columns")
+            );
+            assert_eq!(
+                v.message,
+                "Parameter `index` names 3 columns, so `munge_pivot` would make at least 4 \
+                 output columns (one more for each distinct value of the `on` column `key`), \
+                 which exceeds this server's limit of 3 columns (pivot_columns). Name fewer \
+                 `index` columns."
+            );
+            assert!(
+                with("pivot_columns=4")
+                    .check_pivot(rule(), &args(&["a", "b", "c"]), &df)
+                    .is_ok()
+            );
+        }
+
+        #[test]
+        fn a_cell_refusal_counts_the_wide_rows() {
             // Two rows by 5 columns, 10 cells, refused at 9.
             let df = long(2, 4);
             assert_eq!(pivoted(&df, &["idx"]), (2, 5));
@@ -3786,9 +3841,9 @@ mod tests {
                 "The dataset has 5 rows, and `munge_pivot` groups each row by its 9 `index` \
                  values and its `on` value, 50 values in all, which exceeds this server's limit \
                  of 40 values to group (2 for each of its 20 cells, pivot_cells). Name fewer \
-                 `index` columns (one that identifies each row is enough; join the others back \
-                 afterwards with munge_join), or pivot fewer rows, for example after munge_filter \
-                 or munge_sample."
+                 `index` columns (one column that identifies each row of the wide table, such as \
+                 a unit id, is enough; join the others back afterwards with munge_join), or pivot \
+                 fewer rows, for example after munge_filter or munge_sample."
             );
             // A long table repeating one pair, which the pivot refuses after grouping all of
             // its values, is refused the same way.
