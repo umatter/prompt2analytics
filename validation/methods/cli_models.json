@@ -288,7 +288,7 @@
       "id": "cli_gsynth_defaults",
       "name": "CLI causal gsynth defaults: force unit, r up to 5",
       "category": "interfaces",
-      "reference": "gsynth::gsynth(force = 'unit', CV = FALSE, r = 0 | 1) (fixed-r fits; CV's choice is seed-dependent)",
+      "reference": "gsynth::gsynth(force = 'unit', CV = FALSE, r = 0 | 1) (fixed-r fits) and gsynth(force = 'unit', CV = TRUE, r = c(0, 5)) (default run)",
       "doc": "validation/cli/models.md",
       "cases": [
         "cli_gsynth_defaults"
@@ -306,7 +306,7 @@
         {
           "finding": "CLI-33",
           "quantity": "cross-validated r",
-          "note": "gsynth 1.4 cross-validates over random folds with a 1-SE rule, so the chosen r depends on R's RNG; the case pins fixed-r fits and the test checks the chosen r is in 0..=1"
+          "note": "on gsynth_staggered.csv core's cross-validation over r = 0..5 chooses r = 1 (ATT 2.967) where gsynth 1.4's deterministic cross-validation chooses r = 0 (ATT 6.948); default_r and default_att_avg are kept out of the Check, and the default run's ATT is pinned at the fixed-r fit for the r core chooses"
         }
       ],
       "supersedes_legacy": []

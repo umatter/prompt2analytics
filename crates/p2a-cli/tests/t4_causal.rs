@@ -268,8 +268,8 @@ fn test_validate_cli_iv_report() {
 
 /// CLI-33 (gsynth part): with no --force and no --n-factors the CLI fits gsynth's defaults, unit
 /// fixed effects with the number of factors chosen by cross-validation over 0..=5 (case
-/// cli_gsynth_defaults: gsynth at fixed r, CV = FALSE; gsynth 1.4's own CV draws random folds,
-/// so the r it chooses is not pinned, only the fit at the r core chooses). Fails before: the
+/// cli_gsynth_defaults: gsynth at fixed r, CV = FALSE, and gsynth's default CV run, whose
+/// choice of r differs from core's: deviation CLI-33). Fails before: the
 /// default was two-way effects searched over 0..=10.
 #[test]
 fn test_validate_cli_gsynth_defaults() {
@@ -285,11 +285,11 @@ fn test_validate_cli_gsynth_defaults() {
     let j = s.json(&base);
     assert_eq!(j["force"], "unit", "{j}");
     assert_eq!(j["r_max"], 5, "{j}");
+    // deviation CLI-33: gsynth's (deterministic) cross-validation chooses r = 0 on this panel
+    // (`default_r`, ATT `default_att_avg` 6.948); core's chooses r = 1, ATT 2.967, so both keys
+    // stay out of the Check. The default run's ATT is pinned at the r core chose, which is
+    // still R's fixed-r fit.
     let r = number(&j, "n_factors") as usize;
-    assert!(
-        r <= 1,
-        "core chose r = {r}; R's fits are pinned for r = 0 and 1"
-    );
     Check::new(&case)
         .scalar(&format!("unit_r{r}_att_avg"), number(&j, "att"), tol)
         .finish();
@@ -404,6 +404,14 @@ fn test_validate_cli_staggered_universal_simple() {
     assert_eq!(out.status.code(), Some(1), "{err}");
     assert!(
         err.contains("No valid group-time ATT estimates") && err.contains("small cell size"),
+        "{err}"
+    );
+    // 0 units per cell means nothing: refused by the parser, naming the flag and the bound
+    let out = s.run(&argv(&base, &["--min-obs-per-cell", "0"]));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{err}");
+    assert!(
+        err.contains("--min-obs-per-cell") && err.contains("1.."),
         "{err}"
     );
 }

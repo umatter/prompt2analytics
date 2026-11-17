@@ -549,7 +549,12 @@ EXAMPLES:
 
         /// Fewest treated and fewest comparison units a cell needs (default 1: did computes
         /// every cell that has both sides).
-        #[arg(long, default_value_t = 1, value_name = "N")]
+        #[arg(
+            long,
+            default_value_t = 1,
+            value_name = "N",
+            value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..)
+        )]
         min_obs_per_cell: usize,
     },
 
