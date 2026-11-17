@@ -189,6 +189,130 @@ fn numeric_with_gaps(df: &DataFrame, name: &str) -> Result<Vec<f64>, String> {
     Ok(out)
 }
 
+/// "Pairwise complete observations: 35 to 38 of 40 rows" when some pair of the correlation
+/// matrix dropped rows (the sentence `CorrelationMatrix`'s table ends with).
+fn pairwise_note(corr: &p2a_core::stats::CorrelationMatrix) -> Option<String> {
+    let min = corr.pair_n.iter().flatten().min().copied()?;
+    let max = corr.pair_n.iter().flatten().max().copied()?;
+    if min >= corr.n_rows {
+        return None;
+    }
+    let range = if min == max {
+        min.to_string()
+    } else {
+        format!("{min} to {max}")
+    };
+    Some(format!(
+        "Pairwise complete observations: {range} of {} rows",
+        corr.n_rows
+    ))
+}
+
+/// The viz_heatmap reply (text, PNG): the selection is checked first (every name exists and is
+/// numeric, and no more variables than the image holds), then only the selected columns are
+/// correlated (all numeric columns without a selection).
+fn heatmap_reply(
+    dataset: &p2a_core::Dataset,
+    selection: Option<&[String]>,
+    title: Option<&str>,
+) -> Result<(String, String), String> {
+    use p2a_core::visualization::heatmap::heatmap_capacity;
+    let df = dataset.df();
+    // The dtypes stats::correlation_matrix correlates.
+    let correlated = |dtype: &DataType| dtype.is_integer() || dtype.is_float();
+    let numeric_names: Vec<String> = df
+        .get_columns()
+        .iter()
+        .filter(|c| correlated(c.dtype()))
+        .map(|c| c.name().to_string())
+        .collect();
+    let capacity = heatmap_capacity(None, None);
+    let refuse_size = |k: usize| {
+        format!(
+            "{k} variables do not fit the heatmap image: at most {capacity} do. Select fewer \
+             with `columns`"
+        )
+    };
+    let corr = match selection {
+        Some(names) => {
+            let mut problems = Vec::new();
+            for name in names {
+                match df.column(name) {
+                    Err(_) => problems.push(format!("column '{name}' not found")),
+                    Ok(c) if !correlated(c.dtype()) => {
+                        problems.push(format!("'{name}' is not numeric ({})", c.dtype()))
+                    }
+                    Ok(_) => {}
+                }
+            }
+            if !problems.is_empty() {
+                return Err(format!(
+                    "Cannot draw the heatmap: {}. Numeric columns: {}",
+                    problems.join("; "),
+                    crate::tools::common::echo_list(&numeric_names, ", ", 20)
+                ));
+            }
+            let mut unique: Vec<&str> = Vec::new();
+            for name in names {
+                if !unique.contains(&name.as_str()) {
+                    unique.push(name);
+                }
+            }
+            if unique.len() < 2 {
+                return Err(
+                    "Need at least 2 distinct numeric columns for a correlation heatmap"
+                        .to_string(),
+                );
+            }
+            if unique.len() > capacity {
+                return Err(refuse_size(unique.len()));
+            }
+            let selected = dataset
+                .select_columns(&unique)
+                .map_err(|e| format!("Failed to select the columns: {e}"))?;
+            let corr = p2a_core::stats::correlation_matrix(&selected)
+                .map_err(|e| format!("Failed to compute correlation: {e}"))?;
+            if let Some(name) = unique
+                .iter()
+                .find(|n| !corr.columns.iter().any(|c| c == *n))
+            {
+                return Err(format!("'{name}' is not numeric"));
+            }
+            corr
+        }
+        None => {
+            if numeric_names.len() > capacity {
+                return Err(refuse_size(numeric_names.len()));
+            }
+            let corr = p2a_core::stats::correlation_matrix(dataset)
+                .map_err(|e| format!("Failed to compute correlation: {e}"))?;
+            if corr.columns.len() < 2 {
+                return Err("Need at least 2 numeric columns for correlation heatmap".to_string());
+            }
+            corr
+        }
+    };
+    let result = correlation_heatmap(
+        &corr.matrix,
+        &corr.columns,
+        &corr.columns,
+        title,
+        None,
+        None,
+    )
+    .map_err(|e| format!("Failed to generate heatmap: {e}"))?;
+    let mut description = format!(
+        "Correlation heatmap generated successfully.\nVariables: {}",
+        corr.columns.join(", ")
+    );
+    if let Some(note) = pairwise_note(&corr) {
+        description.push('\n');
+        description.push_str(&note);
+    }
+    append_notes(&mut description, None, &result.warnings);
+    Ok((description, result.image_base64))
+}
+
 /// Outliers listed per column in the viz_boxplot reply (in the core's order); the rest are
 /// counted, so a heavy-tailed column cannot push later columns past the chat loop's cut.
 const BOXPLOT_OUTLIERS_LISTED: usize = 20;
@@ -511,7 +635,7 @@ impl AnalyticsServer {
 
     /// Generate a correlation heatmap.
     #[tool(
-        description = "Generate a correlation heatmap visualization for numeric columns. Uses a diverging blue-white-red colormap. Returns a base64-encoded PNG image."
+        description = "Correlation heatmap of numeric columns: Pearson correlations, each pair over the rows where both are present (R's cor(use = \"pairwise.complete.obs\")), on a diverging colour scale. At most 127 variables fit the image (labels are hidden above about 40); unknown or non-numeric names in columns are refused. Returns a base64-encoded PNG image."
     )]
     pub async fn viz_heatmap(
         &self,
@@ -528,74 +652,16 @@ impl AnalyticsServer {
             }
         };
 
-        // Compute correlation matrix
-        let corr_result = match p2a_core::stats::correlation_matrix(&dataset) {
-            Ok(r) => r,
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Failed to compute correlation: {}",
-                    e
-                ))]));
-            }
-        };
-
-        if corr_result.columns.len() < 2 {
-            return Ok(CallToolResult::error(vec![Content::text(
-                "Need at least 2 numeric columns for correlation heatmap",
-            )]));
-        }
-
-        // Filter to specified columns if provided
-        let (matrix, columns) = if let Some(ref selected_cols) = request.columns {
-            // Find indices of requested columns
-            let indices: Vec<usize> = selected_cols
-                .iter()
-                .filter_map(|name| corr_result.columns.iter().position(|c| c == name))
-                .collect();
-
-            if indices.len() < 2 {
-                return Ok(CallToolResult::error(vec![Content::text(
-                    "Need at least 2 valid numeric columns for correlation heatmap",
-                )]));
-            }
-
-            // Build filtered matrix
-            let filtered_matrix: Vec<Vec<f64>> = indices
-                .iter()
-                .map(|&i| indices.iter().map(|&j| corr_result.matrix[i][j]).collect())
-                .collect();
-            let filtered_cols: Vec<String> = indices
-                .iter()
-                .map(|&i| corr_result.columns[i].clone())
-                .collect();
-
-            (filtered_matrix, filtered_cols)
-        } else {
-            (corr_result.matrix.clone(), corr_result.columns.clone())
-        };
-
-        match correlation_heatmap(
-            &matrix,
-            &columns,
-            &columns,
+        match heatmap_reply(
+            &dataset,
+            request.columns.as_deref(),
             request.title.as_deref(),
-            None,
-            None,
         ) {
-            Ok(result) => {
-                let description = format!(
-                    "Correlation heatmap generated successfully.\nVariables: {}",
-                    columns.join(", ")
-                );
-                Ok(CallToolResult::success(vec![
-                    Content::text(description),
-                    Content::image(result.image_base64, "image/png"),
-                ]))
-            }
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
-                "Failed to generate heatmap: {}",
-                e
-            ))])),
+            Ok((description, image)) => Ok(CallToolResult::success(vec![
+                Content::text(description),
+                Content::image(image, "image/png"),
+            ])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
         }
     }
 
@@ -1500,5 +1566,95 @@ mod tests {
         );
         assert_eq!(r.is_error, Some(true));
         assert!(text(&r).contains("Column 'names'"), "{}", text(&r));
+    }
+
+    fn heatmap(server: &AnalyticsServer, columns: Option<Vec<&str>>) -> CallToolResult {
+        run(
+            Limits::off(),
+            server.viz_heatmap(Parameters(HeatmapRequest {
+                dataset: "d".into(),
+                columns: columns.map(|c| c.into_iter().map(String::from).collect()),
+                title: None,
+            })),
+        )
+    }
+
+    /// 40 rows: numeric a, b (b with 2 nulls, c with 5), a text and a Boolean column.
+    fn heatmap_frame() -> DataFrame {
+        let a: Vec<f64> = (0..40)
+            .map(|i| (i as f64 * 0.7).sin() + i as f64 * 0.1)
+            .collect();
+        let b: Vec<Option<f64>> = (0..40)
+            .map(|i| (i % 17 != 3).then(|| (i as f64 * 1.3).cos() * 2.0 + i as f64 * 0.05))
+            .collect();
+        let c: Vec<Option<i64>> = (0..40)
+            .map(|i| (i % 8 != 5).then_some((i * 7 % 11) as i64))
+            .collect();
+        let name: Vec<String> = (0..40).map(|i| format!("n{i}")).collect();
+        let flag: Vec<bool> = (0..40).map(|i| i % 3 == 0).collect();
+        df!("a" => a, "b" => b, "c" => c, "name" => name, "flag" => flag).unwrap()
+    }
+
+    /// TOOL-38: unknown and non-numeric names were dropped without a word.
+    #[test]
+    fn heatmap_refuses_unknown_and_non_numeric_columns() {
+        let server = server_with(vec![("d", heatmap_frame())]);
+        let r = heatmap(&server, Some(vec!["a", "b", "zzz", "name"]));
+        assert_eq!(r.is_error, Some(true));
+        let t = text(&r);
+        assert!(
+            t.contains("column 'zzz' not found")
+                && t.contains("'name' is not numeric")
+                && t.contains("Numeric columns: a, b, c"),
+            "{t}"
+        );
+        let r = heatmap(&server, Some(vec!["a", "flag"]));
+        assert_eq!(r.is_error, Some(true));
+        assert!(text(&r).contains("'flag' is not numeric"), "{}", text(&r));
+    }
+
+    #[test]
+    fn heatmap_correlates_only_the_selection() {
+        let server = server_with(vec![("d", heatmap_frame())]);
+        let t = text(&heatmap(&server, Some(vec!["a", "b"])));
+        assert!(t.contains("Variables: a, b\n"), "{t}");
+        assert!(
+            t.ends_with("Pairwise complete observations: 37 to 40 of 40 rows"),
+            "{t}"
+        );
+        let all = text(&heatmap(&server, None));
+        assert!(all.contains("Variables: a, b, c\n"), "{all}");
+        // The handler's sentence equals the last line of CorrelationMatrix's table.
+        let corr = p2a_core::stats::correlation_matrix(&Dataset::new(heatmap_frame())).unwrap();
+        assert_eq!(
+            pairwise_note(&corr).as_deref(),
+            corr.to_string_table().lines().last()
+        );
+        assert!(
+            all.ends_with(corr.to_string_table().lines().last().unwrap()),
+            "{all}"
+        );
+    }
+
+    #[test]
+    fn heatmap_refuses_more_variables_than_fit() {
+        let columns: Vec<Column> = (0..130)
+            .map(|j| {
+                let v: Vec<f64> = (0..20)
+                    .map(|i| ((i * (j + 3)) % 13) as f64 + 0.1 * j as f64)
+                    .collect();
+                Column::new(format!("v{j:03}").into(), v)
+            })
+            .collect();
+        let server = server_with(vec![("d", DataFrame::new(columns).unwrap())]);
+        let r = heatmap(&server, None);
+        assert_eq!(r.is_error, Some(true));
+        assert!(
+            text(&r).contains("130 variables do not fit") && text(&r).contains("at most 127"),
+            "{}",
+            text(&r)
+        );
+        let t = text(&heatmap(&server, Some(vec!["v000", "v001", "v002"])));
+        assert!(t.contains("Variables: v000, v001, v002"), "{t}");
     }
 }

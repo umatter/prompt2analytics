@@ -101,7 +101,7 @@ pub struct HeatmapRequest {
 
     /// Column names to include (optional, uses all numeric if not specified)
     #[schemars(
-        description = "Names of numeric columns to include. If not specified, uses all numeric columns."
+        description = "Names of numeric (integer or float) columns to correlate and draw; an unknown or non-numeric name is refused. If not specified, uses all numeric columns. At most 127 fit the image."
     )]
     pub columns: Option<Vec<String>>,
 

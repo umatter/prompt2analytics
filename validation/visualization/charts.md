@@ -59,6 +59,17 @@ without leverage: 0.5319056255997687 at observation 16. Tests `test_validate_coo
 (1e-5 relative; measured 7.4e-15), `test_validate_qq_theoretical_quantiles` (1e-11),
 `test_residual_diagnostics_rejects_bad_leverage`.
 
+## Correlation heatmap (`correlation_heatmap`, `viz_heatmap`)
+
+Not R-pinned: the correlations are `stats::correlation_matrix` (R's `cor(use = "pairwise.complete.obs")`,
+pinned there); the chart only lays them out. Cells are square and shrink to fit the image beside a reserved
+colour-bar band; below 10 px the labels are hidden (the result's `warnings` say so) and below 4 px the matrix is
+refused, so at the default 800 x 600 at most 127 variables fit (`heatmap_capacity`). Column labels are
+rotated. Tests: `test_heatmap_layout_fits_the_canvas` (k = 2 to 127, every band inside the canvas; k = 128
+refused) and `test_heatmap_draws_every_cell` (the PNG's last cell has its colour). `viz_heatmap` refuses unknown
+and non-numeric names (listing the numeric ones), refuses more variables than fit, correlates only the selected
+columns and ends with the pairwise-complete sentence of `CorrelationMatrix` when a pair dropped rows.
+
 ## Regression-table exporters
 
 `LatexTableBuilder`, `HtmlTableBuilder` and `MarkdownTableBuilder` for lm(inv ~ value + capital) and
