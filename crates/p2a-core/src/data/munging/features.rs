@@ -202,7 +202,9 @@ pub fn diff(dataset: &Dataset, column: &str, periods: usize) -> MungeResult<Data
 
 /// Calculate percentage change between consecutive values.
 ///
-/// Computes: (value[i] - value[i - periods]) / value[i - periods]
+/// Computes: (value[i] - value[i - periods]) / value[i - periods], in floating
+/// point: an integer column gives Float64 fractions. A non-numeric column is
+/// refused.
 ///
 /// # Arguments
 ///
@@ -225,14 +227,17 @@ pub fn pct_change(dataset: &Dataset, column: &str, periods: usize) -> MungeResul
         return Err(MungeError::ColumnNotFound(column.to_string()));
     }
 
+    super::require_numeric(df, column, false)?;
+
     let pct_name = format!("{}_pct_change{}", column, periods);
 
-    // Calculate (current - lagged) / lagged
-    let lagged = col(column).shift(lit(periods as i64));
+    // Calculate (current - lagged) / lagged in Float64: an integer column would floor-divide
+    let current = col(column).cast(DataType::Float64);
+    let lagged = current.clone().shift(lit(periods as i64));
     let result = df
         .clone()
         .lazy()
-        .with_column(((col(column) - lagged.clone()) / lagged).alias(&pct_name))
+        .with_column(((current - lagged.clone()) / lagged).alias(&pct_name))
         .collect()
         .map_err(|e| MungeError::FeatureError(e.to_string()))?;
 
@@ -241,7 +246,7 @@ pub fn pct_change(dataset: &Dataset, column: &str, periods: usize) -> MungeResul
 
 /// Standardize columns to have mean 0 and standard deviation 1.
 ///
-/// Computes: (value - mean) / std
+/// Computes: (value - mean) / std. A non-numeric column is refused.
 ///
 /// # Arguments
 ///
@@ -258,11 +263,9 @@ pub fn pct_change(dataset: &Dataset, column: &str, periods: usize) -> MungeResul
 pub fn standardize(dataset: &Dataset, columns: &[&str]) -> MungeResult<Dataset> {
     let df = dataset.df();
 
-    // Validate columns exist
+    // Validate columns exist and are numeric
     for col_name in columns {
-        if df.column(col_name).is_err() {
-            return Err(MungeError::ColumnNotFound(col_name.to_string()));
-        }
+        super::require_numeric(df, col_name, false)?;
     }
 
     // Build expressions for standardization
@@ -287,7 +290,8 @@ pub fn standardize(dataset: &Dataset, columns: &[&str]) -> MungeResult<Dataset> 
 
 /// Normalize columns to range [0, 1].
 ///
-/// Computes: (value - min) / (max - min)
+/// Computes: (value - min) / (max - min), in floating point: an integer column
+/// gives Float64 values. A non-numeric column is refused.
 ///
 /// # Arguments
 ///
@@ -304,18 +308,16 @@ pub fn standardize(dataset: &Dataset, columns: &[&str]) -> MungeResult<Dataset> 
 pub fn normalize(dataset: &Dataset, columns: &[&str]) -> MungeResult<Dataset> {
     let df = dataset.df();
 
-    // Validate columns exist
+    // Validate columns exist and are numeric
     for col_name in columns {
-        if df.column(col_name).is_err() {
-            return Err(MungeError::ColumnNotFound(col_name.to_string()));
-        }
+        super::require_numeric(df, col_name, false)?;
     }
 
-    // Build expressions for normalization
+    // Build expressions for normalization, in Float64: an integer column would floor-divide
     let mut exprs: Vec<Expr> = Vec::new();
     for col_name in columns {
         let normalized_name = format!("{}_normalized", col_name);
-        let c = col(*col_name);
+        let c = col(*col_name).cast(DataType::Float64);
         let min = c.clone().min();
         let max = c.clone().max();
         exprs.push(((c - min.clone()) / (max - min)).alias(&normalized_name));
@@ -2181,5 +2183,56 @@ mod tests {
             .vector("dummy_3", &d[2], Tol::exact())
             .vector("level_counts", &counts, Tol::exact())
             .finish();
+    }
+
+    #[test]
+    fn test_validate_panel_shift_integer() {
+        use p2a_validation::{Check, Tol};
+        // case data_munging_panel_shift: (x - lag(x)) / lag(x) and (x - min) / (max - min) on an
+        // integer column are doubles in R; the same IEEE operations on the same values.
+        let (case, ds) = crate::test_support::load_case("data_munging_panel_shift");
+        assert_eq!(dtype(&ds, "x"), DataType::Int64);
+        let float = Tol::new(1e-14, 0.0);
+        let pc = pct_change(&ds, "x", 1).unwrap();
+        let nz = normalize(&ds, &["x"]).unwrap();
+        assert_eq!(dtype(&pc, "x_pct_change1"), DataType::Float64);
+        assert_eq!(dtype(&nz, "x_normalized"), DataType::Float64);
+        Check::new(&case)
+            .vector("pct1_x", &as_r(&num_cells(&pc, "x_pct_change1")), float)
+            .vector("normalize_x", &as_r(&num_cells(&nz, "x_normalized")), float)
+            .finish();
+        for (d, c, k) in [(&pc, "x_pct_change1", "pct1_x"), (&nz, "x_normalized", "normalize_x")] {
+            assert_eq!(
+                d.df().column(c).unwrap().null_count(),
+                case.vector(k).iter().filter(|v| v.is_nan()).count(),
+                "{c}"
+            );
+        }
+        // Int32 gives the same values
+        let mut df32 = ds.df().clone();
+        let x32 = df32.column("x").unwrap().cast(&DataType::Int32).unwrap();
+        df32.with_column(x32).unwrap();
+        let ds32 = Dataset::new(df32);
+        assert_eq!(
+            num_cells(&pct_change(&ds32, "x", 1).unwrap(), "x_pct_change1"),
+            num_cells(&pc, "x_pct_change1")
+        );
+        assert_eq!(
+            num_cells(&normalize(&ds32, &["x"]).unwrap(), "x_normalized"),
+            num_cells(&nz, "x_normalized")
+        );
+        // text is refused, not cast to missing values
+        let text = Dataset::new(df!("s" => ["1", "2", "3"]).unwrap());
+        for r in [
+            pct_change(&text, "s", 1),
+            normalize(&text, &["s"]),
+            standardize(&text, &["s"]),
+        ] {
+            assert!(
+                matches!(r, Err(MungeError::TypeMismatch { .. })),
+                "{:?}",
+                r.err()
+            );
+        }
     }
 }

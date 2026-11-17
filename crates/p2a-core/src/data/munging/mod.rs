@@ -62,6 +62,30 @@ fn numeric_f64(
     })
 }
 
+/// Refuse a column that fails [`numeric_f64`]'s rule, without converting it: a
+/// numeric column (Boolean too when `allow_bool`), or one whose cells are all
+/// null, passes.
+fn require_numeric(
+    df: &polars::prelude::DataFrame,
+    column: &str,
+    allow_bool: bool,
+) -> MungeResult<()> {
+    let col = df
+        .column(column)
+        .map_err(|_| MungeError::ColumnNotFound(column.to_string()))?;
+    if crate::data::columns::is_numeric_dtype(col.dtype(), allow_bool)
+        || col.null_count() == col.len()
+    {
+        Ok(())
+    } else {
+        Err(MungeError::TypeMismatch {
+            column: column.to_string(),
+            expected: "numeric (convert text with munge_cast first)".to_string(),
+            found: col.dtype().to_string(),
+        })
+    }
+}
+
 /// The values of the numeric column `column` ([`numeric_f64`]'s rule), `None`
 /// where a value is missing (null, or NaN in a float column; R's `is.na`).
 /// Infinite values are kept.
