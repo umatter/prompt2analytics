@@ -2924,8 +2924,8 @@ mod tests {
                 .flat_map(nums)
                 .collect()
         };
-        // deviation TOOL-23: center = false switches the correlation matrix off but still
-        // centres the data (R's cov.wt(center = FALSE) does not), so center is left out.
+        // center = false and cor are pinned on their own case
+        // (tier3 test_validate_mcp_cov_wt_center_and_cor).
         let v = json_of(&call(serde_json::json!({})));
         let ml = json_of(&call(serde_json::json!({"method": "ML"})));
         Check::new(&case)
