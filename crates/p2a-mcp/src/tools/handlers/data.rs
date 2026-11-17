@@ -130,8 +130,8 @@ pub(crate) enum FileSizeRefusal {
 /// and the conversation store's dataset reload: only when the limits set a
 /// `load_file_bytes` budget (hosted 64 MiB, none when limits are off,
 /// `P2A_LIMIT_OVERRIDES` in any mode) is the size read on disk and compared
-/// with it. Returns the size when it was read. A refusal is logged under
-/// `tool`; each caller words its own message.
+/// with it. Returns the size when it was read. Each caller logs a refusal
+/// with its own fields and words its own message.
 pub(crate) fn check_file_size(path: &Path, tool: &str) -> Result<Option<u64>, FileSizeRefusal> {
     let limits = crate::tools::limits::current();
     if limits.load_file_bytes.is_none() {
@@ -142,16 +142,7 @@ pub(crate) fn check_file_size(path: &Path, tool: &str) -> Result<Option<u64>, Fi
         .len();
     limits
         .check_budget(tool, "load_file_bytes", size, limits.load_file_bytes)
-        .map_err(|v| {
-            tracing::info!(
-                tool,
-                override_key = v.override_key,
-                requested = %v.requested,
-                limit = %v.limit,
-                "request refused by a named budget"
-            );
-            FileSizeRefusal::OverLimit(v)
-        })?;
+        .map_err(FileSizeRefusal::OverLimit)?;
     Ok(Some(size))
 }
 
@@ -1874,6 +1865,13 @@ impl AnalyticsServer {
                 ))]));
             }
             Err(FileSizeRefusal::OverLimit(v)) => {
+                tracing::info!(
+                    tool = "load_dataset",
+                    override_key = v.override_key,
+                    requested = %v.requested,
+                    limit = %v.limit,
+                    "request refused by a named budget"
+                );
                 return Ok(CallToolResult::error(vec![Content::text(format!(
                     "{} Load a smaller file, or split it and load the parts.",
                     v.message

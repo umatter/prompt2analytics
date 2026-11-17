@@ -780,7 +780,14 @@ pub fn load_reload_source(
                 return Err(RELOAD_LOAD_FAILED.to_string());
             }
             Err(FileSizeRefusal::OverLimit(v)) => {
-                tracing::debug!(dataset = %name, "Reload source over load_file_bytes");
+                tracing::info!(
+                    tool = RELOAD_LABEL,
+                    dataset = %name,
+                    override_key = v.override_key,
+                    requested = %v.requested,
+                    limit = %v.limit,
+                    "request refused by a named budget"
+                );
                 return Err(format!(
                     "the file needs {} (load_file_bytes), which exceeds this server's limit of {}",
                     v.requested, v.limit
