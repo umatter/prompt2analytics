@@ -98,7 +98,8 @@ mediation `missing`); it pins no value.
 | `matching --distance` | logit (glm, logistic, ps), probit, mahalanobis, euclidean | `matchit(distance = )` |
 | `matching --m-order` (new) | largest (descending), smallest (ascending), data (data_order), random; default largest for logit/probit, data otherwise | `matchit(m.order = )` |
 | `synth --v-method` | datadriven (data_driven, optimal, nested), equal (uniform); custom V is MCP-only | `synth(custom.v = )` |
-| `gsynth --force` | none, unit (individual), time, two_way (twoway) | `gsynth(force = )` |
+| `gsynth --force` | unit (default, gsynth's; individual), none, time, two_way (twoway) | `gsynth(force = )` |
+| `gsynth --r-max` (new) | the largest factor count cross-validation tries, default 5 (`gsynth(r = c(0, 5))`); `--n-factors` fixes r | `gsynth(r = )` |
 | `gsynth --estimator` | ife (gsynth, interactive_fixed_effects), mc (matrix_completion) | `gsynth(estimator = )` |
 
 `--method cem` uses MatchIt's default Sturges bins (it used four quantile bins). Matching prints
@@ -228,14 +229,14 @@ the Johansen result (`"method": "VECM"` first). Only the transitory form is esti
 | Command, option | Values (canonical first; aliases) | R argument |
 |---|---|---|
 | `--weight-style` (all four) | W (row, rowstd, row_standardised), B (binary), C (global, globalstd), U (unit_sum, unitsum), minmax (mm, min_max), S (varstab, variance_stabilising) | `spdep::nb2listw(style = )` |
-| `moran --alternative` | two.sided (two_sided, ...), greater, less | `moran.test(alternative = )` |
+| `moran --alternative` | greater (default, `moran.test`'s), two.sided (two_sided, ...), less | `moran.test(alternative = )` |
 
 An unknown style ran row standardisation and an unknown alternative the two-sided test; both
 are now usage errors. The SAR impacts carry the core's warnings (text: a `Warning:` line after
 the table; JSON: `impacts.warnings`, always present), so a degraded impact computation (a
 singular multiplier) no longer looks like a real one (SPAT-25). SAR, SEM and SAC report the
 style (`weight_style`, spdep's letter), `k_neighbors` and the optimiser's notes; Moran reports
-the alternative by its R name and `n_islands`.
+the alternative by its R name and `n_islands`. Without `--alternative` the test is one-sided (greater), as `moran.test`; it was two-sided.
 
 | Test | Case, keys | Tolerance |
 |---|---|---|

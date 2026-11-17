@@ -262,6 +262,120 @@
       "tolerance": "validation/README.md, n = 200: Tol::coef/se/stat/p_value(200); n and sorted rows exact; the printed table of the replay test Tol::printed(6/6/3/4)",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "cli_iv_report",
+      "name": "CLI causal iv report: HC1 or classical SEs, R-squared and ivreg adjusted R-squared",
+      "category": "interfaces",
+      "reference": "AER::ivreg + sandwich::vcovHC(type = 'HC1'); summary.ivreg",
+      "doc": "validation/cli/models.md",
+      "cases": [
+        "cli_iv_report"
+      ],
+      "tests": [
+        "p2a-cli::t4_causal::test_validate_cli_iv_report"
+      ],
+      "quantities": [
+        "coefficients",
+        "SE (HC1 and classical)",
+        "t",
+        "p",
+        "R-squared",
+        "adjusted R-squared"
+      ],
+      "tolerance": "Tol::coef/se/stat/p_value(n)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "cli_gsynth_defaults",
+      "name": "CLI causal gsynth defaults: force unit, r up to 5",
+      "category": "interfaces",
+      "reference": "gsynth::gsynth(force = 'unit', CV = FALSE, r = 0 | 1) (fixed-r fits; CV's choice is seed-dependent)",
+      "doc": "validation/cli/models.md",
+      "cases": [
+        "cli_gsynth_defaults"
+      ],
+      "tests": [
+        "p2a-cli::t4_causal::test_validate_cli_gsynth_defaults"
+      ],
+      "quantities": [
+        "average ATT at r = 0 and r = 1 (force unit)",
+        "force",
+        "r_max"
+      ],
+      "tolerance": "Tol::iterative(5e-4) (p2a's EM stopping rule against R's converged fit, as test_validate_cli_gsynth_r_spellings)",
+      "deviations": [
+        {
+          "finding": "CLI-33",
+          "quantity": "cross-validated r",
+          "note": "gsynth 1.4 cross-validates over random folds with a 1-SE rule, so the chosen r depends on R's RNG; the case pins fixed-r fits and the test checks the chosen r is in 0..=1"
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "cli_panel_fe_missing_note",
+      "name": "CLI panel fe/re dropped-rows note and missing JSON",
+      "category": "interfaces",
+      "reference": "plm::plm(model = 'within' | 'random') on complete cases (na.omit)",
+      "doc": "validation/cli/models.md",
+      "cases": [
+        "panel_grunfeld_na"
+      ],
+      "tests": [
+        "p2a-cli::tier2::wp19_dynamic_panel::test_validate_cli_panel_fe_missing_note"
+      ],
+      "quantities": [
+        "rows dropped",
+        "per-column missing counts"
+      ],
+      "tolerance": "exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "cli_staggered_universal_simple",
+      "name": "CLI causal staggered-did universal base period, simple ATT, first-period drops",
+      "category": "interfaces",
+      "reference": "did::att_gt(base_period = 'varying' | 'universal', bstrap = FALSE); aggte(type = 'simple' | 'group')",
+      "doc": "validation/cli/models.md",
+      "cases": [
+        "did_cs_varying",
+        "did_cs_small_cohorts"
+      ],
+      "tests": [
+        "p2a-cli::t4_causal::test_validate_cli_staggered_universal_simple"
+      ],
+      "quantities": [
+        "simple overall ATT and SE",
+        "universal group overall ATT and SE",
+        "n_dropped_first_period"
+      ],
+      "tolerance": "Tol::coef/se(n); counts exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "cli_hurdle_theta_se",
+      "name": "CLI discrete hurdle negbin dispersion and its standard errors",
+      "category": "interfaces",
+      "reference": "pscl::hurdle(dist = 'negbin'): theta, SE(log theta), theta * SE(log theta)",
+      "doc": "validation/cli/models.md",
+      "cases": [
+        "disc_hurdle_t4"
+      ],
+      "tests": [
+        "p2a-cli::tier3::t4_output::test_validate_cli_hurdle_theta_se"
+      ],
+      "quantities": [
+        "theta",
+        "SE of theta",
+        "SE of log theta"
+      ],
+      "tolerance": "Tol::iterative(1e-7) theta, Tol::iterative(1e-5) SEs, as the core hurdle tests",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }
