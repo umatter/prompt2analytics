@@ -328,6 +328,10 @@ fn kernel_value(x1: &[f64], x2: &[f64], kernel: FastKernel) -> f64 {
 /// Fill a column in parallel from this many missing entries.
 const PARALLEL_FILL: usize = 4096;
 
+/// Compute the decision values in parallel from this many kernel terms (rows x support vectors x
+/// features).
+const PARALLEL_DECISION_WORK: usize = 1 << 16;
+
 /// `Q` on the solver's positions: `rows[pos]` is the row at a position.
 struct QMatrix<'a> {
     x: &'a [f64],
@@ -941,21 +945,31 @@ fn train(
     let budget = resource::current_budget();
     let mut decision_values = resource::try_vec(n, 0.0, "SVM decision values")?;
     let (x_ref, svs, coefs) = (x, &support_vector_indices, &dual_coefficients);
-    decision_values
-        .par_iter_mut()
-        .enumerate()
-        .try_for_each(|(r, slot)| -> EconResult<()> {
-            if let Some(b) = &budget {
-                b.check()?;
-            }
-            let row = &x_ref[r * p..(r + 1) * p];
-            let mut s = 0.0;
-            for (&sv, &coef) in svs.iter().zip(coefs) {
-                s += coef * kernel_value(row, &x_ref[sv * p..(sv + 1) * p], kernel);
-            }
-            *slot = s + bias;
-            Ok(())
-        })?;
+    let decide = |(r, slot): (usize, &mut f64)| -> EconResult<()> {
+        if let Some(b) = &budget {
+            b.check()?;
+        }
+        let row = &x_ref[r * p..(r + 1) * p];
+        let mut s = 0.0;
+        for (&sv, &coef) in svs.iter().zip(coefs) {
+            s += coef * kernel_value(row, &x_ref[sv * p..(sv + 1) * p], kernel);
+        }
+        *slot = s + bias;
+        Ok(())
+    };
+    // Each row is computed alone, so both ways give the same values; handing a small problem to
+    // the thread pool costs more than the work.
+    if n.saturating_mul(svs.len()).saturating_mul(p.max(1)) >= PARALLEL_DECISION_WORK {
+        decision_values
+            .par_iter_mut()
+            .enumerate()
+            .try_for_each(decide)?;
+    } else {
+        decision_values
+            .iter_mut()
+            .enumerate()
+            .try_for_each(decide)?;
+    }
     let predictions: Vec<f64> = decision_values
         .iter()
         .map(|&d| {
