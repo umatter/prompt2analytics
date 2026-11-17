@@ -420,7 +420,14 @@ pub static PARAM_RULES: &[ParamRule] = {
         // partykit's nresample (default 9,999), read only by the Monte Carlo test; the
         // `ctree_permutation_work` budget bounds its product with the rows and inputs.
         p("ml_ctree", "n_permutations", Max(SimulationSize)),
-        p("ml_cubist", "neighbors", Max(Neighbors)),
+        p(
+            "ml_cubist",
+            "neighbors",
+            Exempt(
+                "0 to 9: the core refuses more in every mode (R's Cubist limit); the leave-one-out \
+                 correction checks the call's budget once per row, so the deadline bounds it",
+            ),
+        ),
         p("ml_cutree", "k", Max(Components)),
         p("ml_cutree", "cut_height", Exempt(CUT_HEIGHT)),
         p(
@@ -961,13 +968,20 @@ pub static PARAM_RULES: &[ParamRule] = {
 /// Deliberately not row-limited, because their cost is close to linear in the row count:
 /// `hypothesis_cor_test` (Kendall's tau by sort and merge), `stats_ecdf` (evaluation by binary
 /// search), `timeseries_cpgram` (an FFT periodogram), `ml_ctree` (splits from one sort and
-/// running sums; its Monte Carlo test is bounded by `ctree_permutation_work`), `treatment_twang` (features sorted once, stumps swept with prefix sums),
+/// running sums; its Monte Carlo test is bounded by `ctree_permutation_work`),
+/// `treatment_twang` (features sorted once, stumps swept with prefix sums),
 /// `treatment_sbw` (solved in the dimension of the balance constraints), `bacon_decomp` (cell
 /// sums, no dense design), `regression_gls` (O(n) whitening for each of its correlation
 /// structures), `panel_gls` (a T x T covariance with T at most N, linear work per entity),
 /// `moran_test` (traces from the sparse W), `spatial_lm_tests_tool` (traces from the sparse W and
 /// products of x with W, k columns wide) and `spatial_neighbors`
 /// (a k-d tree, bounded by `spatial_links`).
+///
+/// Not row-limited either: `hypothesis_wilcoxon` and `pairwise_wilcox`, whose `exact = true`
+/// paths p2a-core refuses above about two seconds of work in every mode (`MAX_EXACT_WORK` in
+/// `stats::wilcoxon`; Ansari and the exact Kolmogorov-Smirnov distributions share the bound),
+/// and `hypothesis_ks_test`, which has no `exact` field and computes an exact distribution only
+/// in R's default range.
 pub static ROW_RULES: &[RowRule] = &[
     // Dense: `hierarchical` keeps the condensed n(n-1)/2 f64 distance matrix; `ml_cutree` builds
     // the same tree before cutting it.
@@ -1860,13 +1874,19 @@ mod tests {
         }
     }
 
+    /// `ml_cubist` `neighbors` is bounded by the core (0 to 9 in every mode), not by a hosted
+    /// cap; the handler test `cubist_neighbors_above_nine_are_refused_by_the_core` pins the
+    /// core's refusal.
+    #[test]
+    fn cubist_neighbors_is_left_to_the_core() {
+        assert!(hosted("ml_cubist", json!({"neighbors": 150})).is_ok());
+    }
+
     /// Every hosted cap is at least 1.5x the tool's default (handler or core default).
     #[test]
     fn hosted_caps_accept_one_and_a_half_times_every_default() {
         const DEFAULTS: &[(&str, &str, u64)] = &[
             ("regression_bootstrap_cov", "n_boot", 999),
-            ("treatment_ipw", "bootstrap", 0),
-            ("treatment_doubly_robust", "bootstrap", 0),
             ("staggered_did", "bootstrap", 999),
             ("mediation_analysis", "n_bootstrap", 999),
             ("regression_standardization", "n_bootstrap", 999),
@@ -1946,7 +1966,17 @@ mod tests {
             ("ts_garch_fit", "p", 1),
             ("ts_garch_fit", "q", 1),
         ];
-        for &(tool, field, d) in DEFAULTS {
+        // A default of 0 runs no replicates; 999 is the replicate count the other bootstrap
+        // tools default to.
+        const REQUESTED: &[(&str, &str, u64)] = &[
+            ("treatment_ipw", "bootstrap", 999),
+            ("treatment_doubly_robust", "bootstrap", 999),
+        ];
+        assert!(
+            DEFAULTS.iter().all(|&(_, _, d)| d > 0),
+            "a zero default tests nothing; list it in REQUESTED"
+        );
+        for &(tool, field, d) in DEFAULTS.iter().chain(REQUESTED) {
             let v = (d * 3).div_ceil(2);
             assert!(
                 hosted(tool, json!({ field: v })).is_ok(),
@@ -2557,9 +2587,8 @@ mod tests {
     /// While the ARIMA work budget is set, a column holding a nonzero value below
     /// `ARIMA_MIN_MAGNITUDE` is refused, because the differences, products and squares the fit
     /// forms from such values can be subnormal, and arithmetic on those is far slower than the
-    /// budget assumes.
-    /// Zero, NaN and infinities cost no more than other numbers and pass, as does everything when
-    /// the budget is off.
+    /// budget assumes. Zero, NaN and infinities cost no more than other numbers and pass, as does
+    /// everything when the budget is off.
     #[test]
     fn arima_series_below_the_magnitude_floor_is_refused_while_the_budget_is_set() {
         use super::ARIMA_MIN_MAGNITUDE;

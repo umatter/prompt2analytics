@@ -3400,6 +3400,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cubist_neighbors_above_nine_are_refused_by_the_core() {
+        let s = server().await;
+        for n in [10, 150] {
+            let r = s
+                .ml_cubist(req(json!({"dataset": "ml", "features": ["x1", "x2"],
+                                      "target": "yi_f", "neighbors": n, "seed": 1})))
+                .await
+                .unwrap();
+            assert_eq!(r.is_error, Some(true), "{}", text_of(&r));
+            assert!(
+                text_of(&r).contains(&format!(
+                    "neighbors must be 0 to 9 (the limit of R's Cubist), got {n}"
+                )),
+                "{}",
+                text_of(&r)
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn test_na_mcp_tree_tools_integer_and_missing_targets() {
         // WT-2 through MCP. Before: an Int64 target fails with "Column 'yi' is not numeric",
         // and y_na / cls_na are fitted with the null read as 0.0.
