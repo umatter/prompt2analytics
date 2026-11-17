@@ -376,7 +376,8 @@ impl ToolCallStore {
     }
 
     /// Complete or fail the call's row `row` and capture the dataset metadata of a successful
-    /// dataset loader. Failed writes are logged.
+    /// dataset loader. A call that failed, or whose tool answered with an error result, fails the
+    /// row. Failed writes are logged.
     async fn finished(
         &self,
         row: Option<&str>,
@@ -388,17 +389,22 @@ impl ToolCallStore {
         let Some(db) = &self.db else {
             return;
         };
-        let result = match outcome {
-            Ok(result) => result,
-            Err(e) => {
-                // Update tool call record with error
-                if let Some(tc_id) = row
-                    && let Err(db_err) = db.fail_tool_call(tc_id, e, duration_ms).await
-                {
-                    tracing::warn!("Failed to update tool call record: {}", db_err);
-                }
-                return;
+        let error = match outcome {
+            Ok(result) if result.success => None,
+            Ok(result) => Some(truncate_str(&tool_result_text(result), 10_240).to_string()),
+            Err(e) => Some(e.clone()),
+        };
+        if let Some(error) = error {
+            // Update tool call record with error
+            if let Some(tc_id) = row
+                && let Err(db_err) = db.fail_tool_call(tc_id, &error, duration_ms).await
+            {
+                tracing::warn!("Failed to update tool call record: {}", db_err);
             }
+            return;
+        }
+        let Ok(result) = outcome else {
+            return;
         };
         let capture = self
             .session_id
@@ -449,6 +455,20 @@ impl ToolCallStore {
             .await;
         }
     }
+}
+
+/// The text items of a tool result, one per line (images left out).
+#[cfg(feature = "db")]
+fn tool_result_text(result: &super::http::ToolResult) -> String {
+    result
+        .content
+        .iter()
+        .filter_map(|item| match item {
+            ContentItem::Text { text } => Some(text.as_str()),
+            ContentItem::Image { .. } => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// The milliseconds of a tool call as the store records them.
@@ -735,7 +755,12 @@ impl ToolExecutor for SessionToolExecutor {
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
-                Ok(content)
+                // A tool's own error result reaches the model as an error.
+                if result.success {
+                    Ok(content)
+                } else {
+                    Err(content)
+                }
             }
             Err(e) => Err(e),
         }
@@ -1356,10 +1381,13 @@ pub enum ProgressEvent {
         tool: String,
         arguments: serde_json::Value,
     },
+    /// A tool call finished; `status` is `success`, or `error` when the call failed or the tool
+    /// answered with an error result.
     ToolEnd {
         tool: String,
         elapsed_ms: u64,
         result: Option<String>,
+        status: &'static str,
     },
     /// Tool result with images (for viz tools)
     ToolResult {
@@ -1817,6 +1845,10 @@ impl ToolExecutor for StreamingToolExecutor {
             .map_err(|e| e.to_string());
         let elapsed = start.elapsed();
 
+        let status = match &result {
+            Ok(r) if r.success => "success",
+            _ => "error",
+        };
         // Extract result text for the ToolEnd event
         let result_text = match &result {
             Ok(r) => {
@@ -1842,6 +1874,7 @@ impl ToolExecutor for StreamingToolExecutor {
                 tool: name.to_string(),
                 elapsed_ms: elapsed.as_millis() as u64,
                 result: result_text,
+                status,
             })
             .await;
 
@@ -1894,7 +1927,12 @@ impl ToolExecutor for StreamingToolExecutor {
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
-                Ok(content)
+                // A tool's own error result reaches the model as an error.
+                if result.success {
+                    Ok(content)
+                } else {
+                    Err(content)
+                }
             }
             Err(e) => Err(e),
         }

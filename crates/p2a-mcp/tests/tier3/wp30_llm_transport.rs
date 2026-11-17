@@ -694,3 +694,65 @@ async fn the_llm_routes_give_every_refusal_a_code() {
     .await;
     assert_eq!(stream_error(&events).1, "not_found");
 }
+
+// ---------- tool errors ----------
+
+/// A tool that answers with an error result (a dataset that does not exist) ends with
+/// `tool_end.status` "error" and reaches the model as an error (the next request's tool message
+/// starts "Error: "); a successful call has "success". The provider is an Ollama stub, the one
+/// provider the chat routes take over plain HTTP.
+#[tokio::test]
+async fn a_tools_error_result_is_an_error_to_the_model_and_the_client() {
+    let (app, _) = http_app().await;
+    let sid = new_session(&app).await;
+    for (tool, args, status) in [
+        (
+            "describe_dataset",
+            json!({"dataset": "no_such_dataset"}),
+            "error",
+        ),
+        ("list_datasets", json!({}), "success"),
+    ] {
+        let call = format!(
+            "{}\n",
+            json!({"message": {"role": "assistant", "content": "",
+                   "tool_calls": [{"function": {"name": tool, "arguments": args}}]}, "done": true})
+        );
+        let done = format!(
+            "{}\n",
+            json!({"message": {"role": "assistant", "content": "done"}, "done": true})
+        );
+        let (addr, bodies) = chunked_stub(
+            "/api/chat",
+            vec![vec![call.into_bytes()], vec![done.into_bytes()]],
+        )
+        .await;
+        let events = stream_events(
+            &app,
+            json!({"session_id": sid, "message": "go",
+                   "provider": provider_json(ProviderType::Ollama, addr)}),
+        )
+        .await;
+        let end = events
+            .iter()
+            .find(|e| e["type"] == "tool_end")
+            .unwrap_or_else(|| panic!("{tool}: no tool_end in {events:?}"));
+        assert_eq!(end["status"], status, "{tool}: {end}");
+        assert_eq!(events.last().unwrap()["type"], "done", "{events:?}");
+        let bodies = bodies.lock().unwrap();
+        assert_eq!(bodies.len(), 2, "{tool}");
+        let tool_message = bodies[1]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["role"] == "tool")
+            .unwrap_or_else(|| panic!("{tool}: no tool message in {}", bodies[1]))
+            .clone();
+        let content = tool_message["content"].as_str().unwrap();
+        assert_eq!(
+            content.starts_with("Error: "),
+            status == "error",
+            "{tool}: {content}"
+        );
+    }
+}
