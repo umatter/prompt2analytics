@@ -124,7 +124,8 @@ fn derived_file(meta: &DatasetMeta, session_path: &Path) -> anyhow::Result<PathB
             Ok(dir.join(f))
         }
         _ => anyhow::bail!(
-            "the session entry points outside {} ({}); refusing to use it",
+            "the stored copy of dataset '{}' must be under {}/ (found {}); was the session file renamed or copied? Re-run the commands that created it",
+            meta.name,
             expected_dir.to_string_lossy(),
             meta.source_path.display()
         ),
@@ -144,7 +145,10 @@ pub struct CommandRecord {
     pub category: String,
     /// Subcommand name (load, ols, fe, etc.)
     pub subcommand: String,
-    /// Structured arguments for reconstruction
+    /// Not filled since p2a 0.2 (recorded as `null`); [`CommandRecord::argv`] is the
+    /// canonical record of a command, and `script export` reads only `argv` (or this field
+    /// for records older than `argv`). Still written, because older p2a versions require it.
+    #[serde(default)]
     pub arguments: serde_json::Value,
     /// The command-portion argv (category, subcommand, and args) as actually
     /// invoked: without the program name, without the global flags typed before
@@ -152,9 +156,11 @@ pub struct CommandRecord {
     /// Preferred over `arguments` for faithful, injection-safe script export.
     #[serde(default)]
     pub argv: Vec<String>,
-    /// Referenced datasets by name
+    /// Not filled since p2a 0.2 (recorded empty); see [`CommandRecord::arguments`]
+    #[serde(default)]
     pub dataset_refs: Vec<String>,
-    /// Output file paths (for viz commands)
+    /// Not filled since p2a 0.2 (recorded empty); see [`CommandRecord::arguments`]
+    #[serde(default)]
     pub output_files: Vec<PathBuf>,
     /// The working directory of the invocation (`None` in older files); an exported
     /// script changes into it before replaying the command
@@ -579,43 +585,6 @@ impl SessionManager {
         self.command_start = Some(Instant::now());
     }
 
-    /// Record a completed command
-    pub fn record_command(
-        &mut self,
-        category: &str,
-        subcommand: &str,
-        command_line: &str,
-        arguments: serde_json::Value,
-        dataset_refs: Vec<String>,
-        output_files: Vec<PathBuf>,
-        success: bool,
-        error: Option<String>,
-    ) {
-        let duration_ms = self
-            .command_start
-            .map(|start| start.elapsed().as_millis() as u64)
-            .unwrap_or(0);
-
-        let record = CommandRecord {
-            id: uuid::Uuid::new_v4().to_string(),
-            timestamp: Utc::now(),
-            command_line: command_line.to_string(),
-            category: category.to_string(),
-            subcommand: subcommand.to_string(),
-            arguments,
-            argv: Vec::new(),
-            dataset_refs,
-            output_files,
-            cwd: None,
-            success,
-            error,
-            duration_ms,
-        };
-
-        self.session.record_command(record);
-        self.command_start = None;
-    }
-
     /// Record a command invocation from its command-portion argv (category,
     /// subcommand, and arguments), recorded without the program name, without the
     /// global flags typed before the category and without `--session`; global
@@ -876,41 +845,6 @@ fn dataset_meta(
     }
 }
 
-/// In-memory dataset store for non-session mode
-pub struct DatasetStore {
-    datasets: HashMap<String, Dataset>,
-}
-
-impl DatasetStore {
-    pub fn new() -> Self {
-        Self {
-            datasets: HashMap::new(),
-        }
-    }
-
-    pub fn insert(&mut self, name: String, dataset: Dataset) {
-        self.datasets.insert(name, dataset);
-    }
-
-    pub fn get(&self, name: &str) -> Option<&Dataset> {
-        self.datasets.get(name)
-    }
-
-    pub fn list(&self) -> Vec<&String> {
-        self.datasets.keys().collect()
-    }
-
-    pub fn remove(&mut self, name: &str) -> Option<Dataset> {
-        self.datasets.remove(name)
-    }
-}
-
-impl Default for DatasetStore {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 #[cfg(test)]
 mod record_invocation_tests {
     use super::SessionManager;
@@ -1131,6 +1065,23 @@ mod derived_dataset_tests {
             again.register_dataset("d", dir.path().join("d.csv"), "csv", &sample(), None);
             assert!(outside.exists(), "{bad:?} removed the outside file");
         }
+        // the refusal names the expected directory and the path found
+        let mut meta = dataset_meta("d", PathBuf::new(), "parquet", &sample(), None, true);
+        for bad in [
+            "other.datasets/outside.parquet",
+            "../outside.parquet",
+            "s.json.datasets/x.csv",
+        ] {
+            meta.source_path = PathBuf::from(bad);
+            assert_eq!(
+                derived_file(&meta, Path::new("s.json"))
+                    .unwrap_err()
+                    .to_string(),
+                format!(
+                    "the stored copy of dataset 'd' must be under s.json.datasets/ (found {bad}); was the session file renamed or copied? Re-run the commands that created it"
+                )
+            );
+        }
         // the path persist_dataset writes is accepted
         let mut m = SessionManager::new(dir.path().join("t.json")).unwrap();
         m.persist_dataset("d", sample()).unwrap();
@@ -1139,6 +1090,22 @@ mod derived_dataset_tests {
             derived_file(meta, &dir.path().join("t.json")).unwrap(),
             dir.path().join("t.json.datasets/d.parquet")
         );
+    }
+
+    #[test]
+    fn old_records_without_cwd_or_legacy_fields_parse() {
+        let old = r#"{"id":"r","timestamp":"2026-01-01T00:00:00Z","command_line":"data list","category":"data","subcommand":"list","argv":["data","list"],"success":true,"error":null,"duration_ms":1}"#;
+        let record: CommandRecord = serde_json::from_str(old).unwrap();
+        assert_eq!(record.cwd, None);
+        assert!(record.arguments.is_null() && record.dataset_refs.is_empty());
+        let written = serde_json::to_value(&record).unwrap();
+        for key in ["arguments", "dataset_refs", "output_files"] {
+            assert!(
+                written.get(key).is_some(),
+                "{key} is written for older p2a versions"
+            );
+        }
+        assert!(written.get("cwd").is_none());
     }
 
     #[test]
