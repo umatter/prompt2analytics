@@ -343,15 +343,32 @@ fn missing_count(col: &Column) -> usize {
     n
 }
 
-/// One flag per cell of `col`: missing as a fill treats it (null, or NaN in a float column).
-fn missing_flags(col: &Column) -> Vec<bool> {
-    if matches!(col.dtype(), DataType::Float64 | DataType::Float32)
-        && let Ok(cast) = col.cast(&DataType::Float64)
-        && let Ok(ca) = cast.f64()
+/// Calls `f` with each row a fill changed in one column (missing in `before`, present in
+/// `after`; missing is null, or NaN in a float column), in order, until `f` returns false.
+fn filled_positions(before: &Column, after: &Column, mut f: impl FnMut(usize) -> bool) {
+    let float = |c: &Column| matches!(c.dtype(), DataType::Float64 | DataType::Float32);
+    if float(before)
+        && float(after)
+        && let (Ok(b), Ok(a)) = (
+            before.cast(&DataType::Float64),
+            after.cast(&DataType::Float64),
+        )
+        && let (Ok(b), Ok(a)) = (b.f64(), a.f64())
     {
-        return ca.iter().map(|v| v.is_none_or(f64::is_nan)).collect();
+        let missing = |v: Option<f64>| v.is_none_or(f64::is_nan);
+        for (idx, (was, is)) in b.iter().zip(a.iter()).enumerate() {
+            if missing(was) && !missing(is) && !f(idx) {
+                return;
+            }
+        }
+        return;
     }
-    col.is_null().iter().map(|v| v.unwrap_or(false)).collect()
+    let (was, is) = (before.is_null(), after.is_null());
+    for (idx, (was, is)) in was.iter().zip(is.iter()).enumerate() {
+        if was == Some(true) && is == Some(false) && !f(idx) {
+            return;
+        }
+    }
 }
 
 /// Preview trim operation.
@@ -513,7 +530,8 @@ fn preview_fill_na(
 ) -> CleaningPreview {
     let mut sample_changes = Vec::new();
     let mut cells = 0usize;
-    let mut rows = vec![false; row_count];
+    let mut rows = Vec::new();
+    let mut single_rows = 0usize;
     let mut quality_change = 0.0;
     let mut warnings = Vec::new();
 
@@ -525,6 +543,9 @@ fn preview_fill_na(
         Err(e) => warnings.push(e.to_string()),
         Ok(outcome) => {
             let filled_df = outcome.dataset.df();
+            if outcome.filled.iter().filter(|(_, n)| *n > 0).count() > 1 {
+                rows = vec![false; row_count];
+            }
             for (col_name, n_filled) in &outcome.filled {
                 if *n_filled == 0 {
                     continue;
@@ -534,14 +555,17 @@ fn preview_fill_na(
                 else {
                     continue;
                 };
-                let (was, is) = (missing_flags(before), missing_flags(after));
-                // Up to 2 samples per column.
+                // One filled column: its filled cells are the rows, and only the samples need
+                // positions. Several: the rows are the union of their filled cells.
+                let single = outcome.filled.iter().filter(|(_, n)| *n > 0).count() == 1;
                 let mut samples_for_col = 0;
-                for (idx, (was, is)) in was.iter().zip(&is).enumerate() {
-                    if !(*was && !*is) {
-                        continue;
+                filled_positions(before, after, |idx| {
+                    if !single {
+                        rows[idx] = true;
+                    } else if samples_for_col == 2 || sample_changes.len() >= sample_size {
+                        return false;
                     }
-                    rows[idx] = true;
+                    // Up to 2 samples per column.
                     if samples_for_col < 2 && sample_changes.len() < sample_size {
                         sample_changes.push(ChangeExample {
                             row_index: idx,
@@ -551,6 +575,10 @@ fn preview_fill_na(
                         });
                         samples_for_col += 1;
                     }
+                    true
+                });
+                if single {
+                    single_rows = *n_filled;
                 }
             }
             // A fill turns missing cells into present ones and changes nothing else.
@@ -563,7 +591,7 @@ fn preview_fill_na(
             }
         }
     }
-    let rows_affected = rows.iter().filter(|r| **r).count();
+    let rows_affected = single_rows.max(rows.iter().filter(|r| **r).count());
 
     CleaningPreview {
         operation: CleaningOperation::FillNa {

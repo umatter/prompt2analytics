@@ -603,8 +603,22 @@ impl<R: Read + Seek> StataReader<R> {
             self.reader.read_exact(&mut bytes)?;
             let text = match kind[0] {
                 130 => {
-                    let text = bytes.strip_suffix(&[0]).unwrap_or(&bytes);
-                    release.decode(text, || format!("the strL ({v}, {o})"))?
+                    if bytes.last() == Some(&0) {
+                        bytes.pop();
+                    }
+                    match release {
+                        // UTF-8 text is taken over without a copy.
+                        Release::R118 | Release::R119 => {
+                            String::from_utf8(bytes).map_err(|_| {
+                                StataError::ParseError(format!(
+                                    "the strL ({v}, {o}) is not valid UTF-8"
+                                ))
+                            })?
+                        }
+                        Release::R117 => {
+                            release.decode(&bytes, || format!("the strL ({v}, {o})"))?
+                        }
+                    }
                 }
                 129 => {
                     binary = true;
