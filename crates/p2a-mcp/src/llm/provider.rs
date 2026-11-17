@@ -250,12 +250,16 @@ impl Message {
         let (Some(calls), Some(results)) = (&self.tool_calls, &self.tool_results) else {
             return Vec::new();
         };
-        let mut open: std::collections::HashSet<&str> =
-            calls.iter().map(|c| c.id.as_str()).collect();
-        // A call's id leaves the set with its first result.
+        // Each call id, and whether a result of it was kept.
+        let mut answered: std::collections::HashMap<&str, bool> =
+            calls.iter().map(|c| (c.id.as_str(), false)).collect();
         results
             .iter()
-            .filter(|r| open.remove(r.tool_call_id.as_str()))
+            .filter(|r| {
+                answered
+                    .get_mut(r.tool_call_id.as_str())
+                    .is_some_and(|kept| !std::mem::replace(kept, true))
+            })
             .collect()
     }
 
