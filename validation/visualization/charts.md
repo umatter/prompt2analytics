@@ -99,3 +99,69 @@ lm(inv ~ value_usd + capital) on Grunfeld with `value_usd = value * 1e6`, coeffi
 SE 5.8357095572206334e-09. Tests `test_validate_csv_ols_grunfeld_usd` (coefficients, SEs, t, p, confint
 bounds, R2, adj. R2, F and sigma read back from the CSV, at the validation/README.md tolerances for n = 200)
 and `test_validate_latex_small_coefficient_grunfeld_usd` (`1.156e-07***` and `(5.836e-09)`, 5e-4 relative).
+
+## Timing (against v0.5.0)
+
+Release builds of `f80b0131` (base) and this branch (head), p2a-core `ci` and p2a-mcp
+`http,llm,auth,websocket`, one harness crate per side calling the tools through
+`AnalyticsServer::call_tool_with_session` in process (and the core `histogram` and
+`correlation_heatmap` directly). Nine interleaved processes per side, `taskset -c 4`,
+`RAYON_NUM_THREADS=1`; each value is the median over the nine processes of the per-process median of 61
+calls (21 at n = 10,000) after 5 warm-ups. Datasets: Int64 and f64 columns with 2% missing cells; the
+heatmap rows use 10 and 40 numeric columns of 1,000 rows. Load average 24-34 on 12 cores during the runs
+(2026-11-17).
+
+| Workload | n | base (ms) | head (ms) | head/base | runs |
+|---|---|---|---|---|---|
+| `viz_histogram` | 100 | 5.66 | 5.36 | 0.95x | 9/9 |
+| `viz_scatter` | 100 | 7.72 | 7.58 | 0.98x | 9/9 |
+| `viz_boxplot` | 100 | 5.34 | 5.22 | 0.98x | 9/9 |
+| `viz_line` | 100 | 7.67 | 7.49 | 0.98x | 9/9 |
+| `viz_event_study` | 100 | 7.92 | 7.87 | 0.99x | 9/9 |
+| `viz_coefficient` | 100 | 8.30 | 8.20 | 0.99x | 9/9 |
+| `viz_irf` | 100 | 8.16 | 8.05 | 0.99x | 9/9 |
+| `viz_residual_diagnostics` | 100 | 25.63 | 24.57 | 0.96x | 9/9 |
+| `viz_scatter_interactive` | 100 | 0.39 | 0.38 | 0.98x | 9/9 |
+| `viz_scatter_interactive_grouped` | 100 | 1.06 | 0.40 | 0.38x | 9/9 |
+| `viz_histogram_interactive` | 100 | 0.37 | 0.34 | 0.92x | 9/9 |
+| `viz_line_interactive` | 100 | 0.39 | 0.37 | 0.95x | 9/9 |
+| `core_histogram` | 100 | 5.60 | 5.34 | 0.95x | 9/9 |
+| `viz_histogram` | 1000 | 6.57 | 6.46 | 0.98x | 9/9 |
+| `viz_scatter` | 1000 | 9.68 | 9.67 | 1.00x | 9/9 |
+| `viz_boxplot` | 1000 | 5.29 | 5.29 | 1.00x | 9/9 |
+| `viz_line` | 1000 | 8.39 | 8.17 | 0.97x | 9/9 |
+| `viz_event_study` | 1000 | 9.78 | 9.78 | 1.00x | 9/9 |
+| `viz_coefficient` | 1000 | 25.42 | 25.39 | 1.00x | 9/9 |
+| `viz_irf` | 1000 | 9.17 | 9.09 | 0.99x | 9/9 |
+| `viz_residual_diagnostics` | 1000 | 38.47 | 37.99 | 0.99x | 9/9 |
+| `viz_scatter_interactive` | 1000 | 0.67 | 0.71 | 1.07x | 9/9 |
+| `viz_scatter_interactive_grouped` | 1000 | 1.49 | 0.78 | 0.52x | 9/9 |
+| `viz_histogram_interactive` | 1000 | 0.52 | 0.53 | 1.02x | 9/9 |
+| `viz_line_interactive` | 1000 | 0.66 | 0.68 | 1.04x | 9/9 |
+| `core_histogram` | 1000 | 6.68 | 6.74 | 1.01x | 9/9 |
+| `viz_histogram` | 10000 | 8.24 | 8.39 | 1.02x | 9/9 |
+| `viz_scatter` | 10000 | 29.93 | 31.42 | 1.05x | 9/9 |
+| `viz_boxplot` | 10000 | 7.13 | 7.50 | 1.05x | 9/9 |
+| `viz_line` | 10000 | 16.03 | 15.77 | 0.98x | 9/9 |
+| `viz_event_study` | 10000 | 21.96 | 23.60 | 1.07x | 9/9 |
+| `viz_coefficient` | 10000 | 199.89 | 197.64 | 0.99x | 9/9 |
+| `viz_irf` | 10000 | 21.06 | 21.86 | 1.04x | 9/9 |
+| `viz_residual_diagnostics` | 10000 | 284.56 | 285.90 | 1.00x | 9/9 |
+| `viz_scatter_interactive` | 10000 | 3.23 | 3.88 | 1.20x | 9/9 |
+| `viz_scatter_interactive_grouped` | 10000 | 5.05 | 4.47 | 0.88x | 9/9 |
+| `viz_histogram_interactive` | 10000 | 1.97 | 2.35 | 1.19x | 9/9 |
+| `viz_line_interactive` | 10000 | 3.27 | 3.91 | 1.20x | 9/9 |
+| `core_histogram` | 10000 | 7.09 | 7.13 | 1.01x | 9/9 |
+| `viz_heatmap_k10` | 1000 | 9.37 | 8.88 | 0.95x | 9/9 |
+| `viz_heatmap_k40_sel10` | 1000 | 20.94 | 9.07 | 0.43x | 9/9 |
+| `core_correlation_heatmap_k10` | - | 8.91 | 9.15 | 1.03x | 9/9 |
+| `core_correlation_heatmap_k40` | - | 9.08 | 10.51 | 1.16x | 9/9 |
+
+Head/base above 1.10x:
+- `viz_*_interactive` at n = 10,000 (about 1.2x, +0.4 to +0.7 ms): the figure now carries every value as a
+  double in its shortest round-trip digits (DATA-64) instead of single precision, so the page and its JSON
+  are about twice as long; the grouped scatter is faster (0.38x to 0.88x) because groups are coded once.
+- `core_correlation_heatmap_k40` (1.16x, +1.4 ms): the head draws all 1,600 cells, their borders, the
+  rotated labels and the colour bar inside the image; the base drew 20-pixel cells past the edge, where
+  most of the matrix and the colour bar were clipped away (DATA-63). `viz_heatmap` with 10 of 40 columns
+  selected is 0.43x, since only the selection is correlated.
