@@ -117,6 +117,64 @@ fn mean_sd(x: &[f64]) -> (f64, f64) {
     (mean, sd)
 }
 
+/// Why [`check_file_size`] refused a file.
+#[derive(Debug)]
+pub(crate) enum FileSizeRefusal {
+    /// Its size could not be read.
+    Unreadable,
+    /// It is larger than the `load_file_bytes` budget.
+    OverLimit(crate::tools::limits::LimitViolation),
+}
+
+/// The file-size check before a file is parsed, shared by `load_dataset`
+/// and the conversation store's dataset reload: only when the limits set a
+/// `load_file_bytes` budget (hosted 64 MiB, none when limits are off,
+/// `P2A_LIMIT_OVERRIDES` in any mode) is the size read on disk and compared
+/// with it. Returns the size when it was read. A refusal is logged under
+/// `tool`; each caller words its own message.
+pub(crate) fn check_file_size(path: &Path, tool: &str) -> Result<Option<u64>, FileSizeRefusal> {
+    let limits = crate::tools::limits::current();
+    if limits.load_file_bytes.is_none() {
+        return Ok(None);
+    }
+    let size = std::fs::metadata(path)
+        .map_err(|_| FileSizeRefusal::Unreadable)?
+        .len();
+    limits
+        .check_budget(tool, "load_file_bytes", size, limits.load_file_bytes)
+        .map_err(|v| {
+            tracing::info!(
+                tool,
+                override_key = v.override_key,
+                requested = %v.requested,
+                limit = %v.limit,
+                "request refused by a named budget"
+            );
+            FileSizeRefusal::OverLimit(v)
+        })?;
+    Ok(Some(size))
+}
+
+/// Count each factor code of column `name` into `counts` (one slot per
+/// level) and return the number of non-missing codes. `factor_options` gives
+/// only codes below the level count; a code outside them is an error rather
+/// than a value counted as missing.
+fn count_levels(codes: &[Option<u32>], counts: &mut [usize], name: &str) -> Result<usize, String> {
+    let n_levels = counts.len();
+    let mut n = 0usize;
+    for &code in codes.iter().flatten() {
+        let Some(c) = counts.get_mut(code as usize) else {
+            debug_assert!(false, "factor code {code} outside the {n_levels} levels");
+            return Err(format!(
+                "factor code {code} outside the {n_levels} levels of column '{name}'"
+            ));
+        };
+        *c += 1;
+        n += 1;
+    }
+    Ok(n)
+}
+
 /// The summary of column `name` (see [`ColumnSummary`]).
 pub(crate) fn summarize_column(df: &DataFrame, name: &str) -> Result<ColumnSummary, String> {
     use p2a_core::data::columns;
@@ -172,13 +230,7 @@ pub(crate) fn summarize_column(df: &DataFrame, name: &str) -> Result<ColumnSumma
         let (codes, levels) = columns::factor_options(df, name).map_err(|e| e.to_string())?;
         let mut counts: Vec<usize> = try_vec(levels.len(), 0usize, "describe_dataset level counts")
             .map_err(|e| e.to_string())?;
-        let mut n = 0usize;
-        for code in codes.iter().flatten() {
-            if let Some(c) = counts.get_mut(*code as usize) {
-                *c += 1;
-                n += 1;
-            }
-        }
+        let n = count_levels(&codes, &mut counts, name)?;
         let mut order: Vec<usize> = try_with_capacity(levels.len(), "describe_dataset levels")
             .map_err(|e| e.to_string())?;
         order.extend(0..levels.len());
@@ -393,7 +445,7 @@ impl Serialize for CellJson<'_> {
 
 /// What decoding a parquet file allocates at least, read from its footer
 /// and page headers before anything is decoded (see
-/// [`parquet_decoded_bytes`]).
+/// [`footer_decoded_bytes`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct DecodedBound {
     /// The least the dataset quotas charge for the dataset once it is
@@ -406,46 +458,17 @@ struct DecodedBound {
     transient: u64,
 }
 
-/// What decoding the parquet file at `path` allocates at least, read from
-/// its footer and page headers before anything is decoded. A small file can
-/// declare hundreds of millions of rows, one row holding a list of as many
-/// values (one value run-length encoded), or a page that decompresses to
-/// gigabytes, and the quotas only see a dataset once it is built.
-///
-/// The dataset part is the least the quotas will charge once the file is
-/// decoded: each column's values at their in-memory width, a list's from
-/// the entries counted below it (see [`least_value_bytes`]), plus the
-/// dataset's structure. It is taken per row group and summed: polars
-/// decodes each row group on its own (several at once), so what one group
-/// declares cannot cancel what another holds. The labels of a Categorical
-/// column are the exception: polars keeps one mapping a column, so a label
-/// that several row groups' dictionaries hold is held once, and each
-/// distinct label of the column's dictionary pages is counted once, at what
-/// the quotas charge for it, as is each value of a page that is not
-/// dictionary-encoded (see [`DictionaryLabels`]). An Enum column's labels
-/// are the categories its type declares, counted once a column (see
-/// [`session::frozen_label_bytes`]). The transient part is the decoder's
-/// buffers for the column chunks it decodes at once (see
-/// [`chunk_transient`] and [`decode_threads`]).
-///
-/// The counts are the ones the decoder follows, not the footer's summary of
-/// them: the rows are each row group's own (polars decodes those and never
-/// reads the file-level count), and a leaf column's entries and page sizes
-/// are what the page headers declare over the pages the decoder reads (see
-/// [`PageWalk::chunk`]) where that is more than the column chunk's footer
-/// entry says. So a footer that understates either is still charged what
-/// decoding the file allocates.
-///
-/// `Ok(None)` when the footer cannot be read; the loader then reports the
-/// file's error. `Err` says why the file is not read: its footer declares
-/// what no writer produces (see [`read_footer`]), or the call was cancelled
-/// or passed its deadline while the page headers or dictionaries were read.
+/// [`footer_decoded_bytes`] of the parquet file at `path`, with the default
+/// dictionary budget (tests only; `admit_parquet_source` reads the footer
+/// once and calls `footer_decoded_bytes` itself).
+#[cfg(test)]
 fn parquet_decoded_bytes(path: &Path) -> Result<Option<DecodedBound>, String> {
     parquet_decoded_bytes_within(ParquetSource::File(path), &mut DictionaryBudget::default())
 }
 
-/// [`parquet_decoded_bytes`] of the parquet file `source`, reading no more
-/// dictionary pages than `budget` allows.
+/// [`footer_decoded_bytes`] of the parquet file `source`, reading no more
+/// dictionary pages than `budget` allows (tests only).
+#[cfg(test)]
 fn parquet_decoded_bytes_within(
     source: ParquetSource<'_>,
     budget: &mut DictionaryBudget,
@@ -535,8 +558,43 @@ fn read_footer(source: ParquetSource<'_>) -> Result<Option<Footer<'_>>, String> 
     }))
 }
 
-/// [`parquet_decoded_bytes_within`] of the file `source`, whose footer
-/// [`read_footer`] read.
+/// What decoding the parquet file `source` (whose footer [`read_footer`]
+/// read) allocates at least, read from its footer and page headers before
+/// anything is decoded. A small file can
+/// declare hundreds of millions of rows, one row holding a list of as many
+/// values (one value run-length encoded), or a page that decompresses to
+/// gigabytes, and the quotas only see a dataset once it is built.
+///
+/// The dataset part is the least the quotas will charge once the file is
+/// decoded: each column's values at their in-memory width, a list's from
+/// the entries counted below it (see [`least_value_bytes`]), plus the
+/// dataset's structure. It is taken per row group and summed: polars
+/// decodes each row group on its own (several at once), so what one group
+/// declares cannot cancel what another holds. The labels of a Categorical
+/// column are the exception: polars keeps one mapping a column, so a label
+/// that several row groups' dictionaries hold is held once, and each
+/// distinct label of the column's dictionary pages is counted once, at what
+/// the quotas charge for it, as is each value of a page that is not
+/// dictionary-encoded (see [`DictionaryLabels`]). An Enum column's labels
+/// are the categories its type declares, counted once a column (see
+/// [`session::frozen_label_bytes`]). The transient part is the decoder's
+/// buffers for the column chunks it decodes at once (see
+/// [`chunk_transient`] and [`decode_threads`]).
+///
+/// The counts are the ones the decoder follows, not the footer's summary of
+/// them: the rows are each row group's own (polars decodes those and never
+/// reads the file-level count), and a leaf column's entries and page sizes
+/// are what the page headers declare over the pages the decoder reads (see
+/// [`PageWalk::chunk`]) where that is more than the column chunk's footer
+/// entry says. So a footer that understates either is still charged what
+/// decoding the file allocates.
+///
+/// `Ok(None)` when the footer cannot be read; the loader then reports the
+/// file's error. `Err` says why the file is not read: its footer declares
+/// what no writer produces (see [`read_footer`]), or the call was cancelled
+/// or passed its deadline while the page headers or dictionaries were read.
+///
+/// Dictionary pages are read only as far as `budget` allows.
 fn footer_decoded_bytes(
     source: ParquetSource<'_>,
     footer: Footer<'_>,
@@ -610,7 +668,11 @@ fn footer_decoded_bytes(
             // the file's columns, which is the order of its leaves.
             let chunks = group.columns_under_root_iter(name).into_iter().flatten();
             for (i, chunk) in chunks.enumerate() {
-                let read = walk.chunk(chunk.byte_range(), chunk.num_values())?;
+                // polars' own footer type: this stops compiling when the
+                // thrift parser the walk uses is not the one polars reads
+                // the file with (see Cargo.toml).
+                let codec: polars_parquet_format::CompressionCodec = chunk.metadata().codec;
+                let read = walk.chunk(chunk.byte_range(), chunk.num_values(), codec)?;
                 // Not negative: check_chunk_counts refused the file.
                 let declared = u64::try_from(chunk.num_values()).unwrap_or(0);
                 leaves.push(LeafChunks {
@@ -620,10 +682,6 @@ fn footer_decoded_bytes(
                         .max(read.page_bytes),
                     data_page_bytes: read.page_bytes.saturating_sub(read.dict_bytes),
                 });
-                // polars' own footer type: this stops compiling when the
-                // thrift parser the walk uses is not the one polars reads
-                // the file with (see Cargo.toml).
-                let codec: polars_parquet_format::CompressionCodec = chunk.metadata().codec;
                 transients.push(chunk_transient(
                     &read,
                     leaf_types.get(i).copied(),
@@ -1107,8 +1165,20 @@ impl<'a> PageWalk<'a> {
     /// dictionary page past the first, a page without its type's header or
     /// with a negative size, or a page past the chunk's end. `Err` when the
     /// call is cancelled or past its deadline.
-    fn chunk(&mut self, range: std::ops::Range<u64>, declared: i64) -> Result<ChunkPages, String> {
+    ///
+    /// A page's bytes are its header's `uncompressed_page_size`, except in a
+    /// chunk whose `codec` is UNCOMPRESSED: polars reads such a page where it
+    /// lies and ignores that field, so it holds at least its stored
+    /// (`compressed_page_size`) bytes, and the larger of the two is counted.
+    fn chunk(
+        &mut self,
+        range: std::ops::Range<u64>,
+        declared: i64,
+        codec: polars_parquet_format::CompressionCodec,
+    ) -> Result<ChunkPages, String> {
         use polars_parquet_format::PageType;
+        let stored = codec == polars_parquet_format::CompressionCodec::UNCOMPRESSED;
+        let page_bytes = |size: u64, bytes: u64| if stored { bytes.max(size) } else { bytes };
         let mut read = ChunkPages::default();
         let end = range.end.min(self.file_len);
         if range.start >= end || !self.seek_to(range.start) {
@@ -1128,6 +1198,7 @@ impl<'a> PageWalk<'a> {
             let (Some(Ok(entries)), Ok(size), Ok(bytes)) = (entries, size, bytes) else {
                 return Ok(read);
             };
+            let bytes = page_bytes(size, bytes);
             let at = end - left;
             if !self.skip(size, &mut left) {
                 return Ok(read);
@@ -1166,6 +1237,7 @@ impl<'a> PageWalk<'a> {
             else {
                 break;
             };
+            let bytes = page_bytes(size, bytes);
             if !self.skip(size, &mut left) {
                 break;
             }
@@ -1361,7 +1433,7 @@ fn page_label_bytes(bytes: u64, entries: u64) -> u64 {
 }
 
 /// The labels of one Categorical leaf column over a file's row groups, for
-/// [`parquet_decoded_bytes`]: what polars puts into the column's mapping
+/// [`footer_decoded_bytes`]: what polars puts into the column's mapping
 /// while it decodes it, at what the quotas charge for each label once the
 /// file is loaded (see [`session::label_bytes`]).
 ///
@@ -1475,7 +1547,7 @@ const OFFSET_BYTES: u64 = 8;
 
 /// The least memory the values of `dtype` take in polars, for `slots` of it,
 /// from what the footer and page headers say about each leaf column
-/// (`leaves`, consumed in order, one per leaf; see [`parquet_decoded_bytes`]).
+/// (`leaves`, consumed in order, one per leaf; see [`footer_decoded_bytes`]).
 ///
 /// A leaf column's value takes its physical width (a view per String or
 /// Binary value, a code per Categorical one); a list its offsets, plus what
@@ -1495,7 +1567,7 @@ const OFFSET_BYTES: u64 = 8;
 /// left to the caller, which counts each label once over the row groups
 /// (see [`DictionaryLabels`]), and `holds_labels` gets one entry per leaf
 /// consumed, in order: whether it is a Categorical leaf that holds values
-/// (an Enum leaf's labels are its type's, see [`parquet_decoded_bytes`]).
+/// (an Enum leaf's labels are its type's, see [`footer_decoded_bytes`]).
 /// A fixed-width leaf's charge does not grow with its pages, which also
 /// hold levels its values in memory do not; what decoding its pages
 /// allocates is counted with the decoder's buffers instead (see
@@ -1625,6 +1697,14 @@ pub(crate) enum NotAdmitted {
 /// SAS file is charged only once decoded, and a CSV can decode to several
 /// times its size on disk. `load_dataset` and a dataset reload
 /// (`persistent_session::load_reload_source`) run it.
+///
+/// Known overcount: the bound can exceed what the quotas charge once the
+/// file is loaded, never the other way round. Text that polars decodes as
+/// views and then casts is counted at both forms' widths (see
+/// [`chunk_transient`]), and a Categorical value of a page that is not
+/// dictionary-encoded is counted as a label of its own
+/// ([`MAPPING_LABEL_BYTES`]) once per mapping it may enter. A file close to
+/// its quota can therefore be refused before decoding that would load.
 pub(crate) async fn admit_parquet(path: &Path, name: &str) -> Result<(), NotAdmitted> {
     let is_parquet = path
         .extension()
@@ -1639,7 +1719,7 @@ pub(crate) async fn admit_parquet(path: &Path, name: &str) -> Result<(), NotAdmi
 /// Refuse, before decoding it, the parquet file `source` that the dataset
 /// quotas would refuse once it was loaded as `name` (see
 /// [`session::admit_dataset`]), counting what decoding it allocates on top
-/// of the dataset (see [`parquet_decoded_bytes`]).
+/// of the dataset (see [`footer_decoded_bytes`]).
 ///
 /// A parquet file whose footer declares what no writer produces (see
 /// [`read_footer`]) is not loaded whether or not the call has quotas: those
@@ -1785,30 +1865,15 @@ impl AnalyticsServer {
         // The configurable maximum file size: checked on disk before any
         // parsing, only when the limits set a load_file_bytes budget (hosted
         // 64 MiB, none when limits are off, P2A_LIMIT_OVERRIDES in any mode).
-        let limits = crate::tools::limits::current();
-        if limits.load_file_bytes.is_some() {
-            let size = match std::fs::metadata(&path) {
-                Ok(meta) => meta.len(),
-                Err(_) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Failed to load dataset: File not found: {}",
-                        path_jail::display_path(&path)
-                    ))]));
-                }
-            };
-            if let Err(v) = limits.check_budget(
-                "load_dataset",
-                "load_file_bytes",
-                size,
-                limits.load_file_bytes,
-            ) {
-                tracing::info!(
-                    tool = "load_dataset",
-                    override_key = v.override_key,
-                    requested = %v.requested,
-                    limit = %v.limit,
-                    "request refused by a named budget"
-                );
+        match check_file_size(&path, "load_dataset") {
+            Ok(_) => {}
+            Err(FileSizeRefusal::Unreadable) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Failed to load dataset: File not found: {}",
+                    path_jail::display_path(&path)
+                ))]));
+            }
+            Err(FileSizeRefusal::OverLimit(v)) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
                     "{} Load a smaller file, or split it and load the parts.",
                     v.message
@@ -2326,6 +2391,21 @@ mod tests {
     use super::*;
     use p2a_core::polars::prelude::*;
     use serde_json::json;
+
+    #[test]
+    fn count_levels_refuses_a_code_outside_the_levels() {
+        let mut counts = [0usize; 2];
+        let n = count_levels(&[Some(0), None, Some(1), Some(1)], &mut counts, "g");
+        assert_eq!(n, Ok(3));
+        assert_eq!(counts, [1, 2]);
+        let outside = || count_levels(&[Some(0), Some(2)], &mut [0usize; 2], "g");
+        if cfg!(debug_assertions) {
+            assert!(std::panic::catch_unwind(outside).is_err());
+        } else {
+            let e = outside().unwrap_err();
+            assert_eq!(e, "factor code 2 outside the 2 levels of column 'g'");
+        }
+    }
 
     /// LLM-6, full precision: validation/r/cases/mcp_data_t3.R, case data_describe_columns (summary(), sd(),
     /// table()). Counts, min, max and the level tables exact; mean and quartiles at the coefficient and sd
@@ -3033,10 +3113,15 @@ mod tests {
                 // row groups, from the page's size in one); an Enum's
                 // categories once. Pre-fix a label counted its bytes in the
                 // page (1,004 and 10 bytes) and an Enum's categories nothing.
+                // In one row group the 2,000 distinct 6-byte labels count
+                // from their dictionary page's size (`page_label_bytes`):
+                // each its 6 bytes of text, 2 (half the text less a half,
+                // rounded down) and the per-label overhead.
+                const SHORT_ONE_GROUP_BYTES: u64 = 2_000 * (6 + 2 + session::LABEL_OVERHEAD_BYTES);
                 let least = match name {
                     "labels" => 40 * session::label_bytes(1_000),
                     "short" if groups.is_some() => 2_000 * session::label_bytes(6),
-                    "short" => 2_000 * 168,
+                    "short" => SHORT_ONE_GROUP_BYTES,
                     "levels" => session::frozen_label_bytes(&frozen),
                     _ => 0,
                 };
@@ -3140,10 +3225,10 @@ mod tests {
     #[test]
     fn a_struct_chunk_that_declares_more_entries_counts_them() {
         // polars reserves room for a nested column chunk's footer count, at
-        // the leaf's width, before it decodes the chunk (`collect_nested`);
-        // a one-row struct column whose chunk declares billions of entries
-        // makes that reservation fail, which aborts the process. Pre-fix
-        // the bound counted the struct's rows only.
+        // the leaf's width, before it decodes the chunk (`collect_nested`),
+        // so the bound has to count that reservation and not only the rows
+        // the struct holds. Pre-fix the bound counted the struct's rows
+        // only.
         use p2a_core::polars::prelude::{IntoSeries, NamedFrom, Series, StructChunked};
         let a = Series::new("a".into(), [0.5f64, 1.75]);
         let s = StructChunked::from_series("s".into(), 2, [a].iter())
@@ -3214,8 +3299,8 @@ mod tests {
         // An array of size zero holds no values, whatever its chunk says,
         // but polars still reserves room for the chunk's footer count at
         // the leaf's width (and a validity bit each) before it decodes it
-        // (`collect_nested`). Pre-fix nothing counted that reservation, so
-        // a small file whose chunk declares billions of entries passed.
+        // (`collect_nested`). The bound counts that reservation from the
+        // footer's count; pre-fix nothing counted it.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("empty.parquet");
         empty_arrays_parquet(&path, 1_000);
@@ -3277,7 +3362,13 @@ mod tests {
         let mut dictionaries = 0;
         for group in &metadata.row_groups {
             for chunk in group.parquet_columns() {
-                let read = walk.chunk(chunk.byte_range(), chunk.num_values()).unwrap();
+                let read = walk
+                    .chunk(
+                        chunk.byte_range(),
+                        chunk.num_values(),
+                        chunk.metadata().codec,
+                    )
+                    .unwrap();
                 assert_eq!(read.entries, chunk.num_values() as u64);
                 assert!(read.page_bytes > 0);
                 assert!(read.page_bytes <= chunk.uncompressed_size() as u64);
@@ -3470,6 +3561,50 @@ mod tests {
         std::fs::write(path, bytes).unwrap();
     }
 
+    /// polars reads an uncompressed page where it lies, whatever its header's
+    /// `uncompressed_page_size` says, so the walk counts at least the page's
+    /// stored size there; in a compressed chunk the header's figure stands.
+    #[test]
+    fn an_uncompressed_page_counts_at_least_its_stored_size() {
+        use p2a_core::polars::prelude::{ParquetCompression, ParquetWriter};
+        use polars_parquet_format::CompressionCodec;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plain.parquet");
+        let mut df = df! {
+            "x" => (0..10_000).map(|i| f64::from(i) * 1.37 + 0.11).collect::<Vec<_>>(),
+        }
+        .unwrap();
+        ParquetWriter::new(std::fs::File::create(&path).unwrap())
+            .with_compression(ParquetCompression::Uncompressed)
+            .finish(&mut df)
+            .unwrap();
+        let first_page = |path: &Path, codec| {
+            let metadata = std::sync::Arc::clone(
+                ParquetReader::new(std::fs::File::open(path).unwrap())
+                    .get_metadata()
+                    .unwrap(),
+            );
+            let chunk = &metadata.row_groups[0].parquet_columns()[0];
+            assert_eq!(chunk.metadata().codec, CompressionCodec::UNCOMPRESSED);
+            walk_of(path)
+                .chunk(chunk.byte_range(), chunk.num_values(), codec)
+                .unwrap()
+                .page_bytes
+        };
+        let honest = first_page(&path, CompressionCodec::UNCOMPRESSED);
+        let mut stored = 0;
+        rewrite_first_page_header(&path, |header| {
+            stored = header.compressed_page_size;
+            assert!(stored >= 8_192 * 2, "{stored}");
+            header.uncompressed_page_size = stored / 2;
+        });
+        // The understated header is charged the page's stored size.
+        assert_eq!(first_page(&path, CompressionCodec::UNCOMPRESSED), honest);
+        // Read as a compressed chunk, the header's figure would stand.
+        let as_snappy = first_page(&path, CompressionCodec::SNAPPY);
+        assert_eq!(as_snappy, honest - (stored - stored / 2) as u64);
+    }
+
     #[test]
     fn an_unreadable_dictionary_page_counts_every_page_from_its_size() {
         // Seven row groups, each with a dictionary page of the same 40
@@ -3495,7 +3630,13 @@ mod tests {
         let mut pages = 0;
         for group in &metadata.row_groups {
             let chunk = &group.parquet_columns()[0];
-            let read = walk.chunk(chunk.byte_range(), chunk.num_values()).unwrap();
+            let read = walk
+                .chunk(
+                    chunk.byte_range(),
+                    chunk.num_values(),
+                    chunk.metadata().codec,
+                )
+                .unwrap();
             assert!(read.dict_bytes >= 40 * 1_004);
             pages += read.dict_bytes;
         }

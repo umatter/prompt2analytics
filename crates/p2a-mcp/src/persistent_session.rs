@@ -771,32 +771,21 @@ pub fn load_reload_source(
         tracing::debug!(dataset = %name, error = %e, "Reload path rejected by the path jail");
         RELOAD_OUTSIDE_JAIL.to_string()
     })?;
-    let limits = crate::tools::limits::current();
-    if limits.load_file_bytes.is_some() {
-        let size = std::fs::metadata(&path)
-            .map_err(|e| {
-                tracing::debug!(dataset = %name, error = %e, "Failed to read a reload source's size");
-                RELOAD_LOAD_FAILED.to_string()
-            })?
-            .len();
-        if let Err(v) = limits.check_budget(
-            RELOAD_LABEL,
-            "load_file_bytes",
-            size,
-            limits.load_file_bytes,
-        ) {
-            tracing::info!(
-                tool = RELOAD_LABEL,
-                dataset = %name,
-                override_key = v.override_key,
-                requested = %v.requested,
-                limit = %v.limit,
-                "request refused by a named budget"
-            );
-            return Err(format!(
-                "the file needs {} (load_file_bytes), which exceeds this server's limit of {}",
-                v.requested, v.limit
-            ));
+    {
+        use crate::tools::handlers::data::{FileSizeRefusal, check_file_size};
+        match check_file_size(&path, RELOAD_LABEL) {
+            Ok(_) => {}
+            Err(FileSizeRefusal::Unreadable) => {
+                tracing::debug!(dataset = %name, "Failed to read a reload source's size");
+                return Err(RELOAD_LOAD_FAILED.to_string());
+            }
+            Err(FileSizeRefusal::OverLimit(v)) => {
+                tracing::debug!(dataset = %name, "Reload source over load_file_bytes");
+                return Err(format!(
+                    "the file needs {} (load_file_bytes), which exceeds this server's limit of {}",
+                    v.requested, v.limit
+                ));
+            }
         }
     }
     // The check before a parquet file is decoded reads the quotas from this
