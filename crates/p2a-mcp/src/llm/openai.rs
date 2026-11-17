@@ -429,6 +429,26 @@ impl OpenAIProvider {
     }
 }
 
+/// The ids of a models list that name chat models. OpenAI's own endpoint (`default_endpoint`)
+/// also lists embedding, audio, image, moderation and legacy completion models, which are left
+/// out; any other endpoint (OpenRouter, a local server) keeps every id.
+fn chat_model_ids(ids: impl Iterator<Item = String>, default_endpoint: bool) -> Vec<String> {
+    const NOT_CHAT: [&str; 10] = [
+        "embedding",
+        "whisper",
+        "tts",
+        "dall-e",
+        "moderation",
+        "transcribe",
+        "davinci",
+        "babbage",
+        "gpt-image",
+        "sora",
+    ];
+    ids.filter(|id| !default_endpoint || !NOT_CHAT.iter().any(|w| id.contains(w)))
+        .collect()
+}
+
 /// Whether `model` is one of OpenAI's reasoning models, which refuse a `temperature`: names
 /// starting `o1`, `o3`, `o4` or `gpt-5`, except the `gpt-5-chat` models. A name rule: a new
 /// reasoning family needs its prefix added here.
@@ -490,15 +510,12 @@ impl LlmProvider for OpenAIProvider {
         let models_response: OpenAIModelsResponse =
             read_json_capped(response, MAX_UPSTREAM_BODY_BYTES).await?;
 
-        // Filter to chat models only
-        let chat_models: Vec<String> = models_response
-            .data
-            .into_iter()
-            .filter(|m| m.id.starts_with("gpt-"))
-            .map(|m| m.id)
-            .collect();
-
-        Ok(chat_models)
+        let default_endpoint =
+            is_default_endpoint(ProviderType::OpenAI, self.config.base_url.as_deref());
+        Ok(chat_model_ids(
+            models_response.data.into_iter().map(|m| m.id),
+            default_endpoint,
+        ))
     }
 
     async fn chat(
@@ -776,6 +793,23 @@ mod tests {
             .map(|m| m["role"].as_str().unwrap())
             .collect();
         assert_eq!(roles, ["system", "user", "assistant", "user"]);
+    }
+
+    /// LLM-19: OpenAI's own list keeps the chat and reasoning models; another endpoint keeps all.
+    #[test]
+    fn the_default_endpoint_lists_only_chat_models() {
+        let ids = [
+            "gpt-4o",
+            "o4-mini",
+            "text-embedding-3-small",
+            "whisper-1",
+            "tts-1",
+            "dall-e-3",
+            "omni-moderation-latest",
+        ];
+        let all = || ids.iter().map(|s| s.to_string());
+        assert_eq!(chat_model_ids(all(), true), ["gpt-4o", "o4-mini"]);
+        assert_eq!(chat_model_ids(all(), false), ids);
     }
 
     /// LLM-21: the token and temperature fields by endpoint and model.

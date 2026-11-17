@@ -526,3 +526,65 @@ async fn an_openai_compatible_endpoint_gets_max_tokens_and_the_temperature() {
         assert!((t - 0.7).abs() < 1e-6, "{body}");
     }
 }
+
+// ---------- LLM-19, LLM-25: model lists ----------
+
+/// A stub that answers `GET path` with `body` and records each request's headers.
+async fn models_stub(
+    path: &'static str,
+    body: Value,
+) -> (SocketAddr, Arc<Mutex<Vec<axum::http::HeaderMap>>>) {
+    let seen: Arc<Mutex<Vec<axum::http::HeaderMap>>> = Arc::default();
+    let s = seen.clone();
+    let router = axum::Router::new().route(
+        path,
+        axum::routing::get(move |headers: axum::http::HeaderMap| {
+            let (s, body) = (s.clone(), body.clone());
+            async move {
+                s.lock().unwrap().push(headers);
+                axum::Json(body)
+            }
+        }),
+    );
+    (spawn_stub(router).await, seen)
+}
+
+/// Anthropic's list comes from its models endpoint with the caller's key; an OpenAI-compatible
+/// endpoint's list keeps every id (the default endpoint's chat filter is a unit test).
+#[tokio::test]
+async fn the_model_lists_come_from_the_providers() {
+    let (addr, seen) = models_stub(
+        "/v1/models",
+        json!({"data": [{"id": "claude-opus-4-1", "type": "model"},
+                        {"id": "claude-haiku-4-5", "type": "model"}], "has_more": false}),
+    )
+    .await;
+    let models = provider(ProviderType::Anthropic, addr)
+        .list_models()
+        .await
+        .unwrap();
+    assert_eq!(models, ["claude-opus-4-1", "claude-haiku-4-5"]);
+    let headers = &seen.lock().unwrap()[0];
+    assert_eq!(headers["x-api-key"], "wp30-key");
+    assert_eq!(headers["anthropic-version"], "2023-06-01");
+
+    let ids = [
+        "gpt-4o",
+        "o4-mini",
+        "text-embedding-3-small",
+        "whisper-1",
+        "tts-1",
+        "dall-e-3",
+        "meta-llama/llama-3.1-8b-instruct",
+    ];
+    let data: Vec<Value> = ids
+        .iter()
+        .map(|id| json!({"id": id, "object": "model"}))
+        .collect();
+    let (addr, _) = models_stub("/models", json!({"object": "list", "data": data})).await;
+    let models = provider(ProviderType::OpenAI, addr)
+        .list_models()
+        .await
+        .unwrap();
+    assert_eq!(models, ids);
+}

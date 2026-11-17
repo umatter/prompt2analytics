@@ -436,17 +436,25 @@ impl LlmProvider for AnthropicProvider {
         Ok(self.config.api_key.is_some())
     }
 
+    /// The models of Anthropic's models endpoint (`GET /v1/models`, up to 1,000), with the
+    /// caller's key.
     async fn list_models(&self) -> Result<Vec<String>, LlmError> {
-        // Anthropic doesn't have a models list endpoint, return known models
-        Ok(vec![
-            "claude-opus-4-5-20251101".to_string(),
-            "claude-sonnet-4-20250514".to_string(),
-            "claude-3-5-sonnet-20241022".to_string(),
-            "claude-3-5-haiku-20241022".to_string(),
-            "claude-3-opus-20240229".to_string(),
-            "claude-3-sonnet-20240229".to_string(),
-            "claude-3-haiku-20240307".to_string(),
-        ])
+        let url = format!("{}/v1/models?limit=1000", self.base_url());
+        let api_key = self.api_key()?;
+        let response = self
+            .client()?
+            .get(&url)
+            .timeout(self.timeout)
+            .header("x-api-key", api_key)
+            .header("anthropic-version", "2023-06-01")
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            return Err(upstream_error(PROVIDER, response).await);
+        }
+        let models: AnthropicModelsResponse =
+            read_json_capped(response, MAX_UPSTREAM_BODY_BYTES).await?;
+        Ok(models.data.into_iter().map(|m| m.id).collect())
     }
 
     async fn chat(
@@ -586,6 +594,16 @@ enum AnthropicResponseBlock {
         name: String,
         input: Value,
     },
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicModelsResponse {
+    data: Vec<AnthropicModel>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicModel {
+    id: String,
 }
 
 // ========== Anthropic Streaming Types ==========
