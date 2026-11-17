@@ -4,6 +4,7 @@
 //! module is message conversion and transport; the tool-calling loop is [`super::tool_loop`].
 
 use super::LlmSettings;
+use super::provider::is_default_endpoint;
 use super::retry::{MAX_UPSTREAM_BODY_BYTES, count_streamed, read_json_capped, upstream_error};
 use super::stream::{LineBuffer, sse_data, stream_failed};
 use super::tool_loop::{
@@ -89,6 +90,14 @@ impl OpenAIProvider {
             .api_key
             .as_deref()
             .ok_or(LlmError::InvalidApiKey)
+    }
+
+    /// The request's sampling and token fields for this provider's model and endpoint
+    /// ([`token_params`]), on an otherwise empty request.
+    fn sampling(&self) -> OpenAIChatRequest {
+        let default_endpoint =
+            is_default_endpoint(ProviderType::OpenAI, self.config.base_url.as_deref());
+        token_params(&self.config.model, &self.config, default_endpoint)
     }
 
     /// Convert our Message format to OpenAI's message format.
@@ -213,9 +222,8 @@ impl OpenAIProvider {
             model: self.config.model.clone(),
             messages: openai_messages,
             tools: openai_tools,
-            temperature: self.config.temperature,
-            max_tokens: self.config.max_tokens,
             stream: None,
+            ..self.sampling()
         };
 
         let retry_config = super::retry::RetryConfig::default();
@@ -293,9 +301,8 @@ impl OpenAIProvider {
             model: self.config.model.clone(),
             messages: openai_messages,
             tools: openai_tools,
-            temperature: self.config.temperature,
-            max_tokens: self.config.max_tokens,
             stream: Some(true),
+            ..self.sampling()
         };
 
         // No total timeout: a stream is bounded by the client's per-read
@@ -422,6 +429,37 @@ impl OpenAIProvider {
     }
 }
 
+/// Whether `model` is one of OpenAI's reasoning models, which refuse a `temperature`: names
+/// starting `o1`, `o3`, `o4` or `gpt-5`, except the `gpt-5-chat` models. A name rule: a new
+/// reasoning family needs its prefix added here.
+fn is_reasoning_model(model: &str) -> bool {
+    let m = model.trim().to_ascii_lowercase();
+    ["o1", "o3", "o4", "gpt-5"].iter().any(|p| m.starts_with(p)) && !m.starts_with("gpt-5-chat")
+}
+
+/// The temperature and token-limit fields of a request (the rest empty). On OpenAI's own endpoint
+/// (`default_endpoint`), the limit goes in `max_completion_tokens`, which every OpenAI chat model
+/// takes and its reasoning models require (they refuse `max_tokens`), and the reasoning models
+/// ([`is_reasoning_model`]) get no `temperature`. Any other endpoint (OpenRouter, a local
+/// OpenAI-compatible server) gets `max_tokens` and the configured temperature, as before.
+fn token_params(model: &str, config: &ProviderConfig, default_endpoint: bool) -> OpenAIChatRequest {
+    let (temperature, max_tokens, max_completion_tokens) = if default_endpoint {
+        let temperature = config.temperature.filter(|_| !is_reasoning_model(model));
+        (temperature, None, config.max_tokens)
+    } else {
+        (config.temperature, config.max_tokens, None)
+    };
+    OpenAIChatRequest {
+        model: String::new(),
+        messages: Vec::new(),
+        tools: None,
+        temperature,
+        max_tokens,
+        max_completion_tokens,
+        stream: None,
+    }
+}
+
 #[async_trait]
 impl LlmProvider for OpenAIProvider {
     fn provider_type(&self) -> ProviderType {
@@ -541,6 +579,8 @@ struct OpenAIChatRequest {
     temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_completion_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stream: Option<bool>,
 }
@@ -736,6 +776,48 @@ mod tests {
             .map(|m| m["role"].as_str().unwrap())
             .collect();
         assert_eq!(roles, ["system", "user", "assistant", "user"]);
+    }
+
+    /// LLM-21: the token and temperature fields by endpoint and model.
+    #[test]
+    fn reasoning_models_get_the_completion_limit_and_no_temperature() {
+        let config = ProviderConfig {
+            provider_type: ProviderType::OpenAI,
+            temperature: Some(0.7),
+            max_tokens: Some(4096),
+            ..ProviderConfig::default()
+        };
+        let fields = |model: &str, default_endpoint: bool| {
+            let mut v =
+                serde_json::to_value(token_params(model, &config, default_endpoint)).unwrap();
+            v.as_object_mut().unwrap().retain(|k, _| {
+                ["temperature", "max_tokens", "max_completion_tokens"].contains(&k.as_str())
+            });
+            v
+        };
+        let t = Value::from(0.7_f32 as f64);
+        assert_eq!(
+            fields("gpt-4o-mini", true),
+            serde_json::json!({"max_completion_tokens": 4096, "temperature": t})
+        );
+        for model in ["o4-mini", "gpt-5-mini", "o1", "o3-pro"] {
+            assert_eq!(
+                fields(model, true),
+                serde_json::json!({"max_completion_tokens": 4096}),
+                "{model}"
+            );
+        }
+        assert_eq!(
+            fields("gpt-5-chat-latest", true),
+            serde_json::json!({"max_completion_tokens": 4096, "temperature": t})
+        );
+        for model in ["gpt-4o-mini", "o4-mini"] {
+            assert_eq!(
+                fields(model, false),
+                serde_json::json!({"max_tokens": 4096, "temperature": t}),
+                "{model}"
+            );
+        }
     }
 
     #[test]

@@ -480,3 +480,49 @@ async fn the_stream_route_reports_a_failed_or_cut_off_provider_stream() {
         assert_eq!(error, want);
     }
 }
+
+// ---------- LLM-21: an OpenAI-compatible endpoint keeps its fields ----------
+
+/// A non-default OpenAI endpoint gets `max_tokens` and the configured temperature for any model,
+/// streaming or not; the reasoning-model rule of OpenAI's own endpoint is a unit test of the
+/// request builder, since no test may reach that endpoint.
+#[tokio::test]
+async fn an_openai_compatible_endpoint_gets_max_tokens_and_the_temperature() {
+    let settings = LlmSettings::from_limits(&p2a_mcp::tools::limits::Limits::off(), None);
+    let plain = openai_sse(&openai_text("ok", true), true);
+    for streaming in [false, true] {
+        let answer = if streaming {
+            plain.clone().into_bytes()
+        } else {
+            json!({"choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"},
+                    "finish_reason": "stop"}]})
+            .to_string()
+            .into_bytes()
+        };
+        let (addr, bodies) = chunked_stub("/chat/completions", vec![vec![answer]]).await;
+        let config = ProviderConfig {
+            provider_type: ProviderType::OpenAI,
+            base_url: Some(format!("http://{addr}")),
+            api_key: Some("wp30-key".into()),
+            model: "o4-mini".into(),
+            temperature: Some(0.7),
+            max_tokens: Some(4096),
+            ..ProviderConfig::default()
+        };
+        let p = OpenAIProvider::with_settings(config, &settings);
+        if streaming {
+            let (reply, _) = stream_chat(&p, &Recorder::default(), true).await;
+            reply.unwrap();
+        } else {
+            p.chat(&[Message::user("go")], &[], &Recorder::default(), true)
+                .await
+                .unwrap();
+        }
+        let body = &bodies.lock().unwrap()[0];
+        assert_eq!(body["max_tokens"], 4096, "streaming={streaming}: {body}");
+        assert!(body.get("max_completion_tokens").is_none(), "{body}");
+        // 0.7 as an f32 on the wire.
+        let t = body["temperature"].as_f64().unwrap();
+        assert!((t - 0.7).abs() < 1e-6, "{body}");
+    }
+}

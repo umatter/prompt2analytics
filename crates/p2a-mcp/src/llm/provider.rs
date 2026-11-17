@@ -124,7 +124,7 @@ fn server_key_var(t: ProviderType) -> Option<&'static str> {
 
 /// Whether `base_url` (unset, or after trimming one trailing `/`) is the
 /// provider's built-in endpoint.
-fn is_default_endpoint(t: ProviderType, base_url: Option<&str>) -> bool {
+pub(crate) fn is_default_endpoint(t: ProviderType, base_url: Option<&str>) -> bool {
     match base_url {
         None => true,
         Some(url) => url.strip_suffix('/').unwrap_or(url) == t.default_base_url(),
