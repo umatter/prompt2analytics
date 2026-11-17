@@ -476,8 +476,8 @@ async fn the_stream_route_reports_a_failed_or_cut_off_provider_stream() {
         )
         .await;
         assert!(!events.iter().any(|e| e["type"] == "done"), "{events:?}");
-        let (error, _) = stream_error(&events);
-        assert_eq!(error, want);
+        let (error, code) = stream_error(&events);
+        assert_eq!((error.as_str(), code.as_str()), (want, "upstream_error"));
     }
 }
 
@@ -627,4 +627,70 @@ async fn the_models_route_lists_the_callers_provider() {
         (400, Some("invalid_provider")),
         "{body}"
     );
+}
+
+// ---------- error codes ----------
+
+/// A refused provider is 400 `invalid_provider` on `/api/llm/chat` and the stream's error code; a
+/// provider's failure is 502 `upstream_error`; a stream on an unknown session ends with
+/// `not_found`.
+#[tokio::test]
+async fn the_llm_routes_give_every_refusal_a_code() {
+    let (app, _) = http_app().await;
+    let sid = new_session(&app).await;
+    let refused = json!({"provider_type": "ollama", "base_url": "ftp://127.0.0.1:1", "model": "m"});
+    let (status, body) = post_json(
+        &app,
+        "/api/llm/chat",
+        json!({"session_id": sid, "message": "go", "provider": refused}),
+    )
+    .await;
+    assert_eq!(
+        (status.as_u16(), body["code"].as_str()),
+        (400, Some("invalid_provider")),
+        "{body}"
+    );
+    let events = stream_events(
+        &app,
+        json!({"session_id": sid, "message": "go", "provider": refused}),
+    )
+    .await;
+    assert_eq!(stream_error(&events).1, "invalid_provider");
+
+    // A provider that answers 500: the caller's 502.
+    let failing = axum::Router::new().route(
+        "/api/chat",
+        axum::routing::post(|| async {
+            (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "STUB-SECRET")
+        }),
+    );
+    let addr = spawn_stub(failing).await;
+    let (status, body) = post_json(
+        &app,
+        "/api/llm/chat",
+        json!({"session_id": sid, "message": "go",
+               "provider": provider_json(ProviderType::Ollama, addr)}),
+    )
+    .await;
+    assert_eq!(
+        (status.as_u16(), body["code"].as_str()),
+        (502, Some("upstream_error")),
+        "{body}"
+    );
+    assert!(!body.to_string().contains("STUB-SECRET"), "{body}");
+    let events = stream_events(
+        &app,
+        json!({"session_id": sid, "message": "go",
+               "provider": provider_json(ProviderType::Ollama, addr)}),
+    )
+    .await;
+    assert_eq!(stream_error(&events).1, "upstream_error");
+
+    let events = stream_events(
+        &app,
+        json!({"session_id": "no-such-session", "message": "go",
+               "provider": provider_json(ProviderType::Ollama, addr)}),
+    )
+    .await;
+    assert_eq!(stream_error(&events).1, "not_found");
 }

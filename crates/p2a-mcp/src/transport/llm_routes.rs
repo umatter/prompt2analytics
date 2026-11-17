@@ -785,17 +785,65 @@ fn build_provider(cfg: ProviderConfig, settings: &LlmSettings) -> Box<dyn LlmPro
     }
 }
 
-/// The HTTP status of a failed LLM call: the provider's own failure is a
-/// 502, its silence a 504, a refused endpoint or key the caller's 400. The
-/// message is the error's text, which never carries an upstream body.
+/// The HTTP status of a failed LLM call: a failure on the provider's side
+/// (its error status, a network error, an answer too large, cut off or not
+/// understood) is a 502, its silence a 504, a provider that cannot be reached
+/// at all a 503, a refused endpoint or key the caller's 400, and a tool
+/// error a 500. The message is the error's text, which never carries an
+/// upstream body. The code is [`llm_error_code`].
 fn llm_error_status(e: &LlmError) -> StatusCode {
     match e {
+        LlmError::Timeout => StatusCode::GATEWAY_TIMEOUT,
+        LlmError::NotAvailable(_) => StatusCode::SERVICE_UNAVAILABLE,
+        LlmError::EgressDenied(_) | LlmError::InvalidApiKey => StatusCode::BAD_REQUEST,
+        LlmError::ToolError(_) => StatusCode::INTERNAL_SERVER_ERROR,
         LlmError::Upstream { .. }
         | LlmError::StreamFailed { .. }
-        | LlmError::StreamIncomplete { .. } => StatusCode::BAD_GATEWAY,
-        LlmError::Timeout => StatusCode::GATEWAY_TIMEOUT,
-        LlmError::EgressDenied(_) | LlmError::InvalidApiKey => StatusCode::BAD_REQUEST,
-        _ => StatusCode::INTERNAL_SERVER_ERROR,
+        | LlmError::StreamIncomplete { .. }
+        | LlmError::NetworkError(_)
+        | LlmError::ResponseTooLarge(_)
+        | LlmError::SerializationError(_)
+        | LlmError::ApiError(_)
+        | LlmError::RateLimited
+        | LlmError::ModelNotFound(_) => StatusCode::BAD_GATEWAY,
+    }
+}
+
+/// The 400 `invalid_provider` answer of a provider config `resolve_provider_config` refused.
+fn invalid_provider(message: String) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(ApiResponse::<()>::error_with_code(
+            message,
+            "invalid_provider",
+            None,
+        )),
+    )
+        .into_response()
+}
+
+/// The answer of a failed LLM call: its status and code, and `message`.
+fn llm_error_response(e: &LlmError, message: String) -> Response {
+    (
+        llm_error_status(e),
+        Json(ApiResponse::<()>::error_with_code(
+            message,
+            llm_error_code(e),
+            None,
+        )),
+    )
+        .into_response()
+}
+
+/// The code of a refused session lookup, as the session routes give it:
+/// `not_found`, `session_expired`, `capacity` (the registry is full) or
+/// `internal` (the store failed).
+fn lookup_error_code(e: &LookupError) -> &'static str {
+    match e {
+        LookupError::Session(SessionError::NotFound) => "not_found",
+        LookupError::Session(SessionError::Expired) => "session_expired",
+        LookupError::Session(SessionError::MaxSessionsReached) => "capacity",
+        LookupError::Internal => "internal",
     }
 }
 
@@ -968,9 +1016,7 @@ pub async fn llm_chat(
         &server_env,
     ) {
         Ok(cfg) => cfg,
-        Err(msg) => {
-            return (StatusCode::BAD_REQUEST, Json(ApiResponse::<()>::error(msg))).into_response();
-        }
+        Err(msg) => return invalid_provider(msg),
     };
 
     // Get the session (a stored one is adopted)
@@ -1114,11 +1160,7 @@ pub async fn llm_chat(
         }
         Err(e) => {
             tracing::error!(error = %e, elapsed_ms = %elapsed.as_millis(), "LLM chat failed");
-            (
-                llm_error_status(&e),
-                Json(ApiResponse::<()>::error(e.to_string())),
-            )
-                .into_response()
+            llm_error_response(&e, e.to_string())
         }
     }
 }
@@ -1181,17 +1223,7 @@ async fn list_models_response(
         }
         Some(cfg) => match resolve_provider_config(Some(cfg), None, settings, &server_env) {
             Ok(cfg) => cfg,
-            Err(msg) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(ApiResponse::<()>::error_with_code(
-                        msg,
-                        "invalid_provider",
-                        None,
-                    )),
-                )
-                    .into_response();
-            }
+            Err(msg) => return invalid_provider(msg),
         },
     };
     let provider = build_provider(config, settings);
@@ -1206,15 +1238,7 @@ async fn list_models_response(
         )
             .into_response(),
         Err(e) if default_ollama => unavailable(format!("LLM provider not available: {e}")),
-        Err(e) => (
-            llm_error_status(&e),
-            Json(ApiResponse::<()>::error_with_code(
-                format!("Could not list the provider's models: {e}"),
-                llm_error_code(&e),
-                None,
-            )),
-        )
-            .into_response(),
+        Err(e) => llm_error_response(&e, format!("Could not list the provider's models: {e}")),
     }
 }
 
@@ -1256,13 +1280,13 @@ pub struct GenerateTitleResponse {
 }
 
 /// Generate a conversation title using the LLM.
-pub async fn llm_generate_title(Json(request): Json<GenerateTitleRequest>) -> impl IntoResponse {
+pub async fn llm_generate_title(Json(request): Json<GenerateTitleRequest>) -> Response {
     // Resolve the provider (egress policy, key policy) before any request.
     let settings = LlmSettings::current();
     let provider_config =
         match resolve_provider_config(request.provider, None, &settings, &server_env) {
             Ok(cfg) => cfg,
-            Err(msg) => return (StatusCode::BAD_REQUEST, Json(ApiResponse::error(msg))),
+            Err(msg) => return invalid_provider(msg),
         };
 
     let provider = build_provider(provider_config, &settings);
@@ -1302,16 +1326,11 @@ pub async fn llm_generate_title(Json(request): Json<GenerateTitleRequest>) -> im
                 StatusCode::OK,
                 Json(ApiResponse::success(GenerateTitleResponse { title })),
             )
+                .into_response()
         }
         Err(e) => {
             tracing::error!(error = %e, "Failed to generate title");
-            (
-                llm_error_status(&e),
-                Json(ApiResponse::error(format!(
-                    "Failed to generate title: {}",
-                    e
-                ))),
-            )
+            llm_error_response(&e, format!("Failed to generate title: {e}"))
         }
     }
 }
@@ -1353,8 +1372,12 @@ pub enum ProgressEvent {
     Done {
         message: Message,
     },
+    /// The chat failed or was refused; `code` is the code the JSON routes give the same refusal
+    /// (`invalid_provider`, `upstream_error`, a session code, the governor's code, ...).
     Error {
         error: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        code: Option<&'static str>,
     },
 }
 
@@ -2081,12 +2104,13 @@ async fn run_chat_stream(
     let session = match live_session(&state, &request.session_id).await {
         Ok(s) => s,
         Err(e) => {
+            let code = Some(lookup_error_code(&e));
             let error = match e {
                 LookupError::Session(SessionError::NotFound) => "Session not found".to_string(),
                 LookupError::Session(e) => e.to_string(),
                 LookupError::Internal => "internal error".to_string(),
             };
-            let _ = tx.send(ProgressEvent::Error { error }).await;
+            let _ = tx.send(ProgressEvent::Error { error, code }).await;
             return;
         }
     };
@@ -2107,7 +2131,12 @@ async fn run_chat_stream(
     ) {
         Ok(cfg) => cfg,
         Err(msg) => {
-            let _ = tx.send(ProgressEvent::Error { error: msg }).await;
+            let _ = tx
+                .send(ProgressEvent::Error {
+                    error: msg,
+                    code: Some("invalid_provider"),
+                })
+                .await;
             return;
         }
     };
@@ -2131,6 +2160,7 @@ async fn run_chat_stream(
         let _ = tx
             .send(ProgressEvent::Error {
                 error: "Conversation not found".to_string(),
+                code: Some("not_found"),
             })
             .await;
         return;
@@ -2246,6 +2276,7 @@ async fn run_chat_stream(
             let _ = tx
                 .send(ProgressEvent::Error {
                     error: e.to_string(),
+                    code: Some(e.code()),
                 })
                 .await;
             return;
@@ -2265,7 +2296,10 @@ async fn run_chat_stream(
                 // Done is handled separately after chat_stream returns
             }
             StreamChunk::Error { message } => {
-                let _ = tx_for_callback.try_send(ProgressEvent::Error { error: message });
+                let _ = tx_for_callback.try_send(ProgressEvent::Error {
+                    error: message,
+                    code: Some("upstream_error"),
+                });
             }
             StreamChunk::ToolCall { .. } | StreamChunk::ToolResult { .. } => {
                 // Tool events are handled by StreamingToolExecutor
@@ -2292,6 +2326,7 @@ async fn run_chat_stream(
             let _ = tx
                 .send(ProgressEvent::Error {
                     error: gone.message().to_string(),
+                    code: Some(gone.code()),
                 })
                 .await;
             return;
@@ -2326,6 +2361,7 @@ async fn run_chat_stream(
             let _ = tx
                 .send(ProgressEvent::Error {
                     error: e.to_string(),
+                    code: Some(llm_error_code(&e)),
                 })
                 .await;
         }
@@ -2946,13 +2982,58 @@ mod chat_tests {
             (LlmError::Timeout, StatusCode::GATEWAY_TIMEOUT),
             (LlmError::EgressDenied("no".into()), StatusCode::BAD_REQUEST),
             (LlmError::InvalidApiKey, StatusCode::BAD_REQUEST),
-            (
-                LlmError::NetworkError("x".into()),
-                StatusCode::INTERNAL_SERVER_ERROR,
-            ),
+            (LlmError::NetworkError("x".into()), StatusCode::BAD_GATEWAY),
         ];
         for (e, want) in cases {
             assert_eq!(llm_error_status(&e), want, "{e}");
+        }
+        // Every variant: its status and code.
+        let gateway = (StatusCode::BAD_GATEWAY, "upstream_error");
+        let cases = [
+            (
+                LlmError::Upstream {
+                    provider: "P",
+                    status: 500,
+                },
+                gateway,
+            ),
+            (
+                LlmError::StreamFailed {
+                    provider: "P",
+                    kind: "overloaded_error".into(),
+                },
+                gateway,
+            ),
+            (LlmError::StreamIncomplete { provider: "P" }, gateway),
+            (LlmError::NetworkError("x".into()), gateway),
+            (LlmError::ResponseTooLarge(8), gateway),
+            (LlmError::SerializationError("x".into()), gateway),
+            (LlmError::ApiError("x".into()), gateway),
+            (LlmError::RateLimited, gateway),
+            (LlmError::ModelNotFound("m".into()), gateway),
+            (
+                LlmError::Timeout,
+                (StatusCode::GATEWAY_TIMEOUT, "upstream_timeout"),
+            ),
+            (
+                LlmError::NotAvailable("x".into()),
+                (StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable"),
+            ),
+            (
+                LlmError::EgressDenied("no".into()),
+                (StatusCode::BAD_REQUEST, "invalid_provider"),
+            ),
+            (
+                LlmError::InvalidApiKey,
+                (StatusCode::BAD_REQUEST, "invalid_provider"),
+            ),
+            (
+                LlmError::ToolError("x".into()),
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
+            ),
+        ];
+        for (e, want) in cases {
+            assert_eq!((llm_error_status(&e), llm_error_code(&e)), want, "{e}");
         }
     }
 
