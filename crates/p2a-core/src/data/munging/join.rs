@@ -56,7 +56,7 @@ use std::collections::HashSet;
 /// datasets and then adding or binding a column builds such a frame. A frame
 /// that is already aligned is not copied; a misaligned one is copied once,
 /// the copy polars itself makes of it in a keyed join.
-fn chunk_aligned(df: &DataFrame) -> Cow<'_, DataFrame> {
+pub(super) fn chunk_aligned(df: &DataFrame) -> Cow<'_, DataFrame> {
     if df.should_rechunk() {
         let mut df = df.clone();
         df.as_single_chunk_par();

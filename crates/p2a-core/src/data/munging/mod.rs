@@ -129,6 +129,7 @@ pub use clean::{
     deduplicate,
     drop_na,
     fill_na,
+    fill_na_by,
     parse_cast_dtype,
     regex_count,
     regex_extract,
@@ -164,6 +165,7 @@ pub use reshape::{explode, melt, pivot, stack, transpose};
 
 // Re-export feature engineering operations
 pub use features::{
-    BinOptions, BinOutcome, BinStrategy, bin, bin_with, cumprod, cumsum, diff, lag, lead,
-    normalize, one_hot_encode, pct_change, rank, standardize,
+    BinOptions, BinOutcome, BinStrategy, ShiftOptions, bin, bin_with, cumprod, cumsum, diff,
+    diff_with, lag, lag_with, lead, lead_with, normalize, one_hot_encode, pct_change,
+    pct_change_with, rank, standardize,
 };

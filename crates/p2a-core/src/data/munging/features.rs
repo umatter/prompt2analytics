@@ -32,7 +32,230 @@ use polars::prelude::*;
 use polars_ops::prelude::RankOptions;
 use serde::{Deserialize, Serialize};
 
+/// Grouping and time index of a shift: [`lag_with`], [`lead_with`], [`diff_with`],
+/// [`pct_change_with`]. `Default` is neither: a positional shift of the whole column.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ShiftOptions<'a> {
+    /// Column(s) whose values form the groups (panel entities): the shift stays within
+    /// each group.
+    pub group_by: Option<&'a [&'a str]>,
+    /// An integer time column (a year, a period number). With it, the lag of period `t`
+    /// is the value of period `t - k` of the same group, missing when that period is not
+    /// in the data (R's `plm::lag` on a `pdata.frame`); without it the shift is by row
+    /// position within groups, in data order (`dplyr::lag`).
+    pub time: Option<&'a str>,
+}
+
+/// The temporary column a time-indexed shift joins into the frame.
+const SHIFTED: &str = "__p2a_shifted";
+
+/// `periods` as a signed shift, or an error above `i64::MAX`.
+fn signed_periods(periods: usize) -> MungeResult<i64> {
+    i64::try_from(periods).map_err(|_| {
+        MungeError::InvalidExpression(format!(
+            "periods must be at most {}, got {periods}",
+            i64::MAX
+        ))
+    })
+}
+
+/// Check that `column`, the group columns and the time column exist.
+fn check_shift_columns(df: &DataFrame, column: &str, opts: &ShiftOptions) -> MungeResult<()> {
+    let names = std::iter::once(column)
+        .chain(opts.group_by.unwrap_or(&[]).iter().copied())
+        .chain(opts.time);
+    for name in names {
+        if df.column(name).is_err() {
+            return Err(MungeError::ColumnNotFound(name.to_string()));
+        }
+    }
+    Ok(())
+}
+
+/// How a shift reaches its values: an expression on `df` (positional), or a column that
+/// [`shifted_column_by_time`] computed and that the caller adds to the frame as
+/// [`SHIFTED`] (time index).
+fn shift_expr(
+    df: &DataFrame,
+    column: &str,
+    periods: i64,
+    opts: &ShiftOptions,
+) -> MungeResult<(Option<Column>, Expr)> {
+    check_shift_columns(df, column, opts)?;
+    let groups = opts.group_by.filter(|g| !g.is_empty());
+    if let Some(time) = opts.time {
+        let shifted = shifted_column_by_time(df, column, periods, groups.unwrap_or(&[]), time)?;
+        return Ok((Some(shifted.with_name(SHIFTED.into())), col(SHIFTED)));
+    }
+    let shifted = col(column).shift(lit(periods));
+    Ok(match groups {
+        Some(groups) => {
+            let group_exprs: Vec<Expr> = groups.iter().map(|g| col(*g)).collect();
+            (None, shifted.over(group_exprs))
+        }
+        None => (None, shifted),
+    })
+}
+
+/// `df` with the column `name` computed by `make` from the shifted values of `column`
+/// (`shifted`: the expression [`shift_expr`] gives).
+fn with_shifted(
+    df: &DataFrame,
+    column: &str,
+    periods: i64,
+    opts: &ShiftOptions,
+    name: &str,
+    make: impl FnOnce(Expr) -> Expr,
+) -> MungeResult<Dataset> {
+    let (extra, shifted) = shift_expr(df, column, periods, opts)?;
+    let mut base = df.clone();
+    if let Some(extra) = extra {
+        base.with_column(extra)?;
+    }
+    let mut result = base
+        .lazy()
+        .with_column(make(shifted).alias(name))
+        .collect()
+        .map_err(|e| MungeError::FeatureError(e.to_string()))?;
+    if result.column(SHIFTED).is_ok() && name != SHIFTED {
+        result.drop_in_place(SHIFTED)?;
+    }
+    Ok(Dataset::new(result))
+}
+
+/// The values of `column` shifted by `periods` (positive: from earlier rows or periods, a
+/// lag; negative: a lead), within the groups of `opts.group_by` and, with `opts.time`,
+/// by the time index: the shared step of the lags, leads, differences and percentage
+/// changes. The column keeps its name and type.
+pub(crate) fn shift_within(
+    df: &DataFrame,
+    column: &str,
+    periods: i64,
+    opts: &ShiftOptions,
+) -> MungeResult<Column> {
+    let (extra, shifted) = shift_expr(df, column, periods, opts)?;
+    if let Some(extra) = extra {
+        return Ok(extra.with_name(column.into()));
+    }
+    let out = df
+        .clone()
+        .lazy()
+        .select([shifted.alias(column)])
+        .collect()
+        .map_err(|e| MungeError::FeatureError(e.to_string()))?;
+    Ok(out.column(column)?.clone())
+}
+
+/// The value of `column` at period `t - periods` of the same group, for each row (period
+/// `t`), as R's `plm::lag(x, periods)` on a `pdata.frame` indexed by (groups, time):
+/// missing when that period is not in the data. A keyed lookup (a left join of the
+/// frame's (groups, time) on (groups, time + periods)), so the rows keep their order and
+/// need not be sorted.
+fn shifted_column_by_time(
+    df: &DataFrame,
+    column: &str,
+    periods: i64,
+    groups: &[&str],
+    time: &str,
+) -> MungeResult<Column> {
+    const TIME: &str = "__p2a_time";
+    let t = df.column(time)?;
+    if !t.dtype().is_integer() {
+        return Err(MungeError::TypeMismatch {
+            column: time.to_string(),
+            expected: "an integer time column (use an integer period number, such as a year)"
+                .to_string(),
+            found: t.dtype().to_string(),
+        });
+    }
+    for name in groups.iter().copied().chain(std::iter::once(time)) {
+        let c = df.column(name)?;
+        if c.null_count() > 0 {
+            return Err(MungeError::InvalidValue {
+                column: name.to_string(),
+                value: "NA".to_string(),
+                reason: format!(
+                    "the time index has {} missing value(s) in this column; drop or fill \
+                     those rows first",
+                    c.null_count()
+                ),
+            });
+        }
+    }
+    let t = t
+        .strict_cast(&DataType::Int64)
+        .map_err(|_| MungeError::TypeMismatch {
+            column: time.to_string(),
+            expected: "integer periods within the range of a 64-bit integer".to_string(),
+            found: t.dtype().to_string(),
+        })?;
+    let t = t.i64()?;
+    let key_name = |i: usize| -> PlSmallStr { format!("__p2a_group{i}").into() };
+    let mut keys: Vec<Column> = Vec::with_capacity(groups.len() + 1);
+    for (i, g) in groups.iter().enumerate() {
+        keys.push(df.column(g)?.clone().with_name(key_name(i)));
+    }
+    keys.push(t.clone().with_name(TIME.into()).into_column());
+    let keys = DataFrame::new(keys)?;
+    let duplicated = keys.is_duplicated()?;
+    if let Some(row) = duplicated.into_iter().position(|d| d == Some(true)) {
+        let names: Vec<&str> = groups
+            .iter()
+            .copied()
+            .chain(std::iter::once(time))
+            .collect();
+        let values: Vec<String> = names
+            .iter()
+            .map(|n| {
+                df.column(n)
+                    .and_then(|c| c.get(row).map(|v| v.str_value().to_string()))
+                    .unwrap_or_default()
+            })
+            .collect();
+        return Err(MungeError::InvalidExpression(format!(
+            "duplicate ({}) pair ({}): each group may have one row per period",
+            names.join(", "),
+            values.join(", ")
+        )));
+    }
+    // Period t + periods takes the value of period t (a lag of `periods`); a period whose
+    // shift overflows has no partner.
+    let target: Int64Chunked = t
+        .iter()
+        .map(|v| v.and_then(|v| v.checked_add(periods)))
+        .collect();
+    let mut lookup: Vec<Column> = Vec::with_capacity(groups.len() + 2);
+    for (i, g) in groups.iter().enumerate() {
+        lookup.push(df.column(g)?.clone().with_name(key_name(i)));
+    }
+    lookup.push(target.with_name(TIME.into()).into_column());
+    lookup.push(df.column(column)?.clone().with_name(SHIFTED.into()));
+    let lookup = DataFrame::new(lookup)?;
+    let on: Vec<PlSmallStr> = (0..groups.len())
+        .map(key_name)
+        .chain(std::iter::once(PlSmallStr::from(TIME)))
+        .collect();
+    crate::resource::checkpoint().map_err(feature_err)?;
+    // (group, time) is unique on both sides, so the result has the frame's rows, in order.
+    let mut args = JoinArgs::new(JoinType::Left);
+    args.maintain_order = MaintainOrderJoin::Left;
+    let joined = super::join::chunk_aligned(&keys)
+        .join(
+            &super::join::chunk_aligned(&lookup),
+            on.clone(),
+            on,
+            args,
+            None,
+        )
+        .map_err(|e| MungeError::FeatureError(e.to_string()))?;
+    Ok(joined.column(SHIFTED)?.clone().with_name(column.into()))
+}
+
 /// Create a lagged version of a column.
+///
+/// The shift is by row position, within the `group_by` groups and in data order
+/// (`dplyr::lag`), so the data must be sorted by time within each group and have no
+/// gaps; [`lag_with`] takes a time index instead.
 ///
 /// # Arguments
 ///
@@ -58,48 +281,47 @@ pub fn lag(
     periods: usize,
     group_by: Option<&[&str]>,
 ) -> MungeResult<Dataset> {
-    let df = dataset.df();
+    lag_with(
+        dataset,
+        column,
+        periods,
+        &ShiftOptions {
+            group_by,
+            time: None,
+        },
+    )
+}
 
-    // Validate column exists
-    if df.column(column).is_err() {
-        return Err(MungeError::ColumnNotFound(column.to_string()));
-    }
-
-    let lagged_name = format!("{}_lag{}", column, periods);
-
-    let result = if let Some(groups) = group_by {
-        // Validate group columns
-        for g in groups {
-            if df.column(g).is_err() {
-                return Err(MungeError::ColumnNotFound(g.to_string()));
-            }
-        }
-
-        // Group by and apply shift
-        let group_exprs: Vec<Expr> = groups.iter().map(|g| col(*g)).collect();
-        df.clone()
-            .lazy()
-            .with_column(
-                col(column)
-                    .shift(lit(periods as i64))
-                    .over(group_exprs)
-                    .alias(&lagged_name),
-            )
-            .collect()
-            .map_err(|e| MungeError::FeatureError(e.to_string()))?
-    } else {
-        // Simple shift without grouping
-        df.clone()
-            .lazy()
-            .with_column(col(column).shift(lit(periods as i64)).alias(&lagged_name))
-            .collect()
-            .map_err(|e| MungeError::FeatureError(e.to_string()))?
-    };
-
-    Ok(Dataset::new(result))
+/// [`lag`] with a time index: adds `{column}_lag{periods}`, the value `periods` rows back
+/// within each group or, with `opts.time`, the value of period `t - periods` of the same
+/// group (missing when that period is not observed; R's `plm::lag`).
+///
+/// # Errors
+///
+/// [`MungeError::ColumnNotFound`]; [`MungeError::InvalidExpression`] for `periods` above
+/// `i64::MAX` and for a duplicated (group, time) pair; [`MungeError::TypeMismatch`] for a
+/// time column that is not an integer column; [`MungeError::InvalidValue`] for a missing
+/// time or group value.
+pub fn lag_with(
+    dataset: &Dataset,
+    column: &str,
+    periods: usize,
+    opts: &ShiftOptions,
+) -> MungeResult<Dataset> {
+    let name = format!("{column}_lag{periods}");
+    with_shifted(
+        dataset.df(),
+        column,
+        signed_periods(periods)?,
+        opts,
+        &name,
+        |e| e,
+    )
 }
 
 /// Create a lead (forward-shifted) version of a column.
+///
+/// Positional, as [`lag`]; [`lead_with`] takes a time index.
 ///
 /// # Arguments
 ///
@@ -121,50 +343,49 @@ pub fn lead(
     periods: usize,
     group_by: Option<&[&str]>,
 ) -> MungeResult<Dataset> {
-    let df = dataset.df();
+    lead_with(
+        dataset,
+        column,
+        periods,
+        &ShiftOptions {
+            group_by,
+            time: None,
+        },
+    )
+}
 
-    // Validate column exists
-    if df.column(column).is_err() {
-        return Err(MungeError::ColumnNotFound(column.to_string()));
+/// [`lead`] with a time index: adds `{column}_lead{periods}`, the value of period
+/// `t + periods` of the same group with `opts.time` (R's `plm::lead`).
+///
+/// # Errors
+///
+/// As [`lag_with`].
+pub fn lead_with(
+    dataset: &Dataset,
+    column: &str,
+    periods: usize,
+    opts: &ShiftOptions,
+) -> MungeResult<Dataset> {
+    let name = format!("{column}_lead{periods}");
+    let shift = -signed_periods(periods)?;
+    with_shifted(dataset.df(), column, shift, opts, &name, |e| e)
+}
+
+/// The refusal of a difference over 0 periods, as R's `diff(x, lag = 0)`.
+fn positive_periods(periods: usize) -> MungeResult<i64> {
+    if periods == 0 {
+        return Err(MungeError::InvalidExpression(
+            "periods must be at least 1 (R's diff: 'lag' must be an integer >= 1)".to_string(),
+        ));
     }
-
-    let lead_name = format!("{}_lead{}", column, periods);
-
-    let result = if let Some(groups) = group_by {
-        // Validate group columns
-        for g in groups {
-            if df.column(g).is_err() {
-                return Err(MungeError::ColumnNotFound(g.to_string()));
-            }
-        }
-
-        // Group by and apply negative shift (lead)
-        let group_exprs: Vec<Expr> = groups.iter().map(|g| col(*g)).collect();
-        df.clone()
-            .lazy()
-            .with_column(
-                col(column)
-                    .shift(lit(-(periods as i64)))
-                    .over(group_exprs)
-                    .alias(&lead_name),
-            )
-            .collect()
-            .map_err(|e| MungeError::FeatureError(e.to_string()))?
-    } else {
-        // Simple negative shift without grouping
-        df.clone()
-            .lazy()
-            .with_column(col(column).shift(lit(-(periods as i64))).alias(&lead_name))
-            .collect()
-            .map_err(|e| MungeError::FeatureError(e.to_string()))?
-    };
-
-    Ok(Dataset::new(result))
+    signed_periods(periods)
 }
 
 /// Calculate the difference between consecutive values.
 ///
-/// Computes: value[i] - value[i - periods]
+/// Computes: value[i] - value[i - periods], by row position (as [`lag`]): the data must be
+/// sorted and complete; [`diff_with`] takes groups and a time index. `periods` must be at
+/// least 1.
 ///
 /// # Arguments
 ///
@@ -180,31 +401,34 @@ pub fn lead(
 /// let with_diff = diff(&data, "price", 1)?;
 /// ```
 pub fn diff(dataset: &Dataset, column: &str, periods: usize) -> MungeResult<Dataset> {
-    let df = dataset.df();
+    diff_with(dataset, column, periods, &ShiftOptions::default())
+}
 
-    // Validate column exists
-    if df.column(column).is_err() {
-        return Err(MungeError::ColumnNotFound(column.to_string()));
-    }
-
-    let diff_name = format!("{}_diff{}", column, periods);
-
-    // Calculate difference as: current - lagged
-    let result = df
-        .clone()
-        .lazy()
-        .with_column((col(column) - col(column).shift(lit(periods as i64))).alias(&diff_name))
-        .collect()
-        .map_err(|e| MungeError::FeatureError(e.to_string()))?;
-
-    Ok(Dataset::new(result))
+/// [`diff`] within groups and by a time index: adds `{column}_diff{periods}`, the value
+/// minus its [`lag_with`] of `periods` (missing where the lag is).
+///
+/// # Errors
+///
+/// As [`lag_with`], and [`MungeError::InvalidExpression`] for `periods == 0`.
+pub fn diff_with(
+    dataset: &Dataset,
+    column: &str,
+    periods: usize,
+    opts: &ShiftOptions,
+) -> MungeResult<Dataset> {
+    let name = format!("{column}_diff{periods}");
+    let shift = positive_periods(periods)?;
+    with_shifted(dataset.df(), column, shift, opts, &name, |lagged| {
+        col(column) - lagged
+    })
 }
 
 /// Calculate percentage change between consecutive values.
 ///
 /// Computes: (value[i] - value[i - periods]) / value[i - periods], in floating
 /// point: an integer column gives Float64 fractions. A non-numeric column is
-/// refused.
+/// refused. By row position, as [`diff`]; [`pct_change_with`] takes groups and a time
+/// index. `periods` must be at least 1.
 ///
 /// # Arguments
 ///
@@ -220,28 +444,30 @@ pub fn diff(dataset: &Dataset, column: &str, periods: usize) -> MungeResult<Data
 /// let with_pct = pct_change(&data, "price", 1)?;
 /// ```
 pub fn pct_change(dataset: &Dataset, column: &str, periods: usize) -> MungeResult<Dataset> {
+    pct_change_with(dataset, column, periods, &ShiftOptions::default())
+}
+
+/// [`pct_change`] within groups and by a time index: adds `{column}_pct_change{periods}`.
+///
+/// # Errors
+///
+/// As [`diff_with`], and [`MungeError::TypeMismatch`] for a non-numeric column.
+pub fn pct_change_with(
+    dataset: &Dataset,
+    column: &str,
+    periods: usize,
+    opts: &ShiftOptions,
+) -> MungeResult<Dataset> {
     let df = dataset.df();
-
-    // Validate column exists
-    if df.column(column).is_err() {
-        return Err(MungeError::ColumnNotFound(column.to_string()));
-    }
-
+    check_shift_columns(df, column, opts)?;
     super::require_numeric(df, column, false)?;
-
-    let pct_name = format!("{}_pct_change{}", column, periods);
-
-    // Calculate (current - lagged) / lagged in Float64: an integer column would floor-divide
-    let current = col(column).cast(DataType::Float64);
-    let lagged = current.clone().shift(lit(periods as i64));
-    let result = df
-        .clone()
-        .lazy()
-        .with_column(((current - lagged.clone()) / lagged).alias(&pct_name))
-        .collect()
-        .map_err(|e| MungeError::FeatureError(e.to_string()))?;
-
-    Ok(Dataset::new(result))
+    let name = format!("{column}_pct_change{periods}");
+    let shift = positive_periods(periods)?;
+    // In Float64: an integer column would floor-divide
+    with_shifted(df, column, shift, opts, &name, |lagged| {
+        let lagged = lagged.cast(DataType::Float64);
+        (col(column).cast(DataType::Float64) - lagged.clone()) / lagged
+    })
 }
 
 /// Standardize columns to have mean 0 and standard deviation 1.
@@ -1672,10 +1898,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             (codes_of(&c.dataset, "x_binned"), c.edges.clone()),
-            (
-                vec![0., 0., 0.],
-                vec![2.997, 3.0, 3.003]
-            )
+            (vec![0., 0., 0.], vec![2.997, 3.0, 3.003])
         );
         // R: cut(c(0, 0), 3) codes 1 1.
         let z = bin(
@@ -2201,7 +2424,10 @@ mod tests {
             .vector("pct1_x", &as_r(&num_cells(&pc, "x_pct_change1")), float)
             .vector("normalize_x", &as_r(&num_cells(&nz, "x_normalized")), float)
             .finish();
-        for (d, c, k) in [(&pc, "x_pct_change1", "pct1_x"), (&nz, "x_normalized", "normalize_x")] {
+        for (d, c, k) in [
+            (&pc, "x_pct_change1", "pct1_x"),
+            (&nz, "x_normalized", "normalize_x"),
+        ] {
             assert_eq!(
                 d.df().column(c).unwrap().null_count(),
                 case.vector(k).iter().filter(|v| v.is_nan()).count(),
@@ -2234,5 +2460,210 @@ mod tests {
                 r.err()
             );
         }
+    }
+
+    #[test]
+    fn test_validate_panel_shift_grouped() {
+        use p2a_validation::{Check, Tol};
+        // case data_munging_panel_shift: dplyr y - lag(y) and (x - lag(x)) / lag(x) within
+        // group_by(firm), on unsorted, interleaved rows
+        let (case, ds) = crate::test_support::load_case("data_munging_panel_shift");
+        let by = ShiftOptions {
+            group_by: Some(&["firm"]),
+            time: None,
+        };
+        let d = diff_with(&ds, "y", 1, &by).unwrap();
+        let p = pct_change_with(&ds, "x", 1, &by).unwrap();
+        let float = Tol::new(1e-14, 0.0);
+        Check::new(&case)
+            .vector("grouped_diff1_y", &as_r(&num_cells(&d, "y_diff1")), float)
+            .vector(
+                "grouped_pct1_x",
+                &as_r(&num_cells(&p, "x_pct_change1")),
+                float,
+            )
+            .finish();
+        for (o, c, k) in [
+            (&d, "y_diff1", "grouped_diff1_y"),
+            (&p, "x_pct_change1", "grouped_pct1_x"),
+        ] {
+            assert_eq!(
+                o.df().column(c).unwrap().null_count(),
+                case.vector(k).iter().filter(|v| v.is_nan()).count(),
+                "{c}"
+            );
+        }
+        // R's diff(x, lag = 0) is an error
+        for r in [
+            diff_with(&ds, "y", 0, &by),
+            pct_change_with(&ds, "x", 0, &by),
+            diff(&ds, "y", 0),
+        ] {
+            assert!(
+                matches!(r, Err(MungeError::InvalidExpression(_))),
+                "{:?}",
+                r.err()
+            );
+        }
+        assert!(matches!(
+            diff_with(
+                &ds,
+                "y",
+                1,
+                &ShiftOptions {
+                    group_by: Some(&["nope"]),
+                    time: None
+                }
+            ),
+            Err(MungeError::ColumnNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn test_validate_panel_shift_time_index() {
+        use p2a_validation::{Check, Tol};
+        // case data_munging_panel_shift: plm::lag / lead / diff on pdata.frame(index = c("firm",
+        // "year")), mapped back to data order; firm 3 has no 2003
+        let (case, ds) = crate::test_support::load_case("data_munging_panel_shift");
+        let by = ShiftOptions {
+            group_by: Some(&["firm"]),
+            time: Some("year"),
+        };
+        let l1 = lag_with(&ds, "y", 1, &by).unwrap();
+        let l2 = lag_with(&ds, "y", 2, &by).unwrap();
+        let lx = lag_with(&ds, "x", 1, &by).unwrap();
+        let ld = lead_with(&ds, "y", 1, &by).unwrap();
+        let d1 = diff_with(&ds, "y", 1, &by).unwrap();
+        let p1 = pct_change_with(&ds, "x", 1, &by).unwrap();
+        assert_eq!(dtype(&lx, "x_lag1"), DataType::Int64);
+        let float = Tol::new(1e-14, 0.0);
+        Check::new(&case)
+            .vector(
+                "time_lag1_y",
+                &as_r(&num_cells(&l1, "y_lag1")),
+                Tol::exact(),
+            )
+            .vector(
+                "time_lag2_y",
+                &as_r(&num_cells(&l2, "y_lag2")),
+                Tol::exact(),
+            )
+            .vector(
+                "time_lag1_x",
+                &as_r(&num_cells(&lx, "x_lag1")),
+                Tol::exact(),
+            )
+            .vector(
+                "time_lead1_y",
+                &as_r(&num_cells(&ld, "y_lead1")),
+                Tol::exact(),
+            )
+            .vector("time_diff1_y", &as_r(&num_cells(&d1, "y_diff1")), float)
+            .vector(
+                "time_pct1_x",
+                &as_r(&num_cells(&p1, "x_pct_change1")),
+                float,
+            )
+            .finish();
+        assert_eq!(
+            l1.df().column("y_lag1").unwrap().null_count(),
+            case.vector("time_lag1_y")
+                .iter()
+                .filter(|v| v.is_nan())
+                .count()
+        );
+        // rows keep their order and the frame its columns
+        assert_eq!(num_cells(&l1, "id"), num_cells(&ds, "id"));
+        assert_eq!(l1.df().width(), ds.df().width() + 1);
+
+        // a duplicated (firm, year) pair is refused and named
+        let mut dup = ds.df().clone();
+        let year = Column::new(
+            "year".into(),
+            [
+                2002i64, 2003, 2001, 2001, 2001, 2002, 2004, 2003, 2002, 2003, 2004,
+            ],
+        );
+        dup.with_column(year).unwrap();
+        match lag_with(&Dataset::new(dup), "y", 1, &by) {
+            Err(MungeError::InvalidExpression(m)) => {
+                assert!(m.contains("(firm, year)") && m.contains("(1, 2003)"), "{m}")
+            }
+            other => panic!("{:?}", other.err()),
+        }
+        // a missing year is refused
+        let mut gap = ds.df().clone();
+        let year = Column::new(
+            "year".into(),
+            [
+                Some(2002i64),
+                None,
+                Some(2001),
+                Some(2001),
+                Some(2001),
+                Some(2002),
+                Some(2004),
+                Some(2003),
+                Some(2002),
+                Some(2004),
+                Some(2004),
+            ],
+        );
+        gap.with_column(year).unwrap();
+        assert!(matches!(
+            lag_with(&Dataset::new(gap), "y", 1, &by),
+            Err(MungeError::InvalidValue { .. })
+        ));
+        // a date is not a period number
+        let mut dated = ds.df().clone();
+        let date = dated
+            .column("year")
+            .unwrap()
+            .cast(&DataType::Int32)
+            .unwrap()
+            .cast(&DataType::Date)
+            .unwrap();
+        dated.with_column(date).unwrap();
+        match lag_with(&Dataset::new(dated), "y", 1, &by) {
+            Err(MungeError::TypeMismatch { expected, .. }) => {
+                assert!(expected.contains("integer period number"), "{expected}")
+            }
+            other => panic!("{:?}", other.err()),
+        }
+        // too many periods
+        assert!(matches!(
+            lag_with(&ds, "y", usize::MAX, &by),
+            Err(MungeError::InvalidExpression(_))
+        ));
+
+        // without groups, the time column indexes one series
+        let one =
+            Dataset::new(df!("t" => [3i64, 1, 2, 5], "v" => [30.5, 10.5, 20.5, 50.5]).unwrap());
+        let opts = ShiftOptions {
+            group_by: None,
+            time: Some("t"),
+        };
+        assert_eq!(
+            num_cells(&lag_with(&one, "v", 1, &opts).unwrap(), "v_lag1"),
+            [Some(20.5), None, Some(10.5), None]
+        );
+        // a sorted panel without gaps gives the positional result
+        let mut rng = rand::rngs::StdRng::seed_from_u64(27);
+        let n = 60;
+        let firm: Vec<i64> = (0..n).map(|i| i / 6).collect();
+        let year: Vec<i64> = (0..n).map(|i| 2000 + i % 6).collect();
+        let y: Vec<f64> = (0..n).map(|_| rng.gen_range(0.0..10.0_f64)).collect();
+        let panel = Dataset::new(df!("firm" => firm, "year" => year, "y" => y).unwrap());
+        let keyed = lag_with(&panel, "y", 2, &by).unwrap();
+        let positional = lag(&panel, "y", 2, Some(&["firm"])).unwrap();
+        assert_eq!(
+            num_cells(&keyed, "y_lag2"),
+            num_cells(&positional, "y_lag2")
+        );
+        let shifted = shift_within(panel.df(), "y", 2, &by).unwrap();
+        assert_eq!(
+            shifted.f64().unwrap().into_iter().collect::<Vec<_>>(),
+            num_cells(&positional, "y_lag2")
+        );
     }
 }

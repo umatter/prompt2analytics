@@ -319,7 +319,50 @@ pub fn fill_na_with(
     columns: Option<&[&str]>,
     strategy: &FillStrategy,
 ) -> MungeResult<FillOutcome> {
+    fill_na_grouped(dataset, columns, strategy, &[])
+}
+
+/// [`fill_na_with`] within groups: a forward or backward fill takes each missing cell's value
+/// from the last (next) observed value of its own group, in data order, as `tidyr::fill` on a
+/// grouped frame. With no columns named, the group columns themselves are not filled. An empty
+/// `group_by` is [`fill_na_with`].
+///
+/// # Errors
+///
+/// As [`fill_na_with`]; [`MungeError::ColumnNotFound`] for a group column that does not exist;
+/// [`MungeError::InvalidExpression`] for a strategy other than forward and backward with groups.
+pub fn fill_na_by(
+    dataset: &Dataset,
+    columns: Option<&[&str]>,
+    strategy: &FillStrategy,
+    group_by: &[&str],
+) -> MungeResult<FillOutcome> {
+    if !group_by.is_empty() && !matches!(strategy, FillStrategy::Forward | FillStrategy::Backward) {
+        return Err(MungeError::InvalidExpression(format!(
+            "group_by applies to forward and backward fills, not '{}'",
+            strategy.kind()
+        )));
+    }
+    for g in group_by {
+        if dataset.df().column(g).is_err() {
+            return Err(MungeError::ColumnNotFound(g.to_string()));
+        }
+    }
+    fill_na_grouped(dataset, columns, strategy, group_by)
+}
+
+fn fill_na_grouped(
+    dataset: &Dataset,
+    columns: Option<&[&str]>,
+    strategy: &FillStrategy,
+    group_by: &[&str],
+) -> MungeResult<FillOutcome> {
     let df = dataset.df();
+    // The groups as the data has them, whatever the loop below fills.
+    let groups: Vec<Column> = group_by
+        .iter()
+        .map(|g| df.column(g).cloned())
+        .collect::<PolarsResult<_>>()?;
 
     let cols_to_fill: Vec<String> = match columns {
         Some(cols) => {
@@ -333,6 +376,7 @@ pub fn fill_na_with(
         None => df
             .get_column_names()
             .iter()
+            .filter(|s| !group_by.contains(&s.as_str()))
             .map(|s| s.to_string())
             .collect(),
     };
@@ -369,11 +413,11 @@ pub fn fill_na_with(
                 }
             }
             FillStrategy::Forward => ColumnFill::Filled {
-                column: fill_forward(col)?,
+                column: fill_within(col, true, &groups)?,
                 value: None,
             },
             FillStrategy::Backward => ColumnFill::Filled {
-                column: fill_backward(col)?,
+                column: fill_within(col, false, &groups)?,
                 value: None,
             },
             FillStrategy::Zero => fill_zero(col)?,
@@ -629,14 +673,34 @@ fn fill_with_statistic(
     Ok((filled.with_name(col.name().clone()).into_column(), value))
 }
 
-fn fill_forward(col: &Column) -> MungeResult<Column> {
-    let filled = col.fill_null(FillNullStrategy::Forward(None))?;
-    Ok(filled)
-}
-
-fn fill_backward(col: &Column) -> MungeResult<Column> {
-    let filled = col.fill_null(FillNullStrategy::Backward(None))?;
-    Ok(filled)
+/// `col` (NaN already null) with each null set to the last observed value before it (`forward`)
+/// or the first after it, within the groups `groups` form (columns of `col`'s length), in data
+/// order: `tidyr::fill`. No groups is one group.
+pub(crate) fn fill_within(col: &Column, forward: bool, groups: &[Column]) -> MungeResult<Column> {
+    let strategy = if forward {
+        FillNullStrategy::Forward(None)
+    } else {
+        FillNullStrategy::Backward(None)
+    };
+    if groups.is_empty() || col.null_count() == 0 {
+        return Ok(col.fill_null(strategy)?);
+    }
+    const VALUES: &str = "__p2a_fill_values";
+    let mut frame: Vec<Column> = Vec::with_capacity(groups.len() + 1);
+    let mut keys: Vec<Expr> = Vec::with_capacity(groups.len());
+    for (i, g) in groups.iter().enumerate() {
+        let name = format!("__p2a_fill_group{i}");
+        keys.push(polars::prelude::col(name.as_str()));
+        frame.push(g.clone().with_name(name.into()));
+    }
+    frame.push(col.clone().with_name(VALUES.into()));
+    let filled = DataFrame::new(frame)?
+        .lazy()
+        .select([polars::prelude::col(VALUES)
+            .fill_null_with_strategy(strategy)
+            .over(keys)])
+        .collect()?;
+    Ok(filled.column(VALUES)?.clone().with_name(col.name().clone()))
 }
 
 /// Remove duplicate rows.
@@ -3385,5 +3449,62 @@ mod tests {
             ))
             .contains("'age'")
         );
+    }
+
+    #[test]
+    fn test_validate_fill_grouped_tidyr() {
+        use p2a_validation::{Check, Tol};
+        // case data_munging_panel_shift: tidyr::fill(group_by(d, firm), z, .direction = "down"/"up")
+        let (case, ds) = crate::test_support::load_case("data_munging_panel_shift");
+        let cells = |o: &FillOutcome| -> Vec<f64> {
+            o.dataset
+                .df()
+                .column("z")
+                .unwrap()
+                .f64()
+                .unwrap()
+                .into_iter()
+                .map(|v| v.unwrap_or(f64::NAN))
+                .collect()
+        };
+        let down = fill_na_by(&ds, Some(&["z"]), &FillStrategy::Forward, &["firm"]).unwrap();
+        let up = fill_na_by(&ds, Some(&["z"]), &FillStrategy::Backward, &["firm"]).unwrap();
+        Check::new(&case)
+            .vector("fill_down_z_by_firm", &cells(&down), Tol::exact())
+            .vector("fill_up_z_by_firm", &cells(&up), Tol::exact())
+            .finish();
+        assert_eq!(down.dataset.df().column("z").unwrap().null_count(), 2);
+        // a NaN cell is filled like NA
+        let mut df = ds.df().clone();
+        let z: Float64Chunked = df
+            .column("z")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .into_iter()
+            .map(|v| Some(v.unwrap_or(f64::NAN)))
+            .collect();
+        df.with_column(z.with_name("z".into()).into_column())
+            .unwrap();
+        let nan_down = fill_na_by(
+            &Dataset::new(df),
+            Some(&["z"]),
+            &FillStrategy::Forward,
+            &["firm"],
+        )
+        .unwrap();
+        assert_eq!(cells(&nan_down), cells(&down));
+        // other strategies do not take groups
+        assert!(matches!(
+            fill_na_by(&ds, Some(&["z"]), &FillStrategy::Mean, &["firm"]),
+            Err(MungeError::InvalidExpression(_))
+        ));
+        assert!(matches!(
+            fill_na_by(&ds, Some(&["z"]), &FillStrategy::Forward, &["nope"]),
+            Err(MungeError::ColumnNotFound(_))
+        ));
+        // without columns, the group column is not filled
+        let all = fill_na_by(&ds, None, &FillStrategy::Forward, &["firm"]).unwrap();
+        assert!(all.filled.iter().all(|(c, _)| c != "firm"));
     }
 }
