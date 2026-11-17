@@ -10,7 +10,7 @@
 //! standard error that would round to zero at the style's decimals is written with that many
 //! significant digits in scientific notation (`1.156e-07`).
 
-use super::format_estimate;
+use super::{LegendStyle, format_estimate, significance_legend};
 use super::latex::format_cell;
 use crate::econometrics::{DiscreteResult, PanelResult};
 use crate::regression::OlsResult;
@@ -238,8 +238,10 @@ impl HtmlTableBuilder {
         // Significance note
         if self.style.significance_stars {
             html.push_str("<p class=\"sig-note\"><small>");
-            html.push_str("Standard errors in parentheses. ");
-            html.push_str("* p &lt; 0.05, ** p &lt; 0.01, *** p &lt; 0.001");
+            if self.style.se_in_parentheses {
+                html.push_str("Standard errors in parentheses. ");
+            }
+            html.push_str(&significance_legend(LegendStyle::Html));
             html.push_str("</small></p>\n");
         }
 
@@ -357,7 +359,10 @@ impl DiscreteResult {
         html.push_str("  </tfoot>\n");
 
         html.push_str("</table>\n");
-        html.push_str("<p class=\"sig-note\"><small>* p &lt; 0.05, ** p &lt; 0.01, *** p &lt; 0.001</small></p>\n");
+        html.push_str(&format!(
+            "<p class=\"sig-note\"><small>{}</small></p>\n",
+            significance_legend(LegendStyle::Html)
+        ));
 
         html
     }
@@ -436,7 +441,10 @@ impl PanelResult {
         html.push_str("  </tfoot>\n");
 
         html.push_str("</table>\n");
-        html.push_str("<p class=\"sig-note\"><small>* p &lt; 0.05, ** p &lt; 0.01, *** p &lt; 0.001</small></p>\n");
+        html.push_str(&format!(
+            "<p class=\"sig-note\"><small>{}</small></p>\n",
+            significance_legend(LegendStyle::Html)
+        ));
 
         html
     }

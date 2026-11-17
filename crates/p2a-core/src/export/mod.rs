@@ -16,9 +16,13 @@
 //!
 //! Publication-ready LaTeX tables with customizable styling:
 //! - Standard errors in parentheses
-//! - Significance stars (*, **, ***)
+//! - Significance stars (\textdagger{} p < 0.10, * p < 0.05, ** p < 0.01, *** p < 0.001), with a
+//!   legend built from the same mapping
 //! - Multi-model comparison tables
 //! - Custom notes and captions
+//!
+//! A table with notes puts them in a `threeparttable` environment and says so in its first
+//! line (`% Requires \usepackage{threeparttable}`): the document must load that package.
 //!
 //! ```ignore
 //! use p2a_core::export::{LatexTableBuilder, LatexStyle};
@@ -92,6 +96,7 @@ pub use html::{HtmlStyle, HtmlTableBuilder};
 pub use latex::{LatexStyle, LatexTableBuilder};
 pub use markdown::{MarkdownStyle, MarkdownTableBuilder};
 
+use crate::traits::SignificanceLevel;
 use latex::format_cell;
 
 /// An estimate, standard-error or marginal-effect cell of a regression table.
@@ -116,6 +121,58 @@ pub(super) fn format_estimate(x: f64, decimals: usize) -> String {
     format!("{mantissa}e{sign}{digits:0>2}")
 }
 
+/// How a table writes its significance legend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum LegendStyle {
+    /// `\textdagger{} $p<0.10$; * $p<0.05$; ...` (inside a `tablenotes` item).
+    Latex,
+    /// `&dagger; p &lt; 0.10, * p &lt; 0.05, ...`.
+    Html,
+    /// `† p < 0.10, \* p < 0.05, ...` (stars escaped).
+    Markdown,
+}
+
+/// The levels a table marks, weakest first.
+const LEGEND_LEVELS: [SignificanceLevel; 4] = [
+    SignificanceLevel::TenPercent,
+    SignificanceLevel::FivePercent,
+    SignificanceLevel::OnePercent,
+    SignificanceLevel::TenthPercent,
+];
+
+/// The significance legend, built from the mapping that assigns the stars
+/// ([`SignificanceLevel::stars`] and the thresholds of [`SignificanceLevel::code`]), so the
+/// legend and the stars cannot disagree.
+pub(super) fn significance_legend(style: LegendStyle) -> String {
+    let items: Vec<String> = LEGEND_LEVELS
+        .iter()
+        .map(|level| {
+            let threshold = level.code().trim_start_matches("p<");
+            let stars = level.stars();
+            match style {
+                LegendStyle::Latex => {
+                    let symbol = stars.replace('†', "\\textdagger{}");
+                    format!("{symbol} $p<{threshold}$")
+                }
+                LegendStyle::Html => {
+                    let symbol = stars.replace('†', "&dagger;");
+                    format!("{symbol} p &lt; {threshold}")
+                }
+                LegendStyle::Markdown => {
+                    let symbol = stars.replace('*', "\\*");
+                    format!("{symbol} p < {threshold}")
+                }
+            }
+        })
+        .collect();
+    let separator = if style == LegendStyle::Latex {
+        "; "
+    } else {
+        ", "
+    };
+    items.join(separator)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,5 +190,49 @@ mod tests {
         assert_eq!(format_estimate(f64::NAN, 4), "NA");
         assert_eq!(format_estimate(f64::INFINITY, 4), "Inf");
         assert_eq!(format_estimate(f64::NEG_INFINITY, 4), "-Inf");
+    }
+
+    /// (symbol, threshold) pairs of a rendered legend.
+    fn legend_entries(legend: &str, style: LegendStyle) -> Vec<(String, f64)> {
+        let (separator, marker) = match style {
+            LegendStyle::Latex => ("; ", "$p<"),
+            LegendStyle::Html => (", ", "p &lt; "),
+            LegendStyle::Markdown => (", ", "p < "),
+        };
+        legend
+            .split(separator)
+            .map(|item| {
+                let (symbol, rest) = item.split_once(marker).expect(item);
+                let threshold = rest.trim_end_matches('$').parse().expect(item);
+                (symbol.trim().to_string(), threshold)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_legend_follows_the_star_mapping() {
+        for style in [LegendStyle::Latex, LegendStyle::Html, LegendStyle::Markdown] {
+            let legend = significance_legend(style);
+            let entries = legend_entries(&legend, style);
+            assert_eq!(entries.len(), LEGEND_LEVELS.len(), "{legend}");
+            for (level, (symbol, t)) in LEGEND_LEVELS.iter().zip(&entries) {
+                assert_eq!(
+                    SignificanceLevel::from_p_value(t * (1.0 - 1e-12)),
+                    *level,
+                    "{legend}"
+                );
+                assert_ne!(SignificanceLevel::from_p_value(*t), *level, "{legend}");
+                let want = match style {
+                    LegendStyle::Latex => level.stars().replace('†', "\\textdagger{}"),
+                    LegendStyle::Html => level.stars().replace('†', "&dagger;"),
+                    LegendStyle::Markdown => level.stars().replace('*', "\\*"),
+                };
+                assert_eq!(symbol, &want, "{legend}");
+            }
+        }
+        assert_eq!(
+            significance_legend(LegendStyle::Latex),
+            "\\textdagger{} $p<0.10$; * $p<0.05$; ** $p<0.01$; *** $p<0.001$"
+        );
     }
 }

@@ -1,9 +1,14 @@
 //! LaTeX table export for regression results.
 //!
 //! Produces publication-ready LaTeX tables with:
-//! - Significance stars (*, **, ***)
+//! - Significance stars (`\textdagger{}` p < 0.10, * p < 0.05, ** p < 0.01, *** p < 0.001) and a
+//!   legend built from the same mapping, written as `$p<0.05$` in math mode
 //! - Standard errors in parentheses
 //! - Model statistics footer (N, R², F-stat)
+//!
+//! The notes (the legend, the parentheses sentence, convergence and warnings) sit in a
+//! `tablenotes` list inside a `threeparttable` environment, which the table names in its first
+//! line: `% Requires \usepackage{threeparttable}`. A table without notes needs no package.
 //!
 //! Model names, captions and variable names are plain text: LaTeX special
 //! characters in them (`\ { } _ % & # $ ^ ~ < > |`) are escaped, a `[` or
@@ -15,7 +20,7 @@
 //! standard error that would round to zero at the style's decimals is written with that many
 //! significant digits in scientific notation (`1.156e-07`).
 
-use super::format_estimate;
+use super::{LegendStyle, format_estimate, significance_legend};
 use crate::econometrics::{DiscreteResult, PanelResult};
 use crate::regression::OlsResult;
 use crate::traits::SignificanceLevel;
@@ -39,6 +44,31 @@ fn notes_items(result: &dyn ResultNotes) -> String {
         .lines()
         .map(|line| format!("\\item {}\n", escape_latex(line)))
         .collect()
+}
+
+/// The first line of a table that has notes.
+const REQUIRES_THREEPARTTABLE: &str = "% Requires \\usepackage{threeparttable}\n";
+
+/// The `tablenotes` list of `items` (each a full `\\item ...` line).
+fn table_notes(items: &str) -> String {
+    format!("\\begin{{tablenotes}}\\footnotesize\n{items}\\end{{tablenotes}}\n")
+}
+
+/// The legend item.
+fn legend_item() -> String {
+    format!("\\item {}\n", significance_legend(LegendStyle::Latex))
+}
+
+/// `begin` (from `\\centering` on), `body` (caption, label, tabular) and `notes` as a table:
+/// with notes, the comment line first and `body` and the notes in a threeparttable.
+fn wrap_table(body: &str, notes: &str) -> String {
+    if notes.is_empty() {
+        return format!("\\begin{{table}}[htbp]\n\\centering\n{body}\\end{{table}}\n");
+    }
+    format!(
+        "{REQUIRES_THREEPARTTABLE}\\begin{{table}}[htbp]\n\\centering\n\\begin{{threeparttable}}\n{body}{}\\end{{threeparttable}}\n\\end{{table}}\n",
+        table_notes(notes)
+    )
 }
 
 /// Style options for LaTeX tables.
@@ -157,10 +187,6 @@ impl LatexTableBuilder {
 
         let mut latex = String::new();
 
-        // Begin table
-        latex.push_str("\\begin{table}[htbp]\n");
-        latex.push_str("\\centering\n");
-
         // Caption
         if let Some(cap) = &self.style.caption {
             latex.push_str(&format!("\\caption{{{}}}\n", escape_latex(cap)));
@@ -266,16 +292,15 @@ impl LatexTableBuilder {
         latex.push_str("\\end{tabular}\n");
 
         // Significance note
+        let mut notes = String::new();
         if self.style.significance_stars {
-            latex.push_str("\\begin{tablenotes}\\footnotesize\n");
-            latex.push_str("\\item Standard errors in parentheses.\n");
-            latex.push_str("\\item * p < 0.1, ** p < 0.05, *** p < 0.01\n");
-            latex.push_str("\\end{tablenotes}\n");
+            if self.style.se_in_parentheses {
+                notes.push_str("\\item Standard errors in parentheses.\n");
+            }
+            notes.push_str(&legend_item());
         }
 
-        latex.push_str("\\end{table}\n");
-
-        latex
+        wrap_table(&latex, &notes)
     }
 }
 
@@ -291,7 +316,7 @@ fn significance_stars(level: &SignificanceLevel) -> String {
         SignificanceLevel::TenthPercent => "***".to_string(), // p < 0.001
         SignificanceLevel::OnePercent => "**".to_string(),    // p < 0.01
         SignificanceLevel::FivePercent => "*".to_string(),    // p < 0.05
-        SignificanceLevel::TenPercent => "†".to_string(),     // p < 0.10
+        SignificanceLevel::TenPercent => "\\textdagger{}".to_string(), // p < 0.10
         SignificanceLevel::NotSignificant => String::new(),
     }
 }
@@ -380,9 +405,6 @@ impl DiscreteResult {
     pub fn to_latex(&self) -> String {
         let mut latex = String::new();
 
-        // Begin table
-        latex.push_str("\\begin{table}[htbp]\n");
-        latex.push_str("\\centering\n");
         latex.push_str(&format!(
             "\\caption{{{} Regression Results}}\n",
             escape_latex(&self.model_type.to_string())
@@ -436,16 +458,9 @@ impl DiscreteResult {
         latex.push_str("\\hline\\hline\n");
         latex.push_str("\\end{tabular}\n");
 
-        // Significance note
-        latex.push_str("\\begin{tablenotes}\\footnotesize\n");
-        latex.push_str("\\item Standard errors in parentheses.\n");
-        latex.push_str("\\item * p < 0.05, ** p < 0.01, *** p < 0.001\n");
-        latex.push_str(&notes_items(self));
-        latex.push_str("\\end{tablenotes}\n");
-
-        latex.push_str("\\end{table}\n");
-
-        latex
+        // Significance legend, convergence and warnings
+        let notes = legend_item() + &notes_items(self);
+        wrap_table(&latex, &notes)
     }
 }
 
@@ -454,9 +469,6 @@ impl PanelResult {
     pub fn to_latex(&self) -> String {
         let mut latex = String::new();
 
-        // Begin table
-        latex.push_str("\\begin{table}[htbp]\n");
-        latex.push_str("\\centering\n");
         latex.push_str(&format!(
             "\\caption{{{} Panel Regression Results}}\n",
             escape_latex(&self.method.to_string())
@@ -510,16 +522,9 @@ impl PanelResult {
         latex.push_str("\\hline\\hline\n");
         latex.push_str("\\end{tabular}\n");
 
-        // Significance note
-        latex.push_str("\\begin{tablenotes}\\footnotesize\n");
-        latex.push_str("\\item Standard errors in parentheses.\n");
-        latex.push_str("\\item * p < 0.05, ** p < 0.01, *** p < 0.001\n");
-        latex.push_str(&notes_items(self));
-        latex.push_str("\\end{tablenotes}\n");
-
-        latex.push_str("\\end{table}\n");
-
-        latex
+        // Significance legend, convergence and warnings
+        let notes = legend_item() + &notes_items(self);
+        wrap_table(&latex, &notes)
     }
 }
 
@@ -650,7 +655,10 @@ mod tests {
         assert_eq!(significance_stars(&SignificanceLevel::TenthPercent), "***");
         assert_eq!(significance_stars(&SignificanceLevel::OnePercent), "**");
         assert_eq!(significance_stars(&SignificanceLevel::FivePercent), "*");
-        assert_eq!(significance_stars(&SignificanceLevel::TenPercent), "†");
+        assert_eq!(
+            significance_stars(&SignificanceLevel::TenPercent),
+            "\\textdagger{}"
+        );
         assert_eq!(significance_stars(&SignificanceLevel::NotSignificant), "");
     }
 
@@ -900,6 +908,105 @@ mod tests {
         check.finish();
     }
 
+    /// No `<` outside `$...$` (a bare `<` in text mode prints as an inverted exclamation mark).
+    fn no_text_mode_less_than(tex: &str) -> bool {
+        tex.split('$').step_by(2).all(|text| !text.contains('<'))
+    }
+
+    /// The notes of every LaTeX table sit in a threeparttable, which the first line names; the
+    /// legend follows the stars; the parentheses sentence appears only where SEs are in
+    /// parentheses.
+    #[test]
+    fn test_latex_notes_structure() {
+        let ds = grunfeld();
+        let (m1, _) = two_models(&ds);
+        let fe = crate::econometrics::run_fixed_effects(&ds, "inv", &["value", "capital"], "firm")
+            .unwrap();
+        let d = crate::data::Dataset::new(
+            polars::prelude::df!(
+                "y" => [0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0],
+                "x" => [0.1, 0.4, 0.35, 0.8, 0.9, 1.2, 0.5, 1.5, 1.1, 2.0, 0.3, 1.7]
+            )
+            .unwrap(),
+        );
+        let lg = crate::econometrics::run_logit(&d, "y", &["x"]).unwrap();
+        let legend = "\\item \\textdagger{} $p<0.10$; * $p<0.05$; ** $p<0.01$; *** $p<0.001$\n";
+        let builder = LatexTableBuilder::new()
+            .add_model("(1)", m1.clone())
+            .caption("Results")
+            .build();
+        for (what, tex, parentheses) in [
+            ("builder", builder, true),
+            ("discrete", lg.to_latex(), false),
+            ("panel", fe.to_latex(), false),
+        ] {
+            assert!(
+                tex.starts_with("% Requires \\usepackage{threeparttable}\n"),
+                "{what}: {tex}"
+            );
+            let at = |needle: &str| {
+                tex.find(needle)
+                    .unwrap_or_else(|| panic!("{what}: no {needle}: {tex}"))
+            };
+            assert!(at("\\begin{threeparttable}") < at("\\begin{tabular}"), "{what}");
+            assert!(at("\\end{tablenotes}") < at("\\end{threeparttable}"), "{what}");
+            assert!(at("\\end{threeparttable}") < at("\\end{table}"), "{what}");
+            assert!(tex.contains(legend), "{what}: {tex}");
+            assert_eq!(
+                tex.contains("Standard errors in parentheses."),
+                parentheses,
+                "{what}: {tex}"
+            );
+            assert!(no_text_mode_less_than(&tex), "{what}: {tex}");
+            assert!(braces_balanced(&tex), "{what}: {tex}");
+        }
+        // SEs in their own rows only when asked: the parentheses sentence follows the style.
+        let mut style = LatexStyle::default();
+        style.se_in_parentheses = false;
+        let tex = m1.to_latex_styled(style);
+        assert!(!tex.contains("parentheses"), "{tex}");
+        assert!(tex.contains(legend), "{tex}");
+        // No stars, no notes: neither the wrapper nor the comment.
+        let mut style = LatexStyle::default();
+        style.significance_stars = false;
+        let tex = m1.to_latex_styled(style);
+        assert!(!tex.contains("threeparttable") && !tex.contains("tablenotes"), "{tex}");
+        assert!(tex.starts_with("\\begin{table}"), "{tex}");
+    }
+
+    /// The HTML and Markdown legends list the dagger and follow the stars; the parentheses
+    /// sentence follows the style.
+    #[test]
+    fn test_html_and_markdown_legends() {
+        use crate::export::{HtmlStyle, HtmlTableBuilder, MarkdownStyle, MarkdownTableBuilder};
+        let (m1, _) = two_models(&grunfeld());
+        let html_legend = "&dagger; p &lt; 0.10, * p &lt; 0.05, ** p &lt; 0.01, *** p &lt; 0.001";
+        let md_legend = "† p < 0.10, \\* p < 0.05, \\*\\* p < 0.01, \\*\\*\\* p < 0.001";
+        let html = HtmlTableBuilder::new().add_model("(1)", m1.clone()).build();
+        assert!(html.contains(html_legend), "{html}");
+        assert!(html.contains("Standard errors in parentheses."), "{html}");
+        let mut style = HtmlStyle::default();
+        style.se_in_parentheses = false;
+        let html = m1.to_html_styled(style);
+        assert!(html.contains(html_legend) && !html.contains("parentheses"), "{html}");
+        let md = MarkdownTableBuilder::new().add_model("(1)", m1.clone()).build();
+        assert!(md.contains(md_legend), "{md}");
+        assert!(md.contains("Standard errors in parentheses."), "{md}");
+        let mut style = MarkdownStyle::default();
+        style.se_in_parentheses = false;
+        let md = m1.to_markdown_styled(style);
+        assert!(md.contains(md_legend) && !md.contains("parentheses"), "{md}");
+        let fe = crate::econometrics::run_fixed_effects(
+            &grunfeld(),
+            "inv",
+            &["value", "capital"],
+            "firm",
+        )
+        .unwrap();
+        let html = fe.to_html();
+        assert!(html.contains(html_legend) && !html.contains("parentheses"), "{html}");
+    }
+
     /// Case `export_ols_grunfeld_usd`'s model: `inv ~ value_usd + capital`, value in dollars.
     fn ols_grunfeld_usd() -> (p2a_validation::Case, OlsResult) {
         use polars::prelude::*;
@@ -997,7 +1104,8 @@ mod tests {
             "crates/p2a-core/tests/golden/export_latex_ols_grunfeld.tex",
         ))
         .unwrap();
-        // DATA-56: the exporter does not declare that its notes need threeparttable.
+        // The table names the package its notes need in its first line.
+        assert!(table.starts_with("% Requires \\usepackage{threeparttable}\n"));
         let doc = format!(
             "\\documentclass{{article}}\\usepackage[utf8]{{inputenc}}\\usepackage{{threeparttable}}\
              \\begin{{document}}\n{table}\\end{{document}}\n"
@@ -1009,10 +1117,17 @@ mod tests {
             .current_dir(dir.path())
             .output()
             .expect("pdflatex runs");
-        assert!(
-            out.status.success(),
-            "{}",
-            String::from_utf8_lossy(&out.stdout)
-        );
+        let log = String::from_utf8_lossy(&out.stdout);
+        assert!(out.status.success(), "{log}");
+        assert!(!log.contains("undefined"), "{log}");
+        // A bare `<` in text mode prints as an inverted exclamation mark.
+        if let Ok(txt) = std::process::Command::new("pdftotext")
+            .args(["doc.pdf", "-"])
+            .current_dir(dir.path())
+            .output()
+        {
+            let txt = String::from_utf8_lossy(&txt.stdout);
+            assert!(!txt.contains('¡'), "{txt}");
+        }
     }
 }

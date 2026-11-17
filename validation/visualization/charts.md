@@ -60,10 +60,14 @@ R's rounded values, stars follow R's p-values, N/R2/adj. R2/F as summary.lm. Tes
 `test_validate_latex_table_ols_grunfeld`, `test_validate_html_table_ols_grunfeld` and
 `test_validate_markdown_table_ols_grunfeld` (printed precision); `test_latex_table_golden_grunfeld`
 compares the whole output byte for byte with
-`crates/p2a-core/tests/golden/export_latex_ols_grunfeld.tex`, written from R's values. The table notes need `threeparttable`, and
-their legend does not match the stars (DATA-56, DATA-57, open); the ignored test
-`test_latex_table_compiles_with_pdflatex` compiles the golden with `threeparttable` loaded. Undefined values
-print as `NA`.
+`crates/p2a-core/tests/golden/export_latex_ols_grunfeld.tex`, written from R's values. A LaTeX table with
+notes opens with `% Requires \usepackage{threeparttable}` and puts caption, tabular and notes in a
+`threeparttable`; its legend is built from the star mapping (`\textdagger{}` p < 0.10, * p < 0.05, ** p < 0.01,
+*** p < 0.001) with `$p<0.05$` in math mode, and the HTML and Markdown legends come from the same mapping
+(`test_latex_notes_structure`, `test_html_and_markdown_legends`). "Standard errors in parentheses" appears only
+when the SEs are. The ignored test `test_latex_table_compiles_with_pdflatex` compiles the golden with
+`threeparttable` loaded and checks the log and the text for undefined commands and inverted exclamation marks.
+Undefined values print as `NA`.
 
 ### Numbers that keep their digits
 

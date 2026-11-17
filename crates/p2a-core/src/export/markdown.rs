@@ -10,7 +10,7 @@
 //! standard error that would round to zero at the style's decimals is written with that many
 //! significant digits in scientific notation (`1.156e-07`).
 
-use super::format_estimate;
+use super::{LegendStyle, format_estimate, significance_legend};
 use super::latex::format_cell;
 use crate::regression::OlsResult;
 use crate::traits::SignificanceLevel;
@@ -207,8 +207,12 @@ impl MarkdownTableBuilder {
 
         // Significance note
         if self.style.significance_stars {
-            md.push_str("\n*Standard errors in parentheses. ");
-            md.push_str("\\* p < 0.05, \\*\\* p < 0.01, \\*\\*\\* p < 0.001*\n");
+            md.push_str("\n*");
+            if self.style.se_in_parentheses {
+                md.push_str("Standard errors in parentheses. ");
+            }
+            md.push_str(&significance_legend(LegendStyle::Markdown));
+            md.push_str("*\n");
         }
 
         md
