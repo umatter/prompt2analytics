@@ -190,6 +190,36 @@ together they use every RLE command and every RDC item type.
   0x9000 page; 1.8-3.3 MB, not committed) load identically to `read_sas`, including non-ASCII names
   such as "Bayamón".
 
+## Timing
+
+Release builds (`--no-default-features --features ci`), v0.5.0 (`f80b0131`) against this branch, one
+harness binary per side pinned to core 2 (`taskset -c 2`, `RAYON_NUM_THREADS=1`, `POLARS_MAX_THREADS=1`,
+cwd `/dev/shm`); 9 interleaved processes per side, each the median of 2,001 / 301 / 41 calls (n = 100 /
+1,000 / 10,000) after 10 warm-ups; the table gives the median of the 9 medians. Seeded data with noise
+(ChaCha8 in the harness, `set.seed(n)` for the files R writes). Load average during the runs 4.3-12.4
+(other work on the machine).
+
+| Hot path | n | v0.5.0 (µs) | lane (µs) | lane/v0.5.0 |
+|---|---|---|---|---|
+| CSV chunks (5 columns, chunk n/10) | 100 | 1,015.6 | 1,050.1 | 1.03x |
+| CSV chunks (5 columns, chunk n/10) | 1,000 | 11,685.4 | 11,365.8 | 0.97x |
+| CSV chunks (5 columns, chunk n/10) | 10,000 | 34,193.5 | 33,635.4 | 0.98x |
+| Stata load (6 columns: 2 numeric, %td, %tc, labelled, str10) | 100 | 43.5 | 60.4 | 1.39x |
+| Stata load (6 columns: 2 numeric, %td, %tc, labelled, str10) | 1,000 | 260.7 | 301.9 | 1.16x |
+| Stata load (6 columns: 2 numeric, %td, %tc, labelled, str10) | 10,000 | 2,592.4 | 2,984.5 | 1.15x |
+| Stata load, plus a strL column of 20-byte values | 100 | 54.8 | 95.2 | 1.74x |
+| Stata load, plus a strL column of 20-byte values | 1,000 | 362.0 | 666.6 | 1.84x |
+| Stata load, plus a strL column of 20-byte values | 10,000 | 3,679.9 | 5,850.5 | 1.59x |
+| Excel load (5 columns, one of "3.0" text) | 100 | 1,176.8 | 1,178.7 | 1.00x |
+| Excel load (5 columns, one of "3.0" text) | 1,000 | 4,616.5 | 4,554.1 | 0.99x |
+| Excel load (5 columns, one of "3.0" text) | 10,000 | 43,959.6 | 42,545.3 | 0.97x |
+
+Above 1.10x: the Stata load now converts the `%td` and `%tc` columns to dates (two O(n) passes and the
+`<formats>` and `<value_labels>` sections; about 40 ns per date cell, 17 µs fixed), and the strL variant
+reads the file's string table and looks up every cell, where v0.5.0 wrote a constant placeholder and
+read no table (1.6-1.8x; the table is read in one pass without per-block system calls and the text is
+taken over without a copy).
+
 ## Tests
 
 Tests that do not load `data_readers_values` (byte offsets, decoders, guards) are listed here but not in
