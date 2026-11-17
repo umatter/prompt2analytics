@@ -54,11 +54,12 @@ pub type TransportResult<T> = Result<T, TransportError>;
 /// first, for every transport; an unknown override key fails startup. The
 /// stdio transport installs them here. On the HTTP path
 /// `transport::http::serve` resolves them again, from the socket it serves,
-/// and installs them. Either way the server holds its limits and its
-/// allocation ceiling while it runs, and a start whose limits or ceiling
-/// differ from those of a server still running in this process is refused
-/// (`http::hold_limits` and `http::serve` say more; without the `http`
-/// feature no other server can run).
+/// and installs them. Either way the server holds its limits and process
+/// policies (the allocation ceiling and, for HTTP, the session-directory
+/// switch; a stdio server holds it off) while it runs, and a start whose
+/// limits or policies differ from those of a server still running in this
+/// process is refused (`http::hold_limits` and `http::serve` say more;
+/// without the `http` feature no other server can run).
 pub async fn start_transport(config: &ServerConfig) -> TransportResult<()> {
     use crate::config::TransportType;
 

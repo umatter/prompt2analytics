@@ -187,17 +187,17 @@ struct Held {
     limits: Limits,
     alloc_ceiling_bytes: Option<usize>,
     /// The holders, counted by [`DirsSetting`] (its discriminant).
-    holders: [usize; 3],
+    holders: [usize; 2],
 }
 
 /// The session-directory setting a server holds. A stdio server holds
-/// `Either`: it never sets the switch, and its calls run outside any session
-/// scope, so the switch does not reach them.
+/// `Off`: it runs with the switch off, and an HTTP server that turned it on
+/// in the same process would send the stdio server's dataset paths into
+/// session directories it never enters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DirsSetting {
     Off = 0,
     On = 1,
-    Either = 2,
 }
 
 /// The refusal of a start whose request limits differ from those of a server
@@ -284,12 +284,22 @@ pub fn hold_limits(limits: &Limits, exec: &ExecConfig) -> TransportResult<Limits
 }
 
 /// [`hold_limits`] for a stdio server: its limits and allocation ceiling,
-/// and either session-directory setting ([`DirsSetting::Either`]).
+/// and the session directories off ([`DirsSetting::Off`]), so an HTTP server
+/// with them on cannot start beside it, nor it beside one.
 pub(crate) fn hold_stdio_limits(
     limits: &Limits,
     alloc_ceiling_bytes: Option<usize>,
 ) -> TransportResult<LimitsHold> {
-    hold_in(&SERVING, limits, alloc_ceiling_bytes, DirsSetting::Either)
+    hold_stdio_in(&SERVING, limits, alloc_ceiling_bytes)
+}
+
+/// [`hold_stdio_limits`] on `slot`.
+fn hold_stdio_in(
+    slot: &'static Serving,
+    limits: &Limits,
+    alloc_ceiling_bytes: Option<usize>,
+) -> TransportResult<LimitsHold> {
+    hold_in(slot, limits, alloc_ceiling_bytes, DirsSetting::Off)
 }
 
 fn hold_in(
@@ -302,12 +312,11 @@ fn hold_in(
     let held = serving.get_or_insert_with(|| Held {
         limits: limits.clone(),
         alloc_ceiling_bytes,
-        holders: [0; 3],
+        holders: [0; 2],
     });
     let other_dirs = match dirs {
         DirsSetting::Off => held.holders[DirsSetting::On as usize],
         DirsSetting::On => held.holders[DirsSetting::Off as usize],
-        DirsSetting::Either => 0,
     };
     if held.limits != *limits {
         return Err(TransportError::Config(LIMITS_CONFLICT.to_string()));
@@ -1184,22 +1193,33 @@ mod serve_tests {
             Some(()),
             "the session directories off"
         );
-        // A stdio server holds either session-directory setting, so it
-        // shares the hold; its allocation ceiling is held like any other.
-        let stdio = hold_in(&SLOT, &hosted, ceiling, DirsSetting::Either).unwrap();
+        // A stdio server holds the session directories off: it conflicts
+        // with a server that has them on.
+        assert_eq!(
+            policies(hold_stdio_in(&SLOT, &hosted, ceiling)),
+            Some(()),
+            "a stdio server beside session directories"
+        );
         drop(public);
+        assert!(SLOT.lock().unwrap().is_none());
+        // It shares the hold with a server that has them off, and its
+        // allocation ceiling is held like any other.
+        let stdio = hold_stdio_in(&SLOT, &hosted, ceiling).unwrap();
+        let local = hold_in(&SLOT, &hosted, ceiling, DirsSetting::Off).unwrap();
         assert_eq!(
             policies(hold_in(&SLOT, &hosted, None, DirsSetting::Off)),
             Some(())
         );
-        // With only the stdio server left, an HTTP server of either setting
-        // can start, and then holds its own setting against the other.
-        let local = hold_in(&SLOT, &hosted, ceiling, DirsSetting::Off).unwrap();
         assert_eq!(
             policies(hold_in(&SLOT, &hosted, ceiling, DirsSetting::On)),
             Some(())
         );
         drop(local);
+        assert_eq!(
+            policies(hold_in(&SLOT, &hosted, ceiling, DirsSetting::On)),
+            Some(()),
+            "the stdio server alone still holds them off"
+        );
         drop(stdio);
         assert!(SLOT.lock().unwrap().is_none());
     }
