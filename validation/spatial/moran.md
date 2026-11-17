@@ -157,7 +157,7 @@ with the k-column design and its trace terms), and the score tests their trace t
 the permutations of `localmoran` draw each unit's neighbours without repeats from the other n - 1
 values, from a generator per permutation. The ratios are within the estimates signed off 2026-11-15
 (2-6x, 1.2-2x and 1.5-3x), except `localmoran` with 99 permutations at n = 10,000: 3.08x by the median (39.97 -> 123.2 ms),
-above the 2.99x signed off 2026-11-16 and within its 3.18x by the minima; that row has gone to the user.
+above the 2.99x signed off 2026-11-16 and within its 3.18x by the minima; signed off 2026-11-16.
 
 ## Known differences
 

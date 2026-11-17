@@ -155,4 +155,4 @@ length; the post-period has 30 points. Median time per call against v0.5.0:
 The controls now cost one mean-only filter pass each and a GLS solve on the n x k innovations, beside the OLS fit the
 variances are estimated from. Five controls at n = 100: 1.06x (686 µs / 726 µs, nine rounds), within the
 1.15x accepted; signed off 2026-11-16. Peak resident memory of one process with five controls at n = 10,000
-(median of three): 14.3 MiB at v0.5.0, 16.2 MiB here (1.13x; a memory row no sign-off names, gone to the user).
+(median of three): 14.3 MiB at v0.5.0, 16.2 MiB here (1.13x; signed off 2026-11-17).

@@ -115,7 +115,9 @@ Quiet integration re-time, 2026-11-16: release builds of v0.5.0 (`f80b0131`) and
 BLAS too), cwd `/dev/shm`; per row five processes per side, interleaved with the order alternating (nine for rows
 within 1.05-1.15x), each the median of its calls after a warm-up; cells are the median over the processes, the ratio
 of the minima in brackets. 1-minute load average 0.7-2.7 on 12 cores, nothing else building. Peak RSS: one process per
-side, the median of three (`/usr/bin/time`). Intel Core 7 150U.
+side, the median of three (`/usr/bin/time`). Intel Core 7 150U. The time rows were re-timed on 2026-11-17, after small
+problems' decision values moved off the thread pool, with the same protocol and nine processes per side (load
+1.4-2.2).
 
 `linear_svm` against the v0.5.0 SMO. "Benchmark" is `unified_benchmarks`' SVM row (cluster data, p = 5, label 1
 when `i % 3 == 0`, else -1, C = 1, defaults); "overlapping" is two overlapping classes (p = 5, the label a noisy
@@ -124,20 +126,21 @@ like-for-like row.
 
 | Data | n | v0.5.0 | head | head / v0.5.0 [min] |
 |---|---|---|---|---|
-| benchmark | 100 | 29.5 µs | 42.9 µs | 1.45 [1.00] |
-| benchmark | 1,000 | 408 µs | 212 µs | 0.52 [0.50] |
-| benchmark | 10,000 | 4.84 ms | 2.45 ms | 0.51 [0.50] |
-| overlapping, C = 10 | 100 | 1.36 ms | 329 µs | 0.24 [0.23] |
-| overlapping, C = 10 | 1,000 | 7.92 ms | 13.2 ms | 1.67 [1.67] |
-| overlapping, C = 10 | 10,000 | 518.2 ms | 1.09 s | 2.10 [2.10] |
+| benchmark | 100 | 29.6 µs | 22.7 µs | 0.77 [0.76] |
+| benchmark | 1,000 | 407 µs | 182 µs | 0.45 [0.44] |
+| benchmark | 10,000 | 4.77 ms | 2.49 ms | 0.52 [0.51] |
+| overlapping, C = 10 | 100 | 1.36 ms | 305 µs | 0.22 [0.22] |
+| overlapping, C = 10 | 1,000 | 7.95 ms | 13.3 ms | 1.67 [1.67] |
+| overlapping, C = 10 | 10,000 | 520.9 ms | 1.09 s | 2.10 [2.10] |
 
-Peak RSS: benchmark at n = 10,000 3.8 MB against 5.0 MB; overlapping at n = 1,000 3.2 MB against 4.0 MB, at
-n = 10,000 3.8 MB against 46.4 MB (the kernel cache of at most 40 MB, e1071's default). The memory increase on hard
+Peak RSS: benchmark at n = 10,000 3.8 MiB against 5.0 MiB; overlapping at n = 1,000 3.2 MiB against 4.0 MiB, at
+n = 10,000 3.8 MiB against 46.4 MiB (the kernel cache of at most 40 MB, e1071's default). The memory increase on hard
 problems was signed off with the choice of LIBSVM's solver. The overlapping time rows at n >= 1,000 compare an
 exact solver with one that stopped early: n = 1,000 (1.67x) is signed off 2026-11-16 (1.70x); n = 10,000 runs
-2.10x in the quiet re-time against the 1.71x signed (v0.5.0 was faster on the quiet machine, the head time
-is the same) and has gone back to the user, as has the benchmark row at n = 100 (median 1.45x, minima 1.00x: most
-calls of this tree take about 43 µs, the fastest 29 µs, as v0.5.0's).
+2.10x in the quiet re-time against the 1.71x first signed (v0.5.0 was faster on the quiet machine, the head time
+is the same) and is signed off 2026-11-16. The benchmark row at n = 100 was bimodal in the first quiet re-time
+(median 1.45x, minima 1.00x): handing the decision values of every row to the thread pool cost more than computing
+them. Below 2^16 kernel terms they are now computed on the calling thread, with the same values.
 
 Benchmark outputs on the paper's `cluster_n*.csv` data (`n_support_vectors`, bias; all converged):
 

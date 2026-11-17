@@ -132,37 +132,39 @@ of the minima in brackets. 1-minute load average 0.7-2.7 on 12 cores, nothing el
 | `runmed`, k = 2 floor(n / 20) + 1, median end rule | 100 | 30.02 | 18.42 | 0.61 [0.60] |
 | `runmed`, k = 2 floor(n / 20) + 1, median end rule | 1,000 | 2,903 | 2,736 | 0.94 [0.94] |
 | `runmed`, k = 2 floor(n / 20) + 1, median end rule | 10,000 | 321,113 | 311,107 | 0.97 [0.97] |
-| `arima_sim`, AR(0.5) | 100 | 3.664 | 2.250 | 0.61 [0.64] |
-| `arima_sim`, AR(0.5) | 1,000 | 18.07 | 17.05 | 0.94 [0.94] |
-| `arima_sim`, AR(0.5) | 10,000 | 183.2 | 185.6 | 1.01 [1.01] |
-| `arima_sim`, AR(0.95) | 100 | 3.658 | 4.176 | 1.14 [1.16] |
-| `arima_sim`, AR(0.95) | 1,000 | 18.09 | 18.76 | 1.04 [1.05] |
-| `arima_sim`, AR(0.95) | 10,000 | 183.6 | 187.5 | 1.02 [1.02] |
-| `arima_sim`, AR(0.99) | 100 | 3.648 | 11.79 | 3.23 [3.36] |
-| `arima_sim`, AR(0.99) | 1,000 | 18.06 | 26.69 | 1.48 [1.47] |
-| `arima_sim`, AR(0.99) | 10,000 | 183.6 | 198.9 | 1.08 [1.08] |
-| `arima_sim`, ARMA(2, 1) (0.5, -0.3; 0.4) | 100 | 4.142 | 2.452 | 0.59 [0.60] |
-| `arima_sim`, ARMA(2, 1) (0.5, -0.3; 0.4) | 1,000 | 20.60 | 18.33 | 0.89 [0.89] |
-| `arima_sim`, ARMA(2, 1) (0.5, -0.3; 0.4) | 10,000 | 206.7 | 196.9 | 0.95 [0.95] |
-| `arima_sim`, MA(2) (0.4, 0.2) | 100 | 4.018 | 1.966 | 0.49 [0.59] |
-| `arima_sim`, MA(2) (0.4, 0.2) | 1,000 | 15.68 | 16.37 | 1.04 [1.05] |
-| `arima_sim`, MA(2) (0.4, 0.2) | 10,000 | 161.3 | 179.4 | 1.11 [1.12] |
-| `arma_acf`, AR(2) (0.5, -0.3), lag_max = n | 100 | 1.416 | 1.870 | 1.32 [1.31] |
-| `arma_acf`, AR(2) (0.5, -0.3), lag_max = n | 1,000 | 9.804 | 13.06 | 1.33 [1.33] |
-| `arma_acf`, AR(2) (0.5, -0.3), lag_max = n | 10,000 | 106.8 | 144.4 | 1.35 [1.35] |
-| `arma_acf`, ARMA(2, 1) (0.5, 0.3; 0.4), lag_max = n | 100 | 37.54 | 1.949 | 0.05 [0.05] |
-| `arma_acf`, ARMA(2, 1) (0.5, 0.3; 0.4), lag_max = n | 1,000 | 390.9 | 13.15 | 0.03 [0.03] |
-| `arma_acf`, ARMA(2, 1) (0.5, 0.3; 0.4), lag_max = n | 10,000 | 43,864 | 145.5 | 0.00 [0.00] |
-| `arma_acf` PACF, ARMA(1, 1) (0.5; 0.3), lag_max = n | 100 | 62.93 | 25.10 | 0.40 [0.39] |
-| `arma_acf` PACF, ARMA(1, 1) (0.5; 0.3), lag_max = n | 1,000 | 4,236 | 994.5 | 0.23 [0.24] |
-| `arma_acf` PACF, ARMA(1, 1) (0.5; 0.3), lag_max = n | 10,000 | 415,301 | 84,691 | 0.20 [0.20] |
+| `arima_sim`, AR(0.5) | 100 | 3.653 | 1.875 | 0.51 [0.50] |
+| `arima_sim`, AR(0.5) | 1,000 | 18.06 | 14.24 | 0.79 [0.76] |
+| `arima_sim`, AR(0.5) | 10,000 | 183.6 | 159.1 | 0.87 [0.86] |
+| `arima_sim`, AR(0.95) | 100 | 3.648 | 3.487 | 0.96 [0.94] |
+| `arima_sim`, AR(0.95) | 1,000 | 18.08 | 15.66 | 0.87 [0.85] |
+| `arima_sim`, AR(0.95) | 10,000 | 183.9 | 160.1 | 0.87 [0.87] |
+| `arima_sim`, AR(0.99) | 100 | 3.649 | 9.847 | 2.70 [2.71] |
+| `arima_sim`, AR(0.99) | 1,000 | 18.07 | 22.23 | 1.23 [1.21] |
+| `arima_sim`, AR(0.99) | 10,000 | 184.2 | 170.9 | 0.93 [0.93] |
+| `arima_sim`, ARMA(2, 1) (0.5, -0.3; 0.4) | 100 | 4.149 | 2.056 | 0.50 [0.49] |
+| `arima_sim`, ARMA(2, 1) (0.5, -0.3; 0.4) | 1,000 | 20.59 | 15.44 | 0.75 [0.75] |
+| `arima_sim`, ARMA(2, 1) (0.5, -0.3; 0.4) | 10,000 | 206.8 | 169.8 | 0.82 [0.82] |
+| `arima_sim`, MA(2) (0.4, 0.2) | 100 | 4.031 | 1.572 | 0.39 [0.48] |
+| `arima_sim`, MA(2) (0.4, 0.2) | 1,000 | 15.71 | 12.49 | 0.79 [0.77] |
+| `arima_sim`, MA(2) (0.4, 0.2) | 10,000 | 160.9 | 141.7 | 0.88 [0.88] |
+| `arma_acf`, AR(2) (0.5, -0.3), lag_max = n | 100 | 1.416 | 0.992 | 0.70 [0.70] |
+| `arma_acf`, AR(2) (0.5, -0.3), lag_max = n | 1,000 | 9.807 | 4.905 | 0.50 [0.50] |
+| `arma_acf`, AR(2) (0.5, -0.3), lag_max = n | 10,000 | 106.5 | 40.09 | 0.38 [0.37] |
+| `arma_acf`, ARMA(2, 1) (0.5, 0.3; 0.4), lag_max = n | 100 | 37.53 | 1.077 | 0.03 [0.03] |
+| `arma_acf`, ARMA(2, 1) (0.5, 0.3; 0.4), lag_max = n | 1,000 | 391.5 | 5.011 | 0.01 [0.01] |
+| `arma_acf`, ARMA(2, 1) (0.5, 0.3; 0.4), lag_max = n | 10,000 | 43,880 | 48.55 | 0.00 [0.00] |
+| `arma_acf` PACF, ARMA(1, 1) (0.5; 0.3), lag_max = n | 100 | 63.01 | 24.57 | 0.39 [0.37] |
+| `arma_acf` PACF, ARMA(1, 1) (0.5; 0.3), lag_max = n | 1,000 | 4,237 | 984.7 | 0.23 [0.23] |
+| `arma_acf` PACF, ARMA(1, 1) (0.5; 0.3), lag_max = n | 10,000 | 415,258 | 84,613 | 0.20 [0.20] |
 
 `arima_sim` follows its burn-in: R's p + q + ceiling(6 / log(min root modulus)) replaces a fixed 100 steps, so
 fast-decaying models run fewer steps and persistent ones more (AR(0.95): 118, AR(0.99): 598). The AR(0.99) rows
-were estimated from the step count at 3.49x / 1.45x / 1.05x and signed off at those estimates 2026-11-15; quiet
-3.23 / 1.48 / 1.08x, the last two 0.03 above the estimates (the per-step cost). Not signed off and gone to the user: AR(0.95) at
-n = 100, 1.14x against the 1.09x the step count gives, and MA(2) at n = 10,000, 1.11x (161.3 -> 179.4 µs; MA(2) runs 2 burn-in steps
-instead of 100, so this is the per-step cost of the scaled innovations and the MA-first filter). `arma_acf` AR(2) runs 1.32 / 1.33 / 1.35x of v0.5.0 (the lane measured 1.10 / 1.07 / 1.00 on the loaded
-machine); not signed off, gone to the user. The likely cost is the stationarity check (a root solve, fixed) and the
-subnormal flush on the recursion's carried value (per lag). `arma_acf` solves
+were estimated from the step count at 3.49x / 1.45x / 1.05x and signed off at those estimates 2026-11-15; the first
+quiet re-time measured 3.23 / 1.48 / 1.08x, and the 1.48x at n = 1,000 was signed off 2026-11-17. The `arima_sim` and
+`arma_acf` rows above were re-timed on 2026-11-17, after both came to carry their AR recursion in registers
+(`arima_sim`'s filter runs its first max(p, q) steps apart from the rest; `arma_acf`'s recursion keeps the subnormal
+flush off its chain of dependent operations and stops once p successive values are 0), with the same protocol and
+nine processes per side (load 1.3-2.2); the values are bit-identical. AR(0.99) now runs 2.70 / 1.23 / 0.93x, and the
+rows the first quiet re-time had above 1.10x (AR(0.95) at n = 100 1.14x, MA(2) at n = 10,000 1.11x, `arma_acf` AR(2)
+1.32-1.35x) now run below v0.5.0. `arma_acf` solves
 R's linear system once instead of iterating, and its PACF no longer works on subnormal values.

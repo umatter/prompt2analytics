@@ -109,8 +109,8 @@ plus noise.
 |  | 10,000 | 37.90 | 48.43 | 1.28 | 1.31 |
 
 One quantile of `|y - f|` (an O(n) selection) per iteration against a componentwise linear fit of 5 features: 1.28x at
-n = 10,000 (37.90 -> 48.43 ms; minima 1.31x), above the 1.15x accepted on 2026-11-16 for this row, so it has gone back
-to the user; 1.02x and 1.08x at n = 100 and 1,000. The base used a fixed threshold in the units of `y`, which made the
+n = 10,000 (37.90 -> 48.43 ms; minima 1.31x), above the 1.15x first accepted for this row and
+signed off 2026-11-16; 1.02x and 1.08x at n = 100 and 1,000. The base used a fixed threshold in the units of `y`, which made the
 fit scale-dependent (WT-1).
 
 ## Not pinned

@@ -171,15 +171,16 @@ the default configuration (seed 1); five calls per process at n = 100, one at n 
 | SEM probit, no impacts | 1,000 | 1,217 | 1,234 | 1.01 [1.01] |
 | SEM probit, no impacts | 2,000 | 5,695 | 6,300 | 1.11 [1.11] |
 
-The impacts cost 17 to 19 dense LU inverses of I - rho W (17 interpolation nodes and two checks against
-the dense inverse in the end cells), O(n^3) each, where the old code summed a truncated power series in
+The impacts cost 17 to 37 dense LU inverses of I - rho W, 19 typical (17 interpolation nodes and two checks
+against the dense inverse in the end cells; a failed check adds the 16 nodes of the next refinement and two
+more checks), O(n^3) each, where the old code summed a truncated power series in
 W; above about n = 1,000 they dominate the run. The sampler itself (no impacts) costs what the old one
 did within about 10% from n = 1,000; at n = 100 the 2,000-cell rho grid evaluated per iteration
 dominates the SEM run. The SAR rows with impacts at n = 1,000 and 2,000 and the SEM row at n = 100 are
 signed off 2026-11-16 (quiet 2.35 / 3.35x and 1.30x against the signed 2.36 / 3.43x and 1.27x); the SAR row with
 impacts at n = 100 (1.17x) and the SEM row at n = 2,000 (1.11x) are within the estimates signed off 2026-11-15
-(0.8-1.2x). Peak resident memory of one process at n = 2,000 (median of three): SAR with impacts 112.4 -> 201.5 MB
-(1.79x), SEM 112.5 -> 170.8 MB (1.52x), the dense n x n inverses; a memory row no sign-off names, gone to the user.
+(0.8-1.2x). Peak resident memory of one process at n = 2,000 (median of three): SAR with impacts 112.4 -> 201.5 MiB
+(1.79x), SEM 112.5 -> 170.8 MiB (1.52x), the dense n x n inverses; signed off 2026-11-17.
 On a hosted server `probit_impact_rows` holds `sar_probit_model` with impacts to 1,500 rows.
 
 ## MCMC Diagnostics

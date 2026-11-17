@@ -109,7 +109,7 @@ of the minima in brackets. 1-minute load average 0.7-2.7 on 12 cores, nothing el
 indices compare the labels with a copy in which 10% are moved to the next cluster. Rows marked † are the lane's (load
 23-53, three processes per side) and were not repeated. c-means now stops later on the same relative rule because its
 memberships are softer (e1071's fixed point): per iteration it is no slower. Euclidean c-means at n = 1,000 and 10,000
-(1.11x, 1.41x) is not signed off and has gone to the user. FANNY at n = 5,000 was not run on v0.5.0 (about 1,000 s per
+(1.11x, 1.41x) is signed off 2026-11-16. FANNY at n = 5,000 was not run on v0.5.0 (about 1,000 s per
 call extrapolated). Peak memory of `silhouette_optimized` at n = 10,000: 3.13 GB on v0.5.0, 0.79 GB now.
 
 | Call | n | v0.5.0 | this change | ratio [min] |
