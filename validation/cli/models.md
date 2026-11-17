@@ -59,8 +59,9 @@ the session file's directory, so a session directory can be moved with its sidec
 - Loading a file over a derived dataset's name removes the stored copy.
 - Session datasets are read when a command first asks for one. With `--max-memory` set, every dataset is read
   at start-up so the estimate covers the whole session, and the warning is printed once per invocation.
-- Exported scripts (`script export`) end with `rm -f "$SESSION_FILE"` and, when the session ran a command that
-  stores a derived dataset, `rm -rf -- "$SESSION_FILE.datasets"`.
+- Exported scripts (`script export`) replay into a session in a `mktemp -d` directory that an `EXIT` trap removes,
+  the derived datasets with it; they `cd` into the recorded directory (`P2A_WORKDIR` overrides) and skip commands
+  that failed when recorded (`--include-failed` replays them).
 - `munge bin` and `munge cast` print one JSON document: `message`, plus `details` (bin's edges and counts) or
   `warnings` (cast's conversion note).
 - `data load` and the session reload read every format `DataLoader::load` reads (CSV with `--na-strings`

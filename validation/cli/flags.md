@@ -13,7 +13,7 @@ T3-WP06 made the following CLI options do what their help says (CLI-5, CLI-18, D
 |---|---|---|---|
 | `--intercept` | `reg ols`, `clustered`, `quantreg`, `gls`, `step`, `hac` | true | false: regression through the origin, R² uncentered (labels `R-squared (uncentered)`, JSON `r_squared_type: "uncentered"`) |
 | `--use-bic` | `reg step` | false | true: BIC, k = log n in `extractAIC` |
-| `--comments` | `script export` | true | false: no comment line above each recorded command (the header and the cleanup comment stay) |
+| `--comments` | `script export` | true | false: no comment line above each recorded command (the header and the lines naming failed commands stay) |
 | `--aic` | `ts ar` | true | false: fits the maximum order min(n − 1, floor(10 log10 n)), as `ar(aic = FALSE)`; `--order` fixes the order and wins over both |
 | `--detrend` | `ts spectrum` | true | false: no least-squares linear trend removed first |
 | `--robust` | `ts stl` | false | true: robust (outlier-resistant) STL |
