@@ -72,6 +72,11 @@ pub struct AppState {
 /// #     listener: tokio::net::TcpListener,
 /// # ) -> Result<(), Box<dyn std::error::Error>> {
 /// use p2a_mcp::{exec, tools, transport::http};
+/// // As `serve` reads it: at the bound socket, over HTTP, validated.
+/// let mut config = config;
+/// config.http.addr = listener.local_addr()?;
+/// config.transport = p2a_mcp::TransportType::Http;
+/// config.validate()?;
 /// let limits = tools::limits::resolve(&config)?;
 /// let exec = exec::ExecConfig::from_config(&config);
 /// let hold = http::hold_limits(&limits, &exec)?;
@@ -623,9 +628,12 @@ async fn serve_app(
 /// task. That stops it accepting connections, but the connections and
 /// websocket sessions it accepted are still served, under its limits, and
 /// it holds them ([`LimitsHold`]) until the last of those has closed; until
-/// then a start of other limits or policies is refused. To start one right
-/// after, serve with [`bind`] and [`serve`] and stop it through `serve`'s
-/// shutdown future.
+/// then a start of other limits or policies is refused. To start one after
+/// it, serve with [`bind`] and [`serve`] and stop it through `serve`'s
+/// shutdown future. A start of other limits is accepted once `serve` has
+/// returned and its websocket sessions (with `enable_ws`) have closed. One
+/// made immediately after the return can be refused for a moment while the
+/// connection tasks wind down, so retry it.
 pub async fn start_http_transport(config: &ServerConfig) -> TransportResult<()> {
     let listener = bind(config).await?;
     serve(listener, config.clone(), std::future::pending()).await
@@ -826,7 +834,9 @@ fn create_base_router(state: AppState, config: &ServerConfig) -> Router {
 
     // WebSocket route: off in open public mode unless --enable-ws
     // (P2A_ENABLE_WS). Its tool messages run under the governor like HTTP
-    // calls, and its message and frame sizes are capped like request bodies.
+    // calls, and its message and frame sizes are capped at the request-body
+    // cap (P2A_MAX_HTTP_BODY_MB), not at the hosted HTTP JSON limit
+    // (middleware::parsed_body_bytes).
     #[cfg(feature = "websocket")]
     if mode != DeploymentMode::OpenPublic || config.http.enable_ws {
         router = router.route("/ws", get(super::websocket::ws_handler));
