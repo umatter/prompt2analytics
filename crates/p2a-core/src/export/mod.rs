@@ -91,3 +91,47 @@ pub use csv::CsvExport;
 pub use html::{HtmlStyle, HtmlTableBuilder};
 pub use latex::{LatexStyle, LatexTableBuilder};
 pub use markdown::{MarkdownStyle, MarkdownTableBuilder};
+
+use latex::format_cell;
+
+/// An estimate, standard-error or marginal-effect cell of a regression table.
+///
+/// As [`format_cell`] (fixed `decimals`, `NA`, `Inf`, `-Inf`), except that a finite, non-zero
+/// value whose fixed-decimal form would read as zero is written with `decimals` significant
+/// digits in scientific notation with an exponent of at least two digits, as R writes it
+/// (`1.156e-07`). Unlike R's `format`, trailing zeros are kept, so a column's cells line up.
+pub(super) fn format_estimate(x: f64, decimals: usize) -> String {
+    let fixed = format_cell(x, decimals);
+    if !x.is_finite() || x == 0.0 || fixed.parse::<f64>().is_ok_and(|v| v != 0.0) {
+        return fixed;
+    }
+    let s = format!("{x:.prec$e}", prec = decimals.max(1) - 1);
+    let Some((mantissa, exponent)) = s.split_once('e') else {
+        return s;
+    };
+    let (sign, digits) = match exponent.strip_prefix('-') {
+        Some(d) => ('-', d),
+        None => ('+', exponent),
+    };
+    format!("{mantissa}e{sign}{digits:0>2}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_estimate() {
+        assert_eq!(format_estimate(0.0, 4), "0.0000");
+        assert_eq!(format_estimate(0.00005, 4), "0.0001");
+        assert_eq!(format_estimate(0.00004, 4), "4.000e-05");
+        assert_eq!(format_estimate(-1.1556e-07, 4), "-1.156e-07");
+        assert_eq!(format_estimate(-42.71436, 4), "-42.7144");
+        assert_eq!(format_estimate(1.2e-120, 4), "1.200e-120");
+        assert_eq!(format_estimate(3e-3, 2), "3.0e-03");
+        assert_eq!(format_estimate(0.3, 0), "3e-01");
+        assert_eq!(format_estimate(f64::NAN, 4), "NA");
+        assert_eq!(format_estimate(f64::INFINITY, 4), "Inf");
+        assert_eq!(format_estimate(f64::NEG_INFINITY, 4), "-Inf");
+    }
+}

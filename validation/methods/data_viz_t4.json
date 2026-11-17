@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "export_small_coefficients",
+      "name": "CSV export at full precision and table cells that do not round to zero",
+      "category": "data",
+      "reference": "stats::lm; summary.lm; confint.lm",
+      "doc": "validation/visualization/charts.md",
+      "cases": [
+        "export_ols_grunfeld_usd"
+      ],
+      "tests": [
+        "p2a-core::export::csv::tests::test_validate_csv_ols_grunfeld_usd",
+        "p2a-core::export::latex::tests::test_validate_latex_small_coefficient_grunfeld_usd"
+      ],
+      "quantities": [
+        "coefficients, SEs, t, p, confint bounds, R2, adj. R2, F, sigma (CSV, full precision)",
+        "a 1e-7 coefficient and its SE at 4 significant digits (LaTeX)"
+      ],
+      "tolerance": "validation/README.md n = 200 rows (CSV); 5e-4 relative (4 significant digits)",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}

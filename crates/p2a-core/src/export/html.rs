@@ -6,8 +6,11 @@
 //! - Jupyter notebook integration
 //! - Standalone reports
 //!
-//! Undefined values (NaN, e.g. aliased coefficients) print as `NA`, as R does.
+//! Undefined values (NaN, e.g. aliased coefficients) print as `NA`, as R does. An estimate or
+//! standard error that would round to zero at the style's decimals is written with that many
+//! significant digits in scientific notation (`1.156e-07`).
 
+use super::format_estimate;
 use super::latex::format_cell;
 use crate::econometrics::{DiscreteResult, PanelResult};
 use crate::regression::OlsResult;
@@ -156,7 +159,7 @@ impl HtmlTableBuilder {
                     };
                     html.push_str(&format!(
                         "      <td class=\"coef\">{}{}</td>\n",
-                        format_cell(coef.estimate, self.style.coef_decimals),
+                        format_estimate(coef.estimate, self.style.coef_decimals),
                         stars
                     ));
                 } else {
@@ -174,7 +177,7 @@ impl HtmlTableBuilder {
                         let coef = &result.coefficients[idx];
                         html.push_str(&format!(
                             "      <td class=\"se\">({})</td>\n",
-                            format_cell(coef.std_error, self.style.se_decimals)
+                            format_estimate(coef.std_error, self.style.se_decimals)
                         ));
                     } else {
                         html.push_str("      <td></td>\n");
@@ -314,12 +317,12 @@ impl DiscreteResult {
             ));
             html.push_str(&format!(
                 "      <td class=\"coef\">{}{}</td>\n",
-                format_cell(self.coefficients[i], 4),
+                format_estimate(self.coefficients[i], 4),
                 stars
             ));
             html.push_str(&format!(
                 "      <td class=\"se\">{}</td>\n",
-                format_cell(self.std_errors[i], 4)
+                format_estimate(self.std_errors[i], 4)
             ));
             html.push_str(&format!(
                 "      <td>{}</td>\n",
@@ -331,7 +334,7 @@ impl DiscreteResult {
             ));
             html.push_str(&format!(
                 "      <td>{}</td>\n",
-                format_cell(self.marginal_effects[i], 4)
+                format_estimate(self.marginal_effects[i], 4)
             ));
             html.push_str("    </tr>\n");
         }
@@ -394,12 +397,12 @@ impl PanelResult {
             ));
             html.push_str(&format!(
                 "      <td class=\"coef\">{}{}</td>\n",
-                format_cell(self.coefficients[i], 4),
+                format_estimate(self.coefficients[i], 4),
                 stars
             ));
             html.push_str(&format!(
                 "      <td class=\"se\">{}</td>\n",
-                format_cell(self.std_errors[i], 4)
+                format_estimate(self.std_errors[i], 4)
             ));
             html.push_str(&format!(
                 "      <td>{}</td>\n",

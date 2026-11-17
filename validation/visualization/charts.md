@@ -1,9 +1,10 @@
 # Static charts and table exporters
 
 R code: `validation/r/cases/data_viz_t3.R` (cases `viz_scatter_cor`, `viz_boxplot_groups`,
-`viz_histogram_bins`, `viz_residual_diag`, `export_ols_grunfeld`; regenerate with
-`Rscript validation/r/run.R --write <id>`). Registry: `validation/methods/data_viz_t3.json`. R 4.3.3, base R
-only. Code: `crates/p2a-core/src/visualization/charts.rs`, `crates/p2a-core/src/export/{latex,html,markdown}.rs`.
+`viz_histogram_bins`, `viz_residual_diag`, `export_ols_grunfeld`) and `validation/r/cases/data_viz_t4.R` (case
+`export_ols_grunfeld_usd`); regenerate with `Rscript validation/r/run.R --write <id>`. Registries:
+`validation/methods/data_viz_t3.json`, `validation/methods/data_viz_t4.json`. R 4.3.3, base R only. Code:
+`crates/p2a-core/src/visualization/charts.rs`, `crates/p2a-core/src/export/{csv,latex,html,markdown}.rs`.
 
 ## Scatter-plot correlation (`scatter_plot().correlation`)
 
@@ -63,3 +64,16 @@ compares the whole output byte for byte with
 their legend does not match the stars (DATA-56, DATA-57, open); the ignored test
 `test_latex_table_compiles_with_pdflatex` compiles the golden with `threeparttable` loaded. Undefined values
 print as `NA`.
+
+### Numbers that keep their digits
+
+CSV cells are written with the shortest digits that read back as the same double (scientific notation below
+1e-5 and from 1e15 on in magnitude), with `NA`, `Inf` and `-Inf` as R's `read.csv` reads them; they were six
+fixed decimals, so a coefficient of 1e-7 and its SE were written as 0 (DATA-77). In the LaTeX, HTML and
+Markdown tables an estimate, SE or marginal-effect cell that would round to zero at the style's decimals is
+written with that many significant digits in R's exponent form (`1.156e-07`, as R's `format(x, digits = 4)`;
+trailing zeros are kept, which R trims); other cells keep their fixed decimals. Case `export_ols_grunfeld_usd`:
+lm(inv ~ value_usd + capital) on Grunfeld with `value_usd = value * 1e6`, coefficient 1.1556215636055214e-07,
+SE 5.8357095572206334e-09. Tests `test_validate_csv_ols_grunfeld_usd` (coefficients, SEs, t, p, confint
+bounds, R2, adj. R2, F and sigma read back from the CSV, at the validation/README.md tolerances for n = 200)
+and `test_validate_latex_small_coefficient_grunfeld_usd` (`1.156e-07***` and `(5.836e-09)`, 5e-4 relative).

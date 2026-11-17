@@ -11,8 +11,11 @@
 //! `{}` in front of it, and control characters become spaces, so pass no
 //! LaTeX markup. Labels are restricted to `[A-Za-z0-9:._-]`.
 //!
-//! Undefined values (NaN, e.g. aliased coefficients) print as `NA`, as R does.
+//! Undefined values (NaN, e.g. aliased coefficients) print as `NA`, as R does. An estimate or
+//! standard error that would round to zero at the style's decimals is written with that many
+//! significant digits in scientific notation (`1.156e-07`).
 
+use super::format_estimate;
 use crate::econometrics::{DiscreteResult, PanelResult};
 use crate::regression::OlsResult;
 use crate::traits::SignificanceLevel;
@@ -195,7 +198,7 @@ impl LatexTableBuilder {
                     };
                     latex.push_str(&format!(
                         " & {}{}",
-                        format_cell(coef.estimate, self.style.coef_decimals),
+                        format_estimate(coef.estimate, self.style.coef_decimals),
                         stars
                     ));
                 } else {
@@ -212,7 +215,7 @@ impl LatexTableBuilder {
                         let coef = &result.coefficients[idx];
                         latex.push_str(&format!(
                             " & ({})",
-                            format_cell(coef.std_error, self.style.se_decimals)
+                            format_estimate(coef.std_error, self.style.se_decimals)
                         ));
                     } else {
                         latex.push_str(" & ");
@@ -399,9 +402,9 @@ impl DiscreteResult {
             latex.push_str(&format!(
                 "{} & {}{} & {} & {} & {} \\\\\n",
                 escape_latex(&self.variables[i]),
-                format_cell(self.coefficients[i], 4),
+                format_estimate(self.coefficients[i], 4),
                 stars,
-                format_cell(self.std_errors[i], 4),
+                format_estimate(self.std_errors[i], 4),
                 format_cell(self.z_stats[i], 2),
                 format_cell(self.p_values[i], 4)
             ));
@@ -473,9 +476,9 @@ impl PanelResult {
             latex.push_str(&format!(
                 "{} & {}{} & {} & {} & {} \\\\\n",
                 escape_latex(&self.variables[i]),
-                format_cell(self.coefficients[i], 4),
+                format_estimate(self.coefficients[i], 4),
                 stars,
-                format_cell(self.std_errors[i], 4),
+                format_estimate(self.std_errors[i], 4),
                 format_cell(self.t_stats[i], 2),
                 format_cell(self.p_values[i], 4)
             ));
@@ -826,13 +829,17 @@ mod tests {
     }
 
     fn cell_number(c: &str) -> f64 {
-        c.trim_matches(|ch| matches!(ch, '(' | ')' | '*' | '†'))
+        c.replace("\\textdagger{}", "")
+            .trim_matches(|ch| matches!(ch, '(' | ')' | '*'))
             .parse()
             .unwrap_or_else(|_| panic!("not a number: {c:?}"))
     }
 
     fn cell_stars(c: &str) -> String {
-        c.chars().filter(|ch| matches!(ch, '*' | '†')).collect()
+        c.replace("\\textdagger{}", "†")
+            .chars()
+            .filter(|ch| matches!(ch, '*' | '†'))
+            .collect()
     }
 
     #[test]
@@ -891,6 +898,79 @@ mod tests {
                 );
         }
         check.finish();
+    }
+
+    /// Case `export_ols_grunfeld_usd`'s model: `inv ~ value_usd + capital`, value in dollars.
+    fn ols_grunfeld_usd() -> (p2a_validation::Case, OlsResult) {
+        use polars::prelude::*;
+        let (case, mut ds) = crate::test_support::load_case("export_ols_grunfeld_usd");
+        let value = ds.df().column("value").unwrap().cast(&DataType::Float64).unwrap();
+        let usd = (value.as_materialized_series() * 1e6).with_name("value_usd".into());
+        ds.df_mut().with_column(usd).unwrap();
+        let fit = crate::regression::run_ols(
+            &ds,
+            "inv",
+            &["value_usd", "capital"],
+            true,
+            CovarianceType::Standard,
+        )
+        .unwrap();
+        (case, fit)
+    }
+
+    /// A 1e-7 coefficient and its SE keep four significant digits (R's `format(x, digits = 4)`:
+    /// `1.156e-07`, `5.836e-09`); the other cells stay fixed-decimal.
+    #[test]
+    fn test_validate_latex_small_coefficient_grunfeld_usd() {
+        use p2a_validation::{Check, Tol};
+        let (case, fit) = ols_grunfeld_usd();
+        let tex = LatexTableBuilder::new().add_model("(1)", fit).build();
+        let rows = latex_rows(&tex);
+        let row = |label: &str| {
+            rows.iter()
+                .position(|r| r[0] == label)
+                .unwrap_or_else(|| panic!("{label}: {tex}"))
+        };
+        let usd = row("value\\_usd");
+        assert_eq!(rows[usd][1], "1.156e-07***", "{tex}");
+        assert_eq!(rows[usd + 1][1], "(5.836e-09)", "{tex}");
+        assert_eq!(rows[row("(Intercept)")][1], "-42.7144***", "{tex}");
+        assert_eq!(rows[row("capital")][1], "0.2307***", "{tex}");
+        let names = ["(Intercept)", "value_usd", "capital"];
+        let labels = ["(Intercept)", "value\\_usd", "capital"];
+        let coef: Vec<f64> = labels.iter().map(|l| cell_number(&rows[row(l)][1])).collect();
+        let se: Vec<f64> = labels
+            .iter()
+            .map(|l| cell_number(&rows[row(l) + 1][1]))
+            .collect();
+        // Four significant digits: half a unit in the fourth digit is at most 5e-4 relative.
+        let sig4 = Tol::new(5e-4, 0.0);
+        let mut check = Check::new(&case);
+        check
+            .named_subset("coef", &["value_usd"], &names, &coef, sig4)
+            .named_subset("se", &["value_usd"], &names, &se, sig4)
+            .named_subset("coef", &["(Intercept)", "capital"], &names, &coef, Tol::printed(4))
+            .named_subset("se", &["(Intercept)", "capital"], &names, &se, Tol::printed(4));
+        check.finish();
+    }
+
+    #[test]
+    fn test_html_and_markdown_small_coefficient_cells() {
+        use crate::export::{HtmlTableBuilder, MarkdownTableBuilder};
+        let (_, fit) = ols_grunfeld_usd();
+        let html = HtmlTableBuilder::new().add_model("(1)", fit.clone()).build();
+        assert!(
+            html.contains("<td class=\"coef\">1.156e-07<sup>***</sup></td>")
+                && html.contains("<td class=\"se\">(5.836e-09)</td>")
+                && html.contains("<td class=\"coef\">-42.7144<sup>***</sup></td>"),
+            "{html}"
+        );
+        let md = MarkdownTableBuilder::new().add_model("(1)", fit).build();
+        assert!(
+            md.contains("| value\\_usd | 1.156e-07\\*\\*\\* |\n| | (5.836e-09) |\n")
+                && md.contains("| capital | 0.2307\\*\\*\\* |"),
+            "{md}"
+        );
     }
 
     #[test]

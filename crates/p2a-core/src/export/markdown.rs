@@ -6,8 +6,11 @@
 //! - Jupyter notebooks
 //! - General documentation
 //!
-//! Undefined values (NaN, e.g. aliased coefficients) print as `NA`, as R does.
+//! Undefined values (NaN, e.g. aliased coefficients) print as `NA`, as R does. An estimate or
+//! standard error that would round to zero at the style's decimals is written with that many
+//! significant digits in scientific notation (`1.156e-07`).
 
+use super::format_estimate;
 use super::latex::format_cell;
 use crate::regression::OlsResult;
 use crate::traits::SignificanceLevel;
@@ -142,7 +145,7 @@ impl MarkdownTableBuilder {
                     };
                     md.push_str(&format!(
                         " {}{} |",
-                        format_cell(coef.estimate, self.style.coef_decimals),
+                        format_estimate(coef.estimate, self.style.coef_decimals),
                         stars
                     ));
                 } else {
@@ -159,7 +162,7 @@ impl MarkdownTableBuilder {
                         let coef = &result.coefficients[idx];
                         md.push_str(&format!(
                             " ({}) |",
-                            format_cell(coef.std_error, self.style.se_decimals)
+                            format_estimate(coef.std_error, self.style.se_decimals)
                         ));
                     } else {
                         md.push_str(" |");
