@@ -45,16 +45,6 @@
           "finding": "DATA-50",
           "quantity": "tagged missing values .a-.z",
           "note": "loaded as plain null; haven keeps the tag (haven::na_tag)"
-        },
-        {
-          "finding": "DATA-74",
-          "quantity": "strL contents",
-          "note": "not decoded (Tier 4): cells hold the placeholder \"<strL>\" with a warning; no fixture holds a strL"
-        },
-        {
-          "finding": "DATA-75",
-          "quantity": "value labels and display formats",
-          "note": "not read (Tier 4): haven returns labelled vectors and format attributes, p2a the codes"
         }
       ],
       "supersedes_legacy": []

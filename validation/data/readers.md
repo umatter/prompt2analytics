@@ -28,8 +28,8 @@ values.
 
 Differences from haven, recorded as deviations of the registry entries: Stata byte, int and long load
 as Int64 (haven: doubles); tagged missing values `.a`-`.z` load as plain null (haven keeps the tag);
-strL contents are not decoded (cells hold the placeholder `"<strL>"`, DATA-74) and value labels and
-display formats are not read (DATA-75); SAS non-ASCII text under an encoding code outside 0, 20, 28, 29,
+value-labelled columns load as their codes, with the labels returned beside the frame (haven: a
+`labelled` vector; `ValueLabels::Text` gives `as_factor`'s text); SAS non-ASCII text under an encoding code outside 0, 20, 28, 29,
 62, 204 is refused (ReadStat converts it with iconv).
 
 The case also records what ReadStat does with the corrupted copies the Rust guard tests build
@@ -77,8 +77,37 @@ Missing values: byte above 100, int above 32,740, long above 2,147,483,620, floa
 `.a`-`.z` and load as null. `dta118_types` holds each type's extremes: the largest float and double
 were null before (the old thresholds 1.701e38 and 8.988e307 lie below them). A file with `<K>` = 0 is
 refused, whatever `<N>` says (DATA-73; Stata cannot save one, ReadStat refuses it). Formats 102-116
-and releases above 119 are `UnsupportedVersion`. Not decoded (Tier 4): strL contents (DATA-74, the
-placeholder `"<strL>"` stays) and value labels and display formats (DATA-75).
+and releases above 119 are `UnsupportedVersion`. strL contents, display formats and value labels are
+read (DATA-74, DATA-75): see the next section.
+
+### Formats, labels and strL
+
+Case `data_readers_formats_values` (`validation/r/cases/data_readers_t4.R`, registry entry
+`data_read_dta_formats` in `validation/methods/data_readers_t4.json`) reads `dta117_formats`,
+`dta118_formats`, `dta119_formats` and `dta119_formats_msf` with haven, keeping formats and labels.
+
+| Field | 117 | 118 / 119 |
+|---|---|---|
+| `<formats>` entry (map slot 5) | 49 bytes | 57 bytes |
+| `<value_label_names>` entry (slot 6) | 33 bytes | 129 bytes |
+| strL reference in a data row | v u32, o u32 | v u16, o 48 bits (haven's split; 119 falls back to Stata's v u24, o u40 when that does not resolve) |
+| GSO header in `<strls>` (slot 10) | `GSO`, v u32, o u32, type u8, length u32 | `GSO`, v u32, o u64, type u8, length u32 |
+| `<lbl>` table in `<value_labels>` (slot 11) | len i32, name 33, 3 pad, n, txtlen, off[n], val[n], text | len i32, name 129, 3 pad, the same table |
+
+All integers follow the file's byte order (`dta119_formats_msf` is the big-endian copy). A strL
+reference (0, 0) is `""`; any other reference must be in the `<strls>` table, else the load fails naming
+the column and the row. GSO type 130 is text (the trailing NUL dropped, decoded as the release's text),
+129 binary (decoded lossily, with a note). Each GSO's length goes through the allocation ceiling
+("Stata strL contents") and the reader checks the call's budget every 4,096 GSOs.
+
+Formats are applied after the rows are read: `%td` (and the legacy `%d`) columns become Date (days since
+1960-01-01 shifted by 3,653 days to 1970), `%tc` and `%tC` Datetime in milliseconds (shifted by
+315,619,200,000 ms; `%tC` leap seconds are kept, as haven does). A `%td` or `%tc` column holding a non-integral value or one
+outside the target type stays numeric with a note; the other time formats (`%tw`, `%tm`, `%tq`, `%th`,
+`%ty`, `%tb`) stay numeric with a note naming the format. Value-labelled columns keep their codes by
+default (`StataOptions::value_labels = Codes`) and `StataLoad::value_labels` lists each column's label set
+(code, label); `ValueLabels::Text` turns them into text columns: the label, the code as text when it
+has none, null for a missing value (`as.character(as_factor(x))`).
 
 ## SAS `.sas7bdat`
 
@@ -185,6 +214,20 @@ Tests that do not load `data_readers_values` (byte offsets, decoders, guards) ar
 | `p2a-core::data::stata::tests::test_stata_column_buffers_respect_the_allocation_ceiling` | column buffers under a 64-byte ceiling are refused (G3) |
 | `p2a-core::data::stata::tests::test_stata_map_and_header_guards` | map offsets past EOF or off their tag, N and K bounds (DATA-22) |
 | `p2a-core::data::stata::tests::test_stata_pre_117_formats_are_unsupported` | formats 102-116 and release 120 are `UnsupportedVersion` |
+| `p2a-core::data::stata::tests::test_validate_read_dta_strl_117` | `dta117_formats` strL text and byte lengths = haven (DATA-74) |
+| `p2a-core::data::stata::tests::test_validate_read_dta_strl_118` | `dta118_formats` strL text = haven, a 3,000-byte GSO (DATA-74) |
+| `p2a-core::data::stata::tests::test_validate_read_dta_strl_119` | `dta119_formats` strL text = haven (DATA-74) |
+| `p2a-core::data::stata::tests::test_validate_read_dta_strl_119_big_endian` | `dta119_formats_msf` strL text = haven (DATA-74) |
+| `p2a-core::data::stata::tests::test_stata_strl_unresolved_reference_is_an_error` | a reference (7, 99) fails naming `sl` and row 1; (0, 0) is `""` (DATA-74) |
+| `p2a-core::data::stata::tests::test_stata_strl_119_stata_split_resolves` | a release-119 reference in Stata's 3/5 split resolves (DATA-74) |
+| `p2a-core::data::stata::tests::test_stata_strl_respects_the_allocation_ceiling` | the 3,000-byte GSO is refused under a 1,024-byte ceiling, naming the strL context (DATA-74) |
+| `p2a-core::data::stata::tests::test_validate_read_dta_formats_117` | `dta117_formats`: dates, datetimes, `%tm` numeric with a note, label codes, text and sets = haven (DATA-75) |
+| `p2a-core::data::stata::tests::test_validate_read_dta_formats_118` | the same for `dta118_formats` (DATA-75) |
+| `p2a-core::data::stata::tests::test_validate_read_dta_formats_119` | the same for `dta119_formats` (DATA-75) |
+| `p2a-core::data::stata::tests::test_validate_read_dta_formats_119_big_endian` | the same for `dta119_formats_msf` (DATA-75) |
+| `p2a-core::data::stata::tests::test_validate_data_readers_t4_manifest_lists_every_fixture` | every fixture of `data_readers_t4_manifest.csv` exists and is in the case |
+| `p2a-core::data::stata::tests::test_stata_date_with_a_fraction_stays_numeric` | a `%td` cell of 0.5 keeps the column Float64, with a note (DATA-75) |
+| `p2a-core::data::stata::tests::test_stata_value_labels_option_parses` | `value_labels` accepts codes and text, any case |
 | `p2a-core::data::stata::tests::test_stata_cell_check_covers_every_declared_row` | the cells of every declared row, not only the first buffer's, are checked against the allocation ceiling |
 | `p2a-core::data::sas::tests::test_magic_number` | the 32-byte magic |
 | `p2a-core::data::sas::tests::test_sas_invalid_magic` | a non-SAS file is refused for its magic |

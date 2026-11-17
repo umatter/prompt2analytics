@@ -1273,10 +1273,19 @@ impl DataLoader {
         excel_range_to_dataframe(&range)
     }
 
-    /// Load a Stata DTA file.
+    /// Load a Stata DTA file: `%td`/`%tc` columns as dates and datetimes, value-labelled
+    /// columns as their codes (see [`DataLoader::load_stata_with`] for the labels).
     pub fn load_stata(path: impl AsRef<Path>) -> Result<DataFrame, LoadError> {
-        let df = super::stata::load_stata(path)?;
-        Ok(df)
+        Ok(Self::load_stata_with(path, &super::stata::StataOptions::default())?.df)
+    }
+
+    /// Load a Stata DTA file with `options`: the frame, the value labels of its labelled
+    /// columns, and notes on what the reader left unconverted.
+    pub fn load_stata_with(
+        path: impl AsRef<Path>,
+        options: &super::stata::StataOptions,
+    ) -> Result<super::stata::StataLoad, LoadError> {
+        Ok(super::stata::load_stata_with(path, options)?)
     }
 
     /// Load a SAS7BDAT file.
