@@ -3086,7 +3086,7 @@ mod chat_tests {
         }
         // Split the whole system prompt at every one of those breaks.
         let lines: Vec<&str> = sys.split(is_break).collect();
-        let count = |s: &str| lines.iter().filter(|l| **l == s).count();
+        let count = |s: &str| lines.iter().filter(|l| l.trim() == s).count();
         assert_eq!(count("DATASETS>>>"), 1, "{block:?}");
         assert_eq!(count("<<<DATASETS"), 1, "{block:?}");
         assert!(
