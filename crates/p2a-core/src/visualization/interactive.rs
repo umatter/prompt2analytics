@@ -16,6 +16,7 @@ use super::colors::PLOTLY_PALETTE;
 use crate::data::columns::{ColumnRequest, MissingSummary, factor_options};
 use crate::resource;
 use polars::prelude::*;
+use serde::Serialize;
 use serde_json::{Map, Value, json};
 
 /// Configuration for interactive charts. Every field is applied when set.
@@ -76,7 +77,43 @@ enum Cell {
     /// ±Inf: not missing, but JSON cannot hold it and Plotly cannot draw it.
     Infinite,
     /// A finite number, or a date as ISO text.
-    Value(Value),
+    Value(Datum),
+}
+
+/// A plotted value as it is written into the figure JSON.
+#[derive(Clone, Serialize)]
+#[serde(untagged)]
+enum Datum {
+    /// A finite double, written in the shortest digits that read back as the same double.
+    Num(f64),
+    /// A date or date-time as ISO text.
+    Text(String),
+}
+
+/// One trace: its settings, then the plotted values (serialized directly, without building a
+/// JSON value per point).
+#[derive(Serialize)]
+struct Trace {
+    #[serde(flatten)]
+    settings: Map<String, Value>,
+    x: Vec<Datum>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    y: Option<Vec<Datum>>,
+}
+
+/// The Plotly figure.
+#[derive(Serialize)]
+struct Figure {
+    data: Vec<Trace>,
+    layout: Map<String, Value>,
+}
+
+/// `json!({...})` as a map (the trace settings).
+fn settings(v: Value) -> Map<String, Value> {
+    match v {
+        Value::Object(m) => m,
+        _ => Map::new(),
+    }
 }
 
 /// The cells of a plotted column: a `Date` or `Datetime` column as ISO text, anything else
@@ -89,7 +126,7 @@ fn column_cells(df: &DataFrame, name: &str) -> Result<Vec<Cell>, VisualizationEr
         let text = col.cast(&DataType::String).map_err(invalid)?;
         for v in text.str().map_err(invalid)?.iter() {
             cells.push(match v {
-                Some(s) => Cell::Value(Value::String(s.to_string())),
+                Some(s) => Cell::Value(Datum::Text(s.to_string())),
                 None => Cell::Missing,
             });
         }
@@ -103,9 +140,10 @@ fn column_cells(df: &DataFrame, name: &str) -> Result<Vec<Cell>, VisualizationEr
         .map_err(invalid)?;
     cells.extend((0..n).map(|_| Cell::Missing));
     for (&row, &v) in cols.rows().iter().zip(cols.numeric(name)) {
-        cells[row] = match serde_json::Number::from_f64(v) {
-            Some(x) => Cell::Value(Value::Number(x)),
-            None => Cell::Infinite,
+        cells[row] = if v.is_finite() {
+            Cell::Value(Datum::Num(v))
+        } else {
+            Cell::Infinite
         };
     }
     Ok(cells)
@@ -194,20 +232,38 @@ fn layout(config: &InteractiveConfig) -> Map<String, Value> {
 
 /// The figure as JSON safe inside a `<script>` element: `<`, `>`, `&`, U+2028 and U+2029 are
 /// written as `\u` escapes (they occur only inside JSON strings, so the JSON is unchanged).
-fn script_json(figure: &Value) -> String {
-    let text = figure.to_string();
+fn script_json(figure: &Figure) -> Result<String, VisualizationError> {
+    let text = serde_json::to_string(figure).map_err(invalid)?;
+    let bytes = text.as_bytes();
     let mut out = String::with_capacity(text.len() + 16);
-    for c in text.chars() {
-        match c {
-            '<' => out.push_str("\\u003c"),
-            '>' => out.push_str("\\u003e"),
-            '&' => out.push_str("\\u0026"),
-            '\u{2028}' => out.push_str("\\u2028"),
-            '\u{2029}' => out.push_str("\\u2029"),
-            c => out.push(c),
+    let mut start = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        let escape = match bytes[i] {
+            b'<' => Some(("\\u003c", 1)),
+            b'>' => Some(("\\u003e", 1)),
+            b'&' => Some(("\\u0026", 1)),
+            // U+2028 and U+2029 are E2 80 A8 and E2 80 A9 in UTF-8.
+            0xE2 if bytes.get(i + 1) == Some(&0x80) && bytes.get(i + 2) == Some(&0xA8) => {
+                Some(("\\u2028", 3))
+            }
+            0xE2 if bytes.get(i + 1) == Some(&0x80) && bytes.get(i + 2) == Some(&0xA9) => {
+                Some(("\\u2029", 3))
+            }
+            _ => None,
+        };
+        match escape {
+            Some((code, len)) => {
+                out.push_str(&text[start..i]);
+                out.push_str(code);
+                i += len;
+                start = i;
+            }
+            None => i += 1,
         }
     }
-    out
+    out.push_str(&text[start..]);
+    Ok(out)
 }
 
 /// The scripts plotly.js 3.0.1 and MathJax are loaded from when the page is opened.
@@ -215,8 +271,8 @@ const CDN_SCRIPTS: &str = r#"<script src="https://cdn.jsdelivr.net/npm/mathjax@3
     <script src="https://cdn.plot.ly/plotly-3.0.1.min.js"></script>"#;
 
 /// The page: the figure JSON in a data element, drawn by plotly.js from its CDN.
-fn page(figure: &Value) -> String {
-    format!(
+fn page(figure: &Figure) -> Result<String, VisualizationError> {
+    Ok(format!(
         r#"<!doctype html>
 <html lang="en">
 
@@ -238,15 +294,15 @@ fn page(figure: &Value) -> String {
 </body>
 
 </html>"#,
-        script_json(figure)
-    )
+        script_json(figure)?
+    ))
 }
 
 /// The plotted rows of `x` (and `y`), per trace: rows with a missing value are dropped, rows
 /// with an infinite one left out.
 struct Points {
-    x: Vec<Vec<Value>>,
-    y: Vec<Vec<Value>>,
+    x: Vec<Vec<Datum>>,
+    y: Vec<Vec<Datum>>,
     n_points: usize,
     missing: MissingSummary,
 }
@@ -269,8 +325,8 @@ fn points(
         plotted.push((name, cells.as_slice()));
     }
     let missing = missing_summary(&plotted, n);
-    let mut xs: Vec<Vec<Value>> = vec![Vec::new(); names.len()];
-    let mut ys: Vec<Vec<Value>> = vec![Vec::new(); names.len()];
+    let mut xs: Vec<Vec<Datum>> = vec![Vec::new(); names.len()];
+    let mut ys: Vec<Vec<Datum>> = vec![Vec::new(); names.len()];
     let mut n_points = 0;
     for i in 0..n {
         if i % (1 << 16) == 0 {
@@ -332,22 +388,27 @@ pub fn scatter_interactive(
     let grouped = group_col.is_some();
     let mut data = Vec::with_capacity(names.len());
     for (i, (x, y)) in p.x.into_iter().zip(p.y).enumerate() {
-        let mut trace = json!({
+        let mut s = settings(json!({
             "type": "scatter",
             "mode": "markers",
             "name": trace_name(&names, i, grouped, y_col),
-            "x": x,
-            "y": y,
             "marker": { "color": trace_color(&config, i) },
-        });
+        }));
         if let Some(o) = config.opacity {
-            trace["opacity"] = json!(o);
+            s.insert("opacity".into(), json!(o));
         }
-        data.push(trace);
+        data.push(Trace {
+            settings: s,
+            x,
+            y: Some(y),
+        });
     }
-    let figure = json!({ "data": data, "layout": layout(&config) });
+    let figure = Figure {
+        data,
+        layout: layout(&config),
+    };
     Ok(InteractivePlotResult {
-        html: page(&figure),
+        html: page(&figure)?,
         n_points: p.n_points,
         chart_type: "Scatter".to_string(),
         missing: p.missing,
@@ -374,24 +435,27 @@ pub fn histogram_interactive(
     let grouped = group_col.is_some();
     let mut data = Vec::with_capacity(names.len());
     for (i, x) in p.x.into_iter().enumerate() {
-        let mut trace = json!({
+        let mut s = settings(json!({
             "type": "histogram",
             "name": trace_name(&names, i, grouped, col),
-            "x": x,
             "marker": { "color": trace_color(&config, i) },
-        });
+        }));
         if let Some(o) = config.opacity {
-            trace["opacity"] = json!(o);
+            s.insert("opacity".into(), json!(o));
         }
-        data.push(trace);
+        data.push(Trace {
+            settings: s,
+            x,
+            y: None,
+        });
     }
     let mut layout = layout(&config);
     if grouped {
         layout.insert("barmode".into(), json!("overlay"));
     }
-    let figure = json!({ "data": data, "layout": layout });
+    let figure = Figure { data, layout };
     Ok(InteractivePlotResult {
-        html: page(&figure),
+        html: page(&figure)?,
         n_points: p.n_points,
         chart_type: "Histogram".to_string(),
         missing: p.missing,
@@ -415,22 +479,27 @@ pub fn line_interactive(
     let (p, _) = points(df, x_col, Some(y_col), None)?;
     let mut data = Vec::with_capacity(1);
     for (i, (x, y)) in p.x.into_iter().zip(p.y).enumerate() {
-        let mut trace = json!({
+        let mut s = settings(json!({
             "type": "scatter",
             "mode": "lines",
             "name": y_col,
-            "x": x,
-            "y": y,
             "line": { "color": trace_color(&config, i) },
-        });
+        }));
         if let Some(o) = config.opacity {
-            trace["opacity"] = json!(o);
+            s.insert("opacity".into(), json!(o));
         }
-        data.push(trace);
+        data.push(Trace {
+            settings: s,
+            x,
+            y: Some(y),
+        });
     }
-    let figure = json!({ "data": data, "layout": layout(&config) });
+    let figure = Figure {
+        data,
+        layout: layout(&config),
+    };
     Ok(InteractivePlotResult {
-        html: page(&figure),
+        html: page(&figure)?,
         n_points: p.n_points,
         chart_type: "Line".to_string(),
         missing: p.missing,
