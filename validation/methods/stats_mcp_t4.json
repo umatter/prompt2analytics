@@ -1,4 +1,49 @@
 {
   "schema": 1,
-  "methods": []
+  "methods": [
+    {
+      "id": "model_tables_t4",
+      "name": "Model tables: one-way and two-way means and effects with R's standard errors",
+      "category": "stats",
+      "reference": "stats::model.tables",
+      "doc": "validation/stats/modeltables.md",
+      "cases": [
+        "stats_mcp_t4"
+      ],
+      "tests": [
+        "p2a-core::stats::modeltables::tests::test_validate_model_tables_one_way_se_stats_mcp_t4",
+        "p2a-core::stats::modeltables::tests::test_validate_model_tables_one_way_unbalanced_stats_mcp_t4",
+        "p2a-core::stats::modeltables::tests::test_validate_model_tables_two_way_stats_mcp_t4",
+        "p2a-mcp::tier3::wp56_stats_ts::test_validate_mcp_model_tables_two_way"
+      ],
+      "quantities": [
+        "one-way and two-way means, effects, se (differences of means / effects), unbalanced and empty-cell layouts",
+        "grand mean",
+        "MSE and residual df",
+        "cell sizes"
+      ],
+      "tolerance": "validation/README.md n < 100; the empty-cell a:b effects with an absolute floor of 1e-12",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_cov_wt_t4",
+      "name": "Weighted covariance through the MCP tool: center and cor",
+      "category": "stats",
+      "reference": "stats::cov.wt",
+      "doc": "validation/stats/weighted.md",
+      "cases": [
+        "stats_mcp_t4"
+      ],
+      "tests": [
+        "p2a-mcp::tier3::wp56_stats_ts::test_validate_mcp_cov_wt_center_and_cor"
+      ],
+      "quantities": [
+        "cov, cor, center, n.obs with center = FALSE/TRUE, unbiased and ML"
+      ],
+      "tolerance": "validation/README.md n < 100 (Tol::coef(25)); n.obs exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
 }

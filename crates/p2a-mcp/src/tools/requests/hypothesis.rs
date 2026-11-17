@@ -72,7 +72,7 @@ pub struct KsTestRequest {
 
     /// Alternative hypothesis direction
     #[schemars(
-        description = "Alternative hypothesis: 'two.sided' (default), 'greater' or 'less'; R and CLI spellings such as 'two-sided', 'right' and 'left' are accepted. For two-sample: 'greater' means CDF of x is not below CDF of y (x is stochastically greater)."
+        description = "Alternative hypothesis: 'two.sided' (default), 'greater' or 'less'; R and CLI spellings such as 'two-sided', 'right' and 'left' are accepted. For two samples, 'greater' means the CDF of x lies above that of y (x tends to be smaller), as R's ks.test."
     )]
     pub alternative: Option<String>,
 }

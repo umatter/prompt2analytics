@@ -122,7 +122,6 @@ comment in the test):
 
 - **STAT-82** (`mcp_t3_power_mauchly_loglin`), Mauchly p (R's pchisq form): p_value is pinned to the Anderson second-order p (psi_contrasts_p_anderson, contrasts_p_anderson); R's mauchly.test p is a 1e-3 cross-check only.
 - **TS-22** (`mcp_t3_garch_statespace_forecasting`), airpass_mult_upr, airpass_mult_lwr: predict.HoltWinters' multiplicative interval formula is wrong; the tool prints point forecasts and a note for multiplicative fits, intervals only for additive and non-seasonal fits (hw_add_upr, hw_add_lwr pinned).
-- **STAT-75** (`mcp_t3_remaining_handlers`), model-table SEs: means, grand mean and group sizes pinned.
 - **TS-26** (`mcp_t3_remaining_handlers`), MSTL components: not pinned against forecast::mstl (f32 core, centred and scaled; level invariance tested in the core); observation count and periods only.
 
 `timeseries_lag` is pinned to `lag_dplyr3_head` (dplyr::lag, NA padding, n values) and `timeseries_runmed` with

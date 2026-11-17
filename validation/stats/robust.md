@@ -83,16 +83,14 @@ exact.
 `stats_iqr` computes R's quantile types 1-9 since T3-WP02 (STAT-36 is fixed in the core
 `iqr`; see the core section below); only its default type 7 is pinned through the MCP tool.
 
-- **STAT-37:** the density's FFT grid is mislabelled when the number of grid points is not a
-  power of two; the density values are not pinned. Fixed in core, see `density_t4` below; the
-  MCP pin follows.
-- **STAT-65:** the default density bandwidth is not `bw.nrd0`, and the non-Gaussian kernels
-  scale `bw` differently from R; the bandwidth is not pinned. Fixed in core, see `density_t4`
-  below; the MCP pin follows.
+- `stats_density` is pinned through the dispatch path by
+  `tier3::wp56_stats_ts::test_validate_mcp_density_bw_nrd0` (case `stat_density_mcp_na_t4`, the
+  complete values of `v` and `vi` of `descriptive_na.csv`): `bw` (`dens_*_bw`, bw.nrd0) at
+  `Tol::stat(n)`, the 512 grid points and densities (`dens_*_x`, `dens_*_y`) at `Tol::coef(n)`.
 - `stats_spline`'s default method `fmm` is R's Forsythe-Malcolm-Moler spline, pinned in the core
   ([spline.md](spline.md), `spline_t4`); this case records `method = "natural"` only.
-- **STAT-87:** `stats_fivenum`'s `iqr` field is the spread of the hinges, not R's `IQR`; it is
-  not pinned.
+- `stats_fivenum` returns the hinges as R's `fivenum`, and `hinge_spread`, their spread (not R's
+  `IQR`, which `stats_iqr` computes; the field was named `iqr` before T4-WP31).
 
 ---
 

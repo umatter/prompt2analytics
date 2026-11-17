@@ -95,9 +95,11 @@ unbiased covariance 9.293739053294967, 3.86984720894979, 3.86984720894979, 5.164
 
 ## Known Differences
 
-- **TOOL-23:** `stats_cov_wt` uses its `center` field to switch the correlation matrix on or
-  off and always centres the data on the weighted means; R's `cov.wt(center = FALSE)` does not
-  centre. The tool is pinned only with `center` omitted.
+- `stats_cov_wt` centres at the weighted means (`center` true, the default) or at zero (`center`
+  false, R's `cov.wt(center = FALSE)`), and returns the correlation matrix unless `cor` is false
+  (default true; R's default is `cor = FALSE`). Pinned on both centres and both methods by
+  `tier3::wp56_stats_ts::test_validate_mcp_cov_wt_center_and_cor` (case `stats_mcp_t4`, dataset
+  `cov_wt_t4`; registry `stats_mcp_t4.json`, id `mcp_cov_wt_t4`).
 - **R's `NA`:** with `na_rm = true` the tool drops a row whose weight is missing, where R's
   `weighted.mean(na.rm = TRUE)` returns `NA`; with `na_rm = false` the tool refuses the data
   where R returns `NA`.

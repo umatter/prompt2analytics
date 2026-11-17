@@ -230,16 +230,11 @@
       "quantities": [
         "residual df and MSE (aov)",
         "group means and sizes",
-        "grand mean"
+        "grand mean",
+        "no standard errors on these unbalanced layouts (R's note instead)"
       ],
       "tolerance": "validation/README.md, n = 5-13 (< 100): means and SS 1e-5 relative, df and sizes exact",
-      "deviations": [
-        {
-          "finding": "STAT-75",
-          "quantity": "standard errors",
-          "note": "p2a's model-tables SEs are SEs of individual means, R's model.tables SEs are for differences of means (and R refuses unbalanced designs); not compared until STAT-75 (Tier 4)"
-        }
-      ],
+      "deviations": [],
       "supersedes_legacy": []
     }
   ]

@@ -42,8 +42,8 @@ print(mt)
 # Standard errors...
 ```
 
-**Rust tests** (not R-pinned: no `model.tables` value is compared, and p2a's SE definition differs from R's; the R-pinned case comes with STAT-75):
-- `stats::modeltables::tests::test_model_tables_means` (`crates/p2a-core/src/stats/modeltables.rs`): the table type, the grand mean within 0.1 of 7.0, three groups with positive means and positive SEs.
+**Rust tests** (not R-pinned: hand-computed values; the R-pinned cases are below):
+- `stats::modeltables::tests::test_model_tables_means` (`crates/p2a-core/src/stats/modeltables.rs`): the table type, the grand mean within 0.1 of 7.0, three groups with positive means and a positive standard error (one per term).
 
 ### Test Case 2: One-Way ANOVA Effects
 
@@ -58,7 +58,7 @@ print(mt)
 #    -2   0   2
 ```
 
-**Rust tests** (not R-pinned: no `model.tables` value is compared, and p2a's SE definition differs from R's; the R-pinned case comes with STAT-75):
+**Rust tests** (not R-pinned: hand-computed values; the R-pinned cases are below):
 - `stats::modeltables::tests::test_model_tables_effects` (`crates/p2a-core/src/stats/modeltables.rs`): the table type and effects that sum to within 0.5 of zero.
 
 ### Test Case 3: Two-Way ANOVA
@@ -79,7 +79,7 @@ mt <- model.tables(fit, "means")
 print(mt)
 ```
 
-**Rust tests** (not R-pinned: no `model.tables` value is compared, and p2a's SE definition differs from R's; the R-pinned case comes with STAT-75):
+**Rust tests** (not R-pinned: hand-computed values; the R-pinned cases are below):
 - `stats::modeltables::tests::test_model_tables_two_way` (`crates/p2a-core/src/stats/modeltables.rs`): hand-computed grand mean (6.5) and the four cell means, within 1e-10.
 
 ### Test Case 4: Two-Way Effects with Interaction
@@ -92,7 +92,7 @@ print(mt)
 # Shows main effects and interaction effects
 ```
 
-**Rust tests** (not R-pinned: no `model.tables` value is compared, and p2a's SE definition differs from R's; the R-pinned case comes with STAT-75):
+**Rust tests** (not R-pinned: hand-computed values; the R-pinned cases are below):
 - `stats::modeltables::tests::test_model_tables_two_way_effects` (`crates/p2a-core/src/stats/modeltables.rs`): hand-computed main effects (±3.0, ±1.5) within 1e-10 and that an interaction table is returned.
 
 ### R-pinned values (T2-WP07)
@@ -113,15 +113,59 @@ non-empty cells, the residual df of `aov(y ~ a * b)` (and of p2a's two-way ANOVA
 it was `n - a * b`, one too few per empty cell (7 instead of 8 here), so its MSE disagreed with
 the two-way ANOVA. Empty cells are NaN (see "Empty cells and layout").
 
-The standard errors are not compared (registry deviation STAT-75, `// deviation STAT-75` in
-both tests): p2a reports the SE of each mean, sqrt(MSE / n), while R's `model.tables(se = TRUE)`
-reports SEs for differences of means and refuses unbalanced designs.
+Both layouts are unbalanced, so neither has a standard error: as R, `se` is `None` and `se_note`
+holds R's message "Design is unbalanced - use se.contrast() for se's".
+
+## Standard errors and the two-way projections (T4-WP31, STAT-75, TOOL-22)
+
+R's `model.tables` reports one standard error per term, and only for a balanced design (every
+cell, or every group, has the same number of rows r). With r_term the replication of the term
+(n divided by its number of cells):
+
+- `type = "means"`: "Standard errors for differences of means", sqrt(2 MSE / r_term);
+- `type = "effects"`: "Standard errors of effects", sqrt(MSE / r_term).
+
+An unbalanced design gets none ("Design is unbalanced - use se.contrast() for se's"). p2a holds
+the value in `se` (one element; `ModelTablesSE` holds one per term), names it in `se_kind`
+("differences of means" / "effects") and sets `se_note` instead on an unbalanced design.
+
+The two-way tables are the projections of the sequential fit `y ~ a + b + a:b` (`aov`'s term
+order), averaged over each term's cells: the a effect is fit(a) - grand, the b effect fit(a + b) -
+fit(a), the a:b effect the cell mean - fit(a + b), with fit(a + b) the least-squares additive fit
+(a weighted fit on the cell means). Means are the grand mean plus the effects of the term and of
+its margins: the a and a:b means are the raw level and cell means, the b means are not the raw
+margins on an unbalanced layout. A balanced layout takes a fast path through the raw margins. The
+MCP tool `stats_model_tables` returns these tables (`tables`, `n`, `se`, `se_note`).
+
+**R Code:** case `stats_mcp_t4` in `validation/r/cases/stats_mcp_t4.R`, datasets
+`validation/datasets/generated/modeltables_t4_{oneway,bal,unbal,empty}.csv`.
+
+| Quantity | R |
+|---|---|
+| one-way balanced means (`ow_means_g`) | 4.876500000000004, 7.0747500000000025, 8.890750000000002 |
+| one-way balanced se: means, effects | 0.5596865442171876 = sqrt(2 MSE / 4), 0.3957581507548378 = sqrt(MSE / 4) |
+| one-way unbalanced (3, 4, 5 rows) | no se |
+| two-way balanced se means (a, b, a:b) | 0.2263442969035022, 0.2772140168012994, 0.3920398222403207 |
+| two-way balanced se effects (a, b, a:b) | 0.16004958722336768, 0.19601991112016037, 0.2772140168012995 |
+| two-way unbalanced b means (projections) | 11.302047916666652, 13.21761666666666, 14.548787499999992 |
+| the same, raw margins (not reported) | 11.59425, 13.0378, 14.503833333333333 |
+| two-way empty cell (a2:b3) | mean and a:b effect NA |
+
+**Rust tests:** `stats::modeltables::tests::test_validate_model_tables_one_way_se_stats_mcp_t4`,
+`test_validate_model_tables_one_way_unbalanced_stats_mcp_t4`,
+`test_validate_model_tables_two_way_stats_mcp_t4` (means and effects at `Tol::coef(n)`, the
+empty-cell effects with an absolute floor of 1e-12 for R's -2.8e-17, MSE `Tol::stat(n)`, se
+`Tol::se(n)`, cell sizes and df exact), and through the MCP dispatch path
+`tier3::wp56_stats_ts::test_validate_mcp_model_tables_two_way` and
+`test_validate_mcp_model_tables_one_way`.
+
+**Status:** R-pinned (registry `validation/methods/stats_mcp_t4.json`, id `model_tables_t4`).
 
 ## Empty cells and layout
 
 `model_tables_two_way` takes `data[a][b]`, one vector per factor A x factor B cell. A cell with no
-observations, and a factor level with none, has a NaN mean (R: `NA`), and its effect, interaction and
-standard error are NaN. A row whose length differs from `data[0]` is an error naming the row.
+observations, and a factor level with none, has a NaN mean (R: `NA`), and its effect and interaction are NaN; such a layout is
+unbalanced, so it has no standard error. A row whose length differs from `data[0]` is an error naming the row.
 
 **R Code:** case `stat_modeltables_t3` in `validation/r/cases/stats_misc_t3.R`, dataset
 `validation/datasets/generated/modeltables_t3.csv` (3 x 3 layout, A3:B2 empty, 23 rows).
@@ -131,7 +175,8 @@ standard error are NaN. A row whose length differs from `data[0]` is an error na
 | cell means (A1:B1, A2:B1, ...) | 4.5263333333333335, 6.398, 7.15625, 6.285, 7.515333333333333, 8.366666666666667, 9.380749999999999, NA, 11.500499999999999 |
 | cell sizes | 3, 2, 4, 2, 3, 3, 4, 0, 2 |
 | factor A means | 6.111111111111112, 7.527, 10.087333333333333 |
-| factor B means (raw, `tapply`) | 7.074666666666666, 7.0684000000000005, 8.52511111111111 |
+| factor B means (raw, `tapply`; not reported) | 7.074666666666666, 7.0684000000000005, 8.52511111111111 |
+| factor B means (`model.tables`) | 6.522573268921095, 7.748625120772947, 8.699301663982823 |
 | grand mean | 7.6408695652173915 |
 | residual df, residual SS | 15, 7.821394000000002 |
 
@@ -140,9 +185,8 @@ standard error are NaN. A row whose length differs from `data[0]` is an error na
 
 **Status:** R-pinned (registry `validation/methods/stats_misc_t3.json`, id `model_tables_t3`).
 
-**Not compared:** R's `model.tables` factor B margins on this unbalanced layout are adjusted for
-factor A (`b_means_model_tables` in the case); p2a's are the raw margins, pinned to `tapply`
-(`b_means_raw`). Registry deviation STAT-75, the finding on `model.tables` and unbalanced designs.
+The factor B means are R's `model.tables` margins of the sequential fit (`b_means_model_tables`),
+not the raw `tapply` margins (`b_means_raw`, kept in the case for comparison).
 
 ## Numerical Precision Summary
 
@@ -154,9 +198,7 @@ factor A (`b_means_model_tables` in the case); p2a's are the raw margins, pinned
 
 ## Known Differences
 
-1. **Unbalanced designs**: Different weighting schemes
-2. **Interaction terms**: Slightly different decomposition
-3. **Display formatting**: Output format differs
+1. **Display formatting**: Output format differs
 
 ## Performance Notes
 

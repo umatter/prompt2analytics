@@ -48,13 +48,32 @@ use p2a_core::data::columns::{ColumnRequest, Factor};
 use p2a_core::stats::{
     ApproxMethod, ApproxRule, ContrastType, DensityKernel, SplineMethod, SsType, TableType,
     TwoWayAnovaConfig, approx, correlation_matrix, fivenum, generate_contrasts, iqr, isoreg,
-    loglin, model_tables, run_cov_wt, run_density, run_ecdf, run_mad, run_mahalanobis, run_manova,
-    run_mauchly_test, run_medpolish, run_one_way_anova, run_tukey_hsd, run_two_way_anova,
-    run_two_way_anova_with, se_contrast, spline, weighted_mean,
+    loglin, model_tables, model_tables_two_way, run_density, run_ecdf, run_mad, run_mahalanobis,
+    run_manova, run_mauchly_test, run_medpolish, run_one_way_anova, run_tukey_hsd,
+    run_two_way_anova, run_two_way_anova_with, se_contrast, spline, weighted_mean,
 };
 
 use p2a_core::options::Choices;
-use p2a_core::stats::CovWtMethod;
+use p2a_core::stats::{CovWtCenter, CovWtMethod, cov_wt};
+
+/// The `solve_for` field of the power tools: absent is `None` (the solver picks the one
+/// missing parameter), a known name is that parameter, anything else is refused with the
+/// accepted names.
+fn parse_solve_for<T: std::str::FromStr<Err = p2a_core::EconError>>(
+    value: Option<&str>,
+) -> Result<Option<T>, String> {
+    value
+        .map(|s| {
+            s.parse::<T>().map_err(|e| match e {
+                p2a_core::EconError::InvalidSpecification { message } => message,
+                other => other.to_string(),
+            })
+        })
+        .transpose()
+}
+
+/// How many of isoreg's block ends the interpretation lists.
+const ISOREG_KNOTS_IN_TEXT: usize = 20;
 
 /// Centre of `stats_mad` (R's mad `center`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -262,7 +281,7 @@ impl AnalyticsServer {
 
     /// Model tables (means/effects) from ANOVA.
     #[tool(
-        description = "Compute cell means or effects tables from one-way or two-way ANOVA. Returns group means or deviations from grand mean with optional standard errors. Equivalent to R's model.tables()."
+        description = "Tables of means or effects of a one-way or two-way ANOVA, as R's model.tables(aov()). Two-way tables are the projections of the sequential fit y ~ a + b + a:b: on an unbalanced layout the second factor's table is not its raw margin, the a:b effects are the interaction, and an empty cell is null. Standard errors, one per term, for balanced designs only."
     )]
     pub async fn stats_model_tables(
         &self,
@@ -301,6 +320,11 @@ impl AnalyticsServer {
                 }
             };
 
+            // R's one standard error for the term (balanced designs only)
+            let se = match (&result.se, &result.se_kind) {
+                (Some(se), Some(kind)) => serde_json::json!({"value": se[0], "kind": kind}),
+                _ => serde_json::Value::Null,
+            };
             let mut json_output = serde_json::json!({
                 "table_type": result.table_type,
                 "grand_mean": result.grand_mean,
@@ -308,12 +332,15 @@ impl AnalyticsServer {
                     "factor": &request.factors[0],
                     "levels": result.group_names,
                     "values": result.values,
-                    "se": result.se,
+                    "se": se,
                     "n": result.n
                 },
                 "mse": result.mse,
                 "df_mse": result.df_mse
             });
+            if let Some(note) = &result.se_note {
+                json_output["se_note"] = serde_json::json!(note);
+            }
             insert_missing(&mut json_output, &anova.missing);
 
             Ok(CallToolResult::success(vec![Content::text(
@@ -366,11 +393,8 @@ impl AnalyticsServer {
             let fb = cols.factor(&request.factors[1]);
             let (la, lb) = (fa.n_levels(), fb.n_levels());
 
-            // Compute grand mean
-            let grand_mean = y.iter().sum::<f64>() / y.len() as f64;
-
-            // Cell sums and counts in one pass; cell (a, b) at a * lb + b. The la x lb table is
-            // held to the table_cells budget before its buffers are allocated.
+            // The la x lb table is held to the table_cells budget before its buffers are
+            // allocated.
             let cells = match p2a_core::resource::checked_len(&[la, lb], "cell-means table") {
                 Ok(cells) => cells,
                 Err(e) => {
@@ -390,57 +414,62 @@ impl AnalyticsServer {
                      ({la} x {lb} levels). {msg} Use factors with fewer levels."
                 ))]));
             }
-            let buffers =
-                p2a_core::resource::try_vec(cells, 0.0f64, "cell-means table").and_then(|sums| {
-                    Ok((
-                        sums,
-                        p2a_core::resource::try_vec(cells, 0usize, "cell-means table")?,
-                    ))
-                });
-            let (mut sums, mut counts) = match buffers {
-                Ok(b) => b,
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Two-way model tables refused: {e}"
-                    ))]));
-                }
-            };
+            // The rows of each cell, data[a][b], for the library's tables (R's projections of
+            // the sequential fit y ~ a + b + a:b).
+            let mut data: Vec<Vec<Vec<f64>>> = vec![vec![Vec::new(); lb]; la];
             for ((&yi, &a), &b) in y.iter().zip(&fa.codes).zip(&fb.codes) {
-                let cell = a as usize * lb + b as usize;
-                sums[cell] += yi;
-                counts[cell] += 1;
+                data[a as usize][b as usize].push(yi);
             }
-            // An empty cell keeps the mean 0
-            for (sum, &count) in sums.iter_mut().zip(&counts) {
-                if count > 0 {
-                    *sum /= count as f64;
+            let result =
+                match model_tables_two_way(&data, &fa.levels, &fb.levels, table_type, compute_se) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return Ok(CallToolResult::error(vec![Content::text(format!(
+                            "Two-way model tables failed: {e}"
+                        ))]));
+                    }
+                };
+            let (name_a, name_b) = (&request.factors[0], &request.factors[1]);
+            let name_ab = format!("{name_a}:{name_b}");
+            let mut tables = serde_json::Map::new();
+            tables.insert(name_a.clone(), serde_json::json!(result.factor_a_values));
+            tables.insert(name_b.clone(), serde_json::json!(result.factor_b_values));
+            tables.insert(name_ab.clone(), serde_json::json!(result.cell_values));
+            let mut counts = serde_json::Map::new();
+            counts.insert(name_a.clone(), serde_json::json!(result.factor_a_n));
+            counts.insert(name_b.clone(), serde_json::json!(result.factor_b_n));
+            counts.insert(name_ab.clone(), serde_json::json!(result.cell_n));
+            let se = match (&result.se, &result.se_kind) {
+                (Some(se), Some(kind)) => {
+                    let first = |v: &Option<Vec<f64>>| v.as_ref().and_then(|v| v.first().copied());
+                    let mut m = serde_json::Map::new();
+                    m.insert(name_a.clone(), serde_json::json!(first(&se.factor_a)));
+                    m.insert(name_b.clone(), serde_json::json!(first(&se.factor_b)));
+                    m.insert(
+                        name_ab.clone(),
+                        serde_json::json!(
+                            se.cells
+                                .as_ref()
+                                .and_then(|c| c.first())
+                                .and_then(|r| r.first())
+                        ),
+                    );
+                    m.insert("kind".into(), serde_json::json!(kind));
+                    serde_json::Value::Object(m)
                 }
-            }
-            let cell_means: Vec<Vec<f64>> = sums.chunks(lb).map(<[f64]>::to_vec).collect();
-            let cell_counts: Vec<Vec<usize>> = counts.chunks(lb).map(<[usize]>::to_vec).collect();
-            let (levels_a, levels_b) = (&fa.levels, &fb.levels);
-
-            // Convert to effects if requested
-            let values = if table_type == TableType::Effects {
-                cell_means
-                    .iter()
-                    .map(|row| row.iter().map(|&m| m - grand_mean).collect())
-                    .collect()
-            } else {
-                cell_means
+                _ => serde_json::Value::Null,
             };
 
             let mut json_output = serde_json::json!({
-                "table_type": table_type.to_string(),
-                "grand_mean": grand_mean,
-                "two_way_table": {
-                    "factor_a": &request.factors[0],
-                    "factor_b": &request.factors[1],
-                    "levels_a": levels_a,
-                    "levels_b": levels_b,
-                    "values": values,
-                    "counts": cell_counts
-                },
+                "table_type": result.table_type,
+                "grand_mean": result.grand_mean,
+                "factors": [name_a, name_b],
+                "levels": {name_a.as_str(): &result.factor_a_names, name_b.as_str(): &result.factor_b_names},
+                "tables": tables,
+                "n": counts,
+                "se": se,
+                "mse": result.mse,
+                "df_mse": result.df_mse,
                 "anova_summary": {
                     "ss_a": anova.ss_a,
                     "ss_b": anova.ss_b,
@@ -448,6 +477,9 @@ impl AnalyticsServer {
                     "ss_residual": anova.ss_error
                 }
             });
+            if let Some(note) = &result.se_note {
+                json_output["se_note"] = serde_json::json!(note);
+            }
             insert_missing(&mut json_output, cols.missing());
 
             Ok(CallToolResult::success(vec![Content::text(
@@ -624,29 +656,24 @@ impl AnalyticsServer {
             }
         };
 
-        let method = match parse_choice(
+        let (method, method_name) = match parse_choice(
             &COV_WT_METHOD,
             request.method.as_deref(),
             CovWtMethod::Unbiased,
         ) {
-            Ok(m) => COV_WT_METHOD.canonical(m),
+            Ok(m) => (m, COV_WT_METHOD.canonical(m)),
             Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
         };
-        let compute_cor = request.center.unwrap_or(true); // Use center flag to also compute correlation
+        // R's cov.wt: center = FALSE uses a centre of zero; cor asks for the correlation
+        // matrix (default true here, R's default is FALSE).
+        let center = if request.center.unwrap_or(true) {
+            CovWtCenter::WeightedMean
+        } else {
+            CovWtCenter::Zero
+        };
+        let compute_cor = request.cor.unwrap_or(true);
 
-        // Flatten matrix data to row-major slice
-        let n_rows = data.nrows();
-        let n_cols = data.ncols();
-        let flat_data = into_row_major(data);
-
-        let result = match run_cov_wt(
-            &flat_data,
-            n_rows,
-            n_cols,
-            Some(&weights),
-            compute_cor,
-            Some(method),
-        ) {
+        let result = match cov_wt(&data, Some(&weights), compute_cor, center, method) {
             Ok(r) => r,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -656,15 +683,17 @@ impl AnalyticsServer {
             }
         };
 
-        let json_output = serde_json::json!({
+        let mut json_output = serde_json::json!({
             "covariance_matrix": result.cov,
             "center": result.center,
             "n_obs": result.n_obs,
             "weights": result.wt,
-            "correlation_matrix": result.cor,
             "columns": request.columns,
-            "method": method
+            "method": method_name
         });
+        if let Some(cor) = &result.cor {
+            json_output["correlation_matrix"] = serde_json::json!(cor);
+        }
 
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string_pretty(&json_output).unwrap(),
@@ -770,7 +799,7 @@ impl AnalyticsServer {
 
     /// Tukey's five-number summary.
     #[tool(
-        description = "Compute Tukey's five-number summary: minimum, lower-hinge (Q1), median, upper-hinge (Q3), and maximum. Equivalent to R's fivenum()."
+        description = "Tukey's five-number summary (R's fivenum): minimum, lower hinge, median, upper hinge, maximum; the hinges are not the type-7 quartiles, and hinge_spread is not R's IQR."
     )]
     pub async fn stats_fivenum(
         &self,
@@ -795,7 +824,7 @@ impl AnalyticsServer {
                     "upper_hinge": result.upper_hinge,
                     "maximum": result.maximum,
                     "n": result.n,
-                    "iqr": result.upper_hinge - result.lower_hinge
+                    "hinge_spread": result.upper_hinge - result.lower_hinge
                 });
                 insert_missing(&mut json_output, &missing);
                 Ok(CallToolResult::success(vec![Content::text(
@@ -947,7 +976,7 @@ impl AnalyticsServer {
 
     /// Kernel density estimation.
     #[tool(
-        description = "Estimate the probability density function using kernel density estimation. Supports multiple kernel functions and automatic bandwidth selection. Equivalent to R's density()."
+        description = "Estimate the probability density function using kernel density estimation, as R's density(): bandwidth by bw.nrd0 unless bw is given; kernels scaled so that bw is the kernel's standard deviation, as R's density."
     )]
     pub async fn stats_density(
         &self,
@@ -995,7 +1024,7 @@ impl AnalyticsServer {
 
     /// Cubic spline interpolation.
     #[tool(
-        description = "Interpolating cubic spline through (x, y), as R's spline(): method 'fmm' (default), 'natural', 'periodic' or 'hyman' (monotone). Returns the evaluated points (x, y): at xout, or at n equally spaced points (default 3 times the number of distinct x values, as R, capped at 200). Rows with a missing x or y are dropped, as R does; tied x values are refused (R averages them first). No spline coefficients are returned."
+        description = "Interpolating cubic spline through (x, y), as R's spline(): method 'fmm' (default), 'natural', 'periodic' or 'hyman' (monotone). Returns the evaluated points (x, y): at xout, or at n equally spaced points (default 3 times the number of distinct x values, as R, capped at 200). Rows with a missing x or y are dropped, as R does; tied x values are averaged first, as R (with a warning). No spline coefficients are returned."
     )]
     pub async fn stats_spline(
         &self,
@@ -1024,13 +1053,18 @@ impl AnalyticsServer {
         // R's default n is 3 x the number of distinct x after ties are collapsed; the MCP
         // default is capped at SPLINE_DEFAULT_MAX_POINTS so that a large dataset does not
         // return thousands of points nobody asked for (an explicit n is honoured).
+        // The knots are the distinct x (tied x are averaged, as R's regularize.values).
+        let n_knots = {
+            let mut xs = x.to_vec();
+            xs.sort_by(f64::total_cmp);
+            xs.dedup();
+            xs.len()
+        };
         let n = request.n.or_else(|| {
-            request.xout.is_none().then(|| {
-                let mut xs = x.to_vec();
-                xs.sort_by(f64::total_cmp);
-                xs.dedup();
-                (3 * xs.len()).min(SPLINE_DEFAULT_MAX_POINTS)
-            })
+            request
+                .xout
+                .is_none()
+                .then(|| (3 * n_knots).min(SPLINE_DEFAULT_MAX_POINTS))
         });
         match spline(x, y, request.xout.as_deref(), n, method) {
             Ok(result) => {
@@ -1040,8 +1074,9 @@ impl AnalyticsServer {
                     "method": method.to_string(),
                     "n_points": result.x.len(),
                     "n_pairs": x.len(),
-                    "n_knots": x.len()
+                    "n_knots": n_knots
                 });
+                insert_notes(&mut json_output, None, &result.warnings);
                 insert_missing(&mut json_output, cols.missing());
                 Ok(CallToolResult::success(vec![Content::text(
                     serde_json::to_string_pretty(&json_output).unwrap(),
@@ -1056,7 +1091,7 @@ impl AnalyticsServer {
 
     /// Linear/constant approximation.
     #[tool(
-        description = "Linear or constant (step function) interpolation between data points. Handles points outside the data range with NA or nearest value. Equivalent to R's approx()."
+        description = "Linear or constant (step function) interpolation between data points. Handles points outside the data range with NA or nearest value. Equivalent to R's approx(); tied x values are averaged first, as R (with a warning)."
     )]
     pub async fn stats_approx(
         &self,
@@ -1099,6 +1134,7 @@ impl AnalyticsServer {
                     "rule": rule.to_string(),
                     "n_interpolated": result.x.len()
                 });
+                insert_notes(&mut json_output, None, &result.warnings);
                 insert_missing(&mut json_output, cols.missing());
                 Ok(CallToolResult::success(vec![Content::text(
                     serde_json::to_string_pretty(&json_output).unwrap(),
@@ -1381,7 +1417,7 @@ impl AnalyticsServer {
 
     /// Compute correlation matrix for numeric columns.
     #[tool(
-        description = "Compute the Pearson correlation matrix for all numeric columns in a dataset."
+        description = "Compute the Pearson correlation matrix for all numeric columns in a dataset. Missing values are handled pairwise (pairwise-complete observations, cor(use = 'pairwise.complete.obs'))."
     )]
     pub async fn compute_correlation(
         &self,
@@ -1471,6 +1507,18 @@ impl AnalyticsServer {
             }
         };
 
+        // R's iKnots: the index at which each pooled block of the fit ends
+        let shown: Vec<String> = result
+            .i_knots
+            .iter()
+            .take(ISOREG_KNOTS_IN_TEXT)
+            .map(|k| k.to_string())
+            .collect();
+        let more = if result.i_knots.len() > ISOREG_KNOTS_IN_TEXT {
+            format!(", ... ({} in all)", result.i_knots.len())
+        } else {
+            String::new()
+        };
         let json_output = serde_json::json!({
             "n_observations": result.n,
             "n_knots": result.i_knots.len(),
@@ -1483,8 +1531,10 @@ impl AnalyticsServer {
             "fitted_values": &result.yf[..result.n.min(50)],
             "note": if result.n > 50 { Some(format!("Showing first 50 of {} fitted values", result.n)) } else { None },
             "interpretation": format!(
-                "Isotonic regression on {} observations produced {} knots (level changes). The fitted values are monotonically non-decreasing and minimize squared error subject to this constraint.",
-                result.n, result.i_knots.len()
+                "Isotonic regression on {} observations: {} pooled blocks end at indices {}{more}. The fitted values are monotonically non-decreasing and minimize squared error subject to this constraint.",
+                result.n,
+                result.i_knots.len(),
+                shown.join(", ")
             ),
             "references": "Barlow et al. (1972). Statistical Inference Under Order Restrictions."
         });
@@ -1799,7 +1849,9 @@ impl AnalyticsServer {
                 "statistic": result.chi_squared,
                 "df": result.df,
                 "p_value": result.p_value,
-                "interpretation": if result.p_value > 0.05 {
+                "interpretation": if result.df == 0 || !result.p_value.is_finite() {
+                    "The model is just identified (df = 0): no goodness-of-fit test.".to_string()
+                } else if result.p_value > 0.05 {
                     format!("The {} factor model adequately explains the correlations (p={:.4}).", result.n_factors, result.p_value)
                 } else {
                     format!("The {} factor model may not fully explain the correlations (p={:.4}). Consider adding more factors.", result.n_factors, result.p_value)
@@ -1991,12 +2043,9 @@ impl AnalyticsServer {
     ) -> Result<CallToolResult, McpError> {
         use p2a_core::stats::power::{PowerAnovaParam, PowerAnovaTestSpec, power_anova_test_with};
 
-        let solve_for = match request.solve_for.as_deref() {
-            None => None,
-            Some(s) => match parse_option(Some(s), PowerAnovaParam::Power) {
-                Ok(v) => Some(v),
-                Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
-            },
+        let solve_for = match parse_solve_for::<PowerAnovaParam>(request.solve_for.as_deref()) {
+            Ok(v) => v,
+            Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
         };
         let mut spec = PowerAnovaTestSpec::default();
         spec.groups = request.groups.map(|g| g as f64);
@@ -2058,12 +2107,9 @@ impl AnalyticsServer {
                 Ok(v) => v,
                 Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
             };
-        let solve_for = match request.solve_for.as_deref() {
-            None => None,
-            Some(s) => match parse_option(Some(s), PowerPropParam::Power) {
-                Ok(v) => Some(v),
-                Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
-            },
+        let solve_for = match parse_solve_for::<PowerPropParam>(request.solve_for.as_deref()) {
+            Ok(v) => v,
+            Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
         };
         let mut spec = PowerPropTestSpec::default();
         spec.n = request.n;
@@ -2132,12 +2178,9 @@ impl AnalyticsServer {
                 Ok(v) => v,
                 Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
             };
-        let solve_for = match request.solve_for.as_deref() {
-            None => None,
-            Some(s) => match parse_option(Some(s), PowerTParam::Power) {
-                Ok(v) => Some(v),
-                Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
-            },
+        let solve_for = match parse_solve_for::<PowerTParam>(request.solve_for.as_deref()) {
+            Ok(v) => v,
+            Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
         };
         let mut spec = PowerTTestSpec::default();
         spec.n = request.n;
@@ -2287,7 +2330,7 @@ mod tests {
         ] {
             assert!(r.is_ok(), "{name}: {r:?}");
         }
-        use p2a_core::stats::CovWtMethod;
+        use p2a_core::stats::{CovWtCenter, CovWtMethod, cov_wt};
         assert_eq!(
             parse_choice(&COV_WT_METHOD, None, CovWtMethod::Unbiased),
             Ok(CovWtMethod::Unbiased)
@@ -2595,6 +2638,7 @@ mod tests {
             columns: vec!["x1".into(), "x2".into()],
             weights: "w".into(),
             center: None,
+            cor: None,
             method: None,
         }
     }
@@ -3064,15 +3108,10 @@ mod tests {
                 {"dataset": name, "response": "cnt", "factors": ["f2", "f3"]}))))
                 .unwrap(),
         );
-        let two = &v["two_way_table"];
-        assert_eq!(two["levels_a"], serde_json::json!(["2", "10"]));
-        assert_eq!(two["levels_b"], serde_json::json!(["x", "y"]));
-        let counts: f64 = two["counts"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .flat_map(nums)
-            .sum();
+        assert_eq!(v["levels"]["f2"], serde_json::json!(["2", "10"]));
+        assert_eq!(v["levels"]["f3"], serde_json::json!(["x", "y"]));
+        let two = &v["n"]["f2:f3"];
+        let counts: f64 = two.as_array().unwrap().iter().flat_map(nums).sum();
         assert_eq!(counts, 14.0, "{two}");
         Check::new(&case)
             .scalar(
@@ -3200,12 +3239,13 @@ mod tests {
                 serde_json::json!({"column": col, "at": [15, 20, 25]}),
             ));
             let d = json_of(&call("density", c.clone()));
-            // deviation STAT-37: the density grid is mislabelled when n is not a power of
-            // two.
-            // deviation STAT-65: the default bandwidth is not bw.nrd0; only the density's n
-            // is pinned.
-            // deviation STAT-87: fivenum's `iqr` field is the hinge spread, not R's IQR,
-            // and is not pinned.
+            // The density itself is pinned in tier3 wp56 (test_validate_mcp_density_bw_nrd0);
+            // fivenum's hinge_spread is the spread of the hinges, not R's IQR (STAT-87).
+            assert_eq!(
+                num(&f["hinge_spread"]),
+                num(&f["upper_hinge"]) - num(&f["lower_hinge"])
+            );
+            assert!(f.get("iqr").is_none(), "{f}");
             check
                 .vector(&format!("fivenum_{sfx}"), &five(&f), Tol::coef(12))
                 .scalar(n_key, num(&f["n"]), Tol::exact())

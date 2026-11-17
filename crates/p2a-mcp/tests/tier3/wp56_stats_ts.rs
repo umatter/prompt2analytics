@@ -887,6 +887,120 @@ async fn test_mcp_stats_spline_default_cap() {
         (t["n_points"].as_u64(), t["n_pairs"].as_u64()),
         (Some(30), Some(30))
     );
+    // the knots are the 10 distinct x, and the averaging of the ties is reported as R warns
+    assert_eq!(t["n_knots"].as_u64(), Some(10), "{t}");
+    let warnings = t["warnings"].to_string();
+    assert!(warnings.contains("collapsing to unique 'x' values"), "{t}");
+    // the default cap is stated where the n is described
+    let schema = tool_definition(&s, "stats_spline").input_schema.to_string();
+    assert!(schema.contains("capped at 200"), "{schema}");
+    assert!(!schema.contains("tied x values are refused"), "{schema}");
+}
+
+/// WP05: 'hyman' is Hyman's filtered fmm spline (core SplineMethod::Hyman), not monoH.FC, and
+/// the description gives each method its own meaning.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_mcp_spline_hyman_is_hyman() {
+    use p2a_core::polars::prelude::*;
+    use p2a_core::stats::{SplineMethod, spline};
+    let x: Vec<f64> = vec![1.0, 2.0, 3.5, 4.0, 6.0, 7.5, 9.0];
+    let y: Vec<f64> = vec![0.1, 0.4, 0.45, 1.9, 2.0, 2.05, 4.3];
+    let ds = p2a_core::data::Dataset::new(df!("x" => x.clone(), "y" => y.clone()).unwrap());
+    let (se, s) = session_with_datasets(vec![("m", ds)]);
+    let xout = [1.5, 3.0, 3.8, 5.0, 7.0, 8.5];
+    let j = json_of(
+        &ok(
+            &s,
+            &se,
+            "stats_spline",
+            json!({"dataset": "m", "x": "x", "y": "y", "method": "hyman", "xout": xout}),
+        )
+        .await,
+    );
+    let hyman = spline(&x, &y, Some(&xout), None, SplineMethod::Hyman).unwrap();
+    let fc = spline(&x, &y, Some(&xout), None, SplineMethod::MonotoneFC).unwrap();
+    assert_eq!(fs(&j["y"]), hyman.y, "{j}");
+    assert_ne!(hyman.y, fc.y, "the data must tell the two methods apart");
+    let schema = tool_definition(&s, "stats_spline").input_schema.to_string();
+    for m in [
+        "'fmm'",
+        "'natural'",
+        "'periodic'",
+        "'monoH.FC'",
+        "'hyman'",
+        "Hyman",
+    ] {
+        assert!(schema.contains(m), "{m}: {schema}");
+    }
+}
+
+/// STAT-49 (handler half): a just-identified factor model (df = 0) gets no goodness-of-fit
+/// verdict.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_mcp_factanal_df0_has_no_fit_verdict() {
+    use p2a_core::polars::prelude::*;
+    let n = 60;
+    let f: Vec<f64> = (0..n)
+        .map(|i| ((i * 37 % 61) as f64 / 61.0) - 0.5)
+        .collect();
+    let col = |k: usize, a: f64| -> Vec<f64> {
+        (0..n)
+            .map(|i| a * f[i] + 0.4 * (((i * (k + 3) * 13) % 47) as f64 / 47.0 - 0.5))
+            .collect()
+    };
+    let ds = p2a_core::data::Dataset::new(
+        df!("a" => col(0, 1.0), "b" => col(1, 0.8), "c" => col(2, 0.6)).unwrap(),
+    );
+    let (se, s) = session_with_datasets(vec![("fa", ds)]);
+    let j = json_of(
+        &ok(
+            &s,
+            &se,
+            "multivariate_factanal",
+            json!({"dataset": "fa", "columns": ["a", "b", "c"], "n_factors": 1}),
+        )
+        .await,
+    );
+    let t = &j["chi_squared_test"];
+    assert_eq!(t["df"].as_u64(), Some(0), "{j}");
+    let verdict = t["interpretation"].as_str().unwrap();
+    assert_eq!(
+        verdict, "The model is just identified (df = 0): no goodness-of-fit test.",
+        "{j}"
+    );
+}
+
+/// Isoreg reports where its pooled blocks end, not "knots (level changes)".
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_mcp_isoreg_text_names_pooled_blocks() {
+    use p2a_core::polars::prelude::*;
+    let y = vec![1.0, 3.1, 2.0, 4.2, 3.9, 5.0, 6.3];
+    let ds = p2a_core::data::Dataset::new(df!("y" => y).unwrap());
+    let (se, s) = session_with_datasets(vec![("iso", ds)]);
+    let j = json_of(
+        &ok(
+            &s,
+            &se,
+            "descriptive_isoreg",
+            json!({"dataset": "iso", "y_column": "y"}),
+        )
+        .await,
+    );
+    let text = j["interpretation"].as_str().unwrap();
+    assert!(text.contains("pooled blocks end at indices"), "{text}");
+    assert!(!text.contains("level changes"), "{text}");
+}
+
+/// The power tools' n fields state the hosted power_sample_size cap, as the groups field
+/// states its own.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_mcp_power_n_descriptions_state_the_cap() {
+    let (_se, s) = session_with_datasets(vec![]);
+    for tool in ["power_t_test", "power_anova_test"] {
+        let schema = tool_definition(&s, tool).input_schema;
+        let n = schema["properties"]["n"]["description"].as_str().unwrap();
+        assert!(n.contains("power_sample_size"), "{tool}: {n}");
+    }
 }
 
 /// The first `got.len()` entries of a case vector (`Check::vector` compares whole values only).
@@ -2439,13 +2553,256 @@ async fn test_validate_mcp_model_tables_one_way() {
         .iter()
         .map(|x| x.as_str().unwrap().to_string())
         .collect();
-    // deviation STAT-75: the standard errors are not pinned.
     Check::new(&case)
         .named("means", &levels, &fs(&t["values"]), Tol::coef(30))
         .scalar("grand_mean", f(&j["grand_mean"]), Tol::coef(30))
         .vector("group_n", &fs(&t["n"]), Tol::exact())
         .finish();
     assert_eq!(levels, ["ctl", "trtA", "trtB"]);
+    // STAT-75: an unbalanced layout has no standard error, only R's note
+    assert!(t["se"].is_null(), "{j}");
+    assert_eq!(
+        j["se_note"],
+        "Design is unbalanced - use se.contrast() for se's"
+    );
+
+    // STAT-75: on a balanced layout, one standard error for the term (stats_mcp_t4)
+    let t4 = Case::load("stats_mcp_t4");
+    let (se, s) = session_with_datasets(vec![("ow", mcp_t4_dataset("modeltables_t4_oneway"))]);
+    for (tt, key, se_key, kind) in [
+        ("means", "ow_means_g", "ow_se_means", "differences of means"),
+        ("effects", "ow_effects_g", "ow_se_effects", "effects"),
+    ] {
+        let j = json_of(
+            &ok(
+                &s,
+                &se,
+                "stats_model_tables",
+                json!({"dataset": "ow", "response": "y", "factors": ["g"], "table_type": tt, "se": true}),
+            )
+            .await,
+        );
+        let t = &j["one_way_table"];
+        assert_eq!(t["se"]["kind"], kind, "{j}");
+        Check::new(&t4)
+            .vector(key, &fs(&t["values"]), Tol::coef(12))
+            .scalar(se_key, f(&t["se"]["value"]), Tol::se(12))
+            .scalar("ow_mse", f(&j["mse"]), Tol::stat(12))
+            .finish();
+    }
+}
+
+/// TOOL-23: stats_cov_wt centres at the weighted mean or at zero as `center` asks, and
+/// returns the correlation matrix as `cor` asks: R's cov.wt(x, wt, cor = TRUE, center, method)
+/// on cov_wt_t4 (stats_mcp_t4).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_cov_wt_center_and_cor() {
+    let case = Case::load("stats_mcp_t4");
+    let (se, s) = session_with_datasets(vec![("w", mcp_t4_dataset("cov_wt_t4"))]);
+    let flat = |v: &Value| -> Vec<f64> { v.as_array().unwrap().iter().flat_map(fs).collect() };
+    for method in ["unbiased", "ML"] {
+        for center in [false, true] {
+            let j = json_of(
+                &ok(
+                    &s,
+                    &se,
+                    "stats_cov_wt",
+                    json!({"dataset": "w", "columns": ["x1", "x2", "x3"], "weights": "w",
+                           "center": center, "method": method, "cor": true}),
+                )
+                .await,
+            );
+            let k = format!(
+                "covwt_{}_{}",
+                method.to_lowercase(),
+                if center { "centered" } else { "zero" }
+            );
+            let mut c = Check::new(&case);
+            c.vector(
+                &format!("{k}_cov"),
+                &flat(&j["covariance_matrix"]),
+                Tol::coef(25),
+            )
+            .vector(
+                &format!("{k}_cor"),
+                &flat(&j["correlation_matrix"]),
+                Tol::coef(25),
+            )
+            .scalar(&format!("{k}_n_obs"), f(&j["n_obs"]), Tol::exact());
+            if center {
+                c.vector(&format!("{k}_center"), &fs(&j["center"]), Tol::coef(25));
+            } else {
+                assert!(fs(&j["center"]).iter().all(|&v| v == 0.0), "{j}");
+            }
+            c.finish();
+        }
+    }
+    let j = json_of(
+        &ok(
+            &s,
+            &se,
+            "stats_cov_wt",
+            json!({"dataset": "w", "columns": ["x1", "x2"], "weights": "w", "center": false, "cor": false}),
+        )
+        .await,
+    );
+    assert!(j.get("correlation_matrix").is_none(), "{j}");
+}
+
+/// X-18 (MCP half): stats_density through the dispatch path is R's density() with bw.nrd0
+/// on the complete values of v and vi (stat_density_mcp_na_t4, 512 points).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_density_bw_nrd0() {
+    let case = Case::load("stat_density_mcp_na_t4");
+    let (se, s) = session_with("stat_density_mcp_na_t4");
+    let mut check = Check::new(&case);
+    for col in ["v", "vi"] {
+        let j = json_of(
+            &ok(
+                &s,
+                &se,
+                "stats_density",
+                json!({"dataset": "descriptive_na", "column": col, "n": 512}),
+            )
+            .await,
+        );
+        let n = f(&j["data_n"]) as usize;
+        check
+            .scalar(&format!("dens_{col}_bw"), f(&j["bw"]), Tol::stat(n))
+            .vector(&format!("dens_{col}_x"), &fs(&j["x"]), Tol::coef(n))
+            .vector(&format!("dens_{col}_y"), &fs(&j["y"]), Tol::coef(n));
+    }
+    check.finish();
+}
+
+/// STAT-87: fivenum's spread field is the spread of the hinges, named for it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_mcp_fivenum_reports_hinge_spread() {
+    let (se, s) = session_with("stat_density_mcp_na_t4");
+    let j = json_of(
+        &ok(
+            &s,
+            &se,
+            "stats_fivenum",
+            json!({"dataset": "descriptive_na", "column": "v"}),
+        )
+        .await,
+    );
+    assert_eq!(
+        f(&j["hinge_spread"]),
+        f(&j["upper_hinge"]) - f(&j["lower_hinge"]),
+        "{j}"
+    );
+    assert!(j.get("iqr").is_none(), "{j}");
+    let d = tool_description(&s, "stats_fivenum");
+    assert!(d.contains("hinges") && !d.contains("Q1"), "{d}");
+}
+
+/// The description of a routed tool, as the HTTP tool list gives it.
+fn tool_description(s: &AnalyticsServer, name: &str) -> String {
+    tool_definition(s, name).description
+}
+
+/// The definition (description and input schema) of a routed tool.
+fn tool_definition(s: &AnalyticsServer, name: &str) -> p2a_mcp::transport::http::ToolDefinition {
+    s.list_tools()
+        .into_iter()
+        .find(|t| t.name == name)
+        .unwrap_or_else(|| panic!("no tool {name}"))
+}
+
+/// STAT-76, X-18, WP04: the descriptions say what the methods compute.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_mcp_descriptions_match_the_methods() {
+    let (_se, s) = session_with_datasets(vec![]);
+    let cor = tool_description(&s, "compute_correlation");
+    assert!(cor.contains("pairwise-complete"), "{cor}");
+    let dens = tool_description(&s, "stats_density");
+    assert!(dens.contains("bw.nrd0"), "{dens}");
+    let boxt = tool_description(&s, "timeseries_box_test");
+    assert!(boxt.contains("missing values"), "{boxt}");
+    let ks = tool_definition(&s, "hypothesis_ks_test")
+        .input_schema
+        .to_string();
+    assert!(
+        ks.contains("x tends to be smaller") && !ks.contains("stochastically greater"),
+        "{ks}"
+    );
+}
+
+/// A generated dataset of the stats_mcp_t4 case, loaded as the CLI loads it.
+fn mcp_t4_dataset(name: &str) -> p2a_core::data::Dataset {
+    let path = p2a_validation::repo_path(&format!("validation/datasets/generated/{name}.csv"));
+    p2a_core::data::Dataset::new(p2a_core::data::DataLoader::load_csv(&path).unwrap())
+}
+
+/// TOOL-22, STAT-75: two-way stats_model_tables through the dispatch path are R's
+/// model.tables(aov(y ~ a * b)) on balanced, unbalanced and empty-cell layouts: the
+/// projections of the sequential fit, null for an empty cell, the interaction as the a:b
+/// effects, and standard errors only for the balanced layout (stats_mcp_t4).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_model_tables_two_way() {
+    let case = Case::load("stats_mcp_t4");
+    let (se, s) = session_with_datasets(vec![
+        ("bal", mcp_t4_dataset("modeltables_t4_bal")),
+        ("unbal", mcp_t4_dataset("modeltables_t4_unbal")),
+        ("empty", mcp_t4_dataset("modeltables_t4_empty")),
+    ]);
+    for (ds, n) in [("bal", 18), ("unbal", 15), ("empty", 15)] {
+        for tt in ["means", "effects"] {
+            let j = json_of(
+                &ok(
+                    &s,
+                    &se,
+                    "stats_model_tables",
+                    json!({"dataset": ds, "response": "y", "factors": ["a", "b"], "table_type": tt, "se": true}),
+                )
+                .await,
+            );
+            let tables = &j["tables"];
+            let ab: Vec<f64> = tables["a:b"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(fs)
+                .collect();
+            let cell_n: Vec<f64> = j["n"]["a:b"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(fs)
+                .collect();
+            let k = |t: &str| format!("{ds}_{tt}_{t}");
+            let ab_tol = if ds == "empty" && tt == "effects" {
+                Tol::new(1e-8, 1e-12)
+            } else {
+                Tol::coef(n)
+            };
+            Check::new(&case)
+                .vector(&k("a"), &fs(&tables["a"]), Tol::coef(n))
+                .vector(&k("b"), &fs(&tables["b"]), Tol::coef(n))
+                .vector(&k("ab"), &ab, ab_tol)
+                .scalar(&format!("{ds}_grand"), f(&j["grand_mean"]), Tol::coef(n))
+                .scalar(&format!("{ds}_mse"), f(&j["mse"]), Tol::stat(n))
+                .vector(&format!("{ds}_cell_n"), &cell_n, Tol::exact())
+                .finish();
+            if ds == "empty" {
+                assert!(tables["a:b"][1][2].is_null(), "{j}");
+            }
+            if ds == "bal" {
+                let got = [f(&j["se"]["a"]), f(&j["se"]["b"]), f(&j["se"]["a:b"])];
+                Check::new(&case)
+                    .vector(&format!("bal_se_{tt}"), &got, Tol::se(n))
+                    .finish();
+            } else {
+                assert!(j["se"].is_null(), "{j}");
+                assert_eq!(
+                    j["se_note"],
+                    "Design is unbalanced - use se.contrast() for se's"
+                );
+            }
+        }
+    }
 }
 
 /// STAT-46/STAT-77: stats_se_contrast through the dispatch path, pinned to
