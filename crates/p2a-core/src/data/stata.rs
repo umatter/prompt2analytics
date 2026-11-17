@@ -567,8 +567,11 @@ impl<R: Read + Seek> StataReader<R> {
         let release = self.release;
         let mut table = HashMap::new();
         let mut binary = false;
+        // The position is tracked here: `stream_position` on the buffered reader is a system
+        // call per block.
+        let mut at = self.reader.stream_position()?;
+        let header_len = 3 + 4 + release.gso_o_width() as u64 + 1 + 4;
         loop {
-            let at = self.reader.stream_position()?;
             let mut tag = [0u8; 3];
             self.reader.read_exact(&mut tag)?;
             if &tag == b"</s" {
@@ -586,7 +589,7 @@ impl<R: Read + Seek> StataReader<R> {
             let mut kind = [0u8; 1];
             self.reader.read_exact(&mut kind)?;
             let len = Self::read_uint(&mut self.reader, 4, order)?;
-            let here = self.reader.stream_position()?;
+            let here = at + header_len;
             if here.checked_add(len).is_none_or(|stop| stop > end) {
                 return Err(StataError::InvalidFormat(format!(
                     "the strL ({v}, {o}) at byte {at} declares {len} bytes, past the end of \
@@ -614,6 +617,7 @@ impl<R: Read + Seek> StataReader<R> {
                 }
             };
             table.insert((v, o), text);
+            at = here + len as u64;
             if table.len() % GSOS_PER_CHECKPOINT == 0 {
                 crate::resource::checkpoint().map_err(resource_err)?;
             }

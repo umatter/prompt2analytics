@@ -331,6 +331,18 @@ fn completeness_change(before: &DataFrame, after: &DataFrame) -> f64 {
     100.0 * (completeness(after) - completeness(before))
 }
 
+/// The missing cells of `col` (null, or NaN in a float column).
+fn missing_count(col: &Column) -> usize {
+    let mut n = col.null_count();
+    if matches!(col.dtype(), DataType::Float64 | DataType::Float32)
+        && let Ok(cast) = col.cast(&DataType::Float64)
+        && let Ok(ca) = cast.f64()
+    {
+        n += ca.iter().flatten().filter(|v| v.is_nan()).count();
+    }
+    n
+}
+
 /// One flag per cell of `col`: missing as a fill treats it (null, or NaN in a float column).
 fn missing_flags(col: &Column) -> Vec<bool> {
     if matches!(col.dtype(), DataType::Float64 | DataType::Float32)
@@ -541,7 +553,8 @@ fn preview_fill_na(
                     }
                 }
             }
-            quality_change = completeness_change(df, filled_df);
+            // A fill turns missing cells into present ones and changes nothing else.
+            quality_change = pct_of(cells, row_count.saturating_mul(df.width()));
             for (col_name, reason) in &outcome.skipped {
                 warnings.push(format!("Column '{col_name}' would be skipped: {reason}"));
             }
@@ -676,7 +689,15 @@ fn preview_replace(
         Err(e) => warnings.push(e.to_string()),
         Ok(outcome) => {
             total_affected = outcome.n_replaced;
-            quality_change = completeness_change(df, outcome.dataset.df());
+            // Only `column` changes, and only where a value was replaced.
+            if total_affected > 0
+                && let (Ok(before), Ok(after)) =
+                    (df.column(column), outcome.dataset.df().column(column))
+            {
+                let cells = row_count.saturating_mul(df.width());
+                quality_change =
+                    pct_of(missing_count(before), cells) - pct_of(missing_count(after), cells);
+            }
             if total_affected == 0 {
                 warnings.push(format!(
                     "No values matching '{}' found in column '{}'",
@@ -1335,6 +1356,33 @@ mod tests {
             p.warnings.iter().any(|w| w.contains("'nope'")),
             "{:?}",
             p.warnings
+        );
+    }
+
+    #[test]
+    fn replace_preview_reports_the_completeness_change() {
+        // The change is taken from the replaced column only; it equals the whole-frame measure.
+        let ds = Dataset::new(
+            df! {
+                "x" => [Some(1.5), None, Some(f64::NAN), Some(4.25)],
+                "y" => ["a", "", "c", ""],
+            }
+            .unwrap(),
+        );
+        let op = CleaningOperation::Replace {
+            column: "y".into(),
+            old_value: "".into(),
+            new_value: "null".into(),
+        };
+        let p = preview_cleaning(&ds, &op, 5);
+        let after = replace_with(&ds, "y", "", Some("null"), &ReplaceOptions::default()).unwrap();
+        let whole = completeness_change(ds.df(), after.dataset.df());
+        assert_eq!(p.rows_affected, 2);
+        assert!((p.estimated_quality_change - whole).abs() < 1e-12);
+        assert!(
+            (p.estimated_quality_change + 25.0).abs() < 1e-12,
+            "{}",
+            p.estimated_quality_change
         );
     }
 
