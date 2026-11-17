@@ -16,7 +16,7 @@
 //!
 //! Publication-ready LaTeX tables with customizable styling:
 //! - Standard errors in parentheses
-//! - Significance stars (\textdagger{} p < 0.10, * p < 0.05, ** p < 0.01, *** p < 0.001), with a
+//! - Significance stars (`\textdagger{}` p < 0.10, * p < 0.05, ** p < 0.01, *** p < 0.001), with a
 //!   legend built from the same mapping
 //! - Multi-model comparison tables
 //! - Custom notes and captions
@@ -66,7 +66,7 @@
 //!
 //! ## CSV Export
 //!
-//! The [`CsvExport`] trait is implemented for all result types:
+//! The [`CsvExport`] trait is implemented for the result types listed below:
 //!
 //! ```ignore
 //! use p2a_core::export::CsvExport;
@@ -79,12 +79,14 @@
 //!
 //! ## Supported Result Types
 //!
-//! All export builders support these result types:
-//! - [`OlsResult`](crate::regression::OlsResult) - OLS regression
-//! - [`PanelResult`](crate::econometrics::PanelResult) - Fixed/random effects
-//! - [`IVResult`](crate::econometrics::IVResult) - Instrumental variables
-//! - [`DiscreteResult`](crate::econometrics::DiscreteResult) - Logit/probit
-//! - And many more via the [`CsvExport`] trait
+//! - The builders ([`LatexTableBuilder`], [`HtmlTableBuilder`], [`MarkdownTableBuilder`]) take
+//!   [`OlsResult`](crate::regression::OlsResult).
+//! - [`PanelResult`](crate::econometrics::PanelResult) and
+//!   [`DiscreteResult`](crate::econometrics::DiscreteResult) have `to_latex` and `to_html`.
+//! - [`CsvExport`] is implemented for `OlsResult`, `DiscreteResult`, `PanelResult`,
+//!   `HausmanResult`, `PCAResult`, `KMeansResult` and `DBSCANResult`.
+//!
+//! `IVResult` has no export.
 
 mod csv;
 mod html;

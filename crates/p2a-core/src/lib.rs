@@ -29,9 +29,15 @@
 //!
 //! ## Feature Flags
 //!
+//! - `full` (the default) - `visualization`, `forecasting`, `file-formats`, `database` and
+//!   `spectral-analysis`
+//! - `visualization` - Chart generation (histograms, scatter plots, heatmaps, interactive charts)
 //! - `forecasting` - Time series forecasting (ARIMA, GARCH, Holt-Winters, etc.)
-//! - `visualization` - Chart generation (histograms, scatter plots, heatmaps)
+//! - `file-formats` - Excel workbooks (xlsx, xls, xlsb, ods)
+//! - `database` - SQLite and DuckDB queries
 //! - `spectral-analysis` - Spectral density estimation
+//! - `cuda` - GPU dispatch of the large linear-algebra kernels (needs the CUDA toolkit)
+//! - `ci` - `full` without `database`
 //!
 //! ## Method Catalog
 //!
@@ -180,7 +186,7 @@
 //! | **LaTeX** | [`LatexTableBuilder`] - Publication-ready tables |
 //! | **HTML** | [`HtmlTableBuilder`] - Self-contained HTML tables |
 //! | **Markdown** | [`MarkdownTableBuilder`] - GitHub-compatible tables |
-//! | **CSV** | [`CsvExport`] trait for all result types |
+//! | **CSV** | [`CsvExport`] for OLS, discrete, panel, Hausman, PCA, k-means and DBSCAN results |
 //! | **Charts** | `histogram`, `scatter_plot`, `box_plot`, `correlation_heatmap` (feature: visualization) |
 //!
 //! ## Module Organization
@@ -924,7 +930,7 @@ pub use forecasting::{
     ArimaSimResult,
     ArmaAcfResult,
     ArmaToMaResult,
-    // CausalImpact (Bayesian Structural Time Series for causal inference)
+    // CausalImpact (maximum-likelihood structural time series)
     CausalImpactConfig,
     CausalImpactModel,
     CausalImpactResult,

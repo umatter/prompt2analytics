@@ -48,13 +48,13 @@
 //! | Method | Function | Description |
 //! |--------|----------|-------------|
 //! | **PELT** | [`detect_changepoints`] | Optimal changepoint detection |
-//! | **Binary Segmentation** | [`binary_segmentation`] | Recursive partitioning |
+//! | **Binary Segmentation** | [`binary_segmentation`] | Greedy binary segmentation (changepoint's BinSeg): MBIC by default, at most Q = 5 changes |
 //!
 //! ## Causal Analysis
 //!
 //! | Method | Function | Description |
 //! |--------|----------|-------------|
-//! | **Causal Impact** | [`run_causal_impact`] | Bayesian time series causal inference |
+//! | **Causal Impact** | [`run_causal_impact`] | Intervention effect from a maximum-likelihood structural time-series forecast |
 //!
 //! ## Utilities
 //!
