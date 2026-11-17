@@ -562,15 +562,6 @@ impl LlmProvider for OpenAIProvider {
 
 #[async_trait]
 impl ToolLoopProvider for OpenAIProvider {
-    fn convert(&self, messages: &[Message]) -> Result<Value, LlmError> {
-        let mut wire = serde_json::Map::new();
-        wire.insert(
-            "messages".into(),
-            serde_json::to_value(self.to_openai_messages(messages))?,
-        );
-        Ok(Value::Object(wire))
-    }
-
     async fn call(
         &self,
         messages: &[Message],

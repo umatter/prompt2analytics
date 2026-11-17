@@ -1,8 +1,8 @@
 //! The one tool-calling loop of the three LLM providers (LLM-20).
 //!
-//! A provider implements [`ToolLoopProvider`]: [`ToolLoopProvider::convert`] turns the conversation
-//! into its wire messages and [`ToolLoopProvider::call`] sends one model turn, streaming text deltas
-//! when a sink is given. [`run_tool_loop`] does the rest: the iteration cap, loop detection, tool
+//! A provider implements [`ToolLoopProvider`]: [`ToolLoopProvider::call`] makes one model call (its
+//! own conversion of the conversation into wire messages included), streaming text deltas when a
+//! sink is given. [`run_tool_loop`] does the rest: the iteration cap, loop detection, tool
 //! execution, `interpret`, and tool-call ids unique per request (`call_<request>_<n>`). A call is
 //! announced on the stream ([`StreamChunk::ToolCall`]) only when it is about to run.
 
@@ -34,9 +34,6 @@ pub struct AssistantTurn {
 #[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait ToolLoopProvider: Send + Sync {
-    /// The provider's wire messages for `messages`, as JSON: `{"messages": [..]}`, plus `"system"`
-    /// for Anthropic. Tool results attached to an assistant message follow it (LLM-17).
-    fn convert(&self, messages: &[Message]) -> Result<serde_json::Value, LlmError>;
     /// One model turn. With `stream`, each text delta goes to the sink as [`StreamChunk::Text`] as it
     /// arrives; nothing else is sent to it.
     async fn call(
@@ -307,9 +304,6 @@ mod tests {
     }
     #[async_trait]
     impl ToolLoopProvider for Scripted {
-        fn convert(&self, messages: &[Message]) -> Result<Value, LlmError> {
-            Ok(serde_json::to_value(messages)?)
-        }
         async fn call(
             &self,
             messages: &[Message],

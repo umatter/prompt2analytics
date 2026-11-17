@@ -501,14 +501,6 @@ impl LlmProvider for AnthropicProvider {
 
 #[async_trait]
 impl ToolLoopProvider for AnthropicProvider {
-    fn convert(&self, messages: &[Message]) -> Result<Value, LlmError> {
-        let (system, wire_messages) = self.to_anthropic_messages(messages);
-        let mut wire = serde_json::Map::new();
-        wire.insert("system".into(), serde_json::to_value(system)?);
-        wire.insert("messages".into(), serde_json::to_value(wire_messages)?);
-        Ok(Value::Object(wire))
-    }
-
     async fn call(
         &self,
         messages: &[Message],
