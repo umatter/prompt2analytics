@@ -15,7 +15,7 @@ use super::munging::clean::{
     FillStrategy, ReplaceOptions, deduplicate, drop_na, fill_na_with, replace_with,
 };
 use super::munging::transform::{drop_columns, filter};
-use super::quality::{completeness, generate_quality_profile};
+use super::quality::{DataIssue, DataQualityProfile, completeness, generate_quality_profile};
 
 /// Result of a cleaning operation with verification.
 #[derive(Clone, Serialize, Deserialize)]
@@ -38,8 +38,12 @@ pub struct VerificationReport {
     pub rows_before: usize,
     /// Number of rows after the operation
     pub rows_after: usize,
-    /// Number of rows that were modified
+    /// Number of rows with at least one changed cell (rows of the same index; 0 when the row
+    /// count changed)
     pub rows_modified: usize,
+    /// Number of changed cells
+    #[serde(default)]
+    pub cells_modified: usize,
     /// Number of rows that were removed
     pub rows_removed: usize,
     /// Number of rows that were added
@@ -93,6 +97,10 @@ pub struct QualityDelta {
     pub issues_resolved: Vec<String>,
     /// New issues introduced (if any)
     pub issues_introduced: Vec<String>,
+    /// Issues of the same kind and column on both sides whose count or detail changed, e.g.
+    /// "missing values in 'x': 12 -> 3"
+    #[serde(default)]
+    pub issues_changed: Vec<String>,
 }
 
 /// Preview of what a cleaning operation would do.
@@ -764,38 +772,7 @@ pub fn verify_cleaning(before: &Dataset, after: &Dataset, _operation: &str) -> V
     let profile_before = generate_quality_profile(before);
     let profile_after = generate_quality_profile(after);
 
-    // Calculate quality delta
-    let issues_before: Vec<String> = profile_before
-        .all_issues()
-        .iter()
-        .map(|i| i.description())
-        .collect();
-    let issues_after: Vec<String> = profile_after
-        .all_issues()
-        .iter()
-        .map(|i| i.description())
-        .collect();
-
-    let issues_resolved: Vec<String> = issues_before
-        .iter()
-        .filter(|i| !issues_after.contains(i))
-        .cloned()
-        .collect();
-    let issues_introduced: Vec<String> = issues_after
-        .iter()
-        .filter(|i| !issues_before.contains(i))
-        .cloned()
-        .collect();
-
-    let quality_delta = QualityDelta {
-        completeness_before: profile_before.completeness_score,
-        completeness_after: profile_after.completeness_score,
-        completeness_change: profile_after.completeness_score - profile_before.completeness_score,
-        issues_before: issues_before.len(),
-        issues_after: issues_after.len(),
-        issues_resolved,
-        issues_introduced,
-    };
+    let quality_delta = quality_delta(&profile_before, &profile_after);
 
     // Detect changes by comparing dataframes
     let scan = detect_changes(before, after, 5);
@@ -816,6 +793,7 @@ pub fn verify_cleaning(before: &Dataset, after: &Dataset, _operation: &str) -> V
         rows_before,
         rows_after,
         rows_modified: scan.rows_modified,
+        cells_modified: scan.cells_modified,
         rows_removed: rows_before.saturating_sub(rows_after),
         rows_added: rows_after.saturating_sub(rows_before),
         sample_changes: scan.sample_changes,
@@ -825,9 +803,100 @@ pub fn verify_cleaning(before: &Dataset, after: &Dataset, _operation: &str) -> V
     }
 }
 
+/// An issue's identity across two profiles: its kind and its column (`None` for a dataset-level
+/// issue; the columns joined for possible duplicates).
+type IssueKey = (std::mem::Discriminant<DataIssue>, Option<String>);
+
+fn issue_key(issue: &DataIssue) -> IssueKey {
+    let column = match issue {
+        DataIssue::DuplicateRows { .. } => None,
+        DataIssue::PossibleDuplicates { columns, .. } => Some(columns.join(", ")),
+        DataIssue::HighNullRate { column, .. }
+        | DataIssue::MixedTypes { column, .. }
+        | DataIssue::OutlierValues { column, .. }
+        | DataIssue::InconsistentFormat { column, .. }
+        | DataIssue::WhitespaceIssues { column, .. }
+        | DataIssue::ConstantColumn { column, .. }
+        | DataIssue::LowCardinality { column, .. }
+        | DataIssue::HighCardinality { column, .. }
+        | DataIssue::EmptyStrings { column, .. } => Some(column.clone()),
+    };
+    (std::mem::discriminant(issue), column)
+}
+
+/// What an issue counts, and how many, for the "changed" line; `None` for a kind without a count.
+fn issue_count(issue: &DataIssue, profile: &DataQualityProfile) -> Option<(&'static str, usize)> {
+    match issue {
+        DataIssue::HighNullRate { column, .. } => profile
+            .columns
+            .iter()
+            .find(|c| &c.name == column)
+            .map(|c| ("missing values", c.null_count)),
+        DataIssue::DuplicateRows { count } => Some(("duplicate rows", *count)),
+        DataIssue::PossibleDuplicates { count, .. } => Some(("possible duplicate rows", *count)),
+        DataIssue::OutlierValues { count, .. } => Some(("outliers", *count)),
+        DataIssue::WhitespaceIssues { count, .. } => {
+            Some(("values with leading/trailing whitespace", *count))
+        }
+        DataIssue::EmptyStrings { count, .. } => Some(("empty strings", *count)),
+        DataIssue::LowCardinality { unique_count, .. } => Some(("unique values", *unique_count)),
+        _ => None,
+    }
+}
+
+/// The quality delta of two profiles, issues matched by kind and column: an issue on one side
+/// only is resolved or introduced, one on both sides whose count or detail differs is changed.
+fn quality_delta(before: &DataQualityProfile, after: &DataQualityProfile) -> QualityDelta {
+    let (issues_before, issues_after) = (before.all_issues(), after.all_issues());
+    let find = |issues: &[&DataIssue], key: &IssueKey| -> Option<DataIssue> {
+        issues
+            .iter()
+            .find(|i| &issue_key(i) == key)
+            .map(|i| (*i).clone())
+    };
+    let mut issues_resolved = Vec::new();
+    let mut issues_changed = Vec::new();
+    for issue in &issues_before {
+        let key = issue_key(issue);
+        match find(&issues_after, &key) {
+            None => issues_resolved.push(issue.description()),
+            Some(now) => {
+                let (was_text, now_text) = (issue.description(), now.description());
+                if was_text == now_text {
+                    continue;
+                }
+                let line = match (issue_count(issue, before), issue_count(&now, after)) {
+                    (Some((what, was)), Some((_, is))) if was != is => match &key.1 {
+                        Some(column) => format!("{what} in '{column}': {was} -> {is}"),
+                        None => format!("{what}: {was} -> {is}"),
+                    },
+                    _ => format!("{was_text} -> {now_text}"),
+                };
+                issues_changed.push(line);
+            }
+        }
+    }
+    let issues_introduced = issues_after
+        .iter()
+        .filter(|i| find(&issues_before, &issue_key(i)).is_none())
+        .map(|i| i.description())
+        .collect();
+    QualityDelta {
+        completeness_before: before.completeness_score,
+        completeness_after: after.completeness_score,
+        completeness_change: after.completeness_score - before.completeness_score,
+        issues_before: issues_before.len(),
+        issues_after: issues_after.len(),
+        issues_resolved,
+        issues_introduced,
+        issues_changed,
+    }
+}
+
 /// What [`detect_changes`] found.
 struct ChangeScan {
     rows_modified: usize,
+    cells_modified: usize,
     sample_changes: Vec<ChangeExample>,
     dtype_changes: Vec<DtypeChange>,
     warnings: Vec<String>,
@@ -920,6 +989,7 @@ fn detect_changes(before: &Dataset, after: &Dataset, sample_size: usize) -> Chan
 
     let mut scan = ChangeScan {
         rows_modified: 0,
+        cells_modified: 0,
         sample_changes: Vec::new(),
         dtype_changes: Vec::new(),
         warnings: Vec::new(),
@@ -930,6 +1000,8 @@ fn detect_changes(before: &Dataset, after: &Dataset, sample_size: usize) -> Chan
         .iter()
         .map(|s| s.to_string())
         .collect();
+    let same_height = df_before.height() == df_after.height();
+    let mut rows = vec![false; if same_height { df_before.height() } else { 0 }];
 
     for col_name in &col_names {
         let col_before = match df_before.column(col_name) {
@@ -955,7 +1027,7 @@ fn detect_changes(before: &Dataset, after: &Dataset, sample_size: usize) -> Chan
         }
 
         // Cells are only compared when the row counts are the same
-        if df_before.height() != df_after.height() {
+        if !same_height {
             continue;
         }
 
@@ -969,7 +1041,8 @@ fn detect_changes(before: &Dataset, after: &Dataset, sample_size: usize) -> Chan
             }
         };
         for (idx, _) in mask.iter().enumerate().filter(|(_, changed)| **changed) {
-            scan.rows_modified += 1;
+            scan.cells_modified += 1;
+            rows[idx] = true;
             if scan.sample_changes.len() < sample_size {
                 scan.sample_changes.push(ChangeExample {
                     row_index: idx,
@@ -981,6 +1054,7 @@ fn detect_changes(before: &Dataset, after: &Dataset, sample_size: usize) -> Chan
         }
     }
 
+    scan.rows_modified = rows.iter().filter(|r| **r).count();
     scan
 }
 
@@ -1003,7 +1077,10 @@ impl VerificationReport {
             summary.push_str(&format!("(+{} added) ", self.rows_added));
         }
         if self.rows_modified > 0 {
-            summary.push_str(&format!("({} modified)", self.rows_modified));
+            summary.push_str(&format!(
+                "({} modified, {} cells)",
+                self.rows_modified, self.cells_modified
+            ));
         }
         summary.push('\n');
 
@@ -1035,6 +1112,16 @@ impl VerificationReport {
                 self.quality_delta.issues_resolved.len()
             ));
             for issue in &self.quality_delta.issues_resolved {
+                summary.push_str(&format!("  - {}\n", issue));
+            }
+        }
+
+        if !self.quality_delta.issues_changed.is_empty() {
+            summary.push_str(&format!(
+                "\nChanged issues ({}):\n",
+                self.quality_delta.issues_changed.len()
+            ));
+            for issue in &self.quality_delta.issues_changed {
                 summary.push_str(&format!("  - {}\n", issue));
             }
         }
@@ -1367,6 +1454,39 @@ mod tests {
             changed_mask(&pairs[1].0, &pairs[1].1).unwrap(),
             [false, false, true, true]
         );
+    }
+
+    #[test]
+    fn verify_reports_a_count_change_once() {
+        // Pre-fix: one issue resolved ("30.0% missing") and one introduced ("7.5% missing").
+        let n = 40;
+        let x = |missing: usize| -> Vec<Option<f64>> {
+            (0..n)
+                .map(|i| (i >= missing).then_some(i as f64 * 1.37 + 0.2))
+                .collect()
+        };
+        // `id` keeps the rows with a missing x apart (no duplicate-row issue).
+        let id: Vec<i64> = (0..n as i64).collect();
+        let before = Dataset::new(df! { "id" => id.clone(), "x" => x(12) }.unwrap());
+        let after = Dataset::new(df! { "id" => id, "x" => x(3) }.unwrap());
+        let report = verify_cleaning(&before, &after, "fill");
+        let d = &report.quality_delta;
+        assert!(d.issues_resolved.is_empty(), "{:?}", d.issues_resolved);
+        assert!(d.issues_introduced.is_empty(), "{:?}", d.issues_introduced);
+        assert_eq!(d.issues_changed, ["missing values in 'x': 12 -> 3"]);
+        assert!(report.summary().contains("Changed issues (1):"));
+    }
+
+    #[test]
+    fn verify_counts_modified_rows() {
+        // Pre-fix rows_modified counted the 3 cells.
+        let before =
+            Dataset::new(df! { "a" => ["p", "q", "r", "s"], "b" => [1.5, 2.5, 3.5, 4.5] }.unwrap());
+        let after =
+            Dataset::new(df! { "a" => ["P", "q", "R", "s"], "b" => [1.5, 2.5, 9.5, 4.5] }.unwrap());
+        let report = verify_cleaning(&before, &after, "edit");
+        assert_eq!(report.rows_modified, 2);
+        assert_eq!(report.cells_modified, 3);
     }
 
     #[test]
