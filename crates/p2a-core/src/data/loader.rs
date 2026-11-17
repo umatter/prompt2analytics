@@ -108,12 +108,18 @@ const POLARS_TYPE_KEYS: [&str; 4] = [
 /// nested decoder leaves those unimplemented and panics. At the top level
 /// polars decodes such a dictionary as strings, and it passes.
 ///
-/// This does not rule out every panic polars has on a parquet file. Some
-/// depend on the data rather than the schema: a nested Categorical with
-/// more labels than its code width holds, which also counts the labels
-/// earlier loads put into the same process-wide categories. Others come
-/// before this check can run, such as an ARROW:schema too short to hold its
-/// own header. [`read_parquet`] catches those.
+/// It refuses, too, an Arrow extension type and an Arrow interval, which
+/// polars-core panics on (month-day intervals load as structs when
+/// `POLARS_IMPORT_INTERVAL_AS_STRUCT=1`).
+///
+/// This does not rule out every panic polars has on a parquet file. Two
+/// kinds pass this check and are caught by [`read_parquet`] instead, which
+/// answers them with [`LoadError::ParquetPanic`] and logs a warning: panics
+/// that depend on the data rather than the schema (a nested Categorical
+/// with more labels than its code width holds, counting the labels earlier
+/// loads put into the same process-wide categories), and panics that come
+/// before this check can run (an ARROW:schema too short to hold its own
+/// header).
 fn check_parquet_schema(schema: &ArrowSchema) -> Result<(), LoadError> {
     for field in schema.iter_values() {
         check_dtype(&field.dtype, field.metadata.as_deref(), false).map_err(|reason| {
@@ -166,17 +172,46 @@ fn check_dtype<M: MetaDataExt>(
             Ok(())
         }
         // polars parses the time zone with this function and unwraps the
-        // result. Its error quotes the file's time zone whole, so the
-        // refusal shows a bounded part of it.
+        // result. The refusal shows a bounded part of the file's time zone
+        // and the setting that makes polars accept it, not polars' error.
         ArrowDataType::Timestamp(_, tz) => {
-            TimeZone::opt_try_new(tz.clone()).map(|_| ()).map_err(|e| {
+            TimeZone::opt_try_new(tz.clone()).map(|_| ()).map_err(|_| {
                 format!(
-                    "its time zone '{}' is not one polars can parse: {}",
-                    shown(tz.as_deref().unwrap_or("")),
-                    shown_up_to(&e.to_string(), 300)
+                    "its time zone '{}' is not one polars can parse (setting \
+                     POLARS_IGNORE_TIMEZONE_PARSE_ERROR=1 lets polars accept it)",
+                    shown(tz.as_deref().unwrap_or(""))
                 )
             })
         }
+        // polars-core loads only its own POLARS_EXTENSION_TYPE, and only with
+        // its `object` feature, which this build does not enable; it panics on
+        // every other extension type.
+        ArrowDataType::Extension(ext) => Err(format!(
+            "its type is an Arrow extension type ('{}') polars cannot load",
+            shown(ext.name.as_str())
+        )),
+        // polars-core imports month-day-nano and month-day-millisecond
+        // intervals as structs only when this variable is "1" (read as polars
+        // reads it), and panics on year-month and day-time intervals.
+        ArrowDataType::Interval(unit) => match format!("{unit:?}").as_str() {
+            "MonthDayNano" | "MonthDayMillis" => {
+                if std::env::var("POLARS_IMPORT_INTERVAL_AS_STRUCT").as_deref() == Ok("1") {
+                    Ok(())
+                } else {
+                    Err("it holds Arrow intervals, which polars loads only with \
+                         POLARS_IMPORT_INTERVAL_AS_STRUCT=1"
+                        .to_string())
+                }
+            }
+            "YearMonth" => {
+                Err("it holds Arrow year-month intervals, which polars cannot load".into())
+            }
+            "DayTime" => Err("it holds Arrow day-time intervals, which polars cannot load".into()),
+            other => Err(format!(
+                "it holds Arrow {} intervals, which polars cannot load",
+                other.to_lowercase()
+            )),
+        },
         ArrowDataType::List(inner)
         | ArrowDataType::LargeList(inner)
         | ArrowDataType::FixedSizeList(inner, _) => check_nested(inner),
@@ -938,7 +973,8 @@ impl DataLoader {
 
     /// Load a Parquet file eagerly (entire file into memory).
     ///
-    /// A file whose polars type metadata is malformed is refused with
+    /// A file whose ARROW:schema is malformed, or holds a type polars cannot
+    /// load, is refused with
     /// [`LoadError::ParquetSchema`] naming the column, before it is decoded
     /// (see [`DataLoader::check_parquet_schema`]). A panic in polars while
     /// it reads the file is caught and answered as
@@ -2220,16 +2256,8 @@ mod tests {
         // that it creates for that chunk and reuses from page to page: the
         // path every zstd Parquet file a user loads or uploads takes, and the
         // one .github/workflows/audit.yml's zstd exemptions argue about.
-        let x: Vec<f64> = (0..20_000)
-            .map(|i| f64::from(i) * 0.37)
-            .map(|t| t.sin() * 10.0 + t * 1e-3)
-            .collect();
         let k: Vec<i64> = (0..20_000_i64).map(|i| i * 7919 % 10_007 - 5_000).collect();
-        let mut df = DataFrame::new(vec![
-            Series::new("x".into(), x).into(),
-            Series::new("k".into(), k).into(),
-        ])
-        .unwrap();
+        let mut df = frame_of(Series::new("k".into(), k));
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("pages.parquet");
         ParquetWriter::new(std::fs::File::create(&path).unwrap())
@@ -2571,11 +2599,88 @@ mod tests {
                 text.contains("its time zone 'Europe/Parix' is not one polars can parse"),
                 "{name}: {text}"
             );
-            assert!(text.contains("unable to parse time zone"), "{name}: {text}");
+            assert!(
+                text.contains(
+                    "(setting POLARS_IGNORE_TIMEZONE_PARSE_ERROR=1 lets polars accept it)"
+                ),
+                "{name}: {text}"
+            );
+            assert!(
+                !text.contains("unable to parse time zone"),
+                "{name}: {text}"
+            );
             if let Some(nested) = nested {
                 assert!(text.contains(nested), "{name}: {text}");
             }
         }
+    }
+
+    #[test]
+    fn parquet_with_an_extension_type_is_refused_naming_the_column() {
+        // R 4.3.3, arrow 25.0.1:
+        //   t <- arrow_table(x = c(1.5, 2.5, 3.5),
+        //                    k = vctrs_extension_array(factor(c("a", "b", "a"))))
+        //   write_parquet(t, "arrow_extension_vctrs.parquet")   # 1,149 bytes
+        // polars-core panics converting any extension type but its own.
+        let text = parquet_error(&fixture("arrow_extension_vctrs.parquet"));
+        assert!(text.contains("column 'k'"), "{text}");
+        assert!(
+            text.contains(
+                "its type is an Arrow extension type ('arrow.r.vctrs') polars cannot load"
+            ),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn parquet_with_intervals_is_refused_naming_the_column() {
+        // No writer at hand makes a parquet file with an Arrow interval
+        // (R arrow 25.0.1 has no month_day_nano_interval()), so the schema
+        // check, which the loader runs before decoding, gets the schema
+        // directly. POLARS_IMPORT_INTERVAL_AS_STRUCT is process-global and
+        // left unset here.
+        let interval = |unit: &str| -> ArrowDataType {
+            serde_json::from_str(&format!("{{\"Interval\":\"{unit}\"}}")).unwrap()
+        };
+        let refusal = |dtype: ArrowDataType| {
+            let schema: ArrowSchema = [
+                ArrowField::new("x".into(), ArrowDataType::Float64, true),
+                ArrowField::new("k".into(), dtype, true),
+            ]
+            .into_iter()
+            .map(|f| (f.name.clone(), f))
+            .collect();
+            DataLoader::check_parquet_schema(&schema)
+                .unwrap_err()
+                .to_string()
+        };
+        if std::env::var("POLARS_IMPORT_INTERVAL_AS_STRUCT").as_deref() != Ok("1") {
+            let text = refusal(interval("MonthDayNano"));
+            assert!(text.contains("column 'k'"), "{text}");
+            assert!(
+                text.contains(
+                    "it holds Arrow intervals, which polars loads only with \
+                     POLARS_IMPORT_INTERVAL_AS_STRUCT=1"
+                ),
+                "{text}"
+            );
+        }
+        let text = refusal(interval("YearMonth"));
+        assert!(text.contains("column 'k'"), "{text}");
+        assert!(
+            text.contains("it holds Arrow year-month intervals, which polars cannot load"),
+            "{text}"
+        );
+        let nested = ArrowDataType::LargeList(Box::new(ArrowField::new(
+            "item".into(),
+            interval("DayTime"),
+            true,
+        )));
+        let text = refusal(nested);
+        assert!(
+            text.contains("its nested field 'item': it holds Arrow day-time intervals"),
+            "{text}"
+        );
     }
 
     #[test]
