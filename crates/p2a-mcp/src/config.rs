@@ -13,18 +13,40 @@ use clap::{Parser, ValueEnum};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 
-/// Whether an environment variable is set to a truthy value
-/// (`1`, `true`, `yes`, `on`, case-insensitive). Empty/unset/other = false.
-#[cfg(feature = "http")]
-fn env_flag_enabled(name: &str) -> bool {
-    std::env::var(name)
-        .map(|v| {
-            matches!(
-                v.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false)
+/// Whether a flag's environment value is truthy: `1`, `true`, `yes` or `on`
+/// (any case, surrounding space ignored). Unset, empty and anything else are
+/// false. Every boolean `P2A_*` flag is read through this, so one value means
+/// the same for all of them.
+pub(crate) fn truthy(value: Option<&str>) -> bool {
+    value.is_some_and(|v| {
+        matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
+}
+
+/// The start-up warning for tool calls that share rayon's global pool: `None` when at most one tool call runs at a time,
+/// else the text, naming the deadline when there is one.
+pub(crate) fn rayon_sharing_warning(
+    concurrency: usize,
+    deadline: Option<std::time::Duration>,
+    cpus: usize,
+) -> Option<String> {
+    if concurrency <= 1 {
+        return None;
+    }
+    let delay = match deadline {
+        Some(d) => format!(
+            "a call's parallel work can delay another past its {} s deadline",
+            d.as_secs()
+        ),
+        None => "a call's parallel work can delay another".to_string(),
+    };
+    Some(format!(
+        "{concurrency} tool calls share one rayon pool of {cpus} threads; {delay}. Set \
+         P2A_TOOL_CONCURRENCY=1 to isolate calls."
+    ))
 }
 
 /// Transport type for the MCP server.
@@ -100,9 +122,10 @@ pub struct CliArgs {
     #[arg(short, long, default_value = "8080", env = "P2A_PORT")]
     pub port: u16,
 
-    /// Enable CORS for all origins (development mode)
+    /// Enable CORS for all origins (development mode) (env P2A_CORS_PERMISSIVE,
+    /// 1/true/yes/on)
     #[cfg(feature = "http")]
-    #[arg(long, env = "P2A_CORS_PERMISSIVE")]
+    #[arg(long)]
     pub cors_permissive: bool,
 
     /// Allowed CORS origins (comma-separated)
@@ -163,9 +186,9 @@ pub struct CliArgs {
 
     /// Deprecated: superseded by `--access-token` / `P2A_ACCESS_TOKEN`. This
     /// flag no longer enables any access control on its own and is kept only
-    /// for backward compatibility.
+    /// for backward compatibility. (env P2A_AUTH_ENABLED, 1/true/yes/on)
     #[cfg(feature = "auth")]
-    #[arg(long, env = "P2A_AUTH_ENABLED")]
+    #[arg(long)]
     pub auth_enabled: bool,
 
     /// Deprecated: unused. JWT authentication is not implemented; use the
@@ -187,8 +210,8 @@ pub struct CliArgs {
     #[arg(long, env = "P2A_DB_PATH")]
     pub db_path: Option<String>,
 
-    /// Enable audit logging for tool calls
-    #[arg(long, env = "P2A_AUDIT_LOG")]
+    /// Enable audit logging for tool calls (env P2A_AUDIT_LOG, 1/true/yes/on)
+    #[arg(long)]
     pub audit_log: bool,
 
     /// Path to audit log file (defaults to p2a-audit.log in current directory)
@@ -433,8 +456,20 @@ pub(crate) fn available_cpus() -> usize {
 }
 
 impl ServerConfig {
-    /// Create configuration from CLI arguments.
+    /// Create configuration from CLI arguments, reading the boolean `P2A_*`
+    /// flags from the process environment.
     pub fn from_args(args: CliArgs) -> anyhow::Result<Self> {
+        Self::from_args_with_env(args, |name| std::env::var(name).ok())
+    }
+
+    /// [`Self::from_args`] with the environment lookup passed in. A boolean
+    /// flag is on when its command-line switch is given or its environment
+    /// variable is [`truthy`].
+    pub(crate) fn from_args_with_env(
+        args: CliArgs,
+        env: impl Fn(&str) -> Option<String>,
+    ) -> anyhow::Result<Self> {
+        let flag = |name: &str| truthy(env(name).as_deref());
         let config = Self {
             transport: args.transport,
             #[cfg(feature = "http")]
@@ -442,17 +477,16 @@ impl ServerConfig {
                 addr: format!("{}:{}", args.host, args.port)
                     .parse()
                     .context(format!("Invalid host:port '{}:{}'", args.host, args.port))?,
-                cors_permissive: args.cors_permissive,
+                cors_permissive: args.cors_permissive || flag("P2A_CORS_PERMISSIVE"),
                 cors_origins: args.cors_origins,
                 access_token: args
                     .access_token
                     .map(|t| t.trim().to_string())
                     .filter(|t| !t.is_empty()),
                 allow_unauthenticated: args.allow_unauthenticated
-                    || env_flag_enabled("P2A_ALLOW_UNAUTHENTICATED"),
-                expose_enumeration: args.expose_enumeration
-                    || env_flag_enabled("P2A_EXPOSE_ENUMERATION"),
-                enable_ws: args.enable_ws || env_flag_enabled("P2A_ENABLE_WS"),
+                    || flag("P2A_ALLOW_UNAUTHENTICATED"),
+                expose_enumeration: args.expose_enumeration || flag("P2A_EXPOSE_ENUMERATION"),
+                enable_ws: args.enable_ws || flag("P2A_ENABLE_WS"),
                 session_dirs: args.session_dirs,
                 #[cfg(feature = "db")]
                 db_path: args.db_path,
@@ -464,11 +498,11 @@ impl ServerConfig {
             },
             #[cfg(feature = "auth")]
             auth: AuthConfig {
-                enabled: args.auth_enabled,
+                enabled: args.auth_enabled || flag("P2A_AUTH_ENABLED"),
                 jwt_secret: args.jwt_secret,
             },
             audit: AuditConfig {
-                enabled: args.audit_log,
+                enabled: args.audit_log || flag("P2A_AUDIT_LOG"),
                 path: args
                     .audit_path
                     .unwrap_or_else(|| "p2a-audit.log".to_string()),
@@ -623,6 +657,17 @@ impl ServerConfig {
                 anyhow::bail!("{flag} must be at most {max} {unit}");
             }
         }
+        // Tool calls run their parallel work on rayon's one global pool.
+        // The governor's own resolved concurrency and deadline decide.
+        #[cfg(feature = "http")]
+        if self.transport == TransportType::Http {
+            let exec = crate::exec::ExecConfig::from_config(self);
+            if let Some(warning) =
+                rayon_sharing_warning(exec.concurrency, exec.deadline, available_cpus())
+            {
+                tracing::warn!("{warning}");
+            }
+        }
         Ok(())
     }
 
@@ -706,6 +751,79 @@ impl Default for ServerConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_truthy() {
+        for on in ["1", "true", "TRUE", "yes", "on", " on "] {
+            assert!(truthy(Some(on)), "{on:?}");
+        }
+        for off in ["0", "false", "no", "off", "", "2"] {
+            assert!(!truthy(Some(off)), "{off:?}");
+        }
+        assert!(!truthy(None));
+    }
+
+    #[test]
+    fn test_flag_args_take_no_env_from_clap() {
+        use clap::CommandFactory;
+        let cmd = CliArgs::command();
+        let mut ids = vec!["audit_log"];
+        if cfg!(feature = "http") {
+            ids.push("cors_permissive");
+        }
+        if cfg!(feature = "auth") {
+            ids.push("auth_enabled");
+        }
+        for id in ids {
+            let arg = cmd
+                .get_arguments()
+                .find(|a| a.get_id() == id)
+                .unwrap_or_else(|| panic!("no argument {id}"));
+            assert!(arg.get_env().is_none(), "{id} reads its env through clap");
+        }
+    }
+
+    #[test]
+    fn test_from_args_reads_flags_through_truthy() {
+        let args = CliArgs::try_parse_from(["p2a-mcp"]).unwrap();
+        let env = |name: &str| match name {
+            "P2A_AUDIT_LOG" | "P2A_CORS_PERMISSIVE" | "P2A_AUTH_ENABLED" => Some("1".to_string()),
+            _ => None,
+        };
+        let config = ServerConfig::from_args_with_env(args, env).unwrap();
+        assert!(config.audit.enabled);
+        #[cfg(feature = "http")]
+        assert!(config.http.cors_permissive);
+        #[cfg(feature = "auth")]
+        assert!(config.auth.enabled);
+        let args = CliArgs::try_parse_from(["p2a-mcp"]).unwrap();
+        let config = ServerConfig::from_args_with_env(args, |_| Some("off".into())).unwrap();
+        assert!(!config.audit.enabled);
+    }
+
+    #[test]
+    fn test_rayon_sharing_warning() {
+        use std::time::Duration;
+        assert_eq!(
+            rayon_sharing_warning(1, Some(Duration::from_secs(60)), 8),
+            None
+        );
+        assert_eq!(
+            rayon_sharing_warning(4, Some(Duration::from_secs(60)), 8).as_deref(),
+            Some(
+                "4 tool calls share one rayon pool of 8 threads; a call's parallel work can \
+                 delay another past its 60 s deadline. Set P2A_TOOL_CONCURRENCY=1 to isolate \
+                 calls."
+            )
+        );
+        assert_eq!(
+            rayon_sharing_warning(4, None, 8).as_deref(),
+            Some(
+                "4 tool calls share one rayon pool of 8 threads; a call's parallel work can \
+                 delay another. Set P2A_TOOL_CONCURRENCY=1 to isolate calls."
+            )
+        );
+    }
 
     #[test]
     fn worker_threads_default_is_at_least_two() {
