@@ -4750,6 +4750,45 @@ mod tests {
         }
     }
 
+    /// A forward fill of block labels in one array shares the source's
+    /// buffers, so the bound counts at most those buffers: it covers the
+    /// quota charge and stays within twice it. The same column in two
+    /// arrays keeps the exact filled text.
+    #[test]
+    fn a_one_array_block_label_fill_is_bounded_by_its_buffers() {
+        let labels: Vec<Option<String>> = (0..20_000)
+            .map(|i| (i % 1_000 == 0).then(|| format!("{i:>5} {}", "L".repeat(400))))
+            .collect();
+        let df = df!("s" => labels).unwrap();
+        assert_eq!(df.column("s").unwrap().n_chunks(), 1);
+        let ds = Dataset::new(df.clone());
+        let built = fill_na(&ds, Some(&["s"]), FillStrategy::Forward).unwrap();
+        let charged = crate::session::datasets_bytes_of([("", &built)]);
+        let bound = bound::fill_na(&df, Some(&["s"]), &FillStrategy::Forward, false)
+            .unwrap()
+            .unwrap();
+        assert!(bound >= charged, "bound {bound} < charged {charged}");
+        assert!(
+            bound <= 2 * charged,
+            "bound {bound} > 2 x charged {charged}"
+        );
+        // Two arrays: the filled text crosses them and is counted exactly.
+        let mut two = df.slice(0, 10_000);
+        two.vstack_mut(&df.slice(10_000, 10_000)).unwrap();
+        let two_source = two.column("s").unwrap().as_materialized_series();
+        assert_eq!(two_source.n_chunks(), 2);
+        let filled = fill_na(
+            &Dataset::new(two.clone()),
+            Some(&["s"]),
+            FillStrategy::Forward,
+        )
+        .unwrap();
+        assert_eq!(
+            bound::filled_text(two_source, true).unwrap(),
+            bound::text_bytes(filled.df().column("s").unwrap().as_materialized_series())
+        );
+    }
+
     #[test]
     fn munging_refusals_give_advice_that_applies() {
         let s: Vec<Option<&str>> = (0..2_000)
@@ -5348,11 +5387,15 @@ mod tests {
                     let filled = built.df().column(c).unwrap().as_materialized_series();
                     let source = sparse.column(c).unwrap().as_materialized_series();
                     let forward = matches!(strategy, FillStrategy::Forward);
-                    assert_eq!(
-                        bound::filled_text(source, forward).unwrap(),
-                        bound::text_bytes(filled),
-                        "{strategy:?} {c}"
-                    );
+                    let counted = bound::filled_text(source, forward).unwrap();
+                    let text = bound::text_bytes(filled);
+                    if source.n_chunks() == 1 {
+                        // One array: capped at the shared buffers (`covers` below
+                        // checks the quota charge is still covered).
+                        assert!(counted <= text, "{strategy:?} {c}: {counted} > {text}");
+                    } else {
+                        assert_eq!(counted, text, "{strategy:?} {c}");
+                    }
                 }
             }
             covers(

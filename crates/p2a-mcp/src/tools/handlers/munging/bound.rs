@@ -710,7 +710,10 @@ fn with_new_label(source: &Column, label: &str) -> u64 {
 /// or backward fill, counted in one pass without building it: each value's
 /// own bytes (a null slot's too), and for each null the bytes of the last
 /// value before it (forward) or the first after it (backward). A null with
-/// no such value stays null and adds nothing.
+/// no such value stays null and adds nothing. A column held in one array is
+/// filled by a gather that copies only views and shares the source's
+/// buffers, and the quotas charge at most those buffers, so its count is
+/// capped at their length.
 pub(super) fn filled_text(s: &Series, forward: bool) -> Result<u64, String> {
     let Some(ca) = as_views(s)? else {
         return Ok(text_bytes(s));
@@ -732,17 +735,24 @@ pub(super) fn filled_text(s: &Series, forward: bool) -> Result<u64, String> {
         Ok(())
     };
     if forward {
-        for arr in ca.downcast_iter() {
+        // `is_valid` through the chunk (`dyn Array`): no value slice is resolved.
+        for (arr, chunk) in ca.downcast_iter().zip(ca.chunks()) {
             for (i, view) in arr.views().iter().enumerate() {
-                visit(view.length, arr.get(i).is_some())?;
+                visit(view.length, chunk.is_valid(i))?;
             }
         }
     } else {
-        for arr in ca.downcast_iter().rev() {
+        let arrays: Vec<_> = ca.downcast_iter().zip(ca.chunks()).collect();
+        for (arr, chunk) in arrays.into_iter().rev() {
             for (i, view) in arr.views().iter().enumerate().rev() {
-                visit(view.length, arr.get(i).is_some())?;
+                visit(view.length, chunk.is_valid(i))?;
             }
         }
+    }
+    if ca.chunks().len() == 1
+        && let Some(arr) = ca.downcast_get(0)
+    {
+        text = text.min(arr.total_buffer_len() as u64);
     }
     Ok(text)
 }
@@ -1457,7 +1467,8 @@ mod tests {
                 .expect("a bound");
             assert!(
                 row_order < charged,
-                "{strategy:?}: the row-order bound {row_order} should undercount {charged}"
+                "{strategy:?}: fixture no longer separates the grouped and row-order bounds \
+                 (row order {row_order}, charged {charged}); the property is grouped >= charged"
             );
         }
     }
