@@ -346,6 +346,15 @@ impl Settings {
     }
 }
 
+/// The `source_type` of a dataset a tool generated in the session (random
+/// data, a simulation): no file holds it, so a reload skips it.
+pub const SOURCE_TYPE_GENERATED: &str = "generated";
+
+/// The `source_type` of a dataset a tool derived in the session from other
+/// data (a filter, a join, an aggregate, an import), or a loaded dataset a
+/// tool changed in place: no file holds it, so a reload skips it.
+pub const SOURCE_TYPE_DERIVED: &str = "derived";
+
 /// Metadata about a loaded dataset (not the actual data)
 #[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
 pub struct DatasetMeta {
@@ -409,6 +418,12 @@ impl DatasetMeta {
     /// Get the ID as a string (just the key part, without SurrealDB formatting)
     pub fn id_string(&self) -> String {
         key_string(&self.id)
+    }
+
+    /// Whether a tool made the dataset in the session rather than loading it
+    /// ([`SOURCE_TYPE_GENERATED`], [`SOURCE_TYPE_DERIVED`]).
+    pub fn made_in_session(&self) -> bool {
+        self.source_type == SOURCE_TYPE_GENERATED || self.source_type == SOURCE_TYPE_DERIVED
     }
 }
 

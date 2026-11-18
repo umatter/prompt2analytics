@@ -362,6 +362,44 @@ impl ToolCallStore {
         }
     }
 
+    /// The session's datasets before a call, for [`Self::sync_datasets`] after it; `None` when the
+    /// store does not track the session's datasets.
+    async fn dataset_snapshot(
+        &self,
+        session: &Arc<crate::session::Session>,
+    ) -> Option<(
+        Arc<crate::session::Session>,
+        super::dataset_sync::DatasetSnapshot,
+    )> {
+        if self.db.is_none() || self.session_id.is_none() {
+            return None;
+        }
+        Some((
+            session.clone(),
+            super::dataset_sync::DatasetSnapshot::of(session).await,
+        ))
+    }
+
+    /// Bring the session's dataset rows in step with its dataset map after a call of `name`
+    /// (`super::dataset_sync`, which the tool route calls too). `loader`: the call's own rows were
+    /// written from its result text by [`Self::finished`].
+    async fn sync_datasets(
+        &self,
+        snapshot: Option<(
+            Arc<crate::session::Session>,
+            super::dataset_sync::DatasetSnapshot,
+        )>,
+        name: &str,
+        loader: bool,
+    ) {
+        if let (Some(db), Some(session_id), Some((session, before))) =
+            (&self.db, &self.session_id, snapshot)
+        {
+            super::dataset_sync::sync_dataset_meta(db, &session, session_id, name, &before, loader)
+                .await;
+        }
+    }
+
     /// What [`Self::finished`] needs of a call's arguments, which move into the call. The metadata
     /// capture reads only their path and filename (a create_dataset csv_content or an upload_dataset
     /// content can be large), so only those are kept, and only for a dataset loader (the tool route's
@@ -721,6 +759,8 @@ impl ToolExecutor for SessionToolExecutor {
         let tool_call_id = self.store.started(name, &arguments).await;
         #[cfg(feature = "db")]
         let metadata_arguments = self.store.metadata_arguments(name, &arguments);
+        #[cfg(feature = "db")]
+        let dataset_snapshot = self.store.dataset_snapshot(&session).await;
         tracing::info!(tool = %name, "Executing tool");
         let start = std::time::Instant::now();
         let result = self
@@ -737,15 +777,21 @@ impl ToolExecutor for SessionToolExecutor {
         let elapsed = start.elapsed();
         tracing::info!(tool = %name, elapsed_ms = %elapsed.as_millis(), "Tool execution completed");
         #[cfg(feature = "db")]
-        self.store
-            .finished(
-                tool_call_id.as_deref(),
-                name,
-                metadata_arguments,
-                &result,
-                stored_duration_ms(elapsed),
-            )
-            .await;
+        {
+            let loader = metadata_arguments.is_some() && matches!(&result, Ok(r) if r.success);
+            self.store
+                .finished(
+                    tool_call_id.as_deref(),
+                    name,
+                    metadata_arguments,
+                    &result,
+                    stored_duration_ms(elapsed),
+                )
+                .await;
+            self.store
+                .sync_datasets(dataset_snapshot, name, loader)
+                .await;
+        }
         match result {
             Ok(result) => {
                 // Convert tool result to string
@@ -1902,6 +1948,8 @@ impl ToolExecutor for StreamingToolExecutor {
         let tool_call_id = self.store.started(name, &arguments).await;
         #[cfg(feature = "db")]
         let metadata_arguments = self.store.metadata_arguments(name, &arguments);
+        #[cfg(feature = "db")]
+        let dataset_snapshot = self.store.dataset_snapshot(&session).await;
 
         tracing::info!(tool = %name, "Executing tool");
         let start = std::time::Instant::now();
@@ -1954,15 +2002,21 @@ impl ToolExecutor for StreamingToolExecutor {
         tracing::info!(tool = %name, elapsed_ms = %elapsed.as_millis(), "Tool execution completed");
 
         #[cfg(feature = "db")]
-        self.store
-            .finished(
-                tool_call_id.as_deref(),
-                name,
-                metadata_arguments,
-                &result,
-                stored_duration_ms(elapsed),
-            )
-            .await;
+        {
+            let loader = metadata_arguments.is_some() && matches!(&result, Ok(r) if r.success);
+            self.store
+                .finished(
+                    tool_call_id.as_deref(),
+                    name,
+                    metadata_arguments,
+                    &result,
+                    stored_duration_ms(elapsed),
+                )
+                .await;
+            self.store
+                .sync_datasets(dataset_snapshot, name, loader)
+                .await;
+        }
 
         match result {
             Ok(result) => {
@@ -2831,6 +2885,39 @@ mod capture_tests {
         assert_eq!(threads.len(), 1, "captures: {threads:?}");
         let rows = db.get_datasets_for_session(&sid).await.unwrap();
         assert_eq!(rows.len(), 1, "{rows:?}");
+    }
+
+    /// A dataset the model makes with a tool other than a loader (here
+    /// `generate_random_data`) gets a metadata row from the session's map
+    /// after the call, as on the tool route, so the session's dataset list
+    /// shows it; the text capture is not involved.
+    #[tokio::test]
+    async fn a_generated_dataset_gets_a_row() {
+        let db = Arc::new(DbConnection::connect_memory().await.unwrap());
+        let (executor, sid, _rx) = tracking_executor(&db).await;
+        let args = serde_json::json!({
+            "name": "pseudo",
+            "n_rows": 12,
+            "seed": 3,
+            "columns": [
+                {"name": "u", "distribution": {"type": "uniform", "min": 0, "max": 1}},
+                {"name": "k", "distribution": {"type": "poisson", "lambda": 2.5}},
+                {"name": "z", "distribution": {"type": "normal", "mean": 0, "std": 1}},
+            ],
+        });
+        executor
+            .execute("generate_random_data", args)
+            .await
+            .unwrap();
+
+        let rows = db.get_datasets_for_session(&sid).await.unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].name, "pseudo");
+        assert_eq!((rows[0].row_count, rows[0].column_count), (12, 3));
+        assert_eq!(rows[0].column_names, ["u", "k", "z"]);
+        assert_eq!(rows[0].source_path, None);
+        assert_eq!(rows[0].source_type, crate::db::SOURCE_TYPE_GENERATED);
+        assert!(super::super::routes_tools::capture_threads::of(&sid).is_empty());
     }
 }
 

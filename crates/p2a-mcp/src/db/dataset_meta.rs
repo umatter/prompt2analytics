@@ -33,7 +33,7 @@ pub const MAX_STORED_COLUMN_NAME_BYTES: usize = 64 * 1024;
 
 /// The longest prefix of `names` within [`MAX_STORED_COLUMN_NAMES`] names
 /// and [`MAX_STORED_COLUMN_NAME_BYTES`] bytes.
-fn stored_column_names(names: &[String]) -> Vec<String> {
+pub(crate) fn stored_column_names(names: &[String]) -> Vec<String> {
     let mut bytes = 0usize;
     names
         .iter()

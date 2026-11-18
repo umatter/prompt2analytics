@@ -158,6 +158,17 @@ pub(crate) async fn call_tool(
         && METADATA_TOOLS.contains(&name.as_str()))
     .then(|| capture_fields(&arguments));
 
+    // The session's datasets before the call, which the dataset sync after
+    // it compares with (with an open store).
+    #[cfg(feature = "db")]
+    let sync_before = match &state.persistent_manager {
+        Some(_) => Some((
+            session.clone(),
+            super::dataset_sync::DatasetSnapshot::of(&session).await,
+        )),
+        None => None,
+    };
+
     let tool_result = state
         .governor
         .call(
@@ -169,42 +180,67 @@ pub(crate) async fn call_tool(
         )
         .await;
 
-    match tool_result {
-        Ok(result) => {
-            // Capture dataset metadata for load_dataset, upload_dataset and
-            // create_dataset, with the same parser as the LLM tool loop.
-            #[cfg(all(feature = "db", feature = "llm"))]
-            if result.success
-                && let (Some(arguments), Some(persistent_manager)) =
-                    (capture_arguments, &state.persistent_manager)
-            {
-                let result_text: String = result
-                    .content
-                    .iter()
-                    .filter_map(|item| match item {
-                        super::http::ContentItem::Text { text } => Some(text.as_str()),
-                        super::http::ContentItem::Image { .. } => None,
-                    })
-                    .collect::<Vec<&str>>()
-                    .join("\n");
-                tracing::info!(
-                    tool = %name,
-                    session_id = %session_id,
-                    result_len = result_text.len(),
-                    "[CALL_TOOL] Capturing dataset metadata for direct tool call"
-                );
-                capture_dataset_metadata_off_runtime(
-                    persistent_manager.db().clone(),
-                    session_id,
-                    name,
-                    arguments,
-                    result_text,
-                )
-                .await;
-            }
-
-            (StatusCode::OK, Json(ApiResponse::success(result))).into_response()
+    // Whether the call's own rows were written from its result text.
+    #[cfg(feature = "db")]
+    #[allow(unused_mut)]
+    let mut loader = false;
+    if let Ok(result) = &tool_result {
+        // Capture dataset metadata for load_dataset, upload_dataset and
+        // create_dataset, with the same parser as the LLM tool loop.
+        #[cfg(all(feature = "db", feature = "llm"))]
+        if result.success
+            && let (Some(arguments), Some(persistent_manager)) =
+                (capture_arguments, &state.persistent_manager)
+        {
+            loader = true;
+            let result_text: String = result
+                .content
+                .iter()
+                .filter_map(|item| match item {
+                    super::http::ContentItem::Text { text } => Some(text.as_str()),
+                    super::http::ContentItem::Image { .. } => None,
+                })
+                .collect::<Vec<&str>>()
+                .join("\n");
+            tracing::info!(
+                tool = %name,
+                session_id = %session_id,
+                result_len = result_text.len(),
+                "[CALL_TOOL] Capturing dataset metadata for direct tool call"
+            );
+            capture_dataset_metadata_off_runtime(
+                persistent_manager.db().clone(),
+                session_id.clone(),
+                name.clone(),
+                arguments,
+                result_text,
+            )
+            .await;
         }
+        #[cfg(not(all(feature = "db", feature = "llm")))]
+        let _ = result;
+    }
+
+    // Every dataset the call made, changed or removed, in the session's
+    // dataset list (whatever the call's outcome; a call that changed no
+    // dataset costs no store query).
+    #[cfg(feature = "db")]
+    if let (Some((session, before)), Some(persistent_manager)) =
+        (sync_before, &state.persistent_manager)
+    {
+        super::dataset_sync::sync_dataset_meta(
+            persistent_manager.db(),
+            &session,
+            &session_id,
+            &name,
+            &before,
+            loader,
+        )
+        .await;
+    }
+
+    match tool_result {
+        Ok(result) => (StatusCode::OK, Json(ApiResponse::success(result))).into_response(),
         Err(e) => e.into_response(),
     }
 }

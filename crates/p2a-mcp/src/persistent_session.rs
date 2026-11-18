@@ -690,11 +690,18 @@ impl PersistentSessionManager {
             skipped: Vec::new(),
         };
         for meta in metas {
+            let made_in_session = meta.made_in_session();
             match meta.source_path {
                 Some(source_path) => plan.sources.push(ReloadSource {
                     name: meta.name,
                     source_path,
                     na_strings: meta.na_strings,
+                }),
+                // A dataset a tool generated or derived in the session: no
+                // file holds it.
+                None if made_in_session => plan.skipped.push(ReloadSkip {
+                    name: meta.name,
+                    reason: RELOAD_MADE_IN_SESSION.to_string(),
                 }),
                 // e.g. uploaded datasets without a file path
                 None => plan.skipped.push(ReloadSkip {
@@ -948,6 +955,8 @@ pub const RELOAD_LABEL: &str = "reload_session_datasets";
 
 /// Reload texts. They are fixed so that no server path reaches a caller.
 const RELOAD_NO_SOURCE: &str = "no source path stored";
+const RELOAD_MADE_IN_SESSION: &str =
+    "made in the session by a tool, not loaded from a file; run that step again to rebuild it";
 const RELOAD_OUTSIDE_JAIL: &str = "path is not inside this session's data directory";
 const RELOAD_LOAD_FAILED: &str = "the file could not be loaded";
 

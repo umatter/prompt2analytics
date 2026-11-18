@@ -43,10 +43,11 @@ mod tool_calls;
 mod tests;
 
 pub use connection::{DbConnection, DbError, DbStats, PersistenceLimits};
+pub(crate) use dataset_meta::stored_column_names;
 pub use dataset_meta::{
     MAX_DATASET_META_ROWS_PER_SESSION, MAX_STORED_COLUMN_NAME_BYTES, MAX_STORED_COLUMN_NAMES,
 };
 pub use models::{
-    Conversation, ConversationWithMessages, DatasetMeta, DbSession, Message, MessageRole, Settings,
-    ToolCall, ToolCallStatus,
+    Conversation, ConversationWithMessages, DatasetMeta, DbSession, Message, MessageRole,
+    SOURCE_TYPE_DERIVED, SOURCE_TYPE_GENERATED, Settings, ToolCall, ToolCallStatus,
 };

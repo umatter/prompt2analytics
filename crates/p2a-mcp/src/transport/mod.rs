@@ -25,6 +25,9 @@ pub mod websocket;
 #[cfg(all(feature = "http", feature = "db"))]
 pub mod conversation;
 
+#[cfg(all(feature = "http", feature = "db"))]
+pub(crate) mod dataset_sync;
+
 use crate::config::ServerConfig;
 
 /// Transport error types.

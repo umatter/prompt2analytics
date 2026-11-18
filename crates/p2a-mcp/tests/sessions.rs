@@ -729,6 +729,178 @@ async fn only_load_dataset_records_a_source_path() {
     }
 }
 
+/// Call `tool` through `POST /api/tools/{tool}` in `sid`; it must succeed.
+async fn tool_ok(r: &Router, sid: &str, tool: &str, arguments: Value) -> Value {
+    let (st, body) = call(
+        r,
+        "POST",
+        &format!("/api/tools/{tool}"),
+        Some(sid),
+        Some(json!({"session_id": sid, "arguments": arguments})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{tool}: {body}");
+    assert_eq!(body["data"]["success"], true, "{tool}: {body}");
+    body
+}
+
+/// `GET /api/sessions/{sid}/datasets`, by name.
+async fn listed(r: &Router, sid: &str) -> std::collections::HashMap<String, Value> {
+    let (st, body) = call(
+        r,
+        "GET",
+        &format!("/api/sessions/{sid}/datasets"),
+        Some(sid),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    body["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| (d["name"].as_str().unwrap().to_string(), d.clone()))
+        .collect()
+}
+
+/// A dataset a tool other than a loader makes is listed in the session's
+/// datasets (the web app's dataset sidebar), with its row and column counts
+/// and column names: data from `generate_random_data`, and a dataset a
+/// munging tool derives from it. Neither has a source file, so a reload
+/// skips both with a note saying so. Before, only the loaders' datasets
+/// were listed.
+#[tokio::test]
+async fn datasets_any_tool_makes_are_listed() {
+    let (r, state) = app(ServerConfig::default()).await;
+    let sid = new_session(&r).await;
+    tool_ok(
+        &r,
+        &sid,
+        "generate_random_data",
+        json!({
+            "name": "pseudo",
+            "n_rows": 40,
+            "seed": 7,
+            "columns": [
+                {"name": "x", "distribution": {"type": "normal", "mean": 0, "std": 1}},
+                {"name": "g", "distribution": {"type": "categorical", "categories": ["a", "b"]}},
+            ],
+        }),
+    )
+    .await;
+    let list = listed(&r, &sid).await;
+    let pseudo = list.get("pseudo").expect("the generated dataset is listed");
+    assert_eq!(pseudo["row_count"], 40, "{pseudo}");
+    assert_eq!(pseudo["column_count"], 2, "{pseudo}");
+    assert_eq!(pseudo["column_names"], json!(["x", "g"]), "{pseudo}");
+    assert_eq!(pseudo["source_type"], "generated", "{pseudo}");
+    assert_eq!(pseudo["source_path"], Value::Null, "{pseudo}");
+
+    tool_ok(
+        &r,
+        &sid,
+        "munge_filter",
+        json!({"dataset": "pseudo", "column": "x", "op": "gt", "value": "0", "result_name": "positive"}),
+    )
+    .await;
+    let rows = {
+        let session = state.session_manager.get_session(&sid).await.unwrap();
+        let datasets = session.datasets.read().await;
+        datasets["positive"].nrows()
+    };
+    assert!(rows > 0 && rows < 40, "{rows}");
+    let list = listed(&r, &sid).await;
+    assert_eq!(list.len(), 2, "{list:?}");
+    let positive = list.get("positive").expect("the derived dataset is listed");
+    assert_eq!(positive["row_count"], rows, "{positive}");
+    assert_eq!(positive["column_count"], 2, "{positive}");
+    assert_eq!(positive["column_names"], json!(["x", "g"]), "{positive}");
+    assert_eq!(positive["source_type"], "derived", "{positive}");
+    assert_eq!(list["pseudo"]["row_count"], 40);
+
+    // An analysis call changes no dataset and writes no row.
+    let stored_before = pm(&state).get_datasets_for_session(&sid).await.unwrap();
+    tool_ok(&r, &sid, "list_datasets", json!({})).await;
+    let stored_after = pm(&state).get_datasets_for_session(&sid).await.unwrap();
+    let ids = |rows: &[DatasetMeta]| {
+        let mut v: Vec<(String, String)> = rows
+            .iter()
+            .map(|m| (m.id_string(), format!("{:?}", m.loaded_at)))
+            .collect();
+        v.sort();
+        v
+    };
+    assert_eq!(ids(&stored_before), ids(&stored_after));
+
+    let body = reload(&r, &sid).await;
+    assert_eq!(body["data"]["succeeded"], json!([]), "{body}");
+    let skipped = body["data"]["skipped"].as_array().unwrap();
+    assert_eq!(skipped.len(), 2, "{body}");
+    for skip in skipped {
+        assert!(
+            skip["reason"]
+                .as_str()
+                .is_some_and(|r| r.contains("not loaded from a file")),
+            "{body}"
+        );
+    }
+}
+
+/// `load_dataset` still records its source path; a munging tool that then
+/// overwrites the loaded dataset in place updates its row and drops the
+/// source, so a reload no longer replaces the filtered data with the file.
+#[cfg(feature = "llm")]
+#[tokio::test]
+async fn a_loaded_dataset_changed_in_place_loses_its_source() {
+    let (r, state) = app(ServerConfig::default()).await;
+    let sid = new_session(&r).await;
+    let root = allowed_data_root().unwrap();
+    let dir = tempfile::Builder::new()
+        .prefix(".p2a-sync-")
+        .tempdir_in(&root)
+        .unwrap();
+    std::fs::write(dir.path().join("file.csv"), noisy_csv(30, 3)).unwrap();
+    let file = dir
+        .path()
+        .strip_prefix(&root)
+        .unwrap()
+        .join("file.csv")
+        .to_string_lossy()
+        .into_owned();
+    tool_ok(
+        &r,
+        &sid,
+        "load_dataset",
+        json!({"path": file, "name": "sales"}),
+    )
+    .await;
+    let list = listed(&r, &sid).await;
+    let sales = &list["sales"];
+    assert_eq!(sales["source_path"], json!(file), "{sales}");
+    assert_eq!(sales["source_type"], "csv", "{sales}");
+    assert_eq!(sales["row_count"], 30, "{sales}");
+    assert_eq!(sales["column_names"], json!(["x", "y"]), "{sales}");
+    let rows = pm(&state).get_datasets_for_session(&sid).await.unwrap();
+    assert_eq!(rows.len(), 1, "one row, not a second one from the sync");
+
+    tool_ok(
+        &r,
+        &sid,
+        "munge_filter",
+        json!({"dataset": "sales", "column": "x", "op": "lt", "value": "10"}),
+    )
+    .await;
+    let list = listed(&r, &sid).await;
+    let sales = &list["sales"];
+    assert_eq!(sales["row_count"], 10, "{sales}");
+    assert_eq!(sales["source_path"], Value::Null, "{sales}");
+    assert_eq!(sales["source_type"], "derived", "{sales}");
+    let body = reload(&r, &sid).await;
+    assert_eq!(body["data"]["succeeded"], json!([]), "{body}");
+    let session = state.session_manager.get_session(&sid).await.unwrap();
+    assert_eq!(session.datasets.read().await["sales"].nrows(), 10);
+}
+
 /// A dataset loaded with `na_strings` is reloaded with them: its stored row
 /// keeps the markers, and a reload reads the marked cells as missing again
 /// instead of as data. A dataset loaded without them keeps none.
