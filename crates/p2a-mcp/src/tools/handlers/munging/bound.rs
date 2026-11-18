@@ -562,9 +562,14 @@ pub(super) fn case_mapped(
     column: &str,
     upper: bool,
 ) -> Result<Option<u64>, String> {
-    let Some(ca) = df.column(column).ok().and_then(|c| c.str().ok()) else {
+    // Only a String column is case-mapped; any other dtype gets no estimate.
+    let Ok(c) = df.column(column) else {
         return Ok(None);
     };
+    if c.dtype() != &DataType::String {
+        return Ok(None);
+    }
+    let ca = c.str().map_err(|e| e.to_string())?;
     let mut text = 0u64;
     for (row, value) in ca.into_iter().enumerate() {
         checkpoint(row)?;
@@ -1302,6 +1307,27 @@ mod tests {
 
     /// The bound of munge_melt covers what the quotas charge for the typed value column:
     /// text stays text, u32/f32 widen to f64, nulls stay null.
+
+    /// Only a String column is case-mapped: an Int32 and a Categorical column
+    /// get no estimate, as a String column's dtype check gives them.
+    #[test]
+    fn case_mapping_estimates_only_string_columns() {
+        let s = Series::new("s".into(), &["a", "b"]);
+        let cat = s
+            .cast(&DataType::from_categories(Categories::global()))
+            .unwrap()
+            .with_name("c".into());
+        let df = DataFrame::new(vec![
+            s.into_column(),
+            Series::new("i".into(), &[1i32, 2]).into_column(),
+            cat.into_column(),
+        ])
+        .unwrap();
+        assert!(case_mapped(&df, "s", true).unwrap().is_some());
+        for column in ["i", "c", "missing"] {
+            assert_eq!(case_mapped(&df, column, true).unwrap(), None, "{column}");
+        }
+    }
     #[test]
     fn melt_bound_covers_text_and_typed_value_columns() {
         let long = "a fairly long value that does not fit in a string view";
