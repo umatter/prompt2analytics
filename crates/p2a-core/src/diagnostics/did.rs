@@ -57,10 +57,12 @@ pub fn did_diagnostics(result: &DiDResult) -> IdentificationReport {
             WarningSeverity::Info,
             "Parallel Trends Cannot Be Tested",
             format!(
-                "The 2x2 DiD design with {} observations has only two time periods, \
-                 so parallel pre-trends cannot be tested. Consider whether the \
-                 parallel trends assumption is plausible based on domain knowledge \
-                 or pre-treatment data from other sources.",
+                "The 2x2 DiD estimate with {} observations compares a pre-period \
+                 and a post-period indicator, so it cannot test parallel pre-trends, \
+                 however many periods the data hold. Consider whether the parallel \
+                 trends assumption is plausible based on domain knowledge or \
+                 pre-treatment data from other sources (an event study, or \
+                 staggered DiD's pre-trend test, uses the periods).",
                 result.n_obs
             ),
             "Parallel trends",
@@ -950,5 +952,15 @@ mod tests {
                 .iter()
                 .any(|w| w.code == "PARALLEL_TRENDS_UNTESTABLE")
         );
+
+        // The 2x2 estimator sees a pre and a post indicator, never the number of
+        // periods, so the note must not claim the data have two of them.
+        let note = report
+            .warnings
+            .iter()
+            .find(|w| w.code == "PARALLEL_TRENDS_UNTESTABLE")
+            .unwrap();
+        assert!(!note.message.contains("two time periods"), "{}", note.message);
+        assert!(note.message.contains("post-period indicator"), "{}", note.message);
     }
 }
