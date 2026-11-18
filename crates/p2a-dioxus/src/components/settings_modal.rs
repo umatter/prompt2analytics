@@ -144,6 +144,9 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
     // Track previous open state to detect when modal opens
     let mut was_open = use_signal(|| false);
 
+    // Escape closes the modal as Cancel does.
+    crate::app::use_escape_close(props.is_open, props.on_close);
+
     // Sync local state when modal opens (transition from closed to open)
     if props.is_open && !*was_open.read() {
         // Modal just opened - reset to initial tab and sync settings

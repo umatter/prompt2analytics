@@ -14,6 +14,7 @@ pub struct ShortcutsModalProps {
 /// Keyboard shortcuts help modal
 #[component]
 pub fn ShortcutsModal(props: ShortcutsModalProps) -> Element {
+    crate::app::use_escape_close(props.is_open, props.on_close);
     if !props.is_open {
         return rsx! {};
     }
@@ -86,10 +87,10 @@ pub fn ShortcutsModal(props: ShortcutsModalProps) -> Element {
                         }
                         div { class: "space-y-2",
                             ShortcutRow { keys: "Ctrl + /", description: "Show keyboard shortcuts" }
-                            ShortcutRow { keys: "?", description: "Show keyboard shortcuts (alternative)" }
+                            ShortcutRow { keys: "?", description: "Show keyboard shortcuts (outside text fields)" }
                             ShortcutRow { keys: "Ctrl + K", description: "Focus chat input" }
                             ShortcutRow { keys: "Ctrl + N", description: "New conversation" }
-                            ShortcutRow { keys: "Escape", description: "Close modal/dropdown" }
+                            ShortcutRow { keys: "Escape", description: "Close dialog" }
                         }
                     }
 

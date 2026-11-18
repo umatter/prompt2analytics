@@ -185,6 +185,9 @@ pub fn ConversationSidebar() -> Element {
     let mut handle_cancel_delete = move |_| {
         delete_confirm_id.set(None);
     };
+    // Escape cancels the delete dialog.
+    let cancel_delete = use_callback(move |_: ()| delete_confirm_id.set(None));
+    crate::app::use_escape_close(delete_confirm_id.read().is_some(), cancel_delete);
 
     // Handle confirmed delete
     let handle_confirm_delete = move |_| {

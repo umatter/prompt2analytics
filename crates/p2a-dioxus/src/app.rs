@@ -8,7 +8,8 @@ use crate::api::api;
 use crate::components::{ChatPanel, ConversationSidebar, DatasetSidebar, ShortcutsModal};
 use crate::state::settings::Theme;
 use crate::state::{
-    ChatState, ConversationState, SessionState, Settings, ensure_session, switch_blocked,
+    ChatState, ConversationState, EscapeStack, SessionState, Settings, ensure_session,
+    switch_blocked,
 };
 
 /// Apply theme to the document
@@ -68,6 +69,89 @@ pub fn apply_theme(theme: Theme) {
     tracing::info!("Applied theme: {:?}", theme);
 }
 
+/// A global keyboard shortcut.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Shortcut {
+    /// Show the shortcuts (Ctrl/Cmd+/ anywhere, `?` outside text fields)
+    Help,
+    /// Focus the chat input (Ctrl/Cmd+K)
+    FocusInput,
+    /// New conversation (Ctrl/Cmd+N)
+    New,
+    /// Close the dialog opened last (Escape)
+    CloseTop,
+}
+
+/// The shortcut a key press means: `ctrl_or_cmd` is Ctrl or Cmd held;
+/// `in_text_field` whether the focus is in a text field, where `?` is typed,
+/// not a shortcut.
+pub fn global_shortcut(key: &Key, ctrl_or_cmd: bool, in_text_field: bool) -> Option<Shortcut> {
+    match (key, ctrl_or_cmd) {
+        (Key::Escape, _) => Some(Shortcut::CloseTop),
+        (Key::Character(c), true) => match c.as_str() {
+            "/" => Some(Shortcut::Help),
+            "k" => Some(Shortcut::FocusInput),
+            "n" => Some(Shortcut::New),
+            _ => None,
+        },
+        (Key::Character(c), false) if c == "?" && !in_text_field => Some(Shortcut::Help),
+        _ => None,
+    }
+}
+
+/// Whether an element with tag `tag` (any case) is a text field: an input,
+/// a text area, a select, or any element being edited.
+pub fn is_text_field(tag: &str, content_editable: bool) -> bool {
+    content_editable
+        || ["INPUT", "TEXTAREA", "SELECT"]
+            .iter()
+            .any(|t| tag.eq_ignore_ascii_case(t))
+}
+
+/// Whether the focus is in a text field (web: read synchronously).
+#[cfg(target_arch = "wasm32")]
+fn focus_in_text_field() -> bool {
+    web_sys::window()
+        .and_then(|w| w.document())
+        .and_then(|d| d.active_element())
+        .map(|el| {
+            let editable = el
+                .dyn_ref::<web_sys::HtmlElement>()
+                .is_some_and(|h| h.is_content_editable());
+            is_text_field(&el.tag_name(), editable)
+        })
+        .unwrap_or(false)
+}
+
+/// Whether the focus is in a text field (desktop: asked from the webview).
+#[cfg(not(target_arch = "wasm32"))]
+async fn focus_in_text_field_native() -> bool {
+    let js = "const el = document.activeElement; \
+              return !!el && (el.isContentEditable || ['INPUT','TEXTAREA','SELECT'].includes(el.tagName));";
+    dioxus::document::eval(js)
+        .join::<bool>()
+        .await
+        .unwrap_or(true)
+}
+
+/// Register a dialog with Escape while `open`: Escape calls the `on_close`
+/// of the dialog opened last.
+pub fn use_escape_close(open: bool, on_close: Callback<()>) {
+    let mut stack = use_context::<Signal<EscapeStack<Callback<()>>>>();
+    let id = use_hook(|| {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    });
+    use_effect(use_reactive((&open,), move |(open,)| {
+        if open {
+            stack.write().push(id, on_close);
+        } else {
+            stack.write().remove(id);
+        }
+    }));
+    use_drop(move || stack.write().remove(id));
+}
+
 /// Root application component
 #[component]
 pub fn App() -> Element {
@@ -87,6 +171,8 @@ pub fn App() -> Element {
     use_context_provider(|| conversation_state);
     use_context_provider(|| settings);
     use_context_provider(|| sidebar_visible);
+    // The open dialogs, for Escape (use_escape_close)
+    let escape_stack = use_context_provider(|| Signal::new(EscapeStack::<Callback<()>>::new()));
 
     // No session is created at mount: the first send, data load or new
     // conversation creates it (state::ensure_session). The native app
@@ -115,29 +201,28 @@ pub fn App() -> Element {
             let meta = evt.modifiers().meta(); // For Mac Cmd key
             let ctrl_or_cmd = ctrl || meta;
 
-            // Check if we're typing in an input field (don't intercept those keys)
-            // We check for common character keys that would be typed
-            let is_typing = matches!(key, Key::Character(_)) && !ctrl_or_cmd;
+            // `?` is a shortcut only outside text fields. The web build reads
+            // the focus synchronously; the desktop build asks the webview.
+            #[cfg(target_arch = "wasm32")]
+            let in_text_field = focus_in_text_field();
+            #[cfg(not(target_arch = "wasm32"))]
+            let in_text_field = false;
 
-            if is_typing {
-                return;
-            }
-
-            match (&key, ctrl_or_cmd) {
-                // Ctrl+/ or Cmd+/ - Show shortcuts
-                (Key::Character(c), true) if c == "/" => {
+            match global_shortcut(&key, ctrl_or_cmd, in_text_field) {
+                Some(Shortcut::Help) => {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if !ctrl_or_cmd {
+                        spawn(async move {
+                            if !focus_in_text_field_native().await {
+                                shortcuts_open.set(true);
+                            }
+                        });
+                        return;
+                    }
                     evt.prevent_default();
                     shortcuts_open.set(true);
                 }
-                // ? without modifier - Show shortcuts (but not in input)
-                (Key::Character(c), false) if c == "?" => {
-                    // Only trigger if not in an input field
-                    // The event will only reach here if the target is the main div
-                    evt.prevent_default();
-                    shortcuts_open.set(true);
-                }
-                // Ctrl+K or Cmd+K - Focus chat input
-                (Key::Character(c), true) if c == "k" => {
+                Some(Shortcut::FocusInput) => {
                     evt.prevent_default();
                     // Focus the chat input textarea via JS
                     #[cfg(target_arch = "wasm32")]
@@ -159,8 +244,7 @@ pub fn App() -> Element {
                         dioxus::document::eval("document.querySelector('textarea')?.focus()");
                     }
                 }
-                // Ctrl+N or Cmd+N - New conversation
-                (Key::Character(c), true) if c == "n" => {
+                Some(Shortcut::New) => {
                     evt.prevent_default();
                     // Refused while an answer streams or a conversation change
                     // runs, as the sidebar's "+".
@@ -197,14 +281,14 @@ pub fn App() -> Element {
                         }
                     });
                 }
-                // Escape - Close modals/dropdowns
-                (Key::Escape, _) => {
-                    if *shortcuts_open.read() {
+                Some(Shortcut::CloseTop) => {
+                    let top = escape_stack.read().top().copied();
+                    if let Some(close) = top {
                         evt.prevent_default();
-                        shortcuts_open.set(false);
+                        close.call(());
                     }
                 }
-                _ => {}
+                None => {}
             }
         }
     };
@@ -275,5 +359,45 @@ pub fn App() -> Element {
                 on_close: handle_close_shortcuts
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ch(c: &str) -> Key {
+        Key::Character(c.to_string())
+    }
+
+    #[test]
+    fn global_shortcuts() {
+        assert_eq!(
+            global_shortcut(&ch("?"), false, false),
+            Some(Shortcut::Help)
+        );
+        assert_eq!(global_shortcut(&ch("?"), false, true), None);
+        assert_eq!(global_shortcut(&ch("/"), true, true), Some(Shortcut::Help));
+        assert_eq!(global_shortcut(&ch("n"), true, false), Some(Shortcut::New));
+        assert_eq!(
+            global_shortcut(&ch("k"), true, true),
+            Some(Shortcut::FocusInput)
+        );
+        assert_eq!(
+            global_shortcut(&Key::Escape, false, true),
+            Some(Shortcut::CloseTop)
+        );
+        assert_eq!(global_shortcut(&ch("n"), false, false), None);
+        assert_eq!(global_shortcut(&ch("/"), false, false), None);
+    }
+
+    #[test]
+    fn text_fields() {
+        for tag in ["INPUT", "textarea", "Select"] {
+            assert!(is_text_field(tag, false), "{tag}");
+        }
+        assert!(is_text_field("DIV", true));
+        assert!(!is_text_field("DIV", false));
+        assert!(!is_text_field("BUTTON", false));
     }
 }
