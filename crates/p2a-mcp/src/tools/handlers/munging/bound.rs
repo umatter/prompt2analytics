@@ -1315,9 +1315,6 @@ mod tests {
     use p2a_core::data::Dataset;
     use p2a_core::data::munging::melt as core_melt;
 
-    /// The bound of munge_melt covers what the quotas charge for the typed value column:
-    /// text stays text, u32/f32 widen to f64, nulls stay null.
-
     /// Only a String column is case-mapped: an Int32 and a Categorical column
     /// get no estimate, as a String column's dtype check gives them.
     #[test]
@@ -1338,6 +1335,9 @@ mod tests {
             assert_eq!(case_mapped(&df, column, true).unwrap(), None, "{column}");
         }
     }
+
+    /// The bound of munge_melt covers what the quotas charge for the typed value column:
+    /// text stays text, u32/f32 widen to f64, nulls stay null.
     #[test]
     fn melt_bound_covers_text_and_typed_value_columns() {
         let long = "a fairly long value that does not fit in a string view";
