@@ -11,6 +11,9 @@ pub struct MessageListProps {
     /// Callback when a quick suggestion is clicked
     #[props(default)]
     pub on_suggestion: Option<EventHandler<String>>,
+    /// Whether the suggestion chips are disabled (a send runs)
+    #[props(default)]
+    pub suggestions_disabled: bool,
 }
 
 /// MessageList component - displays all messages with auto-scroll
@@ -72,14 +75,17 @@ pub fn MessageList(props: MessageListProps) -> Element {
                     div { class: "mt-6 flex flex-wrap gap-2 justify-center",
                         QuickSuggestion {
                             text: "Create a sample dataset with x and y",
+                            disabled: props.suggestions_disabled,
                             on_click: props.on_suggestion
                         }
                         QuickSuggestion {
                             text: "Explain OLS regression",
+                            disabled: props.suggestions_disabled,
                             on_click: props.on_suggestion
                         }
                         QuickSuggestion {
                             text: "What tools are available?",
+                            disabled: props.suggestions_disabled,
                             on_click: props.on_suggestion
                         }
                     }
@@ -110,6 +116,9 @@ pub fn MessageList(props: MessageListProps) -> Element {
 #[derive(Props, Clone, PartialEq)]
 struct QuickSuggestionProps {
     text: String,
+    /// Greyed out and deaf to clicks (a send runs)
+    #[props(default)]
+    disabled: bool,
     #[props(default)]
     on_click: Option<EventHandler<String>>,
 }
@@ -122,8 +131,12 @@ fn QuickSuggestion(props: QuickSuggestionProps) -> Element {
 
     rsx! {
         button {
-            class: "px-3 py-1.5 text-sm text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-full cursor-pointer shadow-sm transition-all duration-150 hover:border-orange-500 hover:bg-orange-50 hover:text-orange-700 hover:shadow-md dark:hover:bg-orange-900/30 dark:hover:text-orange-300 active:scale-95 active:shadow-none active:bg-orange-100 dark:active:bg-orange-900/50",
+            class: "px-3 py-1.5 text-sm text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-full cursor-pointer shadow-sm transition-all duration-150 hover:border-orange-500 hover:bg-orange-50 hover:text-orange-700 hover:shadow-md dark:hover:bg-orange-900/30 dark:hover:text-orange-300 active:scale-95 active:shadow-none active:bg-orange-100 dark:active:bg-orange-900/50 disabled:opacity-50 disabled:cursor-not-allowed disabled:pointer-events-none",
+            disabled: props.disabled,
             onclick: move |_| {
+                if props.disabled {
+                    return;
+                }
                 if let Some(ref handler) = props.on_click {
                     handler.call(text_for_click.clone());
                 }

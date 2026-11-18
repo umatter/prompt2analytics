@@ -353,6 +353,17 @@ impl ChatState {
         self.error = None;
     }
 
+    /// Start processing unless a send already runs: the gate `handle_send`
+    /// passes synchronously, before its task is spawned, so a second click
+    /// cannot start a second send.
+    pub fn try_start_processing(&mut self) -> bool {
+        if self.is_busy() {
+            return false;
+        }
+        self.start_processing();
+        true
+    }
+
     /// End the trailing streaming message without a Done: its partial text
     /// is kept and it stops streaming; an empty one shows `note` instead.
     /// Calls still running keep an unknown outcome.
@@ -905,6 +916,19 @@ mod tests {
         send(&mut chat, "describe sales");
         chat.end_interrupted("Stopped.");
         assert_eq!(chat.messages.last().unwrap().content, "Stopped.");
+    }
+
+    /// A second chip click while the first send runs is refused.
+    #[test]
+    fn try_start_processing_admits_one_send() {
+        let mut chat = ChatState::new();
+        chat.set_error(Some("old".into()));
+        assert!(chat.try_start_processing());
+        assert!(chat.is_processing);
+        assert_eq!(chat.error, None, "starting clears the error");
+        assert!(!chat.try_start_processing(), "busy: refused");
+        chat.stop_processing();
+        assert!(chat.try_start_processing());
     }
 
     #[test]

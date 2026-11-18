@@ -262,14 +262,15 @@ pub fn ChatPanel() -> Element {
             return;
         }
 
+        // One send at a time: processing starts here, synchronously, so a
+        // second click (a chip, Retry) before the task runs is refused. It
+        // also keeps the sync effect away from the messages this send adds.
+        if !chat.write().try_start_processing() {
+            return;
+        }
+
         spawn(async move {
             tracing::debug!("[ChatPanel] spawn started");
-
-            // IMPORTANT: Start processing FIRST to prevent the sync effect from
-            // interfering with our messages. The sync effect checks is_processing
-            // and returns early if true.
-            tracing::debug!("[ChatPanel] Starting processing EARLY to protect messages");
-            chat.write().start_processing();
 
             // The Stop button fires this; it is checked before the stream
             // starts and ends the stream when it is running.
@@ -590,10 +591,16 @@ pub fn ChatPanel() -> Element {
         chat_state.write().set_error(None);
     };
 
+    // A send runs or a conversation call does: chips and Retry wait.
+    let busy = is_processing || conversation_state.read().is_operating;
+
     // Handle retry - re-send the last user message
     let handle_retry = {
         let mut handle_send = handle_send;
         move |_| {
+            if chat_state.read().is_busy() || conversation_state.read().is_operating {
+                return;
+            }
             // The last user message, or, after the session ended and the
             // transcript was cleared, the prompt that was being sent.
             let last_user_msg = chat_state
@@ -864,7 +871,8 @@ pub fn ChatPanel() -> Element {
                         div { class: "flex items-center gap-2 flex-shrink-0 ml-2",
                             // Retry button
                             button {
-                                class: "px-3 py-1 text-sm font-medium text-white bg-red-600 hover:bg-red-700 rounded-lg transition-colors flex items-center gap-1",
+                                class: "px-3 py-1 text-sm font-medium text-white bg-red-600 hover:bg-red-700 rounded-lg transition-colors flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed",
+                                disabled: busy,
                                 onclick: handle_retry,
                                 svg {
                                     class: "w-4 h-4",
@@ -961,6 +969,7 @@ pub fn ChatPanel() -> Element {
             // Message list (scrollable)
             div { class: "flex-1 overflow-y-auto",
                 MessageList {
+                    suggestions_disabled: busy,
                     on_suggestion: move |text: String| {
                         handle_send(text);
                     }
