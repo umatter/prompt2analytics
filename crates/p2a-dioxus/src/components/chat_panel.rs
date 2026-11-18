@@ -12,8 +12,8 @@ use crate::components::{
 use crate::state::settings::Theme;
 use crate::state::{
     ChatMessage, ChatState, ConversationState, SESSION_ENDED_TEXT, SessionState, Settings,
-    SyncAction, SyncInput, ToolCallInfo, decide_sync, ensure_session, needs_title, on_session_lost,
-    session_lost, session_lost_text, turn_persistence,
+    SyncAction, SyncInput, ToolCallInfo, busy_tracking, decide_sync, ensure_session, needs_title,
+    on_session_lost, session_lost, session_lost_text, turn_persistence,
 };
 
 /// The session `old_id` ended during a send of `prompt`: the turn is ended,
@@ -111,9 +111,20 @@ pub fn ChatPanel() -> Element {
         if chat.read().is_busy() {
             // Track the conversation the send created, so the end of the
             // send does not look like a switch.
-            if current_conv_id != synced_id {
-                synced_conv_id.set(current_conv_id.clone());
-                synced_messages_len.set(0);
+            // Stored rows that arrive meanwhile (a select's load) are
+            // counted, so the end of the send does not rebuild the
+            // transcript from rows older than the answer just written.
+            let (id, len) = busy_tracking(
+                current_conv_id.as_deref(),
+                synced_id.as_deref(),
+                current_messages_len,
+                prev_messages_len,
+            );
+            if id.as_deref() != synced_id.as_deref() {
+                synced_conv_id.set(id);
+            }
+            if len != prev_messages_len {
+                synced_messages_len.set(len);
             }
             return;
         }
@@ -410,13 +421,18 @@ pub fn ChatPanel() -> Element {
 
             // Build history
             let history = chat.read().build_history();
-            // handle_send gates on validation_error() before spawning, so the
-            // provider is guaranteed to be configured here; `expect` documents
-            // that invariant rather than silently sending a garbage request.
-            let provider_config = settings
-                .read()
-                .to_provider_config()
-                .expect("provider configured (gated in handle_send)");
+            // handle_send checked the provider before spawning, but Settings
+            // stays open to edits while the turn is set up.
+            let Some(provider_config) = settings.read().to_provider_config() else {
+                let text = settings.read().validation_error().unwrap_or_else(|| {
+                    "Choose an LLM provider in Settings to start chatting.".to_string()
+                });
+                let mut c = chat.write();
+                c.set_error(Some(text));
+                c.end_interrupted("");
+                c.stop_processing();
+                return;
+            };
             let interpret = settings.read().interpret_results;
 
             tracing::debug!("[ChatPanel] Calling stream_chat");

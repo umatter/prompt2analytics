@@ -282,6 +282,24 @@ pub struct SyncInput<'a> {
     pub restored: bool,
 }
 
+/// The sync tracking while a send runs: `(synced id, synced stored-row
+/// count)`. The conversation a send created is tracked with no rows; rows of
+/// the tracked conversation that arrive meanwhile (a select's load still
+/// running when the send started) are counted, so the end of the send does
+/// not read them as newly arrived and rebuild over the answer just written.
+pub fn busy_tracking(
+    current: Option<&str>,
+    synced: Option<&str>,
+    stored_len: usize,
+    prev_stored_len: usize,
+) -> (Option<String>, usize) {
+    if current != synced {
+        (current.map(str::to_string), 0)
+    } else {
+        (synced.map(str::to_string), stored_len.max(prev_stored_len))
+    }
+}
+
 /// What the sync effect does with the transcript.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyncAction {
@@ -863,6 +881,28 @@ impl ChatState {
 mod tests {
     //! ChatState as ChatPanel::handle_send drives it.
     use super::*;
+
+    #[test]
+    fn rows_that_arrive_during_a_send_do_not_rebuild_after_it() {
+        // A select's load lands while the send runs on that conversation.
+        let (id, len) = super::busy_tracking(Some("b"), Some("b"), 4, 0);
+        assert_eq!((id.as_deref(), len), (Some("b"), 4));
+        // After the send, the same rows no longer look newly arrived.
+        let action = super::decide_sync(&super::SyncInput {
+            current: Some("b"),
+            synced: Some("b"),
+            stored_len: 4,
+            prev_stored_len: len,
+            chat_has_messages: true,
+            busy: false,
+            has_live: false,
+            restored: false,
+        });
+        assert_eq!(action, super::SyncAction::Skip);
+        // A conversation the send created is tracked with no rows.
+        let (id, len) = super::busy_tracking(Some("new"), None, 0, 0);
+        assert_eq!((id.as_deref(), len), (Some("new"), 0));
+    }
     use crate::api::ToolResult;
     use serde_json::json;
 
