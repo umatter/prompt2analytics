@@ -81,7 +81,7 @@ interleaved rounds through `call_tool_with_session`.
 | `munge_fill_na` mode, 12-level text | 10,000 | 1.10 | covered by the same acceptance |
 | `munge_fill_na` mean, 2 float columns | 100 / 1,000 / 10,000 | 0.99 / 1.02 / 1.00 | within 1.1x |
 | `munge_value_counts` normalize, 20-level text | 100 / 1,000 / 10,000 | 1.05 / 0.98 / 1.03 | within 1.1x |
-| `munge_value_counts` normalize, 50-level Int64 | 100 / 1,000 / 10,000 | 1.07 / 1.05 / 1.04 against `9e9c2e2f`, 1.02 / 1.00 / 1.00 against `f80b0131` (re-timed 2026-11-17: 9 interleaved processes, load average 4.3-5.1; first measured 1.11 / 1.05 / 1.05) | within 1.1x |
+| `munge_value_counts` normalize, 50-level Int64 | 100 / 1,000 / 10,000 | 1.07 / 1.05 / 1.04 against `9e9c2e2f`, 1.00 / 1.00 / 0.99 against `f80b0131` (quiet re-time at the integration 2026-11-18: 9 interleaved processes, load average 1.4-2.5, 243.3 µs on both at 100; first measured 1.11 / 1.05 / 1.05 under load) | within 1.1x |
 | `viz_dendrogram`, balanced linkage | 1,000 / 10,000 merges | 1.03 / 0.95 | within 1.1x |
 
 The baseline `describe_dataset` printed only dtypes and null counts and computed no statistics, so

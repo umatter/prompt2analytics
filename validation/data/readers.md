@@ -196,31 +196,36 @@ Release builds (`--no-default-features --features ci`), v0.5.0 (`f80b0131`) agai
 harness binary per side pinned to core 2 (`taskset -c 2`, `RAYON_NUM_THREADS=1`, `POLARS_MAX_THREADS=1`,
 cwd `/dev/shm`); 9 interleaved processes per side, each the median of 2,001 / 301 / 41 calls (n = 100 /
 1,000 / 10,000) after 10 warm-ups; the table gives the median of the 9 medians. Seeded data with noise
-(ChaCha8 in the harness, `set.seed(n)` for the files R writes). Load average during the runs 4.3-12.4
-(other work on the machine). The Stata rows were re-timed after the reader began to hold strL copies
-to the allocation ceiling and to pick the release-119 split once per file: same harness, 7
-interleaved processes per side, load average 7.8-10.5; the other rows are from the first run.
+(ChaCha8 in the harness, `set.seed(n)` for the files R writes). Quiet re-time at the
+integration (2026-11-18, merged head 156e744f, nothing else running): 9 rounds, load average 1.6-2.3;
+"minima" is the ratio of the fastest of the 9 processes per side. The CSV rows (†) are the lane's
+measurements under load 4.3-12.4 (their input files were not kept).
 
-| Hot path | n | v0.5.0 (µs) | lane (µs) | lane/v0.5.0 |
-|---|---|---|---|---|
-| CSV chunks (5 columns, chunk n/10) | 100 | 1,015.6 | 1,050.1 | 1.03x |
-| CSV chunks (5 columns, chunk n/10) | 1,000 | 11,685.4 | 11,365.8 | 0.97x |
-| CSV chunks (5 columns, chunk n/10) | 10,000 | 34,193.5 | 33,635.4 | 0.98x |
-| Stata load (6 columns: 2 numeric, %td, %tc, labelled, str10) | 100 | 43.7 | 60.8 | 1.39x |
-| Stata load (6 columns: 2 numeric, %td, %tc, labelled, str10) | 1,000 | 264.2 | 328.7 | 1.24x |
-| Stata load (6 columns: 2 numeric, %td, %tc, labelled, str10) | 10,000 | 2,835.5 | 3,156.1 | 1.11x |
-| Stata load, plus a strL column of 20-byte values | 100 | 55.4 | 103.1 | 1.86x |
-| Stata load, plus a strL column of 20-byte values | 1,000 | 359.2 | 690.5 | 1.92x |
-| Stata load, plus a strL column of 20-byte values | 10,000 | 3,698.1 | 6,057.3 | 1.64x |
-| Excel load (5 columns, one of "3.0" text) | 100 | 1,176.8 | 1,178.7 | 1.00x |
-| Excel load (5 columns, one of "3.0" text) | 1,000 | 4,616.5 | 4,554.1 | 0.99x |
-| Excel load (5 columns, one of "3.0" text) | 10,000 | 43,959.6 | 42,545.3 | 0.97x |
+| Hot path | n | v0.5.0 (µs) | head (µs) | head/v0.5.0 | minima |
+|---|---|---|---|---|---|
+| CSV chunks (5 columns, chunk n/10) | 100 | 1,015.6 | 1,050.1 | 1.03x | † |
+| CSV chunks (5 columns, chunk n/10) | 1,000 | 11,685.4 | 11,365.8 | 0.97x | † |
+| CSV chunks (5 columns, chunk n/10) | 10,000 | 34,193.5 | 33,635.4 | 0.98x | † |
+| Stata load (6 columns: 2 numeric, %td, %tc, labelled, str10) | 100 | 43.5 | 61.2 | 1.41x | 1.41x |
+| Stata load (6 columns: 2 numeric, %td, %tc, labelled, str10) | 1,000 | 260.1 | 308.2 | 1.18x | 1.19x |
+| Stata load (6 columns: 2 numeric, %td, %tc, labelled, str10) | 10,000 | 2,583.2 | 3,043.3 | 1.18x | 1.18x |
+| Stata load, plus a strL column of 20-byte values | 100 | 54.5 | 96.7 | 1.78x | 1.78x |
+| Stata load, plus a strL column of 20-byte values | 1,000 | 353.5 | 675.3 | 1.91x | 1.91x |
+| Stata load, plus a strL column of 20-byte values | 10,000 | 3,676.8 | 5,924.9 | 1.61x | 1.62x |
+| Excel load (5 columns, one of "3.0" text) | 100 | 625.5 | 633.1 | 1.01x | 1.01x |
+| Excel load (5 columns, one of "3.0" text) | 1,000 | 4,599.4 | 4,688.4 | 1.02x | 1.01x |
+| Excel load (5 columns, one of "3.0" text) | 10,000 | 42,695.8 | 43,443.4 | 1.02x | 1.02x |
 
 Above 1.10x: the Stata load now converts the `%td` and `%tc` columns to dates (two O(n) passes and the
 `<formats>` and `<value_labels>` sections; about 40 ns per date cell, 17 µs fixed), and the strL variant
 reads the file's string table and looks up every cell, where v0.5.0 wrote a constant placeholder and
 read no table (1.6-1.9x; the table is read in one pass without per-block system calls and the text is
-taken over without a copy).
+taken over without a copy). Peak RSS at 10,000 rows (`/usr/bin/time`, median of 3): 9.1 to 16.5 MiB without
+strL and 9.5 to 18.1 MiB with it, of which 4.3 MiB is the larger idle footprint of the head's harness
+binary.
+
+Rule 5: the strL load is above its pre-approved ceiling of 1.4x and the load without strL (1.18-1.41x)
+is in no sign-off: both awaiting sign-off.
 
 ## Tests
 

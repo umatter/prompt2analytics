@@ -105,63 +105,70 @@ and `test_validate_latex_small_coefficient_grunfeld_usd` (`1.156e-07***` and `(5
 Release builds of `f80b0131` (base) and this branch (head), p2a-core `ci` and p2a-mcp
 `http,llm,auth,websocket`, one harness crate per side calling the tools through
 `AnalyticsServer::call_tool_with_session` in process (and the core `histogram` and
-`correlation_heatmap` directly). Nine interleaved processes per side, `taskset -c 4`,
-`RAYON_NUM_THREADS=1`; each value is the median over the nine processes of the per-process median of 61
-calls (21 at n = 10,000) after 5 warm-ups. Datasets: Int64 and f64 columns with 2% missing cells; the
-heatmap rows use 10 and 40 numeric columns of 1,000 rows. Load average 24-34 on 12 cores during the runs
-(2026-11-17).
+`correlation_heatmap` directly). Nine interleaved processes per side, `taskset -c 2`,
+`RAYON_NUM_THREADS=1`, `POLARS_MAX_THREADS=1`; each value is the median over the nine processes of the
+per-process median of 61 calls (21 at n = 10,000) after 5 warm-ups; "minima" is the ratio of the fastest
+processes. Datasets: Int64 and f64 columns with 2% missing cells; the heatmap rows use 10 and 40 numeric
+columns of 1,000 rows. Quiet re-time at the integration (2026-11-18, merged head 156e744f, nothing else
+running), load average 1.4-2.3.
 
-| Workload | n | base (ms) | head (ms) | head/base | runs |
+| Workload | n | base (ms) | head (ms) | head/base | minima |
 |---|---|---|---|---|---|
-| `viz_histogram` | 100 | 5.66 | 5.36 | 0.95x | 9/9 |
-| `viz_scatter` | 100 | 7.72 | 7.58 | 0.98x | 9/9 |
-| `viz_boxplot` | 100 | 5.34 | 5.22 | 0.98x | 9/9 |
-| `viz_line` | 100 | 7.67 | 7.49 | 0.98x | 9/9 |
-| `viz_event_study` | 100 | 7.92 | 7.87 | 0.99x | 9/9 |
-| `viz_coefficient` | 100 | 8.30 | 8.20 | 0.99x | 9/9 |
-| `viz_irf` | 100 | 8.16 | 8.05 | 0.99x | 9/9 |
-| `viz_residual_diagnostics` | 100 | 25.63 | 24.57 | 0.96x | 9/9 |
-| `viz_scatter_interactive` | 100 | 0.39 | 0.38 | 0.98x | 9/9 |
-| `viz_scatter_interactive_grouped` | 100 | 1.06 | 0.40 | 0.38x | 9/9 |
-| `viz_histogram_interactive` | 100 | 0.37 | 0.34 | 0.92x | 9/9 |
-| `viz_line_interactive` | 100 | 0.39 | 0.37 | 0.95x | 9/9 |
-| `core_histogram` | 100 | 5.60 | 5.34 | 0.95x | 9/9 |
-| `viz_histogram` | 1000 | 6.57 | 6.46 | 0.98x | 9/9 |
-| `viz_scatter` | 1000 | 9.68 | 9.67 | 1.00x | 9/9 |
-| `viz_boxplot` | 1000 | 5.29 | 5.29 | 1.00x | 9/9 |
-| `viz_line` | 1000 | 8.39 | 8.17 | 0.97x | 9/9 |
-| `viz_event_study` | 1000 | 9.78 | 9.78 | 1.00x | 9/9 |
-| `viz_coefficient` | 1000 | 25.42 | 25.39 | 1.00x | 9/9 |
-| `viz_irf` | 1000 | 9.17 | 9.09 | 0.99x | 9/9 |
-| `viz_residual_diagnostics` | 1000 | 38.47 | 37.99 | 0.99x | 9/9 |
-| `viz_scatter_interactive` | 1000 | 0.67 | 0.71 | 1.07x | 9/9 |
-| `viz_scatter_interactive_grouped` | 1000 | 1.49 | 0.78 | 0.52x | 9/9 |
-| `viz_histogram_interactive` | 1000 | 0.52 | 0.53 | 1.02x | 9/9 |
-| `viz_line_interactive` | 1000 | 0.66 | 0.68 | 1.04x | 9/9 |
-| `core_histogram` | 1000 | 6.68 | 6.74 | 1.01x | 9/9 |
-| `viz_histogram` | 10000 | 8.24 | 8.39 | 1.02x | 9/9 |
-| `viz_scatter` | 10000 | 29.93 | 31.42 | 1.05x | 9/9 |
-| `viz_boxplot` | 10000 | 7.13 | 7.50 | 1.05x | 9/9 |
-| `viz_line` | 10000 | 16.03 | 15.77 | 0.98x | 9/9 |
-| `viz_event_study` | 10000 | 21.96 | 23.60 | 1.07x | 9/9 |
-| `viz_coefficient` | 10000 | 199.89 | 197.64 | 0.99x | 9/9 |
-| `viz_irf` | 10000 | 21.06 | 21.86 | 1.04x | 9/9 |
-| `viz_residual_diagnostics` | 10000 | 284.56 | 285.90 | 1.00x | 9/9 |
-| `viz_scatter_interactive` | 10000 | 3.23 | 3.88 | 1.20x | 9/9 |
-| `viz_scatter_interactive_grouped` | 10000 | 5.05 | 4.47 | 0.88x | 9/9 |
-| `viz_histogram_interactive` | 10000 | 1.97 | 2.35 | 1.19x | 9/9 |
-| `viz_line_interactive` | 10000 | 3.27 | 3.91 | 1.20x | 9/9 |
-| `core_histogram` | 10000 | 7.09 | 7.13 | 1.01x | 9/9 |
-| `viz_heatmap_k10` | 1000 | 9.37 | 8.88 | 0.95x | 9/9 |
-| `viz_heatmap_k40_sel10` | 1000 | 20.94 | 9.07 | 0.43x | 9/9 |
-| `core_correlation_heatmap_k10` | - | 8.91 | 9.15 | 1.03x | 9/9 |
-| `core_correlation_heatmap_k40` | - | 9.08 | 10.51 | 1.16x | 9/9 |
+| `viz_histogram` | 100 | 3.43 | 3.48 | 1.01x | 1.02x |
+| `viz_scatter` | 100 | 5.07 | 5.16 | 1.02x | 1.01x |
+| `viz_boxplot` | 100 | 3.42 | 3.49 | 1.02x | 1.02x |
+| `viz_line` | 100 | 5.12 | 5.22 | 1.02x | 1.02x |
+| `viz_event_study` | 100 | 5.41 | 5.55 | 1.03x | 1.03x |
+| `viz_coefficient` | 100 | 5.51 | 5.64 | 1.02x | 1.03x |
+| `viz_irf` | 100 | 5.44 | 5.55 | 1.02x | 1.02x |
+| `viz_residual_diagnostics` | 100 | 16.36 | 16.70 | 1.02x | 1.02x |
+| `viz_scatter_interactive` | 100 | 0.20 | 0.20 | 1.03x | 1.06x |
+| `viz_scatter_interactive_grouped` | 100 | 0.57 | 0.21 | 0.38x | 0.38x |
+| `viz_histogram_interactive` | 100 | 0.19 | 0.19 | 0.97x | 0.97x |
+| `viz_line_interactive` | 100 | 0.20 | 0.20 | 0.98x | 0.98x |
+| `core_histogram` | 100 | 3.50 | 3.55 | 1.01x | 1.01x |
+| `viz_histogram` | 1000 | 4.16 | 4.23 | 1.02x | 1.02x |
+| `viz_scatter` | 1000 | 6.66 | 6.78 | 1.02x | 1.02x |
+| `viz_boxplot` | 1000 | 3.40 | 3.46 | 1.02x | 1.02x |
+| `viz_line` | 1000 | 5.59 | 5.72 | 1.02x | 1.02x |
+| `viz_event_study` | 1000 | 6.55 | 6.74 | 1.03x | 1.03x |
+| `viz_coefficient` | 1000 | 17.10 | 17.47 | 1.02x | 1.01x |
+| `viz_irf` | 1000 | 6.12 | 6.27 | 1.03x | 1.03x |
+| `viz_residual_diagnostics` | 1000 | 26.29 | 25.22 | 0.96x | 1.02x |
+| `viz_scatter_interactive` | 1000 | 0.37 | 0.39 | 1.04x | 1.04x |
+| `viz_scatter_interactive_grouped` | 1000 | 0.80 | 0.44 | 0.55x | 0.54x |
+| `viz_histogram_interactive` | 1000 | 0.29 | 0.30 | 1.02x | 1.00x |
+| `viz_line_interactive` | 1000 | 0.37 | 0.38 | 1.04x | 1.03x |
+| `core_histogram` | 1000 | 4.34 | 4.39 | 1.01x | 1.01x |
+| `viz_histogram` | 10000 | 5.27 | 5.49 | 1.04x | 1.04x |
+| `viz_scatter` | 10000 | 20.81 | 21.55 | 1.04x | 1.04x |
+| `viz_boxplot` | 10000 | 4.67 | 5.18 | 1.11x | 1.11x |
+| `viz_line` | 10000 | 11.78 | 10.99 | 0.93x | 1.06x |
+| `viz_event_study` | 10000 | 15.67 | 16.35 | 1.04x | 1.15x |
+| `viz_coefficient` | 10000 | 132.17 | 133.78 | 1.01x | 1.01x |
+| `viz_irf` | 10000 | 14.06 | 14.96 | 1.06x | 1.06x |
+| `viz_residual_diagnostics` | 10000 | 185.63 | 186.84 | 1.01x | 1.01x |
+| `viz_scatter_interactive` | 10000 | 2.07 | 2.30 | 1.11x | 1.12x |
+| `viz_scatter_interactive_grouped` | 10000 | 3.03 | 2.65 | 0.87x | 0.87x |
+| `viz_histogram_interactive` | 10000 | 1.24 | 1.37 | 1.11x | 1.10x |
+| `viz_line_interactive` | 10000 | 2.10 | 2.29 | 1.09x | 1.08x |
+| `core_histogram` | 10000 | 4.64 | 4.70 | 1.01x | 1.01x |
+| `viz_heatmap_k10` | 1000 | 6.22 | 6.11 | 0.98x | 0.98x |
+| `viz_heatmap_k40_sel10` | 1000 | 12.71 | 6.22 | 0.49x | 0.49x |
+| `core_correlation_heatmap_k10` | - | 6.18 | 6.48 | 1.05x | 1.05x |
+| `core_correlation_heatmap_k40` | - | 6.24 | 7.38 | 1.18x | 1.18x |
 
 Head/base above 1.10x:
-- `viz_*_interactive` at n = 10,000 (about 1.2x, +0.4 to +0.7 ms): the figure now carries every value as a
+- `viz_scatter_interactive` and `viz_histogram_interactive` at n = 10,000 (1.11x, 2.07 to 2.30 ms and
+  1.24 to 1.37 ms; `viz_line_interactive` 1.09x): the figure now carries every value as a
   double in its shortest round-trip digits (DATA-64) instead of single precision, so the page and its JSON
-  are about twice as long; the grouped scatter is faster (0.38x to 0.88x) because groups are coded once.
-- `core_correlation_heatmap_k40` (1.16x, +1.4 ms): the head draws all 1,600 cells, their borders, the
+  are about twice as long; the grouped scatter is faster (0.38x to 0.87x) because groups are coded once.
+- `core_correlation_heatmap_k40` (1.18x, 6.24 to 7.38 ms): the head draws all 1,600 cells, their borders, the
   rotated labels and the colour bar inside the image; the base drew 20-pixel cells past the edge, where
   most of the matrix and the colour bar were clipped away (DATA-63). `viz_heatmap` with 10 of 40 columns
-  selected is 0.43x, since only the selection is correlated.
+  selected is 0.49x, since only the selection is correlated.
+- `viz_boxplot` at n = 10,000 (1.11x, 4.67 to 5.18 ms; 1.02x below): not profiled; the tool now reads its
+  columns with their missing values counted.
+
+Rule 5: the interactive charts, the 40-variable heatmap and the box plot at 10,000 rows are in no sign-off:
+awaiting sign-off.

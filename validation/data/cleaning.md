@@ -60,48 +60,51 @@ Release builds (`--no-default-features --features ci`), v0.5.0 (`f80b0131`) agai
 harness binary per side pinned to core 2 (`taskset -c 2`, `RAYON_NUM_THREADS=1`, `POLARS_MAX_THREADS=1`,
 cwd `/dev/shm`); 9 interleaved processes per side, each the median of 2,001 / 301 / 41 calls (n = 100 /
 1,000 / 10,000) after 10 warm-ups; the table gives the median of the 9 medians. Seeded data with noise
-(ChaCha8 in the harness, `set.seed(n)` for the files R writes). Load average during the runs 4.3-12.4
-(other work on the machine). The quality, filter, drop_na and fill_na rows were re-timed after the
-float NaN count of the completeness change was vectorised: same harness, 7 interleaved processes per
-side, load average 7.8-10.5; the other rows are from the first run.
+(ChaCha8 in the harness, `set.seed(n)` for the files R writes). Quiet re-time at the
+integration (2026-11-18, merged head 156e744f, nothing else running): 9 rounds, load average 1.5-2.3;
+"minima" is the ratio of the fastest of the 9 processes per side.
 
-| Hot path | n | v0.5.0 (µs) | lane (µs) | lane/v0.5.0 |
-|---|---|---|---|---|
-| quality profile (5 columns: 2 numeric with NaN, ISO dates, phones, words) | 100 | 153.5 | 161.3 | 1.05x |
-| quality profile (5 columns: 2 numeric with NaN, ISO dates, phones, words) | 1,000 | 1,022.2 | 1,112.8 | 1.09x |
-| quality profile (5 columns: 2 numeric with NaN, ISO dates, phones, words) | 10,000 | 10,065.1 | 10,987.6 | 1.09x |
-| estimate_dataset_memory (10 columns, 4 text) | 100 | 0.1 | 0.4 | 4.05x |
-| estimate_dataset_memory (10 columns, 4 text) | 1,000 | 0.1 | 0.4 | 4.07x |
-| estimate_dataset_memory (10 columns, 4 text) | 10,000 | 0.1 | 0.4 | 3.87x |
-| preview filter `>=` (Float64) | 100 | 1.6 | 24.1 | 14.81x |
-| preview filter `>=` (Float64) | 1,000 | 10.1 | 31.5 | 3.13x |
-| preview filter `>=` (Float64) | 10,000 | 98.7 | 208.3 | 2.11x |
-| preview filter `contains` (text) | 100 | 12.4 | 28.7 | 2.32x |
-| preview filter `contains` (text) | 1,000 | 64.9 | 61.7 | 0.95x |
-| preview filter `contains` (text) | 10,000 | 721.3 | 530.6 | 0.74x |
-| preview drop_na (3 columns, 10% missing) | 100 | 20.3 | 28.1 | 1.38x |
-| preview drop_na (3 columns, 10% missing) | 1,000 | 202.2 | 44.2 | 0.22x |
-| preview drop_na (3 columns, 10% missing) | 10,000 | 1,986.5 | 203.2 | 0.10x |
-| preview fill_na median (10% missing) | 100 | 9.6 | 8.7 | 0.91x |
-| preview fill_na median (10% missing) | 1,000 | 33.6 | 32.0 | 0.95x |
-| preview fill_na median (10% missing) | 10,000 | 267.2 | 255.8 | 0.96x |
-| preview trim | 100 | 6.3 | 5.8 | 0.91x |
-| preview trim | 1,000 | 33.6 | 29.0 | 0.86x |
-| preview trim | 10,000 | 348.3 | 294.6 | 0.85x |
-| preview replace, no match | 100 | 4.7 | 1.9 | 0.40x |
-| preview replace, no match | 1,000 | 31.8 | 5.6 | 0.17x |
-| preview replace, no match | 10,000 | 317.0 | 75.1 | 0.24x |
+| Hot path | n | v0.5.0 (µs) | head (µs) | head/v0.5.0 | minima |
+|---|---|---|---|---|---|
+| quality profile (5 columns: 2 numeric with NaN, ISO dates, phones, words) | 100 | 153.5 | 162.8 | 1.06x | 1.06x |
+| quality profile (5 columns: 2 numeric with NaN, ISO dates, phones, words) | 1,000 | 1,027.2 | 1,126.5 | 1.10x | 1.10x |
+| quality profile (5 columns: 2 numeric with NaN, ISO dates, phones, words) | 10,000 | 10,104.1 | 11,026.7 | 1.09x | 1.09x |
+| estimate_dataset_memory (10 columns, 4 text) | 100 | 0.07 | 0.31 | 4.45x | 4.35x |
+| estimate_dataset_memory (10 columns, 4 text) | 1,000 | 0.07 | 0.30 | 4.39x | 4.26x |
+| estimate_dataset_memory (10 columns, 4 text) | 10,000 | 0.07 | 0.31 | 4.54x | 4.41x |
+| preview filter `>=` (Float64) | 100 | 1.7 | 24.0 | 14.39x | 14.40x |
+| preview filter `>=` (Float64) | 1,000 | 10.6 | 31.5 | 2.98x | 3.00x |
+| preview filter `>=` (Float64) | 10,000 | 99.3 | 208.1 | 2.10x | 2.10x |
+| preview filter `contains` (text) | 100 | 5.8 | 28.7 | 4.91x | 4.92x |
+| preview filter `contains` (text) | 1,000 | 55.9 | 61.9 | 1.11x | 1.10x |
+| preview filter `contains` (text) | 10,000 | 680.7 | 520.3 | 0.76x | 0.76x |
+| preview drop_na (3 columns, 10% missing) | 100 | 21.1 | 28.2 | 1.34x | 1.36x |
+| preview drop_na (3 columns, 10% missing) | 1,000 | 209.6 | 44.1 | 0.21x | 0.21x |
+| preview drop_na (3 columns, 10% missing) | 10,000 | 2,102.8 | 202.8 | 0.10x | 0.10x |
+| preview fill_na median (10% missing) | 100 | 9.5 | 8.6 | 0.91x | 0.92x |
+| preview fill_na median (10% missing) | 1,000 | 33.3 | 30.6 | 0.92x | 0.93x |
+| preview fill_na median (10% missing) | 10,000 | 257.4 | 247.0 | 0.96x | 0.95x |
+| preview trim | 100 | 3.4 | 3.2 | 0.93x | 0.94x |
+| preview trim | 1,000 | 18.9 | 16.4 | 0.87x | 0.88x |
+| preview trim | 10,000 | 204.3 | 184.6 | 0.90x | 0.93x |
+| preview replace, no match | 100 | 4.7 | 1.9 | 0.40x | 0.40x |
+| preview replace, no match | 1,000 | 30.9 | 5.2 | 0.17x | 0.17x |
+| preview replace, no match | 10,000 | 310.0 | 61.5 | 0.20x | 0.19x |
 
 Above 1.10x:
 - `estimate_dataset_memory` reads polars' buffer sizes (`estimated_size`) instead of multiplying the row
-  count by a fixed width: 0.1 to 0.4 µs a call, whatever the rows.
+  count by a fixed width: 0.07 to 0.31 µs a call (4.4-4.5x), whatever the rows.
 - The filter preview runs the apply's own `filter` and materialises the kept rows, where v0.5.0 counted
   a mask of its own (which treated `contains` as a regex and an unknown operator as no rows): up to
-  0.2 ms at 10,000 rows (the NaN count of the completeness change is vectorised). A mask-only
+  0.11 ms at 10,000 rows (99.3 to 208.1 µs) (the NaN count of the completeness change is vectorised). A mask-only
   filter would have to come from the munging module.
-- `contains` at 100 rows and drop_na at 100 rows: the same fixed cost of the real operation (20 µs and
-  10 µs); at 1,000 rows and above both are as fast or faster (drop_na 4-7x faster: one vectorised
+- `contains` at 100 rows and drop_na at 100 rows: the same fixed cost of the real operation (5.8 to 28.7 µs and
+  21.1 to 28.2 µs); at 1,000 rows and above both are as fast or faster (drop_na 4-7x faster: one vectorised
   mask instead of a per-cell lookup).
-- The quality profile at 10,000 rows (1.10x): one pattern per distinct value, a number parse for digit
+- The quality profile (1.06-1.10x): one pattern per distinct value, a number parse for digit
   text, and the NaN count taken apart from the value buffer.
+
+Rule 5: the filter preview runs above its pre-approved ceiling of 1.5x (14.4x / 3.0x / 2.1x for `>=`,
+4.9x for `contains` at 100 rows): awaiting sign-off. `estimate_dataset_memory` and the drop_na preview
+at 100 rows are in no sign-off: awaiting sign-off.
 

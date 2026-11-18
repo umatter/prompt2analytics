@@ -124,24 +124,24 @@ any other method is an error.
 
 ## Timing
 
-Release builds of `p2a` (`--no-default-features --features spectral-analysis`) at the v0.5.0 base f80b0131 and at the lane head, one process per invocation (`p2a --session s.json <command>`, the session's datasets loaded from CSV each time, so about 20-40 ms of every number is start-up and loading), pinned with `taskset -c 10`, `RAYON_NUM_THREADS=1`; per row and n, 9 rounds per side interleaved, each the median of 21 invocations after 3 warm-ups; the table shows the median of the medians and the 1-minute load average of the (shared, busy) machine. Data: n rows of simulated noise data (head: 5 mixed columns; describe: 20 columns; acf/pacf/ccf/box/pp: AR(1) series; moran: n random points, k = 4; gsynth: n/20 units x 20 periods, at least 5 units; iv: 2 instruments; km: 4 groups; chisq-gof: 6 categories; coefplot and hac: 3 regressors, hac with 4 lags). Lane timing, preliminary until the integration re-times it. The v0.5.2 (90a99318) column of the causal, survival and regression rows is left to the integration.
+Release builds of `p2a` (`--no-default-features --features spectral-analysis`) at the v0.5.0 base f80b0131 and at the merged head 156e744f, one process per invocation (`p2a --session s.json <command>`, the session's datasets loaded from CSV each time, so about 12-25 ms of every number is start-up and loading), pinned with `taskset -c 2`, `RAYON_NUM_THREADS=1`, `POLARS_MAX_THREADS=1`; per row and n, 9 rounds per side interleaved, each the median of 11 invocations after 3 warm-ups; the table shows the median of the medians, the ratio of the minima and the 1-minute load average at the row's start and end. Data: n rows of simulated noise data (head: 5 mixed columns; describe: 20 columns; acf/pacf/ccf/box/pp: AR(1) series; moran: n random points, k = 4; gsynth: n/20 units x 20 periods, at least 5 units; iv: 2 instruments; km: 4 groups; chisq-gof: 6 categories; coefplot and hac: 3 regressors, hac with 4 lags). Quiet re-time at the integration (2026-11-18, nothing else running): a separate 5-round run gave ratios within 0.05 of these, with absolute times about 6 ms lower on both sides.
 
-| Command | n | f80b0131 (ms) | lane head (ms) | head/base | load |
-|---|---:|---:|---:|---:|---:|
-| `causal gsynth default` | 100 | 44.6 | 42.1 | 0.95x | 51 |
-| `causal gsynth default` | 1,000 | 72.1 | 55.3 | 0.77x | 46 |
-| `causal gsynth default` | 10,000 | 98.8 | 76.4 | 0.77x | 43 |
-| `causal iv default` | 100 | 44.0 | 42.1 | 0.96x | 42 |
-| `causal iv default` | 1,000 | 43.2 | 43.0 | 0.99x | 41 |
-| `causal iv default` | 10,000 | 57.3 | 57.0 | 0.99x | 39 |
-| `survival km --group -F json` | 100 | 40.5 | 39.0 | 0.97x | 36 |
-| `survival km --group -F json` | 1,000 | 39.0 | 38.8 | 1.00x | 31 |
-| `survival km --group -F json` | 10,000 | 61.4 | 68.9 | 1.12x | 28 |
-| `reg hac` | 100 | 47.0 | 45.9 | 0.98x | 31 |
-| `reg hac` | 1,000 | 46.5 | 45.9 | 0.99x | 29 |
-| `reg hac` | 10,000 | 56.7 | 54.2 | 0.96x | 28 |
+| Command | n | f80b0131 (ms) | head (ms) | head/base | minima | load |
+|---|---:|---:|---:|---:|---:|---:|
+| `causal gsynth default` | 100 | 24.9 | 25.8 | 1.03x | 1.00x | 1.80-1.73 |
+| `causal gsynth default` | 1,000 | 40.5 | 33.6 | 0.83x | 0.82x | 1.73-1.93 |
+| `causal gsynth default` | 10,000 | 53.9 | 43.5 | 0.81x | 0.80x | 1.93-2.01 |
+| `causal iv default` | 100 | 24.8 | 25.2 | 1.02x | 1.02x | 2.01-1.85 |
+| `causal iv default` | 1,000 | 26.4 | 26.9 | 1.02x | 1.02x | 1.85-1.78 |
+| `causal iv default` | 10,000 | 35.1 | 35.9 | 1.02x | 1.02x | 1.78-1.88 |
+| `survival km --group -F json` | 100 | 25.5 | 26.0 | 1.02x | 1.02x | 1.88-1.81 |
+| `survival km --group -F json` | 1,000 | 26.9 | 27.8 | 1.03x | 1.03x | 1.81-1.68 |
+| `survival km --group -F json` | 10,000 | 37.3 | 43.0 | 1.15x | 1.15x | 1.68-1.71 |
+| `reg hac` | 100 | 27.0 | 27.7 | 1.02x | 1.01x | 2.02-1.94 |
+| `reg hac` | 1,000 | 28.2 | 28.9 | 1.02x | 1.03x | 1.94-1.95 |
+| `reg hac` | 10,000 | 33.7 | 34.0 | 1.01x | 1.01x | 1.95-1.96 |
 
-`survival km --group -F json` at n = 10,000 was re-run alone: 78.7 ms base, 86.8 ms head (1.10x). The head prints one JSON document where the base printed one per group; the nested, pretty-printed curves are about 24% more bytes (1.67 MB against 1.35 MB), the likely cause of the difference.
+`survival km --group -F json` at n = 10,000 is 1.15x here and 1.11x in the 5-round run (30.98 ms base, 34.35 ms head); peak RSS 28.3 MiB base, 35.7 MiB head. The head prints one JSON document where the base printed one per group; the nested, pretty-printed curves are about 24% more bytes (1.67 MB against 1.35 MB), the likely cause of the difference. Above 1.10x and in no sign-off: awaiting sign-off. The v0.5.2 (90a99318) column was not measured.
 
 ## Reproduce
 
