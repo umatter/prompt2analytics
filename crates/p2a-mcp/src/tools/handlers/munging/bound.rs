@@ -734,18 +734,25 @@ pub(super) fn filled_text(s: &Series, forward: bool) -> Result<u64, String> {
         }
         Ok(())
     };
+    // Each chunk's validity bitmap, read once per chunk: no value slice is
+    // resolved and no call per row goes through `dyn Array`.
+    let chunks = ca.chunks();
     if forward {
-        // `is_valid` through the chunk (`dyn Array`): no value slice is resolved.
-        for (arr, chunk) in ca.downcast_iter().zip(ca.chunks()) {
+        for (k, chunk) in chunks.iter().enumerate() {
+            let (Some(arr), validity) = (ca.downcast_get(k), chunk.validity()) else {
+                continue;
+            };
             for (i, view) in arr.views().iter().enumerate() {
-                visit(view.length, chunk.is_valid(i))?;
+                visit(view.length, validity.is_none_or(|b| b.get_bit(i)))?;
             }
         }
     } else {
-        let arrays: Vec<_> = ca.downcast_iter().zip(ca.chunks()).collect();
-        for (arr, chunk) in arrays.into_iter().rev() {
+        for (k, chunk) in chunks.iter().enumerate().rev() {
+            let (Some(arr), validity) = (ca.downcast_get(k), chunk.validity()) else {
+                continue;
+            };
             for (i, view) in arr.views().iter().enumerate().rev() {
-                visit(view.length, chunk.is_valid(i))?;
+                visit(view.length, validity.is_none_or(|b| b.get_bit(i)))?;
             }
         }
     }
@@ -1470,6 +1477,107 @@ mod tests {
                 "{strategy:?}: fixture no longer separates the grouped and row-order bounds \
                  (row order {row_order}, charged {charged}); the property is grouped >= charged"
             );
+        }
+    }
+
+    /// Median of 31 interleaved timings of `old` and `new` after 3 warm-ups, each sample
+    /// `reps` calls; returns (old ns per call, new ns per call).
+    fn interleaved_medians(
+        reps: usize,
+        mut old: impl FnMut(),
+        mut new: impl FnMut(),
+    ) -> (f64, f64) {
+        for _ in 0..3 {
+            old();
+            new();
+        }
+        let (mut t_old, mut t_new) = (Vec::new(), Vec::new());
+        for _ in 0..31 {
+            let s = std::time::Instant::now();
+            for _ in 0..reps {
+                old();
+            }
+            t_old.push(s.elapsed().as_nanos() as f64 / reps as f64);
+            let s = std::time::Instant::now();
+            for _ in 0..reps {
+                new();
+            }
+            t_new.push(s.elapsed().as_nanos() as f64 / reps as f64);
+        }
+        t_old.sort_by(f64::total_cmp);
+        t_new.sort_by(f64::total_cmp);
+        (t_old[15], t_new[15])
+    }
+
+    /// The forward or backward fill count before the buffer cap, verbatim.
+    fn filled_text_before(s: &Series, forward: bool) -> Result<u64, String> {
+        let Some(ca) = as_views(s)? else {
+            return Ok(text_bytes(s));
+        };
+        let mut text = 0u64;
+        // The length of the value a null takes, once a value was passed.
+        let mut fill: Option<u64> = None;
+        let mut row = 0usize;
+        let mut visit = |length: u32, valid: bool| -> Result<(), String> {
+            checkpoint(row)?;
+            row += 1;
+            let length = u64::from(length);
+            text = text.saturating_add(length);
+            if valid {
+                fill = Some(length);
+            } else if let Some(fill) = fill {
+                text = text.saturating_add(fill);
+            }
+            Ok(())
+        };
+        if forward {
+            for arr in ca.downcast_iter() {
+                for (i, view) in arr.views().iter().enumerate() {
+                    visit(view.length, arr.get(i).is_some())?;
+                }
+            }
+        } else {
+            for arr in ca.downcast_iter().rev() {
+                for (i, view) in arr.views().iter().enumerate().rev() {
+                    visit(view.length, arr.get(i).is_some())?;
+                }
+            }
+        }
+        Ok(text)
+    }
+
+    /// The text-fill count against the count before it, both directions, at 100, 1,000 and
+    /// 10,000 rows of a String column with a fifth of its rows null and values of 3 to 40
+    /// bytes (inline and buffered views). Times only; run with
+    /// `taskset -c 2 cargo test --release ... -- --ignored --nocapture benchmark_wp37`.
+    #[test]
+    #[ignore = "benchmark; run with --release -- --ignored --nocapture"]
+    fn benchmark_wp37_fill_text_bound() {
+        println!("filled_text: rows | direction | before ns | after ns | after/before");
+        for n in [100usize, 1_000, 10_000] {
+            let values: Vec<Option<String>> = (0..n)
+                .map(|i| (i % 5 != 2).then(|| "v".repeat(3 + (i * 7919) % 38) + &i.to_string()))
+                .collect();
+            let s = Series::new("s".into(), values);
+            for forward in [true, false] {
+                let before = filled_text_before(&s, forward).unwrap();
+                let after = filled_text(&s, forward).unwrap();
+                assert!(after <= before, "{after} > {before}");
+                let reps = (2_000_000 / n).max(5);
+                let (old, new) = interleaved_medians(
+                    reps,
+                    || {
+                        std::hint::black_box(filled_text_before(std::hint::black_box(&s), forward))
+                            .unwrap();
+                    },
+                    || {
+                        std::hint::black_box(filled_text(std::hint::black_box(&s), forward))
+                            .unwrap();
+                    },
+                );
+                let direction = if forward { "forward" } else { "backward" };
+                println!("{n} | {direction} | {old:.0} | {new:.0} | {:.3}", new / old);
+            }
         }
     }
 }
