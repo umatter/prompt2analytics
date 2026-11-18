@@ -697,6 +697,7 @@ p2a data load [OPTIONS] <PATH>
 | `<PATH>` | Path to the data file (CSV, Parquet, Excel, Stata, SAS) |
 | `-n, --name <NAME>` | Name to assign to the dataset |
 | `--na-strings <LIST>` | Strings read as missing values in a CSV file, comma-separated (e.g. "NA,,." = NA, the empty field and "."). Replaces the default list, NA and the empty field (R read.csv); an empty unquoted field is missing in every case. Use --na-strings=-99 for a marker that starts with '-' |
+| `--value-labels <codes\|text>` | Stata (.dta) files only: what value-labelled columns load as. `codes` (the default) keeps the numeric codes and lists the labels; `text` loads each labelled value as its label (an unlabelled value as its number; haven::as_factor). Kept for every reload of the dataset in the session |
 
 #### `p2a data list`
 
