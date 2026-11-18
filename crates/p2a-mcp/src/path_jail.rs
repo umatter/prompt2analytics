@@ -713,8 +713,9 @@ static KEPT_SESSIONS: LazyLock<Mutex<HashSet<u128>>> = LazyLock::new(Default::de
 ///
 /// `ids` come most recently accessed first, and the directories of the
 /// first `max_kept` of them that have one are kept: ids whose
-/// `<data_root>/sessions/<id>` is not a real directory (a session that never
-/// used files, a link, a file) take no place, so they do not push out an
+/// `<data_root>/sessions/<id>` is not a real directory holding an entry (a
+/// session that never used files, an empty directory left by a session that
+/// only resolved a path, a link, a file) take no place, so they do not push out an
 /// older session that has files. Ids not in canonical UUID form, and
 /// repeats, are passed over. The server calls this at startup, after opening
 /// its store and before it takes requests, with every adoptable session and
@@ -741,7 +742,8 @@ where
 }
 
 /// See [`keep_session_dirs`]: keep (in [`KEPT_SESSIONS`]) the first
-/// `max_kept` of `ids` whose `<data_root>/sessions/<id>` is a real directory.
+/// `max_kept` of `ids` whose `<data_root>/sessions/<id>` is a real directory
+/// that is not empty.
 fn keep_session_dirs_in<I>(data_root: &Path, ids: I, max_kept: usize) -> Vec<String>
 where
     I: IntoIterator,
@@ -760,9 +762,7 @@ where
         let Some(uuid) = session_uuid(id) else {
             continue;
         };
-        if uuids.contains(&uuid)
-            || !fs::symlink_metadata(sessions.join(id)).is_ok_and(|m| m.is_dir())
-        {
+        if uuids.contains(&uuid) || !is_nonempty_dir(&sessions.join(id)) {
             continue;
         }
         uuids.insert(uuid);
@@ -773,6 +773,14 @@ where
     }
     locked(&KEPT_SESSIONS).extend(uuids);
     kept
+}
+
+/// Whether `path` is a real directory (not a link) holding at least one
+/// entry. A session that only resolved a path has an empty directory, which
+/// holds nothing to find again.
+fn is_nonempty_dir(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|m| m.is_dir())
+        && fs::read_dir(path).is_ok_and(|mut entries| entries.next().is_some())
 }
 
 /// Whether `session_id`'s directory may still need removing when the store
@@ -1576,10 +1584,34 @@ mod tests {
         // Once a kept session's own removal ran, deleting its rows is a no-op.
         let back = fresh_id();
         fs::create_dir_all(data.join("sessions").join(&back)).unwrap();
+        fs::write(data.join("sessions").join(&back).join("a.csv"), "x\n1\n").unwrap();
         keep_session_dirs_in(&data, [&back], 10);
         assert!(is_in_kept_set(&back));
         remove_session_dir_in(&data, &back).unwrap();
         assert!(!is_in_kept_set(&back));
+    }
+
+    /// An empty session directory (a session that only resolved a path, say
+    /// of a file that does not exist) takes no place: with two places, the
+    /// three most recent sessions' empty directories do not push out an
+    /// older one with files, and the purge removes them.
+    #[test]
+    fn an_empty_session_directory_takes_no_place() {
+        let (_t, data) = tmp_root();
+        let sessions = data.join("sessions");
+        let ids: Vec<String> = (0..4).map(|_| fresh_id()).collect();
+        for id in &ids[..3] {
+            fs::create_dir_all(sessions.join(id)).unwrap();
+        }
+        fs::create_dir_all(sessions.join(&ids[3])).unwrap();
+        fs::write(sessions.join(&ids[3]).join("mine.csv"), "x\n1\n").unwrap();
+        assert_eq!(keep_session_dirs_in(&data, &ids, 2), [ids[3].as_str()]);
+        let keep: HashSet<u128> = [session_uuid(&ids[3]).unwrap()].into_iter().collect();
+        purge_stale_session_dirs_in(&data, &keep);
+        assert!(sessions.join(&ids[3]).join("mine.csv").exists());
+        for id in &ids[..3] {
+            assert!(fs::symlink_metadata(sessions.join(id)).is_err(), "{id}");
+        }
     }
 
     /// The cap on kept directories counts directories, not stored sessions:
@@ -1641,6 +1673,7 @@ mod tests {
         let (_t, data) = tmp_root();
         let kept = fresh_id();
         fs::create_dir_all(data.join("sessions").join(&kept)).unwrap();
+        fs::write(data.join("sessions").join(&kept).join("a.csv"), "x\n1\n").unwrap();
         assert!(!is_in_kept_set(&kept));
         keep_session_dirs_in(&data, [&kept], 1);
         assert!(is_in_kept_set(&kept));
@@ -1659,6 +1692,7 @@ mod tests {
         let (_t, data) = tmp_root();
         let (kept, other) = (fresh_id(), fresh_id());
         fs::create_dir_all(data.join("sessions").join(&kept)).unwrap();
+        fs::write(data.join("sessions").join(&kept).join("a.csv"), "x\n1\n").unwrap();
         keep_session_dirs_in(&data, [&kept], 1);
         assert!(!is_kept_session_dir_when(false, &kept));
         assert!(is_kept_session_dir_when(true, &kept));

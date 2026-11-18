@@ -392,7 +392,8 @@ HTTP), and they never depend on the resource profile:
   the first file access after a restart. With an on-disk session store
   (SurrealKV, `P2A_DB_PATH`), the directories of stored sessions that can still be adopted
   (accessed within the session TTL; at most `P2A_MAX_SESSIONS` directories,
-  those of the most recently used sessions that have one) are kept, so a
+  those of the most recently used sessions that have one with files in it;
+  an empty directory takes no place and is purged) are kept, so a
   returning client's files are there for the dataset reload. Such a directory
   goes when the store deletes the session's rows, or with the session once it
   has come back and used its files. A session's directory holds at most
@@ -926,8 +927,9 @@ budget, so on a machine with more CPUs lowering `pivot_cells` buys less.
    with `P2A_LIMIT_OVERRIDES` if needed. With an on-disk session store
    (SurrealKV, `P2A_DB_PATH`, as `docker-compose.yml` sets it), a restart keeps the directories of up to
    `P2A_MAX_SESSIONS` stored sessions that can still come back (the most
-   recently used that have one; sessions that never used files take no
-   place), so the strict bound is twice that product, 2 × `P2A_MAX_SESSIONS` ×
+   recently used that have one with files in it; sessions that never used
+   files, or left only an empty directory, take no place), so the strict
+   bound is twice that product, 2 × `P2A_MAX_SESSIONS` ×
    `session_disk_bytes` (12.5 GiB with the hosted defaults), however often the
    server restarts. On top of that comes one leftover temporary file (at most
    `export_bytes`) for each write a stop interrupted: at most one for each call
