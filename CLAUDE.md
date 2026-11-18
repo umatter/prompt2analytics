@@ -392,7 +392,7 @@ crates/p2a-core/src/
 ├── visualization/         # Chart generation
 │   ├── charts.rs          # Static charts (plotters) - PNG output
 │   ├── heatmap.rs         # Correlation heatmaps
-│   └── interactive.rs     # Interactive charts (plotlars/Plotly) - HTML output
+│   └── interactive.rs     # Interactive charts (own Plotly JSON, f64; plotly.js from its CDN) - HTML output
 │
 ├── export/                # Export formats
 │   ├── latex.rs           # LaTeX tables (OLS, Panel, Discrete)
@@ -551,10 +551,9 @@ let missing = cols.missing().clone();           // what was dropped
   and on `.f64()` with no `cast`, `strict_cast` or `cast_with_options` call in the six lines above, in
   non-test code of the five product crates; comments, string literals and `#[cfg(test)]` items are
   skipped. `// na-ok: <reason>` on the line or the line above marks a site that is null-free by
-  construction (a column the code built, a comparison mask). `// na-legacy(T4): <reason>` marks the 11
-  known carry-over sites, which later tiers migrate; the reason says what the site gets wrong, after the
-  finding id of the October 2026 code review where there is one. Migrating a site means removing its
-  marker and lowering `MAX_LEGACY_MARKERS`. A malformed marker, an `na-legacy` marker with no extraction
+  construction (a column the code built, a comparison mask). `// na-legacy(T4): <reason>` marked the
+  known carry-over sites, which later tiers migrated; none is left and `MAX_LEGACY_MARKERS` is 0, so a new
+  site is migrated rather than marked. A malformed marker, an `na-legacy` marker with no extraction
   on its line or the next, and a new `na-legacy` marker all fail the guard. The real-tree test is
   `test_na_guard_tree_is_clean`, and `test_na_guard_legacy_mcp_helpers_are_gone` keeps the removed
   null-to-NaN MCP helpers out.
@@ -674,7 +673,9 @@ crates/p2a-mcp/src/
 │                          #   accounting for the session-data quotas (charged by exec.rs)
 ├── persistent_session.rs  # SurrealDB-backed conversations over that registry (feature `db`)
 ├── llm/                   # tool_loop.rs: the one tool-calling loop (iteration cap, loop detection,
-│                          #   interpret, call_<request>_<n> ids); anthropic.rs, openai.rs, ollama.rs
+│                          #   MAX_CALLS_PER_ROUND 16, MAX_ROUNDS_PER_TOOL 3, interpret,
+│                          #   call_<request>_<n> ids); stream.rs: the UTF-8 line buffer and stream errors
+│                          #   the provider stream parsers share; anthropic.rs, openai.rs, ollama.rs
 │                          #   implement only message conversion and transport; tools.rs holds the
 │                          #   *curated* LLM-facing tool subset, context.rs/tokens.rs manage the budget;
 │                          #   egress.rs: host allowlist, resolve-check-pin resolver, no redirects
@@ -1030,7 +1031,7 @@ Changing any of these silently changes or breaks a paper exhibit; check the pape
 | HTTP API contract in `API_ENDPOINTS.md` (`/api/sessions`, `/api/tools/load_dataset`, `/api/llm/chat/stream`, `/health`) | `run_evaluation.py` (backend URL from `P2A_BASE_URL`, default `localhost:8081`, the Dioxus dev-proxy port used for the paper runs) | Endpoint or SSE event changes break the eval harness |
 | `p2a` **text output format** for `data describe`, `data head`, `reg ols` (text and `-F json`), `panel fe`, `panel re`, `panel hausman`, `panel hdfe`, diagnostics | No paper exhibit includes `p2a` text output any more: the CLI captures moved to the paper repo's untracked `paper/archive/` (paper commit `0b849be`) and no section includes them. The golden copies (`crates/p2a-cli/tests/golden/cli_*.txt`) still pin the output | An output change fails the exhibit tests (`p2a-cli::exhibits::test_validate_cli_*`); update the goldens with `P2A_UPDATE_GOLDEN=1` only after their R checks pass |
 | `validation/datasets/` (Grunfeld etc.) | `paper/code/rust_validation/scripts/run_validation.sh` (copies `grunfeld.csv` and `longley.csv`), `paper/code/validate_examples.sh`, several R benchmark DGPs | Moving a dataset breaks `make rust-validation` |
-| The LLM system prompt and dataset-context format (`llm/context.rs`, `llm/tools.rs`) | e2e evaluation accuracy (`run_evaluation.py` results) | Tier 0 bounded and delimited the dataset block (JSON-quoted names and values, byte and column caps), so re-running the evaluation against a newer `SOFTWARE_VERSION` can shift the accuracy numbers. Tool names and SSE events are unchanged |
+| The LLM system prompt and dataset-context format (`llm/context.rs`, `llm/tools.rs`) | e2e evaluation accuracy (`run_evaluation.py` results) | Tier 0 bounded and delimited the dataset block (JSON-quoted names and values, byte and column caps); Tier 4 dropped the tool listing from the system prompt, reports "% missing" (null or NaN) in the dataset block, sends tool errors to the model as errors and adds `status` to the SSE `tool_end` event and `code` to `error`. Re-running the evaluation against a newer `SOFTWARE_VERSION` can shift the accuracy numbers. Tool names are unchanged |
 | `validation/expected/*.json`, `validation/methods/*.json` | the paper's validation claims (supplementary appendix "numerical validation", introduction footnote, discussion) | A changed reference value or registry entry changes what the paper may claim as R-pinned |
 | Counts and claims stated as prose in `paper/sections/*.tex`: "over 200 methods", test-function and validation-test counts, ~62% line coverage, version, Rust version, and the description of what CI runs | none (hand-written) | They drift silently; re-derive them when re-pinning `SOFTWARE_VERSION`, and re-derive validation counts from the generated `validation/VALIDATION_STATUS.md` |
 
@@ -1101,7 +1102,7 @@ Auto-discovered guidance:
   steps: `docs_examples` (p2a-cli) runs every documented `p2a` command and checks the generated CLI reference;
   `tool_examples_doc` (p2a-mcp) checks every MCP tool example, the README tool table, the tools reference and
   the tool counts. Regenerate with `P2A_UPDATE_DOCS=1` (`docs/guides/TESTING.md`).
-- **Doctests are gated** and, as of Nov 2026, p2a-core runs 111 passed / 0 failed / 181 ignored (p2a-mcp 2 / 0 / 2). A doc example
+- **Doctests are gated** and, as of Nov 2026, p2a-core runs 114 passed / 0 failed / 181 ignored (p2a-mcp 2 / 0 / 2). A doc example
   that stops compiling is a build failure, so keep `use p2a_core::...` paths in doc comments pointing at
   what `mod.rs` actually re-exports. The 181 examples fenced as ignore are NOT compiled and can still rot silently.
 - **p2a-mcp integration tests** are one file per topic in `crates/p2a-mcp/tests/` (`governor.rs`,
@@ -1209,7 +1210,7 @@ let df = df! {
 3. **Serde serialization**: Use `#[serde(skip)]` for large internal matrices in result structs
 4. **Visualization**: Two types:
    - Static (plotters): `histogram()`, `scatter_plot()` - returns base64 PNG
-   - Interactive (plotlars/Plotly): `scatter_interactive()` - returns HTML
+   - Interactive (own Plotly JSON; plotly.js loads from its CDN when the page is opened): `scatter_interactive()` - returns HTML
 5. **Export formats**: Four export types available via `export/` module:
    - LaTeX tables (publication-ready, OLS/Panel/Discrete)
    - Markdown tables (documentation, GitHub)
@@ -1220,6 +1221,7 @@ let df = df! {
 9. **Native Dioxus builds embed the backend**: `desktop`/`mobile` features depend on `p2a-mcp` and start an in-process server (`start_embedded_server` in `p2a-dioxus/src/main.rs`); the web build talks to `P2A_BACKEND_URL` baked in at build time. A change to `p2a-mcp`'s public API can break the desktop build even when the web build passes.
 7. **Disk space**: The `target/` directory can grow large. Use `cargo clean` to reclaim space.
 10. **Deployment mode and resource profile are decided only in `config.rs`** (`DeploymentMode`, `ResourceProfile`). Local, stdio, desktop and the paper's evaluation runs are `Off`: no caps, no deadline, no per-session directories. `P2A_LIMITS=hosted` turns the server layer on anywhere, and open public mode always has it. Never key behaviour to the bind address.
+11. **Server log filter**: `p2a-mcp` reads `RUST_LOG`, default `p2a_mcp=info,p2a_core=warn` (core warnings reach the server log); the embedded desktop server's default is `p2a_mcp=info,p2a_core=info`.
 
 ## Key Files
 
