@@ -2,19 +2,25 @@
 
 use super::types::ExportFormat;
 
-/// Trigger a file download with the given content
+/// Trigger a file download with the given content.
 ///
-/// On web: Creates a Blob URL and triggers an anchor click
-/// On desktop: Opens a save file dialog
-pub fn trigger_download(content: &str, filename: &str, format: ExportFormat) -> Result<(), String> {
+/// On web: creates a Blob URL and clicks an anchor; the browser saves the
+/// file (`Ok(None)`). On desktop: writes the file into the downloads folder
+/// (the home folder if there is none) under a name not yet taken, and
+/// returns its full path (`Ok(Some(path))`); there is no save dialog.
+pub fn trigger_download(
+    content: &str,
+    filename: &str,
+    format: ExportFormat,
+) -> Result<Option<String>, String> {
     #[cfg(target_arch = "wasm32")]
     {
-        trigger_download_web(content, filename, format)
+        trigger_download_web(content, filename, format).map(|()| None)
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     {
-        trigger_download_native(content, filename, format)
+        trigger_download_native(content, filename, format).map(Some)
     }
 }
 
@@ -104,107 +110,147 @@ fn copy_to_clipboard_web(content: &str) -> Result<(), String> {
 // Native (Desktop) implementation
 // ============================================================================
 
+/// Where a desktop export of `filename` is written: in the downloads folder,
+/// else the home folder (never the working directory), under the file name
+/// alone (directory parts are dropped); a name `exists` reports as taken
+/// gets ` (2)`, ` (3)`, ... before its extension.
+#[cfg(not(target_arch = "wasm32"))]
+fn export_target(
+    download_dir: Option<std::path::PathBuf>,
+    home_dir: Option<std::path::PathBuf>,
+    filename: &str,
+    exists: impl Fn(&std::path::Path) -> bool,
+) -> Result<std::path::PathBuf, String> {
+    use std::path::Path;
+    let dir = download_dir
+        .or(home_dir)
+        .ok_or_else(|| "Cannot export: no downloads or home folder was found".to_string())?;
+    let name = Path::new(filename)
+        .file_name()
+        .ok_or_else(|| "Invalid filename: no file component found".to_string())?;
+    let first = dir.join(name);
+    if !exists(&first) {
+        return Ok(first);
+    }
+    let name = Path::new(name);
+    let stem = name
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let ext = name
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+    (2..1000)
+        .map(|n| dir.join(format!("{stem} ({n}){ext}")))
+        .find(|p| !exists(p))
+        .ok_or_else(|| {
+            format!(
+                "Cannot export: too many files named {stem}{ext} in {}",
+                dir.display()
+            )
+        })
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn trigger_download_native(
     content: &str,
     filename: &str,
     _format: ExportFormat,
-) -> Result<(), String> {
-    // For native, we just write to the current directory
-    // A full implementation would use rfd for file dialogs
-    // Strip directory components to prevent path traversal attacks
-    let safe_name = std::path::Path::new(filename)
-        .file_name()
-        .ok_or_else(|| "Invalid filename: no file component found".to_string())?;
-    let path = std::path::Path::new(safe_name);
-    std::fs::write(path, content).map_err(|e| format!("Failed to write file: {}", e))?;
+) -> Result<String, String> {
+    use std::io::Write;
+
+    #[cfg(any(feature = "desktop", feature = "mobile"))]
+    let (downloads, home) = (dirs::download_dir(), dirs::home_dir());
+    #[cfg(not(any(feature = "desktop", feature = "mobile")))]
+    let (downloads, home) = (None, None);
+
+    let path = export_target(downloads, home, filename, |p| p.exists())?;
+    // create_new: a file that appeared since the check is not overwritten.
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
+    file.write_all(content.as_bytes())
+        .map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
     tracing::info!("Exported to: {}", path.display());
+    Ok(path.display().to_string())
+}
+
+/// Run `program` with `args`, write `content` to its standard input and
+/// close it, and wait: a tool that cannot start or exits with a failure
+/// status is an error naming the tool and the status. Its output is
+/// discarded (a clipboard tool that stays in the background to serve the
+/// selection must not hold a pipe the caller reads).
+#[cfg(not(target_arch = "wasm32"))]
+fn pipe_to(program: &str, args: &[&str], content: &str) -> Result<(), String> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new(program)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("{program}: {e}"))?;
+    // Taken and dropped here, so the tool sees the end of its input.
+    let written = child
+        .stdin
+        .take()
+        .map(|mut stdin| stdin.write_all(content.as_bytes()));
+    let status = child.wait().map_err(|e| format!("{program}: {e}"))?;
+    if !status.success() {
+        return Err(format!("{program} failed ({status})"));
+    }
+    if let Some(Err(e)) = written {
+        return Err(format!("{program}: writing failed: {e}"));
+    }
     Ok(())
+}
+
+/// The Linux clipboard tools tried in order: wl-copy under Wayland, then
+/// xclip and xsel.
+#[cfg(all(not(target_arch = "wasm32"), any(target_os = "linux", test)))]
+fn linux_clipboard_tools(wayland: bool) -> Vec<(&'static str, &'static [&'static str])> {
+    let mut tools: Vec<(&'static str, &'static [&'static str])> = Vec::new();
+    if wayland {
+        tools.push(("wl-copy", &[]));
+    }
+    tools.push(("xclip", &["-selection", "clipboard"]));
+    tools.push(("xsel", &["--clipboard", "--input"]));
+    tools
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 fn copy_to_clipboard_native(content: &str) -> Result<(), String> {
-    // For now, just log - a full implementation would use arboard crate
     tracing::info!("Copy to clipboard (native): {} bytes", content.len());
 
-    // Try to use xclip/xsel on Linux, pbcopy on macOS, or clip on Windows
     #[cfg(target_os = "linux")]
     {
-        use std::io::Write;
-        use std::process::{Command, Stdio};
-
-        // Try xclip first, then xsel
-        if let Ok(mut child) = Command::new("xclip")
-            .args(["-selection", "clipboard"])
-            .stdin(Stdio::piped())
-            .spawn()
-        {
-            if let Some(stdin) = child.stdin.as_mut() {
-                let _ = stdin.write_all(content.as_bytes());
+        let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
+        let mut tried = Vec::new();
+        for (program, args) in linux_clipboard_tools(wayland) {
+            match pipe_to(program, args, content) {
+                Ok(()) => return Ok(()),
+                Err(e) => tried.push(e),
             }
-            let _ = child.wait();
-            return Ok(());
         }
-
-        if let Ok(mut child) = Command::new("xsel")
-            .args(["--clipboard", "--input"])
-            .stdin(Stdio::piped())
-            .spawn()
-        {
-            if let Some(stdin) = child.stdin.as_mut() {
-                let _ = stdin.write_all(content.as_bytes());
-            }
-            let _ = child.wait();
-            return Ok(());
-        }
-
-        Err("No clipboard utility found (install xclip or xsel)".to_string())
+        Err(format!(
+            "No clipboard tool worked (install wl-copy, xclip or xsel): {}",
+            tried.join("; ")
+        ))
     }
 
     #[cfg(target_os = "macos")]
     {
-        use std::io::Write;
-        use std::process::{Command, Stdio};
-
-        let mut child = Command::new("pbcopy")
-            .stdin(Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("Failed to run pbcopy: {}", e))?;
-
-        if let Some(stdin) = child.stdin.as_mut() {
-            stdin
-                .write_all(content.as_bytes())
-                .map_err(|e| format!("Failed to write to pbcopy: {}", e))?;
-        }
-
-        child
-            .wait()
-            .map_err(|e| format!("Failed to wait for pbcopy: {}", e))?;
-
-        Ok(())
+        pipe_to("pbcopy", &[], content)
     }
 
     #[cfg(target_os = "windows")]
     {
-        use std::io::Write;
-        use std::process::{Command, Stdio};
-
-        let mut child = Command::new("clip")
-            .stdin(Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("Failed to run clip: {}", e))?;
-
-        if let Some(stdin) = child.stdin.as_mut() {
-            stdin
-                .write_all(content.as_bytes())
-                .map_err(|e| format!("Failed to write to clip: {}", e))?;
-        }
-
-        child
-            .wait()
-            .map_err(|e| format!("Failed to wait for clip: {}", e))?;
-
-        Ok(())
+        pipe_to("clip", &[], content)
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
@@ -242,6 +288,73 @@ fn sanitize_filename(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    use std::path::{Path, PathBuf};
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn export_target_prefers_downloads_then_home() {
+        let d = PathBuf::from("/x/Downloads");
+        let h = PathBuf::from("/x/home");
+        assert_eq!(
+            export_target(Some(d.clone()), Some(h.clone()), "r.html", |_| false),
+            Ok(d.join("r.html"))
+        );
+        assert_eq!(
+            export_target(None, Some(h.clone()), "r.html", |_| false),
+            Ok(h.join("r.html"))
+        );
+        let err = export_target(None, None, "r.html", |_| false).unwrap_err();
+        assert!(err.contains("no downloads or home folder"), "{err}");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn export_target_picks_a_free_name_and_keeps_only_the_file_name() {
+        let d = PathBuf::from("/x/Downloads");
+        let taken = [d.join("r.html"), d.join("r (2).html")];
+        let exists = |p: &Path| taken.iter().any(|t| t == p);
+        assert_eq!(
+            export_target(Some(d.clone()), None, "r.html", exists),
+            Ok(d.join("r (3).html"))
+        );
+        let only_first = |p: &Path| p == d.join("r.html");
+        assert_eq!(
+            export_target(Some(d.clone()), None, "r.html", only_first),
+            Ok(d.join("r (2).html"))
+        );
+        assert_eq!(
+            export_target(Some(d.clone()), None, "../../etc/r.html", |_| false),
+            Ok(d.join("r.html"))
+        );
+    }
+
+    #[cfg(all(unix, not(target_arch = "wasm32")))]
+    #[test]
+    fn pipe_to_reports_the_tools_exit_status() {
+        assert_eq!(pipe_to("cat", &[], "x"), Ok(()));
+        let err = pipe_to("false", &[], "x").unwrap_err();
+        assert!(
+            err.contains("false") && err.contains("exit status"),
+            "{err}"
+        );
+        let err = pipe_to("p2a-no-such-clipboard-tool", &[], "x").unwrap_err();
+        assert!(err.contains("p2a-no-such-clipboard-tool"), "{err}");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn linux_clipboard_tools_in_order() {
+        let names = |w| {
+            linux_clipboard_tools(w)
+                .iter()
+                .map(|(p, _)| *p)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(true), ["wl-copy", "xclip", "xsel"]);
+        assert_eq!(names(false), ["xclip", "xsel"]);
+    }
 
     #[test]
     fn test_generate_filename() {

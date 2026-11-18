@@ -68,8 +68,12 @@ pub fn ExportMenu() -> Element {
                 let filename =
                     generate_filename(conversation.as_ref().map(|c| c.title.as_str()), format);
                 match trigger_download(&content, &filename, format) {
-                    Ok(()) => {
-                        status_message.set(Some(format!("Exported to {}", filename)));
+                    Ok(saved_to) => {
+                        status_message.set(Some(match saved_to {
+                            // Desktop: the full path of the written file
+                            Some(path) => format!("Saved to {path}"),
+                            None => format!("Downloaded {filename}"),
+                        }));
                         // Clear status after 3 seconds
                         spawn(async move {
                             #[cfg(target_arch = "wasm32")]
@@ -140,6 +144,9 @@ pub fn ExportMenu() -> Element {
     let handle_close = move |_| {
         is_open.set(false);
     };
+    // Escape closes the open menu.
+    let close_menu = use_callback(move |()| is_open.set(false));
+    crate::app::use_escape_close(*is_open.read(), close_menu);
 
     // Toggle open state
     let handle_toggle = move |_| {
