@@ -126,7 +126,7 @@ Registered only with an access token, or on a local server started with `--expos
 DELETE /api/sessions/{session_id}
 ```
 
-Answers 204. Before the answer, the session leaves the server's session table, so later requests no longer find it (`GET /api/sessions/{id}` and tool calls answer 404, a chat stream ends with "Session not found"), and, with the session database, its stored conversations, messages, tool calls, settings and dataset records are deleted. Its datasets go with the session (their memory is freed once no call still running in it holds them). Its data directory (open public mode) is removed off the request: the deletion queues the removal on the server's blocking thread pool before it answers and does not wait for it, so the directory can still exist for a moment after the 204. Once the removal has started, no call (one still running in the deleted session, say) can create the directory again for that id while the server remembers the id as removed, which it does for the most recent 65,536 removed sessions. An unknown session answers 404.
+Answers 204. Before the answer, the session leaves the server's session table, so later requests no longer find it (`GET /api/sessions/{id}` and tool calls answer 404, a chat stream ends with "Session not found"), and, with the session database, its stored conversations, messages, tool calls, settings and dataset records are deleted. Its datasets go with the session (their memory is freed once no call still running in it holds them). Its data directory (when session directories are on, `P2A_SESSION_DIRS`) is removed off the request: the deletion queues the removal on the server's blocking thread pool before it answers and does not wait for it, so the directory can still exist for a moment after the 204. Once the removal has started, no call (one still running in the deleted session, say) can create the directory again for that id while the server remembers the id as removed, which it does for the most recent 65,536 removed sessions. An unknown session answers 404.
 
 ### List Files
 ```
@@ -156,7 +156,7 @@ The path id is the caller; it must be a live session (404 otherwise), and a `X-P
 POST /api/sessions/{session_id}/datasets/reload
 ```
 
-The reload runs as one governed call (memory admission, the session's slot, the deadline) inside the session's data directory. Each source file is checked before parsing as `load_dataset` checks it: it must fit `load_file_bytes`, and a Parquet file whose decoded dataset would exceed the dataset quotas is refused before it is decoded, with `load_dataset`'s refusal. Each reloaded dataset must also fit the dataset quotas once loaded. A dataset refused by any of these checks is reported in `failed`. A `failed` entry's `error` is the `load_file_bytes` refusal (as in the example below), a dataset-quota refusal, `path is not inside this session's data directory` or `the file could not be loaded` (for a Parquet file the check would not read, followed by the reason); none of them holds a server path. A dataset loaded with `na_strings` is read with them again. Only a dataset loaded with `load_dataset` has a source path to reload; uploaded and inline (`create_dataset`) datasets are reported in `skipped` with the reason `no source path stored`, and datasets a tool made in the session (`source_type` `generated` or `derived`) with `made in the session by a tool, not loaded from a file; run that step again to rebuild it`. A governor refusal answers like a refused tool call (see [Errors](#errors-status-codes-and-retries)).
+The reload runs as one governed call (memory admission, the session's slot, the deadline) inside the session's data directory. Each source file is checked before parsing as `load_dataset` checks it: it must fit `load_file_bytes`, and a Parquet file whose decoded dataset would exceed the dataset quotas is refused before it is decoded, with `load_dataset`'s refusal. Each reloaded dataset must also fit the dataset quotas once loaded. A dataset refused by any of these checks is reported in `failed`. A `failed` entry's `error` is the `load_file_bytes` refusal (as in the example below), a dataset-quota refusal, `path is not inside this session's data directory` or `the file could not be loaded`, the text for any file the loader fails on and for a file whose size cannot be read (followed by `: ` and the reason only for a Parquet file the check will not read, or a check the call's deadline stopped); none of them holds a server path. A dataset loaded with `na_strings` is read with them again. Only a dataset loaded with `load_dataset` has a source path to reload; uploaded and inline (`create_dataset`) datasets are reported in `skipped` with the reason `no source path stored`, and datasets a tool made in the session (`source_type` `generated` or `derived`) with `made in the session by a tool, not loaded from a file; run that step again to rebuild it`. A governor refusal answers like a refused tool call (see [Errors](#errors-status-codes-and-retries)).
 
 **Request:** (empty body)
 ```json
@@ -713,10 +713,10 @@ GET /api/conversations/{conversation_id}/tool-calls
 GET /api/messages/{message_id}/tool-calls
 ```
 
-Both answer a list of the stored tool calls (captured, for a conversation without any):
+Both answer a list of the stored tool calls, oldest first; a conversation without any answers an empty `data` list. Every id is a string, and `arguments` and `result` are JSON text as the tool received and answered it (`result` and `completed_at` are null until the call ends, `error` holds the error text of a failed call):
 
 ```json
-{"success":true,"data":[]}
+{"success":true,"data":[{"id":"9b1f0c2e-…","message_id":"4ea7256f-…","conversation_id":"e104f3c9-…","tool_name":"list_datasets","arguments":"{}","result":"No datasets currently loaded. Use the 'load_dataset' tool to load a data file.","error":null,"status":"success","started_at":"2026-10-22T18:50:11.021Z","completed_at":"2026-10-22T18:50:11.024Z","duration_ms":3}]}
 ```
 
 ### Delete Conversation
@@ -844,7 +844,7 @@ The `governor` object reports the tool calls running (`in_flight`), those past t
 
 The `server_stats` tool leaves out the process RSS, peak RSS and virtual size in the same mode and prints "Process memory: not reported in open public mode" in their place; it still reports the calling session's own datasets.
 
-While every slot is held by work past its deadline, `/health` answers 503 with `"status": "degraded"` and `"healthy": false`. It does the same with `"memory_stuck": true` while the process stays above its memory soft limit with no call running within its deadline, after the server handed its freed heap memory back to the operating system: every tool call is then refused with `memory_pressure`, so no tool call will run to free it; only work detached past its deadline ending, or sessions being deleted or expiring, can bring the process back under the limit. With `P2A_STUCK_EXIT_SECS` set (300 s in the hosted profile), a watchdog checks the health every 5 s, and the process exits (code 70), so the platform can restart it, at the first check that finds either state has lasted that long since the first check that saw it: between `P2A_STUCK_EXIT_SECS` and `P2A_STUCK_EXIT_SECS` plus 10 s after `/health` first reports the state, 300 to 310 s in the hosted profile ([DEPLOYMENT.md](docs/guides/DEPLOYMENT.md#execution-governor), "Health and watchdog").
+While every slot is held by work past its deadline, `/health` answers 503 with `"status": "degraded"` and `"healthy": false`. It does the same with `"memory_stuck": true` while the process stays above its memory soft limit with no call running within its deadline, after the server handed its freed heap memory back to the operating system: every tool call is then refused with `memory_pressure`, so no tool call will run to free it; only work detached past its deadline ending, or sessions being deleted or expiring, can bring the process back under the limit. A watchdog runs with `P2A_STUCK_EXIT_SECS` at 300 s in the hosted profile unless the variable is set (`0` turns it off), and in the other profiles only when it is set. It checks the health every 5 s, and the process exits (code 70) at the first check that finds either state has lasted that long since the first check that saw it, so the platform can restart it: between `P2A_STUCK_EXIT_SECS` and `P2A_STUCK_EXIT_SECS` plus 10 s after the state begins (which `/health` reports from that moment), 300 to 310 s in the hosted profile ([DEPLOYMENT.md](docs/guides/DEPLOYMENT.md#execution-governor), "Health and watchdog").
 
 ---
 
@@ -912,9 +912,9 @@ interface LlmChatRequest {
 type StreamEvent =
   | { type: "status"; message: string }
   | { type: "tool_start"; tool: string; arguments: Record<string, any> }
-  | { type: "tool_end"; tool: string; elapsed_ms: number; result?: string;
+  | { type: "tool_end"; tool: string; elapsed_ms: number; result: string | null;
       status: "success" | "error" }   // "error": the call failed or the tool answered with an error result
-  | { type: "tool_result"; images?: { data: string; mime_type: string }[] }
+  | { type: "tool_result"; tool: string; images: { data: string; mime_type: string }[] }
   | { type: "content"; text: string }
   | { type: "done"; message: Message }
   | { type: "error"; error: string; code?: string };   // code: as the JSON routes give the same refusal
