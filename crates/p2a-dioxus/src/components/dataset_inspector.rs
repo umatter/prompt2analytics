@@ -13,24 +13,29 @@ pub struct DatasetInspectorModalProps {
     pub on_close: EventHandler<()>,
 }
 
+/// A file size in binary units, as the server counts them (powers of 1024): `B`, `KiB` and
+/// `MiB` with one decimal, `GiB` with two.
+pub(crate) fn size_label(bytes: i64) -> String {
+    const KIB: f64 = 1024.0;
+    let b = bytes as f64;
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else if b < KIB * KIB {
+        format!("{:.1} KiB", b / KIB)
+    } else if b < KIB * KIB * KIB {
+        format!("{:.1} MiB", b / (KIB * KIB))
+    } else {
+        format!("{:.2} GiB", b / (KIB * KIB * KIB))
+    }
+}
+
 /// Dataset inspector modal - shows detailed dataset information
 #[component]
 pub fn DatasetInspectorModal(props: DatasetInspectorModalProps) -> Element {
     let dataset = &props.dataset;
     let mut copied = use_signal(|| false);
 
-    // Format file size
-    let file_size = dataset.file_size_bytes.map(|bytes| {
-        if bytes < 1024 {
-            format!("{} B", bytes)
-        } else if bytes < 1024 * 1024 {
-            format!("{:.1} KB", bytes as f64 / 1024.0)
-        } else if bytes < 1024 * 1024 * 1024 {
-            format!("{:.2} MB", bytes as f64 / (1024.0 * 1024.0))
-        } else {
-            format!("{:.2} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
-        }
-    });
+    let file_size = dataset.file_size_bytes.map(size_label);
 
     // Handle copy dataset name
     let handle_copy_name = {
@@ -378,5 +383,20 @@ fn StatCard(props: StatCardProps) -> Element {
                 "{props.value}"
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::size_label;
+
+    #[test]
+    fn file_sizes_are_labelled_in_binary_units() {
+        assert_eq!(size_label(512), "512 B");
+        assert_eq!(size_label(1536), "1.5 KiB");
+        assert_eq!(size_label(3 << 19), "1.5 MiB");
+        assert_eq!(size_label(3 << 29), "1.50 GiB");
+        // A negative size from the server is shown as it is, not wrapped.
+        assert_eq!(size_label(-1), "-1 B");
     }
 }

@@ -245,16 +245,9 @@ fn DatasetCard(props: DatasetCardProps) -> Element {
     let dataset = &props.dataset;
     let dataset_for_inspect = props.dataset.clone();
 
-    // Format file size
-    let file_size = dataset.file_size_bytes.map(|bytes| {
-        if bytes < 1024 {
-            format!("{} B", bytes)
-        } else if bytes < 1024 * 1024 {
-            format!("{:.1} KB", bytes as f64 / 1024.0)
-        } else {
-            format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
-        }
-    });
+    let file_size = dataset
+        .file_size_bytes
+        .map(super::dataset_inspector::size_label);
 
     rsx! {
         div { class: "rounded-lg border border-gray-300 dark:border-gray-700 overflow-hidden bg-white dark:bg-gray-800",
