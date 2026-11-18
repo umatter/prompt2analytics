@@ -325,6 +325,7 @@
       ],
       "quantities": [
         "rows dropped",
+        "rows used (fe_nobs, re_nobs)",
         "per-column missing counts"
       ],
       "tolerance": "exact",

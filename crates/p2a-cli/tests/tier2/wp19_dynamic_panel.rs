@@ -376,6 +376,29 @@ fn test_validate_cli_panel_fe_missing_note() {
         );
         let j = s.json(&args);
         assert_eq!(j["missing"]["n_dropped"], 5, "{j}");
+        // the rows used and the missing cells per column, against R's complete cases
+        Check::new(&case)
+            .scalar(
+                &format!("{cmd}_nobs"),
+                number(&j["missing"]["n_used"]),
+                Tol::exact(),
+            )
+            .scalar(
+                "missing_inv",
+                number(&j["missing"]["by_column"]["inv"]),
+                Tol::exact(),
+            )
+            .scalar(
+                "missing_value",
+                number(&j["missing"]["by_column"]["value"]),
+                Tol::exact(),
+            )
+            .scalar(
+                "missing_firm_name",
+                number(&j["missing"]["by_column"]["firm_name"]),
+                Tol::exact(),
+            )
+            .finish();
         let ws: Vec<&str> = j["warnings"]
             .as_array()
             .map(|a| a.iter().filter_map(|w| w.as_str()).collect())
