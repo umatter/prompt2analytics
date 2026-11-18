@@ -735,22 +735,20 @@ pub(super) fn filled_text(s: &Series, forward: bool) -> Result<u64, String> {
         Ok(())
     };
     // Each chunk's validity bitmap, read once per chunk: no value slice is
-    // resolved and no call per row goes through `dyn Array`.
+    // resolved and no call per row goes through `dyn Array`. `downcast_iter`
+    // yields one view array per chunk, in the chunks' order, so the two zip
+    // pair by pair and every row is visited.
     let chunks = ca.chunks();
     if forward {
-        for (k, chunk) in chunks.iter().enumerate() {
-            let (Some(arr), validity) = (ca.downcast_get(k), chunk.validity()) else {
-                continue;
-            };
+        for (arr, chunk) in ca.downcast_iter().zip(chunks.iter()) {
+            let validity = chunk.validity();
             for (i, view) in arr.views().iter().enumerate() {
                 visit(view.length, validity.is_none_or(|b| b.get_bit(i)))?;
             }
         }
     } else {
-        for (k, chunk) in chunks.iter().enumerate().rev() {
-            let (Some(arr), validity) = (ca.downcast_get(k), chunk.validity()) else {
-                continue;
-            };
+        for (arr, chunk) in ca.downcast_iter().rev().zip(chunks.iter().rev()) {
+            let validity = chunk.validity();
             for (i, view) in arr.views().iter().enumerate().rev() {
                 visit(view.length, validity.is_none_or(|b| b.get_bit(i)))?;
             }
@@ -1481,7 +1479,8 @@ mod tests {
     }
 
     /// Median of 31 interleaved timings of `old` and `new` after 3 warm-ups, each sample
-    /// `reps` calls; returns (old ns per call, new ns per call).
+    /// `reps` calls; returns (old ns per call, new ns per call). The same helper is in
+    /// p2a-core's `stats::spectrum` tests.
     fn interleaved_medians(
         reps: usize,
         mut old: impl FnMut(),
@@ -1549,10 +1548,12 @@ mod tests {
     /// The text-fill count against the count before it, both directions, at 100, 1,000 and
     /// 10,000 rows of a String column with a fifth of its rows null and values of 3 to 40
     /// bytes (inline and buffered views). Times only; run with
-    /// `taskset -c 2 cargo test --release ... -- --ignored --nocapture benchmark_wp37`.
+    /// `cargo test --release --offline -p p2a-mcp --lib --no-run --no-default-features --features "http,llm,auth,websocket"`, then
+    /// `taskset -c 2 <test binary> --ignored --nocapture --test-threads 1 benchmark_fill_text_validity_bitmap`
+    /// (pinning the run, not the build, to one core).
     #[test]
     #[ignore = "benchmark; run with --release -- --ignored --nocapture"]
-    fn benchmark_wp37_fill_text_bound() {
+    fn benchmark_fill_text_validity_bitmap() {
         println!("filled_text: rows | direction | before ns | after ns | after/before");
         for n in [100usize, 1_000, 10_000] {
             let values: Vec<Option<String>> = (0..n)
