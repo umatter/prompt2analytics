@@ -937,16 +937,16 @@ mod memory_limit_tests {
         m.set_memory_limit(1);
         assert_eq!(m.memory_warning(), None);
         let bytes = estimate_dataset_memory(&two_float_columns(70_000));
-        assert_eq!(bytes, 1_232_000); // 70,000 x 2 x 8 bytes + 10 %
+        assert_eq!(bytes, 1_120_000); // 70,000 x 2 x 8 bytes
         m.count_bytes("a".into(), bytes);
         assert_eq!(
             m.memory_warning().as_deref(),
-            Some("estimated dataset memory 1.17 MB exceeds the limit of 1.00 MB (--max-memory 1)")
+            Some("estimated dataset memory 1.07 MB exceeds the limit of 1.00 MB (--max-memory 1)")
         );
         m.count_bytes("a".into(), bytes); // replaced, not added
-        assert_eq!(m.memory.borrow().tracker.current_usage(), 1_232_000);
+        assert_eq!(m.memory.borrow().tracker.current_usage(), 1_120_000);
         m.count_bytes("b".into(), bytes);
-        assert_eq!(m.memory.borrow().tracker.current_usage(), 2_464_000);
+        assert_eq!(m.memory.borrow().tracker.current_usage(), 2_240_000);
         assert_eq!(
             m.memory_warning(),
             None,

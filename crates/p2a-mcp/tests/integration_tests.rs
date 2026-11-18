@@ -602,7 +602,7 @@ mod dispatch {
         );
         assert_row(
             "xn nulls",
-            after(section(&t, "## xn"), "Null:"),
+            after(section(&t, "## xn"), "Missing (null or NaN):"),
             &[case.scalar("xn_missing")],
             Tol::exact(),
         );

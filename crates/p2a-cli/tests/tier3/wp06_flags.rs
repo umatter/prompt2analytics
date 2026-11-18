@@ -498,7 +498,7 @@ fn test_cli_max_memory_warns_once() {
     let csv = s.dir().join("big.csv");
     let mut body = String::from("x,y\n");
     for i in 0..70_000 {
-        // two Float64 columns: 1,232,000 estimated bytes
+        // two Float64 columns: 1,120,000 estimated bytes
         body.push_str(&format!("{i}.5,{}.25\n", 2 * i));
     }
     std::fs::write(&csv, body).unwrap();
@@ -510,16 +510,16 @@ fn test_cli_max_memory_warns_once() {
     };
     assert_eq!(
         memory_warnings(&s.run(&["--max-memory", "1", "data", "load", csv, "--name", "big"])),
-        [line("1.17 MB")]
+        [line("1.07 MB")]
     );
     // the reloaded dataset already exceeds the limit; storing a second one does not warn again
     assert_eq!(
         memory_warnings(&s.run(&["--max-memory", "1", "data", "load", csv, "--name", "big2"])),
-        [line("1.17 MB")]
+        [line("1.07 MB")]
     );
     assert_eq!(
         memory_warnings(&s.run(&["--max-memory", "1", "data", "list"])),
-        [line("2.35 MB")]
+        [line("2.14 MB")]
     );
     assert!(
         memory_warnings(&s.run(&["data", "list"])).is_empty(),

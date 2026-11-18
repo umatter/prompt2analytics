@@ -693,6 +693,19 @@ async fn the_llm_routes_give_every_refusal_a_code() {
     )
     .await;
     assert_eq!(stream_error(&events).1, "not_found");
+    // the non-streaming route's start-of-request lookup answers with the session routes' code
+    let (status, body) = post_json(
+        &app,
+        "/api/llm/chat",
+        json!({"session_id": "no-such-session", "message": "go",
+               "provider": provider_json(ProviderType::Ollama, addr)}),
+    )
+    .await;
+    assert_eq!(
+        (status.as_u16(), body["code"].as_str()),
+        (404, Some("not_found")),
+        "{body}"
+    );
 }
 
 // ---------- tool errors ----------
