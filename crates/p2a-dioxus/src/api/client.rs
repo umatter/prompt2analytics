@@ -61,16 +61,66 @@ fn header_pairs(headers: &HashMap<String, String>) -> Vec<(&str, &str)> {
         .collect()
 }
 
-/// Default API base URL.
+/// Compiled-in API base URL.
 ///
 /// Resolved at *compile time*: a hosted web build bakes in the public backend
 /// URL via the `P2A_BACKEND_URL` env var (set by the Pages deploy workflow);
-/// every other build (local dev, desktop) leaves it unset and falls back to the
-/// localhost backend documented in CLAUDE.md, so behavior is unchanged.
+/// a local web build leaves it unset and talks to the localhost backend
+/// documented in CLAUDE.md. The desktop and mobile apps do not use it: `main`
+/// sets [`set_backend_base_url`] to the URL of the embedded server it started.
 const DEFAULT_BASE_URL: &str = match option_env!("P2A_BACKEND_URL") {
     Some(url) => url,
     None => "http://localhost:8080",
 };
+
+/// The backend URL set at startup by the native app (the embedded server's
+/// URL); `None` on web, where [`DEFAULT_BASE_URL`] applies.
+static BASE_URL_OVERRIDE: RwLock<Option<String>> = RwLock::new(None);
+
+/// Why the embedded backend did not start (native only), shown once by the
+/// chat panel.
+static BACKEND_START_ERROR: RwLock<Option<String>> = RwLock::new(None);
+
+/// Set (or clear) the backend URL every [`ApiClient::new`] and [`api`] use.
+/// The native app sets it to `EmbeddedServer::url()` before launching.
+pub fn set_backend_base_url(url: Option<String>) {
+    match BASE_URL_OVERRIDE.write() {
+        Ok(mut current) => *current = url,
+        Err(poisoned) => *poisoned.into_inner() = url,
+    }
+}
+
+fn backend_base_url_override() -> Option<String> {
+    match BASE_URL_OVERRIDE.read() {
+        Ok(current) => current.clone(),
+        Err(poisoned) => poisoned.into_inner().clone(),
+    }
+}
+
+/// The base URL a client uses: the override when it is set and not blank
+/// (without a trailing `/`), else the compiled-in URL.
+pub fn resolve_base_url(override_: Option<&str>, compiled: &str) -> String {
+    match override_.map(str::trim).filter(|u| !u.is_empty()) {
+        Some(url) => url.trim_end_matches('/').to_string(),
+        None => compiled.to_string(),
+    }
+}
+
+/// Record why the embedded backend did not start.
+pub fn set_backend_start_error(reason: String) {
+    match BACKEND_START_ERROR.write() {
+        Ok(mut current) => *current = Some(reason),
+        Err(poisoned) => *poisoned.into_inner() = Some(reason),
+    }
+}
+
+/// Why the embedded backend did not start, if it did not.
+pub fn backend_start_error() -> Option<String> {
+    match BACKEND_START_ERROR.read() {
+        Ok(current) => current.clone(),
+        Err(poisoned) => poisoned.into_inner().clone(),
+    }
+}
 
 /// API client for p2a-mcp backend
 ///
@@ -90,11 +140,12 @@ impl Default for ApiClient {
 }
 
 impl ApiClient {
-    /// Create a new API client with default base URL and the published
-    /// backend access token
+    /// Create a new API client for the backend (the embedded server's URL on
+    /// native, the compiled-in URL on web) with the published backend access
+    /// token
     pub fn new() -> Self {
         Self {
-            base_url: DEFAULT_BASE_URL.to_string(),
+            base_url: resolve_base_url(backend_base_url_override().as_deref(), DEFAULT_BASE_URL),
             access_token: backend_access_token(),
         }
     }
@@ -830,6 +881,32 @@ mod tests {
         set_current_session_id(None);
         assert!(session_headers(None).is_empty());
         assert_eq!(session_headers(Some("xyz")).len(), 1);
+    }
+
+    #[test]
+    fn resolve_base_url_prefers_the_override() {
+        let compiled = "http://localhost:8080";
+        assert_eq!(
+            resolve_base_url(Some("http://127.0.0.1:43123/"), compiled),
+            "http://127.0.0.1:43123"
+        );
+        assert_eq!(resolve_base_url(None, compiled), compiled);
+        assert_eq!(resolve_base_url(Some("  "), compiled), compiled);
+    }
+
+    /// The desktop app's client and its chat stream go to the URL the embedded server reports
+    /// (`EmbeddedServer::url()` is `http://{host}:{port}`). The only host test that sets the
+    /// override.
+    #[test]
+    fn client_and_stream_use_the_embedded_url() {
+        let embedded = format!("http://{}:{}", "127.0.0.1", 43123);
+        set_backend_base_url(Some(embedded.clone()));
+        let client_url = ApiClient::new().base_url().to_string();
+        let stream_url = api().streaming_url("/api/llm/chat/stream");
+        set_backend_base_url(None);
+        assert_eq!(client_url, embedded);
+        assert_eq!(stream_url, format!("{embedded}/api/llm/chat/stream"));
+        assert_eq!(ApiClient::new().base_url(), DEFAULT_BASE_URL);
     }
 
     #[test]

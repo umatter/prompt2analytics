@@ -42,14 +42,20 @@ fn init_logging() {
     }
 }
 
-/// Start the embedded backend server on native platforms
-/// Returns the server handle which must be kept alive for the duration of the app
+/// Start the embedded backend server on native platforms.
+///
+/// Returns the server handle, which must be kept alive for the duration of
+/// the app, or the reason the server did not start. The server binds a free
+/// loopback port (port 0), so a second instance of the app or a dev server on
+/// 8080/8081 never collides with it; the caller passes `server.url()` to the
+/// API client.
 #[cfg(any(feature = "desktop", feature = "mobile"))]
-fn start_embedded_backend() -> Option<p2a_mcp::EmbeddedServer> {
+fn start_embedded_backend() -> Result<p2a_mcp::EmbeddedServer, String> {
     use p2a_mcp::EmbeddedServerConfig;
 
     // Create a tokio runtime for the embedded server
-    let rt = tokio::runtime::Runtime::new().ok()?;
+    let rt = tokio::runtime::Runtime::new()
+        .map_err(|e| format!("cannot create the async runtime: {e}"))?;
 
     // Determine the database path (use user data directory)
     let db_path = dirs::data_dir()
@@ -62,10 +68,9 @@ fn start_embedded_backend() -> Option<p2a_mcp::EmbeddedServer> {
         tracing::warn!("Could not determine user data directory, using in-memory database");
     }
 
-    // Configure the embedded server
-    // Use port 8081 to avoid conflict with dx serve dev server on 8080
+    // Configure the embedded server: a free loopback port chosen by the OS.
     let mut config = EmbeddedServerConfig::default()
-        .with_port(8081)
+        .with_port(0)
         .with_host("127.0.0.1");
 
     // Set database path if available
@@ -73,25 +78,17 @@ fn start_embedded_backend() -> Option<p2a_mcp::EmbeddedServer> {
         config = config.with_db_path(path);
     }
 
-    // Start the server
-    let server = rt.block_on(async {
-        match p2a_mcp::start_embedded_server(config).await {
-            Ok(server) => {
-                tracing::info!("Embedded backend started at {}", server.url());
-                Some(server)
-            }
-            Err(e) => {
-                tracing::error!("Failed to start embedded backend: {}", e);
-                None
-            }
-        }
-    })?;
+    // Start the server; it binds before it returns, so a bind error is an Err.
+    let server = rt
+        .block_on(p2a_mcp::start_embedded_server(config))
+        .map_err(|e| e.to_string())?;
+    tracing::info!("Embedded backend started at {}", server.url());
 
     // Keep the runtime alive by leaking it (it will live for the app lifetime)
     // This is intentional - we need the runtime to stay alive for the server
     std::mem::forget(rt);
 
-    Some(server)
+    Ok(server)
 }
 
 fn main() {
@@ -128,11 +125,18 @@ fn main() {
     #[cfg(any(feature = "desktop", feature = "mobile"))]
     let _server = {
         tracing::info!("Starting embedded p2a-mcp backend...");
-        let server = start_embedded_backend();
-        if server.is_none() {
-            tracing::warn!("Embedded backend failed to start. App may not function correctly.");
+        match start_embedded_backend() {
+            Ok(server) => {
+                // Every API client and the chat stream talk to this server.
+                api::set_backend_base_url(Some(server.url()));
+                Some(server)
+            }
+            Err(e) => {
+                tracing::error!("Embedded backend failed to start: {}", e);
+                api::set_backend_start_error(e);
+                None
+            }
         }
-        server
     };
 
     // Launch the Dioxus app with platform-specific configuration

@@ -38,6 +38,16 @@ pub fn ChatPanel() -> Element {
         }
     });
 
+    // Native: a backend that did not start is reported once, in the error banner
+    // (the effect reads no signal, so it runs once, after mount).
+    use_effect(move || {
+        if let Some(reason) = crate::api::backend_start_error() {
+            chat_state.write().set_error(Some(format!(
+                "The built-in backend did not start: {reason}"
+            )));
+        }
+    });
+
     // Track which conversation we've synced from and how many messages we've synced
     let mut synced_conv_id = use_signal(|| Option::<String>::None);
     let mut synced_messages_len = use_signal(|| 0usize);
@@ -333,8 +343,8 @@ pub fn ChatPanel() -> Element {
             // Clone conversation_id for the closure
             let conv_id_for_done = conversation_id.clone();
 
-            // Read backend URL from the API client so it stays in sync with
-            // `DEFAULT_BASE_URL` in `api/client.rs`.
+            // Read the backend URL from the API client: the embedded server's
+            // URL on native, the compiled-in one on web.
             let backend_url = api().base_url().to_string();
 
             // Stream the response
