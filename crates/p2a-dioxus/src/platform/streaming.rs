@@ -85,15 +85,22 @@ pub struct StreamOutcome {
     pub done: bool,
 }
 
+/// The shared state of a stop handle and its signal.
+struct StopInner {
+    fired: std::cell::Cell<bool>,
+    tx: std::cell::RefCell<Option<oneshot::Sender<()>>>,
+}
+
 /// The handle that stops a stream (the Stop button holds it). Cloning
 /// shares it; dropping every clone does not stop the stream.
 #[derive(Clone)]
-pub struct StreamStop(std::rc::Rc<std::cell::RefCell<Option<oneshot::Sender<()>>>>);
+pub struct StreamStop(std::rc::Rc<StopInner>);
 
 impl StreamStop {
     /// Stop the stream (once; later calls do nothing).
     pub fn stop(&self) {
-        if let Some(tx) = self.0.borrow_mut().take() {
+        self.0.fired.set(true);
+        if let Some(tx) = self.0.tx.borrow_mut().take() {
             let _ = tx.send(());
         }
     }
@@ -107,36 +114,55 @@ impl PartialEq for StreamStop {
 
 /// The stream's side of a [`StreamStop`].
 #[derive(Clone)]
-pub struct StopSignal(Shared<oneshot::Receiver<()>>);
+pub struct StopSignal {
+    inner: std::rc::Rc<StopInner>,
+    rx: Shared<oneshot::Receiver<()>>,
+}
 
 impl StopSignal {
     /// Resolves when the stop is fired; never when the handle is dropped.
     pub async fn fired(&self) {
-        if self.0.clone().await.is_err() {
+        if self.rx.clone().await.is_err() {
             futures::future::pending::<()>().await;
         }
     }
 
-    /// Whether the stop has been fired already.
+    /// Whether the stop has been fired already (no polling needed).
     pub fn is_fired(&self) -> bool {
-        matches!(self.0.peek(), Some(Ok(())))
+        self.inner.fired.get()
     }
 }
 
 /// A connected stop handle and signal.
 pub fn stop_pair() -> (StreamStop, StopSignal) {
     let (tx, rx) = oneshot::channel();
+    let inner = std::rc::Rc::new(StopInner {
+        fired: std::cell::Cell::new(false),
+        tx: std::cell::RefCell::new(Some(tx)),
+    });
     (
-        StreamStop(std::rc::Rc::new(std::cell::RefCell::new(Some(tx)))),
-        StopSignal(rx.shared()),
+        StreamStop(inner.clone()),
+        StopSignal {
+            inner,
+            rx: rx.shared(),
+        },
     )
 }
 
+/// One step of [`read_events`].
+enum ReadStep {
+    Chunk(Option<Result<Vec<u8>, StreamError>>),
+    Stopped,
+    Idle,
+}
+
 /// Read SSE events from `bytes` and pass each to `on_event`, until the
-/// stream ends, `stop` fires (`Stopped`) or a timer from `next_timer`,
-/// armed again before every read, runs out first (`Idle`). A line is
-/// decoded only once complete, so a UTF-8 character split across chunks
-/// stays intact.
+/// stream ends, `stop` fires (`Stopped`) or the stream waits longer than a
+/// timer from `next_timer` (`Idle`). A timer is armed for each wait for
+/// data, so a stream that delivers without waiting costs no timer and no
+/// stop poll; the stop is then seen after each chunk. A line is decoded
+/// only once complete, so a UTF-8 character split across chunks stays
+/// intact.
 pub async fn read_events<S, T, TF>(
     mut bytes: S,
     stop: StopSignal,
@@ -148,6 +174,8 @@ where
     TF: FnMut() -> T,
     T: Future<Output = ()>,
 {
+    use std::task::Poll;
+
     let mut outcome = StreamOutcome::default();
     let mut deliver = |event: StreamEvent, outcome: &mut StreamOutcome| {
         if matches!(event, StreamEvent::Done { .. } | StreamEvent::Error { .. }) {
@@ -159,14 +187,29 @@ where
     futures::pin_mut!(stopped);
     let mut buffer: Vec<u8> = Vec::new();
     loop {
-        let timer = next_timer();
-        futures::pin_mut!(timer);
-        let read = select(bytes.next(), timer);
-        match select(stopped.as_mut(), read).await {
-            Either::Left(_) => return Err(StreamError::stopped()),
-            Either::Right((Either::Right(_), _)) => return Err(StreamError::idle()),
-            Either::Right((Either::Left((None, _)), _)) => break,
-            Either::Right((Either::Left((Some(chunk), _)), _)) => {
+        if stop.is_fired() {
+            return Err(StreamError::stopped());
+        }
+        let mut timer: Option<std::pin::Pin<Box<T>>> = None;
+        let step = futures::future::poll_fn(|cx| {
+            if let Poll::Ready(item) = bytes.poll_next_unpin(cx) {
+                return Poll::Ready(ReadStep::Chunk(item));
+            }
+            if stopped.as_mut().poll(cx).is_ready() {
+                return Poll::Ready(ReadStep::Stopped);
+            }
+            let timer = timer.get_or_insert_with(|| Box::pin(next_timer()));
+            if timer.as_mut().poll(cx).is_ready() {
+                return Poll::Ready(ReadStep::Idle);
+            }
+            Poll::Pending
+        })
+        .await;
+        match step {
+            ReadStep::Stopped => return Err(StreamError::stopped()),
+            ReadStep::Idle => return Err(StreamError::idle()),
+            ReadStep::Chunk(None) => break,
+            ReadStep::Chunk(Some(chunk)) => {
                 let chunk = chunk?;
                 drain_complete_lines(&mut buffer, &chunk, |line| {
                     if let Some(event) = parse_sse_line(&line) {
@@ -520,7 +563,7 @@ pub mod native {
                 .map_err(|e| StreamError::failed(format!("Read error: {}", e)))
         });
         futures::pin_mut!(chunks);
-        read_events(chunks, stop, || Box::pin(idle_timer()), on_event).await
+        read_events(chunks, stop, idle_timer, on_event).await
     }
 }
 
@@ -708,8 +751,36 @@ mod read_loop_tests {
             err.to_string().contains("No data from the server for 90 s"),
             "{err}"
         );
+    }
 
-        // A stream that delivers before its timer re-arms it per chunk.
+    #[test]
+    fn a_stop_before_the_stream_starts_is_seen() {
+        let (stop, signal) = stop_pair();
+        assert!(!signal.is_fired());
+        stop.stop();
+        assert!(signal.is_fired());
+    }
+
+    /// A stream that waits (returns Pending once) before each chunk and
+    /// before its end.
+    fn waiting_stream(
+        items: Vec<Result<Vec<u8>, StreamError>>,
+    ) -> impl Stream<Item = Result<Vec<u8>, StreamError>> + Unpin {
+        let mut items = items.into_iter();
+        let mut waited = false;
+        futures::stream::poll_fn(move |cx| {
+            if !waited {
+                waited = true;
+                cx.waker().wake_by_ref();
+                return std::task::Poll::Pending;
+            }
+            waited = false;
+            std::task::Poll::Ready(items.next())
+        })
+    }
+
+    #[test]
+    fn the_idle_timer_is_armed_for_every_wait() {
         let armed = Rc::new(Cell::new(0));
         let counter = armed.clone();
         let input = chunks(&[
@@ -720,7 +791,7 @@ mod read_loop_tests {
         let (_stop, signal) = stop_pair();
         let mut n = 0;
         futures::executor::block_on(read_events(
-            stream::iter(input),
+            waiting_stream(input),
             signal,
             move || {
                 counter.set(counter.get() + 1);
@@ -730,8 +801,32 @@ mod read_loop_tests {
         ))
         .expect("ends normally");
         assert_eq!(n, 3);
-        // One timer per read: three chunks and the end of the stream.
+        // One timer per wait: three chunks and the end of the stream.
         assert_eq!(armed.get(), 4);
+    }
+
+    #[test]
+    fn a_stop_during_a_flowing_stream_ends_it() {
+        // Data never waits, so only the check after each chunk sees the stop.
+        let input = stream::iter(std::iter::repeat_with(|| {
+            Ok(b"data: {\"type\":\"content\",\"text\":\"a\"}\n".to_vec())
+        }));
+        let (stop, signal) = stop_pair();
+        let mut n = 0;
+        let err = futures::executor::block_on(read_events(
+            input,
+            signal,
+            futures::future::pending::<()>,
+            |_| {
+                n += 1;
+                if n == 3 {
+                    stop.stop();
+                }
+            },
+        ))
+        .expect_err("stopped");
+        assert_eq!(err.kind(), StreamErrorKind::Stopped);
+        assert_eq!(n, 3);
     }
 
     #[test]
@@ -748,5 +843,119 @@ mod read_loop_tests {
         ))
         .expect("ends normally");
         assert_eq!(n, 1);
+    }
+}
+
+/// Rule-5 timing of the read loop against a verbatim copy of the base loop
+/// (base: `while let Some(chunk) = stream.next().await`, drain each chunk).
+#[cfg(test)]
+mod timing {
+    use super::*;
+    use futures::stream;
+    use std::time::Instant;
+
+    async fn base_loop<S>(
+        mut s: S,
+        mut on_event: impl FnMut(StreamEvent),
+    ) -> Result<(), StreamError>
+    where
+        S: Stream<Item = Result<Vec<u8>, StreamError>> + Unpin,
+    {
+        let mut buffer: Vec<u8> = Vec::new();
+        while let Some(chunk_result) = s.next().await {
+            let bytes = chunk_result?;
+            drain_complete_lines(&mut buffer, &bytes, |line| {
+                if let Some(event) = parse_sse_line(&line) {
+                    on_event(event);
+                }
+            });
+        }
+        if let Some(line) = decode_trailing(&buffer)
+            && let Some(event) = parse_sse_line(&line)
+        {
+            on_event(event);
+        }
+        Ok(())
+    }
+
+    fn content_chunks(events: usize) -> Vec<Vec<u8>> {
+        // 40-byte content events, five per chunk.
+        let line = b"data: {\"type\":\"content\",\"text\":\"abcde\"}\n";
+        assert_eq!(line.len(), 40);
+        (0..events.div_ceil(5))
+            .map(|i| {
+                let n = (events - i * 5).min(5);
+                line.repeat(n)
+            })
+            .collect()
+    }
+
+    fn done_chunks(bytes: usize) -> Vec<Vec<u8>> {
+        let prefix = "data: {\"type\":\"done\",\"message\":{\"role\":\"assistant\",\"content\":\"";
+        let suffix = "\"}}\n";
+        let body = "x".repeat(bytes - prefix.len() - suffix.len());
+        let line = format!("{prefix}{body}{suffix}").into_bytes();
+        line.chunks(1000).map(|c| c.to_vec()).collect()
+    }
+
+    fn run_base(chunks: &[Vec<u8>]) -> usize {
+        let mut n = 0;
+        let s = stream::iter(chunks.iter().cloned().map(Ok));
+        futures::executor::block_on(base_loop(s, |_| n += 1)).unwrap();
+        n
+    }
+
+    fn run_head(chunks: &[Vec<u8>]) -> usize {
+        let mut n = 0;
+        let s = stream::iter(chunks.iter().cloned().map(Ok));
+        let (_stop, signal) = stop_pair();
+        futures::executor::block_on(read_events(
+            s,
+            signal,
+            futures::future::pending::<()>,
+            |_| n += 1,
+        ))
+        .unwrap();
+        n
+    }
+
+    fn median(mut v: Vec<f64>) -> f64 {
+        v.sort_by(f64::total_cmp);
+        v[v.len() / 2]
+    }
+
+    /// 3 warm-ups, then 31 interleaved base/head runs; medians in ms.
+    fn compare(label: &str, chunks: &[Vec<u8>]) {
+        for _ in 0..3 {
+            assert_eq!(run_base(chunks), run_head(chunks));
+        }
+        let (mut b, mut h) = (Vec::new(), Vec::new());
+        for _ in 0..31 {
+            let t = Instant::now();
+            std::hint::black_box(run_base(chunks));
+            b.push(t.elapsed().as_secs_f64() * 1e3);
+            let t = Instant::now();
+            std::hint::black_box(run_head(chunks));
+            h.push(t.elapsed().as_secs_f64() * 1e3);
+        }
+        let (mb, mh) = (median(b), median(h));
+        println!(
+            "TIMING {label}: base {mb:.4} ms, head {mh:.4} ms, head/base {:.3}",
+            mh / mb
+        );
+    }
+
+    #[test]
+    #[ignore = "benchmark; times the SSE read loop against the base loop"]
+    fn time_read_loop() {
+        for events in [100, 1_000, 10_000, 100_000] {
+            compare(
+                &format!("sse content events {events}"),
+                &content_chunks(events),
+            );
+        }
+        for bytes in [1_000, 10_000, 100_000] {
+            compare(&format!("sse done line {bytes} bytes"), &done_chunks(bytes));
+        }
     }
 }

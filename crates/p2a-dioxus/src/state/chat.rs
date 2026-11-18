@@ -982,3 +982,106 @@ mod tests {
         );
     }
 }
+
+/// Rule-5 timing of tool start/end pairs against verbatim copies of the
+/// base `set_active_tool`/`clear_active_tool` (a scan over the message's calls).
+#[cfg(test)]
+mod timing {
+    use super::*;
+    use std::time::Instant;
+
+    fn base_set_active_tool(s: &mut ChatState, name: String, arguments: serde_json::Value) {
+        s.active_tool = Some(ActiveToolCall {
+            name: name.clone(),
+            started_at: Utc::now(),
+            index: None,
+        });
+        if let Some(last) = s.messages.last_mut()
+            && last.is_streaming
+        {
+            if !last
+                .tool_calls
+                .iter()
+                .any(|tc| tc.name == name && tc.success.is_none())
+            {
+                last.tool_calls.push(ToolCallInfo {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    name,
+                    arguments,
+                    result: None,
+                    success: None,
+                    is_expanded: false,
+                });
+            }
+        }
+    }
+
+    fn base_clear_active_tool(s: &mut ChatState, result: Option<String>) {
+        if let Some(active) = s.active_tool.take() {
+            if let Some(last) = s.messages.last_mut()
+                && last.is_streaming
+                && let Some(tc) = last
+                    .tool_calls
+                    .iter_mut()
+                    .find(|tc| tc.name == active.name && tc.success.is_none())
+            {
+                tc.success = Some(true);
+                tc.result = result;
+            }
+        }
+    }
+
+    fn fresh() -> ChatState {
+        let mut s = ChatState::new();
+        s.add_user_message("q");
+        s.add_streaming_message();
+        s
+    }
+
+    fn run_base(pairs: usize) -> usize {
+        let mut s = fresh();
+        for _ in 0..pairs {
+            base_set_active_tool(&mut s, "regression_ols".into(), serde_json::Value::Null);
+            base_clear_active_tool(&mut s, Some("ok".into()));
+        }
+        s.messages.last().unwrap().tool_calls.len()
+    }
+
+    fn run_head(pairs: usize) -> usize {
+        let mut s = fresh();
+        for _ in 0..pairs {
+            s.set_active_tool("regression_ols".into(), serde_json::Value::Null);
+            s.clear_active_tool(Some("ok".into()), Some("success"));
+        }
+        s.messages.last().unwrap().tool_calls.len()
+    }
+
+    fn median(mut v: Vec<f64>) -> f64 {
+        v.sort_by(f64::total_cmp);
+        v[v.len() / 2]
+    }
+
+    #[test]
+    #[ignore = "benchmark; times tool start/end pairs against the base scan"]
+    fn time_tool_pairs() {
+        for pairs in [100, 1_000, 10_000] {
+            for _ in 0..3 {
+                assert_eq!(run_base(pairs), run_head(pairs));
+            }
+            let (mut b, mut h) = (Vec::new(), Vec::new());
+            for _ in 0..31 {
+                let t = Instant::now();
+                std::hint::black_box(run_base(pairs));
+                b.push(t.elapsed().as_secs_f64() * 1e3);
+                let t = Instant::now();
+                std::hint::black_box(run_head(pairs));
+                h.push(t.elapsed().as_secs_f64() * 1e3);
+            }
+            let (mb, mh) = (median(b), median(h));
+            println!(
+                "TIMING tool pairs {pairs}: base {mb:.4} ms, head {mh:.4} ms, head/base {:.3}",
+                mh / mb
+            );
+        }
+    }
+}
