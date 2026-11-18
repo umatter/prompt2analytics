@@ -157,18 +157,19 @@ pub mod web {
             .map_err(|_| StreamError("Response is not a Response object".to_string()))?;
 
         tracing::debug!("[SSE] Response status: {}", response.status());
-        if response.status() == 401 {
-            return Err(StreamError(crate::platform::http_status_message(
-                401,
-                token.is_some(),
-            )));
-        }
         if !response.ok() {
-            return Err(StreamError(format!(
-                "HTTP error: {} {}",
-                response.status(),
-                response.status_text()
-            )));
+            // The server's error body (429 session_busy, 404 not_found, ...).
+            let body = match response.text() {
+                Ok(promise) => JsFuture::from(promise)
+                    .await
+                    .ok()
+                    .and_then(|v| v.as_string())
+                    .unwrap_or_default(),
+                Err(_) => String::new(),
+            };
+            return Err(StreamError(
+                crate::platform::api_error(response.status(), &body, token.is_some()).into(),
+            ));
         }
 
         // Get the body as a ReadableStream and read it
@@ -342,14 +343,13 @@ pub mod native {
             .map_err(|e| StreamError(format!("Fetch error: {}", e)))?;
 
         tracing::debug!("[SSE] Response status: {}", response.status());
-        if response.status().as_u16() == 401 {
-            return Err(StreamError(crate::platform::http_status_message(
-                401,
-                token.is_some(),
-            )));
-        }
         if !response.status().is_success() {
-            return Err(StreamError(format!("HTTP error: {}", response.status())));
+            // The server's error body (429 session_busy, 404 not_found, ...).
+            let status = response.status().as_u16();
+            let body = response.text().await.unwrap_or_default();
+            return Err(StreamError(
+                crate::platform::api_error(status, &body, token.is_some()).into(),
+            ));
         }
 
         let mut stream = response.bytes_stream();

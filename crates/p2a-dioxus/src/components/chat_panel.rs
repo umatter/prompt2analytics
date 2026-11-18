@@ -368,7 +368,7 @@ pub fn ChatPanel() -> Element {
                         StreamEvent::ToolStart { tool, arguments } => {
                             chat.write().set_active_tool(tool, arguments);
                         }
-                        StreamEvent::ToolEnd { tool: _, elapsed_ms: _, result } => {
+                        StreamEvent::ToolEnd { result, .. } => {
                             chat.write().clear_active_tool(result);
                         }
                         StreamEvent::ToolResult { images } => {
@@ -409,8 +409,9 @@ pub fn ChatPanel() -> Element {
                                 });
                             }
                         }
-                        StreamEvent::Error { error } => {
-                            chat.write().set_error(Some(error));
+                        StreamEvent::Error { error, code } => {
+                            chat.write()
+                                .set_error(Some(crate::api::error_text(&error, code.as_deref())));
                         }
                     }
                 },

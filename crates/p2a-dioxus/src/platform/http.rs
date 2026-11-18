@@ -68,6 +68,80 @@ pub fn http_status_message(status: u16, token_sent: bool) -> String {
     }
 }
 
+/// How much of a non-JSON error body a message keeps, in bytes.
+const ERROR_BODY_BYTES: usize = 300;
+
+/// A server's error as the user sees it: `<message> (<code>)`, or the
+/// message alone when there is no code. The one formatter for REST and SSE
+/// errors.
+pub fn error_text(message: &str, code: Option<&str>) -> String {
+    match code.filter(|c| !c.is_empty()) {
+        Some(code) => format!("{message} ({code})"),
+        None => message.to_string(),
+    }
+}
+
+/// A non-2xx backend answer: its status, and the server's `error` text and
+/// `code` when the body is the JSON error envelope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApiError {
+    pub status: u16,
+    pub code: Option<String>,
+    pub message: String,
+}
+
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&error_text(&self.message, self.code.as_deref()))
+    }
+}
+
+impl From<ApiError> for String {
+    fn from(e: ApiError) -> Self {
+        e.to_string()
+    }
+}
+
+/// The error envelope of the JSON routes: `{"success":false,"error":..,"code":..}`.
+#[derive(serde::Deserialize)]
+struct ErrorBody {
+    error: Option<String>,
+    #[serde(default)]
+    code: Option<String>,
+}
+
+/// Read a non-2xx answer: the JSON envelope gives the message and code; a
+/// 401 keeps the access-token explanation of [`http_status_message`]; a
+/// plain-text body (axum's rejections, a proxy page) is kept, cut to
+/// [`ERROR_BODY_BYTES`] on a char boundary, and a 413 is explained as a
+/// request too large for the server; an empty body gives `HTTP error: <status>`.
+pub fn api_error(status: u16, body: &str, token_sent: bool) -> ApiError {
+    let envelope = serde_json::from_str::<ErrorBody>(body)
+        .ok()
+        .and_then(|b| b.error.map(|error| (error, b.code)));
+    let code = envelope.as_ref().and_then(|(_, code)| code.clone());
+    let message = if status == 401 {
+        http_status_message(status, token_sent)
+    } else if let Some((error, _)) = envelope {
+        p2a_text::ellipsize_bytes(&error, ERROR_BODY_BYTES, "...").into_owned()
+    } else {
+        let text = body.trim();
+        let text = p2a_text::ellipsize_bytes(text, ERROR_BODY_BYTES, "...");
+        match (status, text.is_empty()) {
+            (_, true) => format!("HTTP error: {status}"),
+            (413, false) => {
+                format!("The request is too large for this server (HTTP 413: {text})")
+            }
+            (_, false) => format!("HTTP {status}: {text}"),
+        }
+    };
+    ApiError {
+        status,
+        code,
+        message,
+    }
+}
+
 /// HTTP response wrapper
 #[derive(Debug, Clone)]
 pub struct HttpResponse {
@@ -420,6 +494,100 @@ mod tests {
         assert!(http_status_message(401, false).contains("requires an access token"));
         assert!(http_status_message(401, true).contains("rejected the access token"));
         assert_eq!(http_status_message(503, false), "HTTP error: 503");
+    }
+
+    #[test]
+    fn api_error_reads_the_servers_body() {
+        let e = api_error(
+            503,
+            r#"{"success":false,"error":"Maximum number of sessions reached","code":"capacity"}"#,
+            false,
+        );
+        assert_eq!(e.status, 503);
+        assert_eq!(e.message, "Maximum number of sessions reached");
+        assert_eq!(e.code.as_deref(), Some("capacity"));
+        assert_eq!(
+            e.to_string(),
+            "Maximum number of sessions reached (capacity)"
+        );
+
+        let e = api_error(
+            410,
+            r#"{"success":false,"error":"Session expired","code":"session_expired"}"#,
+            false,
+        );
+        assert_eq!(String::from(e), "Session expired (session_expired)");
+
+        let e = api_error(
+            400,
+            r#"{"success":false,"error":"Missing X-P2A-Session-Id header","code":"invalid_arguments"}"#,
+            false,
+        );
+        assert_eq!(e.code.as_deref(), Some("invalid_arguments"));
+        assert!(e.message.contains("X-P2A-Session-Id"), "{e}");
+
+        // A JSON error without a code keeps the message alone.
+        let e = api_error(404, r#"{"success":false,"error":"Not found"}"#, false);
+        assert_eq!((e.message.as_str(), e.code), ("Not found", None));
+    }
+
+    #[test]
+    fn api_error_explains_plain_text_bodies() {
+        for body in [
+            "length limit exceeded",
+            "Failed to buffer the request body: length limit exceeded",
+        ] {
+            let e = api_error(413, body, false);
+            assert_eq!(e.code, None);
+            assert!(e.message.contains("too large"), "{e}");
+            assert!(e.message.contains(body), "{e}");
+        }
+        // axum's plain-text rejection of a malformed JSON body.
+        let e = api_error(
+            422,
+            "Failed to deserialize the JSON body into the target type: missing field `name`",
+            false,
+        );
+        assert_eq!(
+            e.message,
+            "HTTP 422: Failed to deserialize the JSON body into the target type: missing field `name`"
+        );
+        assert_eq!(api_error(502, "", false).message, "HTTP error: 502");
+        assert_eq!(api_error(502, "  \n", false).message, "HTTP error: 502");
+
+        // A long HTML page is cut on a char boundary.
+        let html = format!("<html><body>{}</body></html>", "é".repeat(2048));
+        let e = api_error(500, &html, false);
+        assert!(
+            e.message.len() <= "HTTP 500: ".len() + 300,
+            "{}",
+            e.message.len()
+        );
+        assert!(e.message.starts_with("HTTP 500: <html><body>é"), "{e}");
+    }
+
+    #[test]
+    fn api_error_keeps_the_token_messages_for_401() {
+        assert!(
+            api_error(401, "", false)
+                .message
+                .contains("requires an access token")
+        );
+        assert!(
+            api_error(401, "Unauthorized", true)
+                .message
+                .contains("rejected the access token")
+        );
+    }
+
+    #[test]
+    fn error_text_appends_the_code() {
+        assert_eq!(
+            error_text("Session expired", Some("session_expired")),
+            "Session expired (session_expired)"
+        );
+        assert_eq!(error_text("Session expired", None), "Session expired");
+        assert_eq!(error_text("Session expired", Some("")), "Session expired");
     }
 
     /// Records the message of every WARN event on the thread it is the

@@ -4,8 +4,8 @@
 
 use super::types::*;
 use crate::platform::{
-    HttpClient, HttpResponse, authorization_header, backend_access_token, create_http_client,
-    http_status_message, normalize_access_token,
+    HttpClient, HttpResponse, api_error, authorization_header, backend_access_token,
+    create_http_client, normalize_access_token,
 };
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -174,8 +174,9 @@ impl ApiClient {
     }
 
     /// The single path for every REST call: adds [`Self::auth_headers`] and
-    /// `extra_headers`, and maps a non-2xx status to an error message (a 401
-    /// is explained as a missing or rejected access token).
+    /// `extra_headers`, and maps a non-2xx answer to the server's message and
+    /// code ([`api_error`]; a 401 is explained as a missing or rejected access
+    /// token).
     async fn send(
         &self,
         method: &str,
@@ -194,10 +195,9 @@ impl ApiClient {
             .map_err(|e| e.to_string())?;
 
         if !response.is_ok() {
-            return Err(http_status_message(
-                response.status,
-                self.access_token.is_some(),
-            ));
+            return Err(
+                api_error(response.status, &response.body, self.access_token.is_some()).into(),
+            );
         }
 
         Ok(response)

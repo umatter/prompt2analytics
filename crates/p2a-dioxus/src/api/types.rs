@@ -175,6 +175,10 @@ pub enum StreamEvent {
         tool: String,
         elapsed_ms: u64,
         result: Option<String>,
+        /// `"success"` or `"error"` (0.6.0 servers); absent from older
+        /// servers, which leaves the call's outcome unknown.
+        #[serde(default)]
+        status: Option<String>,
     },
 
     /// Tool result with potential images
@@ -194,7 +198,13 @@ pub enum StreamEvent {
 
     /// Error occurred
     #[serde(rename = "error")]
-    Error { error: String },
+    Error {
+        error: String,
+        /// The refusal's code (0.6.0 servers), e.g. `upstream_error`,
+        /// `session_expired`; absent from older servers.
+        #[serde(default)]
+        code: Option<String>,
+    },
 }
 
 /// Tool definition from the backend
@@ -385,7 +395,43 @@ pub struct ReloadSkip {
 
 #[cfg(test)]
 mod tests {
-    use super::DatasetMeta;
+    use super::{DatasetMeta, StreamEvent};
+
+    /// The 0.6.0 server's `tool_end` and `error` events (API_ENDPOINTS.md "Tool End", "Error")
+    /// and an older server's, without `status` and `code`.
+    #[test]
+    fn stream_events_of_0_6_0_and_older_servers_parse() {
+        let new_end: StreamEvent = serde_json::from_str(
+            r#"{"type":"tool_end","tool":"load_dataset","elapsed_ms":1234,"result":"Successfully loaded dataset 'sales_data'","status":"success"}"#,
+        )
+        .unwrap();
+        assert!(
+            matches!(new_end, StreamEvent::ToolEnd { ref status, .. } if status.as_deref() == Some("success")),
+            "{new_end:?}"
+        );
+        let old_end: StreamEvent = serde_json::from_str(
+            r#"{"type":"tool_end","tool":"load_dataset","elapsed_ms":1234,"result":"ok"}"#,
+        )
+        .unwrap();
+        assert!(
+            matches!(old_end, StreamEvent::ToolEnd { status: None, .. }),
+            "{old_end:?}"
+        );
+        let new_err: StreamEvent = serde_json::from_str(
+            r#"{"type":"error","error":"Ollama returned HTTP 500; the provider is unavailable; try again later","code":"upstream_error"}"#,
+        )
+        .unwrap();
+        assert!(
+            matches!(new_err, StreamEvent::Error { ref code, .. } if code.as_deref() == Some("upstream_error")),
+            "{new_err:?}"
+        );
+        let old_err: StreamEvent =
+            serde_json::from_str(r#"{"type":"error","error":"Session expired"}"#).unwrap();
+        assert!(
+            matches!(old_err, StreamEvent::Error { code: None, ref error } if error == "Session expired"),
+            "{old_err:?}"
+        );
+    }
 
     fn meta(column_count: i32, names: usize) -> DatasetMeta {
         DatasetMeta {
