@@ -6,7 +6,9 @@ use crate::api::{
     PersistedToolCall, StreamErrorKind, StreamEvent, StreamStop, api, stop_pair, stream_chat,
 };
 use crate::app::apply_theme;
-use crate::components::{ChatInput, ExportMenu, MessageList, P2aWordmark, SettingsModal};
+use crate::components::{
+    ChatInput, ExportMenu, MessageList, P2aWordmark, SettingsModal, next_at_bottom,
+};
 use crate::state::settings::Theme;
 use crate::state::{
     ChatMessage, ChatState, ConversationState, SESSION_ENDED_TEXT, SessionState, Settings,
@@ -80,6 +82,11 @@ pub fn ChatPanel() -> Element {
     // Track which conversation we've synced from and how many messages we've synced
     let mut synced_conv_id = use_signal(|| Option::<String>::None);
     let mut synced_messages_len = use_signal(|| 0usize);
+
+    // Whether the message list's view is at the bottom (it follows new
+    // text then), and the scroll position seen last.
+    let mut at_bottom = use_signal(|| true);
+    let last_scroll_top = use_hook(|| std::rc::Rc::new(std::cell::Cell::new(0.0f64)));
 
     // The Stop handle of the answer being written, if one is.
     let mut stream_stop = use_signal(|| None::<StreamStop>);
@@ -963,9 +970,28 @@ pub fn ChatPanel() -> Element {
                 }
             }
 
-            // Message list (scrollable)
-            div { class: "flex-1 overflow-y-auto",
+            // Message list (scrollable). Whether the view is at the bottom
+            // is written only when it changes, not per scroll event.
+            div {
+                class: "flex-1 overflow-y-auto",
+                onscroll: move |evt: Event<ScrollData>| {
+                    let data = evt.data();
+                    let top = data.scroll_top();
+                    let was = *at_bottom.peek();
+                    let now = next_at_bottom(
+                        was,
+                        last_scroll_top.get(),
+                        top,
+                        data.scroll_height(),
+                        data.client_height(),
+                    );
+                    last_scroll_top.set(top);
+                    if now != was {
+                        at_bottom.set(now);
+                    }
+                },
                 MessageList {
+                    at_bottom: Some(at_bottom),
                     suggestions_disabled: busy,
                     on_suggestion: move |text: String| {
                         handle_send(text);
