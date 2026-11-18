@@ -896,8 +896,34 @@ class CitedTestsTest(unittest.TestCase):
         self.assertEqual(problems, [], "\n" + "\n".join(problems))
 
 
-# A comparison with a committed case value: a Check, or a case accessor with a key literal.
-CASE_VALUE = re.compile(r'Check::new\(|\.(?:scalar|vector|named|named_subset|names|by_names)\(\s*&?(?:"|format!|[A-Za-z_])')
+# A comparison with a committed case value: a Check, or a case accessor called on a case: a
+# receiver bound from Case::load / try_load / load_case (or a `*case(...)` helper), a `Case`
+# parameter, or a receiver named `case` or `*_case`. An accessor of the same name on another
+# value (`df.names(cols)`) is not a case value.
+CASE_VALUE = re.compile(r"Check::new\(")
+CASE_ACCESSOR = re.compile(
+    r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\.\s*(?:scalar|vector|named|named_subset|names|by_names)\(\s*&?(?:\"|format!|[A-Za-z_])"
+)
+# The pattern of a `let` (one name, or a tuple of names) whose value loads a case.
+CASE_BINDING = re.compile(
+    r"\blet\s+(\([^=;]*?\)|(?:mut\s+)?[A-Za-z_][A-Za-z0-9_]*)\s*(?::[^=;]*)?=\s*[^;]*?"
+    r"(?:Case::(?:try_)?load|load_case|[A-Za-z_]*case)\s*\("
+)
+CASE_PARAM = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*:\s*&?(?:mut\s+)?(?:p2a_validation::)?Case\b")
+
+
+def compares_case_value(sources):
+    """Whether the test sources (test fn and helpers) compare a committed case value."""
+    text = "\n".join(sources)
+    if CASE_VALUE.search(text):
+        return True
+    cases = set(CASE_PARAM.findall(text))
+    for pattern in CASE_BINDING.findall(text):
+        cases.update(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", pattern.replace("mut ", " ")))
+    return any(
+        r in cases or r == "case" or r.endswith("_case")
+        for r in CASE_ACCESSOR.findall(text)
+    )
 
 
 def _test_files(test_id):
@@ -957,6 +983,14 @@ class ValidateFilterTest(unittest.TestCase):
                     self.assertNotIn(test_id, registered, "a registered test is R-pinned; do not label it")
                 self.assertGreaterEqual(len(reason), 20, "give the reason the test keeps its name")
 
+    def test_case_value_needs_a_case_receiver(self):
+        self.assertFalse(compares_case_value(["let n = df.names(cols);"]))
+        self.assertFalse(compares_case_value(["let v = row.scalar(x);"]))
+        self.assertTrue(compares_case_value(['let case = Case::load("a");\nlet b = case.scalar("beta");']))
+        self.assertTrue(compares_case_value(['let (h, d) = (Case::load("a"), Case::load("b"));\nh.named("coef", v);']))
+        self.assertTrue(compares_case_value(['fn pin(c: &Case) { c.vector("se"); }']))
+        self.assertTrue(compares_case_value(["Check::new(&case, \"fit\")"]))
+
     def test_registered_tests_compare_a_case_value(self):
         """A registered test compares a value of its case (Check, or a case accessor), or is labelled
         registered-property: it then checks properties on R's data and does not count as R-pinned."""
@@ -968,7 +1002,7 @@ class ValidateFilterTest(unittest.TestCase):
             if labels.get(test_id, ("",))[0] == "registered-property":
                 continue
             sources = test_sources_with_helpers(test_id)
-            if not any(CASE_VALUE.search(s) for s in sources):
+            if not compares_case_value(sources):
                 missing.append(test_id + ("" if sources else " (source not found)"))
         self.assertEqual(missing, [], "\n" + "\n".join(missing))
 

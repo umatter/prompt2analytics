@@ -2,6 +2,7 @@
 (T1-WP06: INF-15, REG-57, ECON-82). Stdlib only; run with
 python3 -m unittest discover -s validation/tools/tests"""
 import glob
+import importlib.util
 import json
 import os
 import re
@@ -140,37 +141,26 @@ HAND_WRITTEN = ("Fully Validated", "R cross-validated", "DGP-validated", "All Pa
 # Tukey-Hanning kernel.
 REG57_NAMES = ("loess", "nonlinear least squares", "smooth spline", "sensemakr", "e-value",
                "supsmu", "super smoother", "tukey line", "resistant line")
-_RUNNING = re.compile(r"^\s*Running (?:unittests )?(\S+)")
+# The runner's own parser, so this check counts the lists as the runner and the page do.
+_spec = importlib.util.spec_from_file_location(
+    "validation_status", VALIDATION / "tools" / "validation_status.py"
+)
+vs = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(vs)
 
 
 def listed_validate_counts():
     """{package: number of test_validate tests} from `cargo test ... -- --list` outputs
-    (files named <package>-tests.txt), excluding the data::database read-only SQL guards.
-    A test is counted once per test id, as the runner and the page count it: unit tests of
-    the lib and the bins share the package's ids, an integration test is <binary>::<name>."""
+    (files named <package>-tests.txt), read with validation_status.py's parser and its
+    is_validate rule (which leaves out the data::database read-only SQL guards). A test is
+    counted once per test id, as the runner and the page count it: unit tests of the lib
+    and the bins share the package's ids, an integration test is <binary>::<name>."""
     pattern = os.environ.get("P2A_TEST_LISTS", str(REPO / "target" / "*-tests.txt"))
     counts = {}
     for path in sorted(glob.glob(pattern)):
         package = Path(path).name[: -len("-tests.txt")]
         text = Path(path).read_text(encoding="utf-8", errors="replace")
-        text = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", text)
-        ids, prefix = set(), None
-        for line in text.splitlines():
-            m = _RUNNING.match(line)
-            if m:
-                target = m.group(1).replace("\\", "/")
-                t = re.search(r"(?:^|/)tests/([^/]+?)(?:\.rs|/main\.rs)$", target)
-                prefix = f"{t.group(1)}::" if t else ""
-                continue
-            if line.lstrip().startswith("Doc-tests "):
-                prefix = None
-                continue
-            m = re.match(r"^(\S+): test$", line)
-            if m and prefix is not None:
-                name = m.group(1)
-                last = name.rsplit("::", 1)[-1]
-                if "test_validate" in last and not ("data::database::" in name and "read_only" in last):
-                    ids.add(prefix + name)
+        ids = {t for t in vs.parse_test_list(text, package) if vs.is_validate(t)}
         if ids:
             counts[package] = len(ids)
     return counts
@@ -241,9 +231,11 @@ class StatusPageTest(unittest.TestCase):
                 continue
             rows.append((line.split("|", 2)[1].strip(), line.strip().rstrip("|").rsplit("|", 1)[-1].strip()))
         self.assertEqual(len(rows), len(pinned_entries()))
+        # The statuses render() gives a method whose tests all passed.
+        passed = ("PASS", "PASS (known deviations)")
         for method, status in rows:
             with self.subTest(method=method):
-                self.assertNotIn(status, ("NOT RUN", "FAIL"))
+                self.assertIn(status, passed)
 
     @unittest.skipUnless(os.environ.get("P2A_CHECK_STATUS_PAGE") == "1",
                          "set P2A_CHECK_STATUS_PAGE=1 with cargo --list outputs in target/*-tests.txt")
