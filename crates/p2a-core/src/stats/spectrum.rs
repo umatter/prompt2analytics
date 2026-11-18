@@ -843,6 +843,17 @@ fn ar_spectrum_grid(
         } else {
             innovation_var
         };
+        if !s.is_finite() {
+            return Err(EconError::InvalidSpecification {
+                message: format!(
+                    "the AR({}) spectral density at frequency {f} exceeds the largest \
+                     floating-point number (innovation variance {innovation_var:e}, a peak \
+                     that sharp): rescale the series, for example to a smaller unit, or fit \
+                     a lower order",
+                    ar_coefs.len()
+                ),
+            });
+        }
         spec.push(s);
     }
 
@@ -1467,7 +1478,12 @@ mod tests {
             assert_eq!(r.is_ok(), ok, "{spans:?}: {r:?}");
             if let Err(e) = r {
                 let m = e.to_string();
-                assert!(m.contains("spans") && m.contains("shorter"), "{m}");
+                // The text of our own refusal, not the quoted R error in its advice.
+                assert!(
+                    m.contains("spans give a smoothing kernel")
+                        && m.contains("-point series"),
+                    "{m}"
+                );
             }
         }
     }
@@ -2042,6 +2058,25 @@ mod tests {
     fn t3_dataset() -> Dataset {
         let path = p2a_validation::repo_path("validation/datasets/generated/spectrum_t3.csv");
         Dataset::new(crate::data::DataLoader::load_csv(&path).unwrap())
+    }
+
+    /// A sharp AR peak with a very large innovation variance can take the density past
+    /// f64::MAX: the grid is refused, naming the order and the peak, instead of holding an
+    /// infinite ordinate.
+    #[test]
+    fn spectrum_ar_refuses_an_infinite_ordinate() {
+        // |1 - phi|^2 at frequency 0 is about 1e-14, above the cancellation guard.
+        let e = ar_spectrum_grid(&[1.0 - 1e-7], 1e300, 11).unwrap_err();
+        match e {
+            EconError::InvalidSpecification { message } => {
+                assert!(message.contains("AR(1)"), "{message}");
+                assert!(message.contains("frequency 0"), "{message}");
+            }
+            other => panic!("{other}"),
+        }
+        // An ordinary peak still passes.
+        let (_, spec) = ar_spectrum_grid(&[0.9], 1.0, 11).unwrap();
+        assert!(spec.iter().all(|v| v.is_finite()));
     }
 
     /// STAT-38: an AR spectrum has no chi-square df (R's spec.ar has none), so it has no interval.
