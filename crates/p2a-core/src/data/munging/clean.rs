@@ -1120,6 +1120,9 @@ fn cast_text(
     })
 }
 
+/// How many lost rows the cast report reads for its examples at most.
+const EXAMPLE_LOST_ROWS: usize = 1_000;
+
 /// Count into `report` the present (neither null nor NaN) values of `source`
 /// that are missing in `casted`, its polars cast.
 fn count_lost_values(source: &Column, casted: &Column, report: &mut CastReport) -> MungeResult<()> {
@@ -1137,13 +1140,17 @@ fn count_lost_values(source: &Column, casted: &Column, report: &mut CastReport) 
     cast_checkpoint(0)?;
     let n_lost = lost.sum().unwrap_or(0) as usize;
     report.n_failed += n_lost;
-    // The first three distinct lost inputs, in row order.
+    // The first three distinct lost inputs, in row order, among the first
+    // EXAMPLE_LOST_ROWS lost rows: when the lost values repeat, the search stops
+    // there instead of reading every lost row.
+    let mut seen = 0usize;
     for (row, is_lost) in lost.iter().enumerate() {
-        if report.examples.len() == 3 {
+        if report.examples.len() == 3 || seen == EXAMPLE_LOST_ROWS {
             break;
         }
         cast_checkpoint(row)?;
         if is_lost == Some(true) {
+            seen += 1;
             let before = source.get(row)?;
             let text = match before.extract::<f64>() {
                 Some(x) if source.dtype().is_float() => x.to_string(),
@@ -2950,6 +2957,19 @@ mod tests {
             (3, vec!["1,234".into(), "N/A".into(), "$5".into()])
         );
         assert_eq!((rep.column.as_str(), rep.dtype.as_str()), ("v", "int"));
+    }
+
+    /// When the lost values repeat, the examples come from the first 1,000 lost
+    /// rows only; every lost row is still counted.
+    #[test]
+    fn test_cast_examples_read_a_bounded_number_of_lost_rows() {
+        // Float64 to int: values beyond the integer range are lost.
+        let mut v = vec![1e30; 1_000];
+        v.extend([2e30, 3e30, 7.0]);
+        let ds = Dataset::new(df!("v" => v).unwrap());
+        let (_, rep) = cast_with(&ds, "v", "int", &CastOptions::default()).unwrap();
+        assert_eq!(rep.n_failed, 1_002);
+        assert_eq!(rep.examples, vec![1e30.to_string()]);
     }
 
     #[test]
