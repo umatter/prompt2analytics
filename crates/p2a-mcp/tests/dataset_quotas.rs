@@ -1169,3 +1169,43 @@ async fn a_time_zone_polars_cannot_parse_is_refused_alike_with_and_without_quota
         }
     }
 }
+
+#[tokio::test]
+async fn an_arrow_extension_type_is_refused_alike_with_and_without_quotas() {
+    // A column of an Arrow extension type other than polars' own (R arrow's
+    // vctrs extension, written by arrow 25.0.1; the core loader's fixture).
+    // Upload and load answer the core loader's refusal naming the column,
+    // with quotas and without.
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../p2a-core/tests/data/arrow_extension_vctrs.parquet");
+    let bytes = std::fs::read(&fixture).unwrap();
+    let dir = data_dir();
+    let path = dir.path().join("vctrs.parquet");
+    std::fs::write(&path, &bytes).unwrap();
+    let content = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    let upload = json!({"content": content, "filename": "vctrs.parquet"});
+    let load = json!({"path": path.to_string_lossy(), "name": "vctrs"});
+
+    let (with_quotas, _) = app_with_quota(8 * MIB).await;
+    let (without, _) = build_app_with(&local(), ExecConfig::default())
+        .await
+        .unwrap();
+    for (app, mode) in [(&with_quotas, "with quotas"), (&without, "without")] {
+        for (tool, args) in [("upload_dataset", &upload), ("load_dataset", &load)] {
+            let sid = new_session(app).await;
+            let (status, body) = call(app, &sid, tool, args.clone()).await;
+            assert_eq!(status, StatusCode::OK, "{mode}, {tool}: {body}");
+            assert_eq!(
+                body["data"]["success"],
+                json!(false),
+                "{mode}, {tool}: {body}"
+            );
+            let text = body.to_string();
+            assert!(text.contains("column 'k'"), "{mode}, {tool}: {body}");
+            assert!(
+                text.contains("Arrow extension type ('arrow.r.vctrs')"),
+                "{mode}, {tool}: {body}"
+            );
+        }
+    }
+}

@@ -1330,9 +1330,16 @@ fn time_values(col: &Column, name: &str) -> EconResult<Vec<Option<i64>>> {
 mod tests {
     use super::*;
 
+    use crate::data::DataLoader;
+    use crate::resource;
+    use p2a_validation::{Check, Tol};
+    use polars::prelude::{
+        Categories, DataType, FrozenCategories, IntoColumn, NamedFrom, Series, TimeUnit, df,
+    };
+
     #[test]
     fn sample_column_names_the_test_and_column_when_empty() {
-        let df = polars::prelude::df!("x" => [None::<f64>, None]).unwrap();
+        let df = df!("x" => [None::<f64>, None]).unwrap();
         match sample_column(&df, "x", "t-test") {
             Err(EconError::InsufficientData {
                 required,
@@ -1344,17 +1351,11 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
-        let df = polars::prelude::df!("x" => [Some(1.5), None, Some(2.5)]).unwrap();
+        let df = df!("x" => [Some(1.5), None, Some(2.5)]).unwrap();
         let (values, missing) = sample_column(&df, "x", "t-test").unwrap();
         assert_eq!(values, [1.5, 2.5]);
         assert!(!missing.is_empty());
     }
-    use crate::data::DataLoader;
-    use crate::resource;
-    use p2a_validation::{Check, Tol};
-    use polars::prelude::{
-        Categories, DataType, FrozenCategories, IntoColumn, NamedFrom, Series, TimeUnit, df,
-    };
 
     fn strings(labels: &[&str]) -> Vec<String> {
         labels.iter().map(|s| s.to_string()).collect()

@@ -1067,6 +1067,12 @@ impl DataLoader {
     ///   the file's header names
     /// * `n_rows` - Number of rows to read
     ///
+    /// Each chunk infers its column types from its own rows and from the data row just before
+    /// it (read to work around an offset bug in polars, then dropped), so a chunk's types can
+    /// differ from the whole file's and from other chunks': a text cell in that
+    /// preceding row can make a numeric column of the chunk `String`. Cast chunks to one schema
+    /// before stacking them.
+    ///
     /// # Example
     /// ```ignore
     /// // Process a large CSV file in 10,000 row chunks
@@ -1098,9 +1104,14 @@ impl DataLoader {
             .finish()
         {
             Ok(df) => Ok(df.slice(lead as i64, n_rows)),
-            // An offset past the last data row: return the header with no rows.
+            // An offset past the last data row: return the header with no rows, read without
+            // skipping (a header-only file reads as an empty frame).
             Err(PolarsError::NoData(_)) if skip_rows > 0 => {
-                Ok(Self::load_csv_chunk(path, 0, 1)?.slice(0, 0))
+                Ok(csv_options(Self::DEFAULT_NA_STRINGS)
+                    .with_n_rows(Some(0))
+                    .try_into_reader_with_file_path(Some(path.as_ref().to_path_buf()))?
+                    .finish()?
+                    .slice(0, 0))
             }
             Err(e) => Err(e.into()),
         }
@@ -1988,6 +1999,18 @@ mod tests {
             let empty = DataLoader::load_csv_chunk(&path, skip, 5).unwrap();
             assert_eq!(empty.height(), 0, "skip {skip}");
             assert_eq!(empty.get_column_names(), ["id", "x", "s"], "skip {skip}");
+        }
+        // A file with a header and no rows gives the header at every offset.
+        let header_only = dir.path().join("header_only.csv");
+        std::fs::write(&header_only, "id,x,s\n").unwrap();
+        for skip in [0usize, 1, 5] {
+            let empty = DataLoader::load_csv_chunk(&header_only, skip, 5).unwrap();
+            assert_eq!(empty.height(), 0, "header only, skip {skip}");
+            assert_eq!(
+                empty.get_column_names(),
+                ["id", "x", "s"],
+                "header only, skip {skip}"
+            );
         }
     }
 
