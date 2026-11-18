@@ -1478,13 +1478,14 @@ pub struct ImageData {
 /// ahead of the tool or end event that follows it. The held text is at most the text the model has
 /// streamed in this call, which the provider holds too.
 #[derive(Clone)]
-pub(crate) struct ChatEvents {
+pub struct ChatEvents {
     tx: tokio::sync::mpsc::Sender<ProgressEvent>,
     pending: Arc<std::sync::Mutex<String>>,
 }
 
 impl ChatEvents {
-    pub(crate) fn new(tx: tokio::sync::mpsc::Sender<ProgressEvent>) -> Self {
+    /// Events sent on `tx`, with nothing held yet.
+    pub fn new(tx: tokio::sync::mpsc::Sender<ProgressEvent>) -> Self {
         Self {
             tx,
             pending: Arc::default(),
@@ -1550,31 +1551,24 @@ pub struct StreamingToolExecutor {
 }
 
 impl StreamingToolExecutor {
-    /// An executor for `chat` that reports on `sender` and records refused
-    /// tool calls in `audit`.
+    /// An executor for `chat` that reports on `events` (which the route and the provider's text
+    /// callback share) and records refused tool calls in `audit`.
     pub fn new(
         governor: Arc<ToolGovernor>,
         server: Arc<crate::server::AnalyticsServer>,
         chat: ChatSession,
         audit: Arc<AuditLogger>,
-        sender: tokio::sync::mpsc::Sender<ProgressEvent>,
+        events: ChatEvents,
     ) -> Self {
         Self {
             governor,
             server,
             chat,
             audit,
-            events: ChatEvents::new(sender),
+            events,
             #[cfg(feature = "db")]
             store: ToolCallStore::default(),
         }
-    }
-
-    /// Report on `events`, which the route and the provider's text callback share, in place of
-    /// the sender given to [`Self::new`].
-    pub(crate) fn with_events(mut self, events: ChatEvents) -> Self {
-        self.events = events;
-        self
     }
 
     #[cfg(feature = "db")]
@@ -2056,9 +2050,8 @@ async fn run_chat_stream(
         state.server.clone(),
         chat.clone(),
         state.audit_logger.clone(),
-        tx.clone(),
-    )
-    .with_events(events.clone());
+        events.clone(),
+    );
 
     // Track whether we've set up the executor for persistence
     #[cfg(feature = "db")]
@@ -2331,7 +2324,8 @@ mod tests {
     async fn streaming_tool_executor_is_governed() {
         let (governor, server, chat) = governed_parts().await;
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
-        let executor = StreamingToolExecutor::new(governor, server, chat, no_audit(), tx);
+        let executor =
+            StreamingToolExecutor::new(governor, server, chat, no_audit(), ChatEvents::new(tx));
         let err = executor
             .execute("list_datasets", serde_json::json!({}))
             .await
@@ -2438,7 +2432,7 @@ mod disconnect_tests {
             Arc::new(crate::server::AnalyticsServer::new()),
             ChatSession::new(sessions, session),
             Arc::new(AuditLogger::disabled()),
-            tx.clone(),
+            ChatEvents::new(tx.clone()),
         )
         .with_persistence(db.clone(), conv.clone(), msg.clone(), sid.clone());
         let placeholder = Arc::new(OnceLock::new());
@@ -2542,7 +2536,7 @@ mod capture_tests {
             Arc::new(crate::server::AnalyticsServer::new()),
             ChatSession::new(sessions, session),
             Arc::new(AuditLogger::disabled()),
-            tx,
+            ChatEvents::new(tx),
         )
         .with_dataset_tracking(db.clone(), sid.clone());
         (executor, sid, rx)
@@ -3137,7 +3131,13 @@ mod chat_tests {
             SessionToolExecutor::new(governor.clone(), server.clone(), chat.clone(), no_audit());
         refused(executor.execute("create_dataset", args.clone()).await);
         let (tx, _rx) = tokio::sync::mpsc::channel(8);
-        let executor = StreamingToolExecutor::new(governor, server, chat.clone(), no_audit(), tx);
+        let executor = StreamingToolExecutor::new(
+            governor,
+            server,
+            chat.clone(),
+            no_audit(),
+            ChatEvents::new(tx),
+        );
         refused(executor.execute("create_dataset", args).await);
         assert!(
             chat.session().datasets.read().await.is_empty(),
@@ -3195,8 +3195,13 @@ mod chat_tests {
                 .unwrap_err();
             assert_eq!(err, want.message(), "{removal}");
             let (tx, mut rx) = tokio::sync::mpsc::channel(8);
-            let executor =
-                StreamingToolExecutor::new(governor.clone(), server, chat.clone(), no_audit(), tx);
+            let executor = StreamingToolExecutor::new(
+                governor.clone(),
+                server,
+                chat.clone(),
+                no_audit(),
+                ChatEvents::new(tx),
+            );
             let err = executor
                 .execute("create_dataset", small_dataset())
                 .await
