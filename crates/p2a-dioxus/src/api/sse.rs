@@ -5,4 +5,6 @@
 //! - Native: Uses reqwest with streaming response
 
 // Re-export streaming functionality from platform module
-pub use crate::platform::streaming::stream_chat;
+pub use crate::platform::streaming::{
+    StopSignal, StreamErrorKind, StreamOutcome, StreamStop, stop_pair, stream_chat,
+};

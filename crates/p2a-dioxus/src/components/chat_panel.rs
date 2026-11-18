@@ -2,7 +2,9 @@
 
 use dioxus::prelude::*;
 
-use crate::api::{PersistedToolCall, StreamEvent, api, stream_chat};
+use crate::api::{
+    PersistedToolCall, StreamErrorKind, StreamEvent, StreamStop, api, stop_pair, stream_chat,
+};
 use crate::app::apply_theme;
 use crate::components::{ChatInput, ExportMenu, MessageList, P2aWordmark, SettingsModal};
 use crate::state::settings::Theme;
@@ -76,6 +78,9 @@ pub fn ChatPanel() -> Element {
     // Track which conversation we've synced from and how many messages we've synced
     let mut synced_conv_id = use_signal(|| Option::<String>::None);
     let mut synced_messages_len = use_signal(|| 0usize);
+
+    // The Stop handle of the answer being written, if one is.
+    let mut stream_stop = use_signal(|| None::<StreamStop>);
 
     // Sync messages from conversation state to chat state when:
     // 1. User explicitly selects a DIFFERENT conversation (not the same one)
@@ -230,6 +235,7 @@ pub fn ChatPanel() -> Element {
 
     // Get current status and error
     let status = chat_state.read().status.clone();
+    let is_processing = chat_state.read().is_processing;
     let error = chat_state.read().error.clone();
 
     // Get current conversation title
@@ -264,6 +270,11 @@ pub fn ChatPanel() -> Element {
             // and returns early if true.
             tracing::debug!("[ChatPanel] Starting processing EARLY to protect messages");
             chat.write().start_processing();
+
+            // The Stop button fires this; it is checked before the stream
+            // starts and ends the stream when it is running.
+            let (stop, stop_signal) = stop_pair();
+            stream_stop.set(Some(stop));
 
             // The tab's session, created on first need (single flight).
             let session_id = match ensure_session(session).await {
@@ -399,6 +410,16 @@ pub fn ChatPanel() -> Element {
             // Set when the server says the session is gone.
             let mut session_ended = false;
 
+            // Stopped before the stream started (while the turn was set up).
+            if stop_signal.is_fired() {
+                stream_stop.set(None);
+                let mut c = chat.write();
+                c.end_interrupted("Stopped.");
+                c.stop_processing();
+                c.set_status(Some("Answer stopped.".to_string()));
+                return;
+            }
+
             // Stream the response
             let result = stream_chat(
                 &backend_url,
@@ -408,6 +429,7 @@ pub fn ChatPanel() -> Element {
                 provider_config,
                 interpret,
                 Some(conversation_id.clone()),
+                stop_signal,
                 |event| {
                     tracing::debug!(
                         "[ChatPanel] Got event: {:?}",
@@ -453,12 +475,25 @@ pub fn ChatPanel() -> Element {
             .await;
 
             tracing::debug!("[ChatPanel] stream_chat returned: {:?}", result.is_ok());
-            if let Err(e) = result {
-                tracing::error!("[ChatPanel] Stream error: {}", e);
-                if session_lost_text(&e.to_string()) {
-                    session_ended = true;
-                } else {
-                    chat.write().set_error(Some(e.to_string()));
+            stream_stop.set(None);
+            let mut stopped = false;
+            match result {
+                Ok(_) => {}
+                // Stopped by the user: the partial answer stays, no error.
+                Err(e) if e.kind() == StreamErrorKind::Stopped => stopped = true,
+                // A silent stream was given up: the error banner offers Retry.
+                Err(e) if e.kind() == StreamErrorKind::Idle => {
+                    let mut c = chat.write();
+                    c.end_interrupted("");
+                    c.set_error(Some(e.to_string()));
+                }
+                Err(e) => {
+                    tracing::error!("[ChatPanel] Stream error: {}", e);
+                    if session_lost_text(&e.to_string()) {
+                        session_ended = true;
+                    } else {
+                        chat.write().set_error(Some(e.to_string()));
+                    }
                 }
             }
 
@@ -477,6 +512,11 @@ pub fn ChatPanel() -> Element {
             }
 
             chat.write().stop_processing();
+            if stopped {
+                let mut c = chat.write();
+                c.end_interrupted("Stopped.");
+                c.set_status(Some("Answer stopped.".to_string()));
+            }
 
             // Trigger dataset sidebar refresh in case tools created/modified datasets
             session.write().trigger_datasets_refresh();
@@ -859,6 +899,24 @@ pub fn ChatPanel() -> Element {
                                 }
                             }
                         }
+                    }
+                }
+            }
+
+            // While an answer is written: the Stop control
+            if is_processing {
+                div { class: "mx-4 mt-2 px-3 py-1.5 rounded-lg bg-gray-50 dark:bg-gray-800 flex items-center justify-between gap-2",
+                    span { class: "text-sm text-gray-600 dark:text-gray-300", "Writing the answer\u{2026}" }
+                    button {
+                        class: "px-3 py-1 text-sm font-medium text-gray-700 dark:text-gray-200 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors",
+                        title: "Stop the answer",
+                        onclick: move |_| {
+                            let stop = stream_stop.read().clone();
+                            if let Some(stop) = stop {
+                                stop.stop();
+                            }
+                        },
+                        "Stop"
                     }
                 }
             }
