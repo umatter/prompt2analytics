@@ -7,7 +7,7 @@ use crate::app::apply_theme;
 use crate::components::{ChatInput, ExportMenu, MessageList, P2aWordmark, SettingsModal};
 use crate::state::settings::Theme;
 use crate::state::{
-    ChatMessage, ChatState, ConversationState, SessionState, Settings, ToolCallInfo,
+    ChatMessage, ChatState, ConversationState, SessionState, Settings, ToolCallInfo, ensure_session,
 };
 
 /// Chat panel component - main chat interface
@@ -230,29 +230,15 @@ pub fn ChatPanel() -> Element {
             tracing::debug!("[ChatPanel] Starting processing EARLY to protect messages");
             chat.write().start_processing();
 
-            // Check if we already have a session ID (without holding write guard across await)
-            let existing_id = session.read().session_id.clone();
-
-            let session_id = if let Some(id) = existing_id {
-                tracing::debug!("[ChatPanel] Using existing session: {}", id);
-                id
-            } else {
-                // Create new session - do the async work first, then update state
-                tracing::debug!("[ChatPanel] Creating new session");
-                let state = session.read().clone();
-                match state.initialize().await {
-                    Ok(id) => {
-                        tracing::debug!("[ChatPanel] Created session: {}", id);
-                        session.write().set_session_id(id.clone());
-                        id
-                    }
-                    Err(e) => {
-                        tracing::error!("[ChatPanel] Session error: {}", e);
-                        chat.write()
-                            .set_error(Some(format!("Session error: {}", e)));
-                        chat.write().stop_processing();
-                        return;
-                    }
+            // The tab's session, created on first need (single flight).
+            let session_id = match ensure_session(session).await {
+                Ok(id) => id,
+                Err(e) => {
+                    tracing::error!("[ChatPanel] Session error: {}", e);
+                    chat.write()
+                        .set_error(Some(format!("Session error: {}", e)));
+                    chat.write().stop_processing();
+                    return;
                 }
             };
 

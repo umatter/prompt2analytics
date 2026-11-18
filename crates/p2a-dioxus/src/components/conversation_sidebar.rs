@@ -7,7 +7,7 @@ use dioxus::prelude::*;
 
 use crate::api::Conversation;
 use crate::components::P2aIconMinimal;
-use crate::state::{ChatState, ConversationState, SessionState};
+use crate::state::{ChatState, ConversationState, SessionState, ensure_session};
 
 /// Conversation sidebar component
 #[component]
@@ -54,30 +54,33 @@ pub fn ConversationSidebar() -> Element {
             tracing::warn!("Ignoring new-conversation while a response is streaming");
             return;
         }
-        let session = session_state.read();
         let mut conv = conversation_state;
-
-        if let Some(session_id) = session.session_id.clone() {
-            spawn(async move {
-                conv.write().set_operating(true);
-                let state = conv.read().clone();
-                match state
-                    .create_conversation(&session_id, "New Conversation")
-                    .await
-                {
-                    Ok(conversation) => {
-                        let id = conversation.id.clone();
-                        conv.write().add_conversation(conversation);
-                        conv.write().set_current_conversation(Some(id));
-                        conv.write().set_operating(false);
-                    }
-                    Err(e) => {
-                        conv.write().set_error(Some(e));
-                        conv.write().set_operating(false);
-                    }
+        spawn(async move {
+            conv.write().set_operating(true);
+            let session_id = match ensure_session(session_state).await {
+                Ok(id) => id,
+                Err(e) => {
+                    conv.write().set_error(Some(e));
+                    return;
                 }
-            });
-        }
+            };
+            let state = conv.read().clone();
+            match state
+                .create_conversation(&session_id, "New Conversation")
+                .await
+            {
+                Ok(conversation) => {
+                    let id = conversation.id.clone();
+                    conv.write().add_conversation(conversation);
+                    conv.write().set_current_conversation(Some(id));
+                    conv.write().set_operating(false);
+                }
+                Err(e) => {
+                    conv.write().set_error(Some(e));
+                    conv.write().set_operating(false);
+                }
+            }
+        });
     };
 
     // Handle select conversation

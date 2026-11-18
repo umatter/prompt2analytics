@@ -5,8 +5,8 @@ use dioxus::prelude::*;
 
 use crate::api::ApiClient;
 use crate::app::apply_theme;
-use crate::state::SessionState;
 use crate::state::settings::{KeySource, Provider, Settings, Theme};
+use crate::state::{SessionState, ensure_session};
 
 /// Where the API key lives, phrased for the platform the app runs on.
 ///
@@ -318,26 +318,13 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
 
         let mut session = session_state;
         spawn(async move {
-            // Ensure session exists (creates one if needed) WITHOUT holding a
-            // signal borrow across `.await`. Holding `session.write()` across the
-            // session-creation network call makes concurrent reads of
-            // `session_state` (e.g. ChatPanel rendering `loaded_datasets`) panic
-            // with `AlreadyBorrowedMut`. Mirrors the pattern used in ChatPanel.
-            let existing_id = session.read().session_id.clone();
-            let session_id = if let Some(id) = existing_id {
-                id
-            } else {
-                let snapshot = session.read().clone();
-                match snapshot.initialize().await {
-                    Ok(id) => {
-                        session.write().set_session_id(id.clone());
-                        id
-                    }
-                    Err(e) => {
-                        load_error.set(Some(format!("Session error: {}", e)));
-                        load_status.set(None);
-                        return;
-                    }
+            // The tab's session, created on first need (single flight).
+            let session_id = match ensure_session(session).await {
+                Ok(id) => id,
+                Err(e) => {
+                    load_error.set(Some(format!("Session error: {}", e)));
+                    load_status.set(None);
+                    return;
                 }
             };
 

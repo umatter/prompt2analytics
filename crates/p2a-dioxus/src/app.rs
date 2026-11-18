@@ -7,7 +7,7 @@ use wasm_bindgen::JsCast;
 use crate::api::api;
 use crate::components::{ChatPanel, ConversationSidebar, DatasetSidebar, ShortcutsModal};
 use crate::state::settings::Theme;
-use crate::state::{ChatState, ConversationState, SessionState, Settings};
+use crate::state::{ChatState, ConversationState, SessionState, Settings, ensure_session};
 
 /// Apply theme to the document
 /// Strategy:
@@ -86,22 +86,8 @@ pub fn App() -> Element {
     use_context_provider(|| settings);
     use_context_provider(|| sidebar_visible);
 
-    // Initialize session on mount
-    use_effect(move || {
-        let session = session_state;
-        spawn(async move {
-            // Do NOT hold a signal borrow across `.await`: a `session.write()`
-            // (or `.read()`) guard kept alive during the session-creation network
-            // call makes any concurrent access to `session_state` (e.g. ChatPanel
-            // reading `loaded_datasets` during a re-render) panic with
-            // `AlreadyBorrowedMut`. Clone a snapshot first so the borrow is
-            // released before we await.
-            let snapshot = session.read().clone();
-            if let Err(e) = snapshot.initialize().await {
-                tracing::error!("Failed to initialize session: {}", e);
-            }
-        });
-    });
+    // No session is created at mount: the first send, data load or new
+    // conversation creates it (state::ensure_session).
 
     // Apply theme on mount and whenever settings change
     use_effect(move || {
@@ -168,24 +154,29 @@ pub fn App() -> Element {
                 // Ctrl+N or Cmd+N - New conversation
                 (Key::Character(c), true) if c == "n" => {
                     evt.prevent_default();
-                    let session_id = session_state.read().session_id.clone();
-                    if let Some(sid) = session_id {
-                        spawn(async move {
-                            let client = api();
-                            match client.create_conversation(&sid, "New Conversation").await {
-                                Ok(new_conv) => {
-                                    let id = new_conv.id.clone();
-                                    conversation_state.write().add_conversation(new_conv);
-                                    conversation_state
-                                        .write()
-                                        .set_current_conversation(Some(id));
-                                }
-                                Err(e) => {
-                                    tracing::warn!("Failed to create conversation: {}", e);
-                                }
+                    spawn(async move {
+                        let sid = match ensure_session(session_state).await {
+                            Ok(sid) => sid,
+                            Err(e) => {
+                                conversation_state.write().set_error(Some(e));
+                                return;
                             }
-                        });
-                    }
+                        };
+                        let client = api();
+                        match client.create_conversation(&sid, "New Conversation").await {
+                            Ok(new_conv) => {
+                                let id = new_conv.id.clone();
+                                conversation_state.write().add_conversation(new_conv);
+                                conversation_state
+                                    .write()
+                                    .set_current_conversation(Some(id));
+                            }
+                            Err(e) => {
+                                tracing::warn!("Failed to create conversation: {}", e);
+                                conversation_state.write().set_error(Some(e));
+                            }
+                        }
+                    });
                 }
                 // Escape - Close modals/dropdowns
                 (Key::Escape, _) => {
