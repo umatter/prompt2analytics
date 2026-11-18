@@ -77,8 +77,10 @@ pub struct ConstrOptimConfig {
     /// Outer convergence tolerance (R's `outer.eps`, default 1e-5): stop when the barrier
     /// objective changes by less than `(1e-3 + |r|) outer_eps`. Must be finite and positive
     pub outer_eps: f64,
-    /// Inner optimization method. BFGS needs a gradient (as R's `method = "BFGS"` without
-    /// `grad`, a call without one is refused; Nelder-Mead is the gradient-free method).
+    /// Inner optimization method, `BFGS` by default. BFGS needs a gradient (as R's
+    /// `method = "BFGS"` without `grad`, a call without one is refused): without a gradient,
+    /// set `method` to [`OptimMethod::NelderMead`], the gradient-free method (R's default
+    /// when `grad` is NULL; p2a does not switch to it for you).
     /// L-BFGS-B is refused: it needs finite values outside the region, which the barrier
     /// does not give
     pub method: OptimMethod,
@@ -200,7 +202,8 @@ where
         (OptimMethod::BFGS, true) => true,
         (OptimMethod::BFGS, false) => {
             return Err(invalid(
-                "constrOptim method BFGS needs a gradient: pass grad, or use method Nelder-Mead"
+                "constrOptim method BFGS (the default) needs a gradient: pass grad, or set method \
+                 to NelderMead, the gradient-free method"
                     .to_string(),
             ));
         }
@@ -996,7 +999,10 @@ mod tests {
             &ci,
             ConstrOptimConfig::default(),
         ));
-        assert!(m.contains("BFGS") && m.contains("needs a gradient"), "{m}");
+        assert!(
+            m.contains("BFGS") && m.contains("needs a gradient") && m.contains("NelderMead"),
+            "{m}"
+        );
         for g in [None, Some(grad)] {
             let mut cfg = ConstrOptimConfig::default();
             cfg.method = OptimMethod::LBFGSB;
