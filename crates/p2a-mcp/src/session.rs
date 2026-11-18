@@ -1446,7 +1446,7 @@ impl DatasetAdmission {
 /// that thread's admission; it is therefore neither `Send` nor `Sync`, so
 /// it cannot be held across an `.await` of a multi-threaded runtime.
 #[derive(Debug)]
-pub struct AdmissionGuard {
+pub(crate) struct AdmissionGuard {
     admission: Arc<DatasetAdmission>,
     previous: Option<Arc<DatasetAdmission>>,
     _thread_bound: PhantomData<*const ()>,

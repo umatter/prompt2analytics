@@ -759,7 +759,7 @@ pub struct ReloadSource {
 /// (`DatasetQuotas::default()`) there is no guard and only the footer is
 /// checked. Other formats are charged only once decoded, by
 /// [`insert_reloaded_dataset`].
-pub fn load_reload_source(
+pub(crate) fn load_reload_source(
     handle: &tokio::runtime::Handle,
     source: &ReloadSource,
     quotas: DatasetQuotas,
