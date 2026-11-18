@@ -156,6 +156,7 @@ fn convert_message(
         tool_calls,
         images,
         timestamp: msg.timestamp.to_rfc3339(),
+        interrupted: msg.interrupted,
     }
 }
 
@@ -257,6 +258,20 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["a"], "[redacted] / [redacted] / short");
         assert_eq!(v["b"], "[redacted]");
+    }
+
+    #[test]
+    fn an_interrupted_answer_is_marked() {
+        let mut msg = ChatMessage::assistant_streaming();
+        msg.content = "The data has".to_string();
+        msg.is_streaming = false;
+        msg.interrupted = true;
+        let mut finished = msg.clone();
+        finished.interrupted = false;
+        let json = export_to_json(None, &[msg, finished], &JsonExportOptions::default()).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["messages"][0]["interrupted"], true);
+        assert!(v["messages"][1].get("interrupted").is_none(), "{json}");
     }
 
     #[test]

@@ -158,12 +158,17 @@ fn format_message_html(msg: &ChatMessage, options: &HtmlExportOptions) -> String
         r#"            <div class="{role_class}">
                 <div class="role">{role_display}</div>
                 <div class="content"><p>{content}</p></div>
-                {tool_calls}
+                {interrupted}{tool_calls}
                 {images}
             </div>"#,
         role_class = role_class,
         role_display = role_display,
         content = content_html,
+        interrupted = if msg.interrupted {
+            r#"<p class="interrupted">Answer interrupted</p>"#
+        } else {
+            ""
+        },
         tool_calls = tool_calls_html,
         images = images_html
     )
@@ -310,6 +315,12 @@ const CSS_LIGHT: &str = r#"
 
         .tool-call.error .status {
             color: var(--error-color);
+        }
+
+        .interrupted {
+            color: var(--text-secondary);
+            font-style: italic;
+            font-size: 0.875rem;
         }
 
         .tool-args, .tool-result {
@@ -482,6 +493,12 @@ const CSS_DARK: &str = r#"
             color: var(--error-color);
         }
 
+        .interrupted {
+            color: var(--text-secondary);
+            font-style: italic;
+            font-size: 0.875rem;
+        }
+
         .tool-args, .tool-result {
             padding: 1rem;
         }
@@ -574,6 +591,22 @@ mod tests {
         assert!(!result.contains("github.com/prompt2analytics/prompt2analytics"));
         let workspace = include_str!("../../../../Cargo.toml");
         assert!(workspace.contains(&format!("repository = \"{PROJECT_URL}\"")));
+    }
+
+    #[test]
+    fn an_interrupted_answer_is_marked() {
+        let mut msg = ChatMessage::assistant_streaming();
+        msg.content = "The data has".to_string();
+        msg.is_streaming = false;
+        msg.interrupted = true;
+        let out = export_to_html(None, &[msg.clone()], &HtmlExportOptions::default());
+        assert!(
+            out.contains(r#"<p class="interrupted">Answer interrupted</p>"#),
+            "{out}"
+        );
+        msg.interrupted = false;
+        let out = export_to_html(None, &[msg], &HtmlExportOptions::default());
+        assert!(!out.contains(r#"<p class="interrupted">"#), "{out}");
     }
 
     #[test]

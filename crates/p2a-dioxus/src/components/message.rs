@@ -116,6 +116,13 @@ pub fn Message(props: MessageProps) -> Element {
                         // Message content
                         {render_content(message)}
 
+                        // An answer that ended before it was finished
+                        if message.interrupted {
+                            p { class: "mt-2 text-xs italic text-gray-500 dark:text-gray-400",
+                                "Answer interrupted"
+                            }
+                        }
+
                         // Display images if any
                         if !message.images.is_empty() {
                             div { class: "mt-3 space-y-2",

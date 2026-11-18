@@ -19,6 +19,9 @@ pub struct ChatMessage {
     pub images: Vec<String>,
     /// Whether this message is currently streaming
     pub is_streaming: bool,
+    /// Whether the answer ended before it was finished (stopped, a stream
+    /// that closed or went silent, a session that ended)
+    pub interrupted: bool,
     /// Message timestamp
     pub timestamp: DateTime<Utc>,
 }
@@ -33,6 +36,7 @@ impl ChatMessage {
             tool_calls: Vec::new(),
             images: Vec::new(),
             is_streaming: false,
+            interrupted: false,
             timestamp: Utc::now(),
         }
     }
@@ -46,6 +50,7 @@ impl ChatMessage {
             tool_calls: Vec::new(),
             images: Vec::new(),
             is_streaming: true,
+            interrupted: false,
             timestamp: Utc::now(),
         }
     }
@@ -65,6 +70,7 @@ impl ChatMessage {
             tool_calls,
             images: Vec::new(),
             is_streaming: false,
+            interrupted: false,
             timestamp: Utc::now(),
         }
     }
@@ -83,6 +89,7 @@ impl ChatMessage {
             tool_calls: Vec::new(), // Tool calls will be loaded separately
             images: Vec::new(),
             is_streaming: false,
+            interrupted: false,
             timestamp,
         }
     }
@@ -189,6 +196,10 @@ pub fn turn_persistence(conversation_id: &str) -> &'static [&'static str] {
         &["user"]
     }
 }
+
+/// The banner when the stream closed before the answer finished.
+pub const CLOSED_EARLY: &str =
+    "The connection closed before the answer finished. Retry to ask again.";
 
 /// Active tool call being processed
 #[derive(Debug, Clone)]
@@ -365,18 +376,61 @@ impl ChatState {
     }
 
     /// End the trailing streaming message without a Done: its partial text
-    /// is kept and it stops streaming; an empty one shows `note` instead.
-    /// Calls still running keep an unknown outcome.
+    /// is kept, it stops streaming and is marked interrupted; an empty one
+    /// shows `note` instead. Calls still running keep an unknown outcome.
     pub fn end_interrupted(&mut self, note: &str) {
         if let Some(last) = self.messages.last_mut()
             && last.is_streaming
         {
             last.is_streaming = false;
+            last.interrupted = true;
             if last.content.is_empty() {
                 last.content = note.to_string();
             }
         }
         self.active_tool = None;
+    }
+
+    /// Run once after the stream returned, whatever its result: an answer
+    /// still streaming is ended as interrupted (its partial text kept), and
+    /// when no Done came (`saw_done` false) and no error is shown, the
+    /// banner says the stream closed early. An answer already finished or
+    /// ended (a Done, a stop) is left as it is.
+    pub fn finish_stream(&mut self, saw_done: bool) {
+        let streaming = self.messages.last().is_some_and(|m| m.is_streaming);
+        if !streaming {
+            return;
+        }
+        self.end_interrupted("");
+        if !saw_done && self.error.is_none() {
+            self.error = Some(CLOSED_EARLY.to_string());
+        }
+    }
+
+    /// The prompt Retry sends, with the turn it replaces taken out: after an
+    /// answer that is empty or interrupted, that answer and its prompt are
+    /// removed (the send adds the prompt again); after a finished answer the
+    /// last prompt is asked again and nothing is removed. With no prompt in
+    /// the transcript (the session ended and it was cleared), the prompt that
+    /// was being sent. That stashed prompt is taken either way, so a stale
+    /// one is never sent later.
+    pub fn take_retry_turn(&mut self) -> Option<String> {
+        let stashed = self.take_retry_prompt();
+        if let Some(last) = self.messages.last()
+            && last.role == "assistant"
+            && !last.is_streaming
+            && (last.interrupted || last.content.is_empty())
+            && let Some(before) = self.messages.len().checked_sub(2)
+            && self.messages[before].role == "user"
+        {
+            self.messages.pop();
+            return self.messages.pop().map(|m| m.content);
+        }
+        self.messages
+            .iter()
+            .rfind(|m| m.role == "user")
+            .map(|m| m.content.clone())
+            .or(stashed)
     }
 
     /// Stop processing
@@ -545,10 +599,15 @@ impl ChatState {
                         .collect();
 
                     // Assistant message with tool calls
-                    // Note: For OpenAI format, the content can be empty when there are tool calls
+                    // Note: For OpenAI format, the content can be empty when there are tool calls.
+                    // An interrupted answer's partial text is not sent; its tools ran.
                     history.push(Message {
                         role: "assistant".to_string(),
-                        content: msg.content.clone(),
+                        content: if msg.interrupted {
+                            String::new()
+                        } else {
+                            msg.content.clone()
+                        },
                         tool_calls: Some(tool_calls),
                         tool_results: None,
                     });
@@ -583,7 +642,7 @@ impl ChatState {
                         tool_calls: None,
                         tool_results: Some(tool_results),
                     });
-                } else if !msg.content.is_empty() {
+                } else if !msg.content.is_empty() && !msg.interrupted {
                     // Assistant message without tool calls - just include content
                     history.push(Message {
                         role: "assistant".to_string(),
@@ -916,6 +975,156 @@ mod tests {
         send(&mut chat, "describe sales");
         chat.end_interrupted("Stopped.");
         assert_eq!(chat.messages.last().unwrap().content, "Stopped.");
+    }
+
+    /// A stream that closed before Done: the partial answer is finished and
+    /// marked, and the banner says so (an SSE error already shown is kept).
+    #[test]
+    fn finish_stream_ends_an_answer_cut_short() {
+        let mut chat = ChatState::new();
+        send(&mut chat, "describe sales");
+        chat.append_content("half");
+        chat.finish_stream(false);
+        let last = chat.messages.last().unwrap();
+        assert!(!last.is_streaming);
+        assert!(last.interrupted);
+        assert_eq!(last.content, "half");
+        assert_eq!(chat.error.as_deref(), Some(CLOSED_EARLY));
+        // A second call changes nothing.
+        let before = chat.messages.len();
+        chat.set_error(None);
+        chat.finish_stream(false);
+        assert_eq!(chat.messages.len(), before);
+        assert_eq!(chat.error, None);
+
+        let mut chat = ChatState::new();
+        send(&mut chat, "describe sales");
+        chat.set_error(Some("Provider error (upstream_error)".into()));
+        chat.finish_stream(false);
+        assert_eq!(
+            chat.error.as_deref(),
+            Some("Provider error (upstream_error)")
+        );
+        assert!(chat.messages.last().unwrap().interrupted);
+    }
+
+    #[test]
+    fn finish_stream_leaves_a_finished_or_stopped_answer() {
+        let mut chat = ChatState::new();
+        send(&mut chat, "describe sales");
+        chat.finalize_message(reply("All done."));
+        chat.finish_stream(true);
+        let last = chat.messages.last().unwrap();
+        assert!(!last.interrupted);
+        assert_eq!(last.content, "All done.");
+        assert_eq!(chat.error, None);
+
+        let mut chat = ChatState::new();
+        send(&mut chat, "describe sales");
+        chat.end_interrupted("Stopped.");
+        chat.finish_stream(false);
+        assert_eq!(chat.error, None, "a stop is not an error");
+        assert_eq!(chat.messages.last().unwrap().content, "Stopped.");
+    }
+
+    #[test]
+    fn end_interrupted_marks_the_message() {
+        let mut chat = ChatState::new();
+        send(&mut chat, "describe sales");
+        chat.append_content("The data has");
+        chat.end_interrupted("Stopped.");
+        assert!(chat.messages.last().unwrap().interrupted);
+        assert!(!chat.messages[0].interrupted);
+    }
+
+    fn contents(chat: &ChatState) -> Vec<(String, String)> {
+        chat.messages
+            .iter()
+            .map(|m| (m.role.clone(), m.content.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn take_retry_turn_replaces_an_interrupted_turn() {
+        let mut chat = ChatState::new();
+        send(&mut chat, "a");
+        chat.append_content("half");
+        chat.finish_stream(false);
+        chat.stop_processing();
+        assert_eq!(chat.take_retry_turn().as_deref(), Some("a"));
+        assert!(chat.messages.is_empty());
+
+        // An empty placeholder is replaced the same way.
+        let mut chat = ChatState::new();
+        send(&mut chat, "a");
+        chat.end_interrupted("");
+        chat.stop_processing();
+        assert_eq!(chat.take_retry_turn().as_deref(), Some("a"));
+        assert!(chat.messages.is_empty());
+    }
+
+    #[test]
+    fn take_retry_turn_reasks_after_a_finished_answer() {
+        let mut chat = ChatState::new();
+        send(&mut chat, "a");
+        finish(&mut chat, reply("done"));
+        assert_eq!(chat.take_retry_turn().as_deref(), Some("a"));
+        assert_eq!(
+            contents(&chat),
+            pairs(&[("user", "a"), ("assistant", "done")])
+        );
+    }
+
+    #[test]
+    fn take_retry_turn_uses_the_prompt_of_an_ended_session() {
+        let mut chat = ChatState::new();
+        chat.retry_prompt = Some("regress price on sqft".into());
+        assert_eq!(
+            chat.take_retry_turn().as_deref(),
+            Some("regress price on sqft")
+        );
+        assert_eq!(chat.retry_prompt, None);
+        // A stale one is dropped when the transcript has a prompt.
+        let mut chat = ChatState::new();
+        send(&mut chat, "a");
+        finish(&mut chat, reply("done"));
+        chat.retry_prompt = Some("old".into());
+        assert_eq!(chat.take_retry_turn().as_deref(), Some("a"));
+        assert_eq!(chat.retry_prompt, None);
+    }
+
+    /// The tools of an interrupted answer ran on the server: their calls go
+    /// back to the model, its partial text does not.
+    #[test]
+    fn build_history_keeps_the_tools_of_an_interrupted_answer() {
+        let mut chat = ChatState::new();
+        send(&mut chat, "load and describe");
+        chat.set_active_tool("load_dataset".into(), json!({"name": "sales"}));
+        chat.clear_active_tool(Some("Loaded sales".into()), Some("success"));
+        chat.append_content("The data has");
+        chat.finish_stream(false);
+        chat.stop_processing();
+        let history = send(&mut chat, "describe sales");
+        assert_eq!(
+            turns(&history),
+            pairs(&[
+                ("user", "load and describe"),
+                ("assistant", ""),
+                ("tool", "")
+            ])
+        );
+        assert_eq!(
+            history[2].tool_results.as_ref().unwrap()[0].content,
+            "Loaded sales"
+        );
+
+        let mut chat = ChatState::new();
+        send(&mut chat, "load and describe");
+        chat.append_content("The data has");
+        chat.finish_stream(false);
+        chat.stop_processing();
+        let history = send(&mut chat, "describe sales");
+        assert_eq!(turns(&history), pairs(&[("user", "load and describe")]));
     }
 
     /// A second chip click while the first send runs is refused.

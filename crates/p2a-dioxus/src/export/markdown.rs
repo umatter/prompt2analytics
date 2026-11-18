@@ -65,6 +65,9 @@ fn format_message(msg: &ChatMessage, options: &MarkdownExportOptions) -> String 
     // Message content
     output.push_str(&msg.content);
     output.push_str("\n\n");
+    if msg.interrupted {
+        output.push_str("_(answer interrupted)_\n\n");
+    }
 
     // Tool calls in collapsible sections
     if options.include_tool_calls && !msg.tool_calls.is_empty() {
@@ -182,6 +185,31 @@ mod tests {
         assert!(result.contains("Hello"));
         assert!(result.contains("**Assistant**"));
         assert!(result.contains("Hi there!"));
+    }
+
+    fn interrupted(content: &str) -> ChatMessage {
+        let mut msg = ChatMessage::assistant_streaming();
+        msg.content = content.to_string();
+        msg.is_streaming = false;
+        msg.interrupted = true;
+        msg
+    }
+
+    #[test]
+    fn an_interrupted_answer_is_marked() {
+        let out = export_to_markdown(
+            None,
+            &[interrupted("The data has")],
+            &MarkdownExportOptions::default(),
+        );
+        assert!(
+            out.contains("The data has\n\n_(answer interrupted)_"),
+            "{out}"
+        );
+        let mut finished = interrupted("All done.");
+        finished.interrupted = false;
+        let out = export_to_markdown(None, &[finished], &MarkdownExportOptions::default());
+        assert!(!out.contains("interrupted"), "{out}");
     }
 
     #[test]

@@ -56,6 +56,9 @@ pub struct ExportedMessage {
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub images: Vec<String>,
     pub timestamp: String,
+    /// The answer ended before it was finished
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub interrupted: bool,
 }
 
 /// Conversation metadata in the exported format

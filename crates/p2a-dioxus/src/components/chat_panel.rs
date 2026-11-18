@@ -410,6 +410,8 @@ pub fn ChatPanel() -> Element {
 
             // Set when the server says the session is gone.
             let mut session_ended = false;
+            // Set when the Done event came (the answer finished).
+            let mut saw_done = false;
 
             // Stopped before the stream started (while the turn was set up).
             if stop_signal.is_fired() {
@@ -458,6 +460,7 @@ pub fn ChatPanel() -> Element {
                         }
                         StreamEvent::Done { message } => {
                             // The server stores the reply (with its tool calls).
+                            saw_done = true;
                             chat.write().finalize_message(message);
                         }
                         StreamEvent::Error { error, code } => {
@@ -512,11 +515,17 @@ pub fn ChatPanel() -> Element {
                 return;
             }
 
-            chat.write().stop_processing();
-            if stopped {
+            {
                 let mut c = chat.write();
-                c.end_interrupted("Stopped.");
-                c.set_status(Some("Answer stopped.".to_string()));
+                if stopped {
+                    c.end_interrupted("Stopped.");
+                }
+                // An answer the stream left unfinished is ended and marked.
+                c.finish_stream(saw_done);
+                c.stop_processing();
+                if stopped {
+                    c.set_status(Some("Answer stopped.".to_string()));
+                }
             }
 
             // Trigger dataset sidebar refresh in case tools created/modified datasets
@@ -601,31 +610,11 @@ pub fn ChatPanel() -> Element {
             if chat_state.read().is_busy() || conversation_state.read().is_operating {
                 return;
             }
-            // The last user message, or, after the session ended and the
-            // transcript was cleared, the prompt that was being sent.
-            let last_user_msg = chat_state
-                .read()
-                .messages
-                .iter()
-                .rfind(|m| m.role == "user")
-                .map(|m| m.content.clone());
-            let retry_prompt = chat_state.write().take_retry_prompt();
-            let last_user_msg = last_user_msg.or(retry_prompt);
-
-            if let Some(msg) = last_user_msg {
-                // Clear the error first
+            // The prompt to ask again; an interrupted or empty answer and its
+            // prompt are taken out, so the new turn replaces them.
+            let retry = chat_state.write().take_retry_turn();
+            if let Some(msg) = retry {
                 chat_state.write().set_error(None);
-                // Remove the failed assistant message if any (last message that might be incomplete)
-                {
-                    let mut chat = chat_state.write();
-                    if let Some(last) = chat.messages.last()
-                        && last.role == "assistant"
-                        && last.content.is_empty()
-                    {
-                        chat.messages.pop();
-                    }
-                }
-                // Re-send the message
                 handle_send(msg);
             }
         }
