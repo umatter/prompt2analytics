@@ -176,7 +176,8 @@ jobs:
         # T1-WP06: dead test names and links in validation docs, README.md and
         # CLAUDE.md fail the build. The status-page check fails when
         # validation/VALIDATION_STATUS.md's test_validate counts differ from
-        # cargo's --list; regenerate it with
+        # cargo's --list, or its method list from validation/methods/*.json;
+        # regenerate it with
         # validation/run_validation.sh --write-status (needs R).
         env:
           CARGO_TERM_COLOR: never

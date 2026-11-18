@@ -139,8 +139,9 @@ Execute these steps to validate numerical correctness:
 
 3. **The comparison happens inside the tests** (`p2a_validation::Check` at the `Tol`
    tolerances of `validation/README.md`): a failing test lists every quantity that differs,
-   with R's value, Rust's value and the allowed difference. Set `P2A_VALIDATION_VERBOSE=1` to
-   print every comparison. Report the registry `deviations` as known differences, with their
+   with R's value, Rust's value and the allowed difference. Set `P2A_VALIDATION_VERBOSE=1` and
+   pass `-- --show-output` (or `--nocapture`) to print every comparison: libtest hides a
+   passing test's output otherwise. Report the registry `deviations` as known differences, with their
    finding ids.
 
 4. **If no case exists** for the method: write one from
@@ -248,7 +249,8 @@ If the method has no registry entry or its cases are missing:
    `Rscript validation/r/run.R --write <id>` and `--check <id>`
 4. Add the `test_validate_*` test and the registry entry in `validation/methods/<area>.json`
 5. Update the method doc and the `validation/README.md` index row (status from the registry)
-6. A new `test_validate` test changes the counts CI checks: `validation/VALIDATION_STATUS.md`
+6. A new `test_validate` test changes the counts CI checks, and a new registry entry the
+   page's method list: `validation/VALIDATION_STATUS.md`
    must be regenerated with `validation/run_validation.sh --write-status` before the change
    reaches main (during the review campaign: at the wave integration, not in a lane)
 
@@ -370,7 +372,7 @@ Rscript validation/r/run.R --write {{case_id}}
 validation/run_validation.sh --rust-only --category {{category}}
 
 # Run Rust validation tests of a method, printing every comparison
-P2A_VALIDATION_VERBOSE=1 cargo test -p p2a-core -- test_validate_{{method}} --nocapture
+P2A_VALIDATION_VERBOSE=1 cargo test -p p2a-core --lib --no-default-features --features ci -- test_validate_{{method}} --show-output
 
 # Registry, case and doc lint
 python3 validation/tools/validation_status.py lint --strict --tests target/*-tests.txt

@@ -374,9 +374,11 @@ validation/
    pinning every number the method reports:
    ```rust
    #[test]
-   fn test_validate_ols_grunfeld() {
+   fn test_validate_ols_example_dataset() {
+       // Abridged: a real test (`test_validate_ols_grunfeld` in regression/ols.rs) pins every
+       // number the method reports, through the module's pin helpers.
        use p2a_validation::{Check, Tol};
-       let (case, ds) = crate::test_support::load_case("ols_grunfeld");
+       let (case, ds) = crate::test_support::load_case("ols_example_dataset");
        let r = run_ols(&ds, "inv", &["value", "capital"], true, CovarianceType::HC1).unwrap();
        let n = r.n_obs;
        let names = r.variable_names.as_slice();
@@ -396,7 +398,8 @@ validation/
 6. **Run** `python3 validation/tools/validation_status.py lint --strict --tests target/*-tests.txt`
    and `validation/run_validation.sh`.
 7. **Regenerate the status page.** Adding, removing or renaming a `test_validate` test changes
-   the counts CI checks: regenerate `validation/VALIDATION_STATUS.md` with
+   the counts CI checks, and adding or removing an entry in `validation/methods/*.json` changes
+   the page's method list: regenerate `validation/VALIDATION_STATUS.md` with
    `validation/run_validation.sh --write-status` before the change reaches main (during the
    review campaign: at the wave integration, not in a lane).
 

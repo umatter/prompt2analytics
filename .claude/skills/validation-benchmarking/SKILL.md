@@ -87,9 +87,11 @@ No `~` values in comparison tables and no hand-written `#[test]` code: cite the 
 **Template**:
 ```rust
 #[test]
-fn test_validate_ols_grunfeld() {
+fn test_validate_ols_example_dataset() {
+    // Abridged: a real test (`test_validate_ols_grunfeld` in regression/ols.rs) pins every
+    // number the method reports, through the module's pin helpers.
     use p2a_validation::{Check, Tol};
-    let (case, ds) = crate::test_support::load_case("ols_grunfeld");
+    let (case, ds) = crate::test_support::load_case("ols_example_dataset");
     let r = run_ols(&ds, "inv", &["value", "capital"], true, CovarianceType::HC1).unwrap();
     let n = r.n_obs;
     let names = r.variable_names.as_slice();
@@ -134,7 +136,8 @@ Methods must be correct and efficient; R checks them and sets the default conven
 3. If a new R package is used, add it to `validation/reference_implementations.md` and to the
    prerequisites in `validation/README.md`.
 4. Run `python3 validation/tools/validation_status.py lint --strict --tests target/*-tests.txt`.
-5. Adding, removing or renaming a `test_validate` test changes the counts CI checks:
+5. Adding, removing or renaming a `test_validate` test changes the counts CI checks, and
+   adding or removing an entry in `validation/methods/*.json` changes the page's method list:
    regenerate `validation/VALIDATION_STATUS.md` with `validation/run_validation.sh
    --write-status` before the change reaches main (during the review campaign: at the wave
    integration, not in a lane).
@@ -285,7 +288,7 @@ Rscript validation/r/run.R --check
 validation/run_validation.sh --rust-only --category <cat>
 
 # Run validation tests for a specific method, printing every comparison
-P2A_VALIDATION_VERBOSE=1 cargo test -p p2a-core -- test_validate_[method] --nocapture
+P2A_VALIDATION_VERBOSE=1 cargo test -p p2a-core --lib --no-default-features --features ci -- test_validate_[method] --show-output
 
 # Registry, case and doc lint (needs the cargo --list outputs in target/*-tests.txt)
 python3 validation/tools/validation_status.py lint --strict --tests target/*-tests.txt
