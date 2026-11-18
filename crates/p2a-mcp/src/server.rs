@@ -1462,8 +1462,9 @@ fn check_response_size(limits: &Limits, tool: &str, bytes: usize) -> Result<(), 
 const ERROR_CUT_MARKER: &str = " [cut: response_bytes]";
 
 /// Cuts a failed result's `error` copy (its first text) to the room its content leaves under
-/// `response_bytes`, so that content and copy together stay within the cap. Nothing changes
-/// when the copy fits or no cap is set.
+/// `response_bytes`, so that content and copy together stay within the cap. When the content
+/// leaves no room for the cut marker, the copy is the marker alone (so a cut copy is never
+/// empty without saying why). Nothing changes when the copy fits or no cap is set.
 #[cfg(feature = "http")]
 fn fit_error_copy(result: &mut crate::transport::http::ToolResult, limits: &Limits) {
     let Some(max) = limits.response_bytes else {
@@ -1476,7 +1477,11 @@ fn fit_error_copy(result: &mut crate::transport::http::ToolResult, limits: &Limi
     if let Some(error) = result.error.as_mut()
         && error.len() > room
     {
-        *error = p2a_text::ellipsize_bytes(error, room, ERROR_CUT_MARKER).into_owned();
+        *error = if room < ERROR_CUT_MARKER.len() {
+            ERROR_CUT_MARKER.trim_start().to_string()
+        } else {
+            p2a_text::ellipsize_bytes(error, room, ERROR_CUT_MARKER).into_owned()
+        };
     }
 }
 
@@ -2024,6 +2029,10 @@ mod tests {
             fit_error_copy(&mut r, &limits);
             assert_eq!(r.error, Some("e".repeat(1_000)));
         }
+        // no room for the marker after the content: the copy is the marker alone
+        let mut r = failed();
+        fit_error_copy(&mut r, &response_cap(1_010));
+        assert_eq!(r.error.as_deref(), Some("[cut: response_bytes]"));
     }
 
     /// Through the governed path: a failed result that quotes a long argument stays within
