@@ -26,12 +26,15 @@ pub struct KdNode {
     pub point_indices: Vec<usize>,
 }
 
-/// KD-tree for efficient spatial queries.
+/// KD-tree for exact nearest-neighbour and fixed-radius queries.
 ///
-/// Supports:
-/// - O(log n) k-nearest neighbor queries
-/// - O(log n + k) radius queries
-/// - O(n log n) dual-tree traversal for MST construction
+/// Built in O(n log^2 n) (a sort per level). On well-spread, low-dimensional data a k-nearest
+/// query visits about O(log n + k) nodes and a radius query O(log n + m) for m points returned;
+/// the worst case of either is O(n), and the pruning weakens as the dimension grows. The tree
+/// does no dual-tree traversal itself: the dual-tree MST builders of [`crate::ml::dual_tree`]
+/// walk its nodes, and [`build_connected_mst`] collects radius edges for Kruskal, bridges the
+/// components they leave by an all-pairs search between components, and falls back to an O(n^2)
+/// Prim pass, so its worst case is quadratic.
 pub struct KdTree {
     root: Option<Box<KdNode>>,
     data: Vec<Vec<f64>>,
