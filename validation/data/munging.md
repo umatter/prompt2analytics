@@ -371,7 +371,7 @@ Rows of existing paths above 1.10x:
   missing last (U3, DATA-36); the base returned them in hash order. The sort costs the same as a plan step
   or on the collected frame.
 - `join` full with 1:10 keys at n = 10,000 (1.13x, 245.0 to 277.1 µs): the key columns are coalesced (DATA-43).
-- `replace` with a match on Float64 at n = 100 (1.11x, 1.88 to 2.09 µs; 1.08-1.09x above): not profiled.
+- `replace` with a match on Float64 at n = 100 (1.12x, 1.88 to 2.09 µs; 1.08-1.09x above): not profiled.
 - Joins with missing keys (1.2-1.5x at 1,000, 8.8-15.3x at 10,000; the full join 1.08 to 16.53 ms): missing
   keys now match each other (U1), so the result has more rows (with 5% missing keys on both sides, about
   (n/20)^2 more); the null-free rows above are the comparison. Peak RSS of the full join at 10,000 rows:
