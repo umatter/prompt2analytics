@@ -9,6 +9,7 @@ use crate::state::settings::Theme;
 use crate::state::{
     ChatMessage, ChatState, ConversationState, SESSION_ENDED_TEXT, SessionState, Settings,
     ToolCallInfo, ensure_session, on_session_lost, session_lost, session_lost_text,
+    turn_persistence,
 };
 
 /// The session `old_id` ended during a send of `prompt`: the turn is ended,
@@ -327,35 +328,45 @@ pub fn ChatPanel() -> Element {
                 chat.read().messages.len()
             );
 
-            // Persist user message to conversation and update local ID
-            if !conversation_id.is_empty() {
-                let conv_id = conversation_id.clone();
-                let msg = message.clone();
-                let mut chat_for_user_id = chat;
-                spawn(async move {
-                    let client = api();
-                    match client.add_message(&conv_id, "user", &msg).await {
-                        Ok(persisted_msg) => {
-                            // Find and update the user message ID
-                            let mut chat_write = chat_for_user_id.write();
-                            // Find the user message with this content (should be second-to-last, before streaming assistant)
-                            for m in chat_write.messages.iter_mut().rev() {
-                                if m.role == "user" && m.content == msg {
-                                    tracing::debug!(
-                                        "[ChatPanel] Updating user message ID from {} to {}",
-                                        m.id,
-                                        persisted_msg.id
-                                    );
-                                    m.id = persisted_msg.id;
-                                    break;
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!("[ChatPanel] Failed to persist user message: {}", e);
+            // Store the user's row before the stream starts, so it precedes the
+            // reply the server stores; the server stores the reply itself
+            // (state::turn_persistence). Without the row nothing is streamed:
+            // the server would store a reply without its question.
+            if turn_persistence(&conversation_id).contains(&"user") {
+                match api().add_message(&conversation_id, "user", &message).await {
+                    Ok(persisted_msg) => {
+                        let mut chat_write = chat.write();
+                        if let Some(m) = chat_write
+                            .messages
+                            .iter_mut()
+                            .rev()
+                            .find(|m| m.role == "user" && m.content == message)
+                        {
+                            m.id = persisted_msg.id;
                         }
                     }
-                });
+                    Err(e) if session_lost_text(&e) => {
+                        recover_lost_session(
+                            chat,
+                            conv,
+                            session,
+                            synced_conv_id,
+                            synced_messages_len,
+                            &session_id,
+                            &message,
+                        );
+                        chat.write().stop_processing();
+                        return;
+                    }
+                    Err(e) => {
+                        tracing::warn!("[ChatPanel] Failed to store the user message: {}", e);
+                        let mut c = chat.write();
+                        c.end_interrupted("Not sent.");
+                        c.set_error(Some(format!("The message was not sent: {e}")));
+                        c.stop_processing();
+                        return;
+                    }
+                }
             }
 
             // Build history
@@ -370,9 +381,6 @@ pub fn ChatPanel() -> Element {
             let interpret = settings.read().interpret_results;
 
             tracing::debug!("[ChatPanel] Calling stream_chat");
-
-            // Clone conversation_id for the closure
-            let conv_id_for_done = conversation_id.clone();
 
             // Read the backend URL from the API client: the embedded server's
             // URL on native, the compiled-in one on web.
@@ -391,7 +399,10 @@ pub fn ChatPanel() -> Element {
                 interpret,
                 Some(conversation_id.clone()),
                 |event| {
-                    tracing::debug!("[ChatPanel] Got event: {:?}", std::mem::discriminant(&event));
+                    tracing::debug!(
+                        "[ChatPanel] Got event: {:?}",
+                        std::mem::discriminant(&event)
+                    );
                     match event {
                         StreamEvent::Content { text } => {
                             chat.write().append_content(&text);
@@ -413,35 +424,8 @@ pub fn ChatPanel() -> Element {
                             }
                         }
                         StreamEvent::Done { message } => {
-                            chat.write().finalize_message(message.clone());
-
-                            // Persist assistant message to conversation and update local ID
-                            if !conv_id_for_done.is_empty() {
-                                let conv_id = conv_id_for_done.clone();
-                                let content = message.content.clone();
-                                let mut chat_for_id = chat;
-                                spawn(async move {
-                                    let client = api();
-                                    match client.add_message(&conv_id, "assistant", &content).await {
-                                        Ok(persisted_msg) => {
-                                            // Update the local message ID to match the backend ID
-                                            // This ensures tool calls can be matched correctly
-                                            if let Some(last) = chat_for_id.write().messages.last_mut()
-                                                && last.role == "assistant" {
-                                                    tracing::debug!(
-                                                        "[ChatPanel] Updating message ID from {} to {}",
-                                                        last.id,
-                                                        persisted_msg.id
-                                                    );
-                                                    last.id = persisted_msg.id;
-                                                }
-                                        }
-                                        Err(e) => {
-                                            tracing::warn!("[ChatPanel] Failed to persist assistant message: {}", e);
-                                        }
-                                    }
-                                });
-                            }
+                            // The server stores the reply (with its tool calls).
+                            chat.write().finalize_message(message);
                         }
                         StreamEvent::Error { error, code } => {
                             if session_lost(code.as_deref(), &error) {

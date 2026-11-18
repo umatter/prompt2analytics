@@ -178,6 +178,18 @@ impl From<&PersistedToolCall> for ToolCallInfo {
     }
 }
 
+/// The rows of a turn the client stores itself: the user's prompt, when the
+/// turn has a conversation, posted before the stream starts. The server
+/// stores the assistant's reply with its tool calls (API_ENDPOINTS.md, chat
+/// routes), so the client posts no assistant row.
+pub fn turn_persistence(conversation_id: &str) -> &'static [&'static str] {
+    if conversation_id.is_empty() {
+        &[]
+    } else {
+        &["user"]
+    }
+}
+
 /// Active tool call being processed
 #[derive(Debug, Clone)]
 pub struct ActiveToolCall {
@@ -861,6 +873,33 @@ mod tests {
             },
         );
         assert_eq!(chat.messages.last().unwrap().tool_calls[0].success, None);
+    }
+
+    /// The client stores the user's row of a turn, before the stream; the server stores the
+    /// assistant's reply (with its tool calls), so the client posts none.
+    #[test]
+    fn turn_persistence_posts_only_the_user_row() {
+        assert_eq!(turn_persistence("e104f3c9"), ["user"]);
+        assert!(turn_persistence("").is_empty());
+    }
+
+    #[test]
+    fn end_interrupted_keeps_partial_text() {
+        let mut chat = ChatState::new();
+        send(&mut chat, "describe sales");
+        chat.append_content("The data has");
+        chat.set_active_tool("describe_dataset".into(), json!({"dataset": "sales"}));
+        chat.end_interrupted("Stopped.");
+        let last = chat.messages.last().unwrap();
+        assert_eq!(last.content, "The data has");
+        assert!(!last.is_streaming);
+        assert_eq!(last.tool_calls[0].success, None);
+        assert!(chat.active_tool.is_none());
+
+        let mut chat = ChatState::new();
+        send(&mut chat, "describe sales");
+        chat.end_interrupted("Stopped.");
+        assert_eq!(chat.messages.last().unwrap().content, "Stopped.");
     }
 
     #[test]
