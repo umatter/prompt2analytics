@@ -479,6 +479,17 @@ fn extract_text(events: &[Event]) -> String {
         match event {
             Event::Text(t) => text.push_str(t),
             Event::Code(c) => text.push_str(c),
+            // In the delimiters render_events shows them in.
+            Event::InlineMath(m) => {
+                text.push('$');
+                text.push_str(m);
+                text.push('$');
+            }
+            Event::DisplayMath(m) => {
+                text.push_str("$$");
+                text.push_str(m);
+                text.push_str("$$");
+            }
             Event::SoftBreak | Event::HardBreak => text.push('\n'),
             _ => {}
         }
@@ -740,7 +751,9 @@ mod render_tests {
     //! whitespace between nodes; `"` `&` `'` `<` `>` in text and attribute values written as
     //! &#34; &#38; &#39; &#60; &#62;; integer attributes unquoted. The markdown has no components
     //! or event handlers, so the tree needs no VirtualDom. One test renders every document through
-    //! dioxus-ssr (a dev-dependency) in a VirtualDom and requires the same string.
+    //! dioxus-ssr (a dev-dependency) in a VirtualDom and requires the same string. render_markdown
+    //! hands text to Dioxus unescaped: the &#34;/&#38; forms in the expectations are the walker's
+    //! and dioxus-ssr's serialisation, and pin that the characters survive as text.
     use super::render_markdown;
     use dioxus::dioxus_core::{
         Attribute, AttributeValue, DynamicNode, TemplateAttribute, TemplateNode, VNode,
@@ -848,6 +861,7 @@ mod render_tests {
         "Fit: $\\hat\\beta_1 = 0.48$ and\n\n$$R^2 = 0.71$$\n",
         "Run `p2a reg ols` with --robust hc1 on \"sales\" and 'grunfeld'.",
         "- [ ] check residuals\n- [x] fit model\n",
+        "![$x$](https://example.org/c.png)",
     ];
 
     /// The tests below read the walker's string; it must be what the app's renderer draws.
@@ -876,7 +890,7 @@ mod render_tests {
     }
 
     #[test]
-    fn test_render_markdown_inline_formatting_and_escaping() {
+    fn test_render_markdown_inline_formatting_keeps_special_characters() {
         let out = structure("A **bold** and *em* word with `code` & <5.");
         assert!(
             out.contains(
@@ -965,6 +979,15 @@ mod render_tests {
             "{out}"
         );
         assert!(out.contains("<p><code>$$R^2 = 0.71$$</code></p>"), "{out}");
+    }
+
+    /// Image alt text dropped InlineMath and DisplayMath, so `![$x$](...)` read `[image: ]`.
+    #[test]
+    fn test_render_markdown_image_alt_keeps_math() {
+        let raw = html("![$x$](https://example.org/c.png)");
+        assert!(raw.contains(">[image: $x$]</a>"), "{raw}");
+        let raw = html("![a $$y$$ b](data:image/png;base64,iVBORw0KGgo=)");
+        assert!(raw.contains(" alt=\"a $$y$$ b\""), "{raw}");
     }
 
     /// Smart punctuation turned `--robust` into an en dash and straight quotes into curly ones, so
