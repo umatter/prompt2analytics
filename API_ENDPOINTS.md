@@ -912,11 +912,12 @@ interface LlmChatRequest {
 type StreamEvent =
   | { type: "status"; message: string }
   | { type: "tool_start"; tool: string; arguments: Record<string, any> }
-  | { type: "tool_end"; tool: string; elapsed_ms: number; result?: string }
+  | { type: "tool_end"; tool: string; elapsed_ms: number; result?: string;
+      status: "success" | "error" }   // "error": the call failed or the tool answered with an error result
   | { type: "tool_result"; images?: { data: string; mime_type: string }[] }
   | { type: "content"; text: string }
   | { type: "done"; message: Message }
-  | { type: "error"; error: string };
+  | { type: "error"; error: string; code?: string };   // code: as the JSON routes give the same refusal
 ```
 
 ---
