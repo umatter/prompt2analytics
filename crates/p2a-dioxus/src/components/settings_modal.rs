@@ -105,6 +105,39 @@ fn list_models_error_text(error: &str) -> String {
     }
 }
 
+/// The first-run nudge shown while no provider is chosen.
+const WELCOME_TEXT: &str = "Welcome! Choose an LLM provider below to start chatting. \
+     Anthropic, OpenAI and OpenRouter need an API key; Ollama needs an Ollama server the backend can reach.";
+
+/// What the Ollama option says about where Ollama runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OllamaCopy {
+    label: &'static str,
+    hint: &'static str,
+}
+
+/// The Ollama copy for a build that talks to a hosted backend (`hosted`, a
+/// compiled-in backend URL) or to one on this machine. The backend, not the
+/// browser, calls the Ollama URL.
+fn ollama_copy(hosted: bool) -> OllamaCopy {
+    if hosted {
+        OllamaCopy {
+            label: "Ollama (on the server)",
+            hint: "The backend calls this URL itself, so it must be an Ollama the server can reach; \
+                   it cannot reach an Ollama on your computer.",
+        }
+    } else {
+        OllamaCopy {
+            label: "Ollama (local)",
+            hint: "The backend calls this URL itself: the desktop app's embedded backend \
+                   (or a backend you run yourself) calls it on this machine.",
+        }
+    }
+}
+
+/// Whether this build talks to a hosted backend (its URL compiled in).
+const HOSTED_BACKEND: bool = option_env!("P2A_BACKEND_URL").is_some();
+
 /// Props for SettingsModal
 #[derive(Props, Clone, PartialEq)]
 pub struct SettingsModalProps {
@@ -474,6 +507,7 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
 
     let current_provider = *local_provider.read();
     let current_theme = *local_theme.read();
+    let ollama = ollama_copy(HOSTED_BACKEND);
     let requires_api_key = current_provider.requires_api_key();
     let current_tab = active_tab.read().clone();
     // The environment notice applies only while the field still shows the
@@ -576,7 +610,7 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
                             if current_provider == Provider::None {
                                 div { class: "p-3 bg-teal-50 dark:bg-teal-900/20 rounded-lg border border-teal-200 dark:border-teal-800",
                                     p { class: "text-sm text-teal-700 dark:text-teal-300",
-                                        "Welcome! Choose an LLM provider below to start chatting. Anthropic and OpenAI need an API key; Ollama runs locally on your machine."
+                                        "{WELCOME_TEXT}"
                                     }
                                 }
                             }
@@ -594,7 +628,7 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
                                     option { value: "anthropic", "Anthropic (Claude)" }
                                     option { value: "openai", "OpenAI (GPT)" }
                                     option { value: "openrouter", "OpenRouter (100+ models)" }
-                                    option { value: "ollama", "Ollama (Local)" }
+                                    option { value: "ollama", "{ollama.label}" }
                                 }
                                 // Helper text per provider: where to get an API key.
                                 if current_provider == Provider::Anthropic {
@@ -624,6 +658,9 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
                                         placeholder: "http://localhost:11434",
                                         value: "{local_base_url}",
                                         oninput: move |evt| local_base_url.set(evt.value().clone())
+                                    }
+                                    p { class: "text-xs text-gray-500 dark:text-gray-400 mt-1",
+                                        "{ollama.hint}"
                                     }
                                 }
                             }
@@ -980,6 +1017,24 @@ mod tests {
         );
         let other = list_models_error_text("Missing API key (invalid_provider)");
         assert!(other.contains("invalid_provider"), "{other}");
+    }
+
+    #[test]
+    fn ollama_copy_says_where_ollama_runs() {
+        let hosted = ollama_copy(true);
+        assert_eq!(hosted.label, "Ollama (on the server)");
+        assert!(hosted.hint.contains("The backend calls this URL itself"));
+        assert!(
+            hosted
+                .hint
+                .contains("cannot reach an Ollama on your computer")
+        );
+        let local = ollama_copy(false);
+        assert_eq!(local.label, "Ollama (local)");
+        assert!(local.hint.contains("embedded backend"));
+        assert!(local.hint.contains("on this machine"));
+        assert!(!WELCOME_TEXT.contains("runs locally"));
+        assert!(WELCOME_TEXT.contains("Ollama needs an Ollama server the backend can reach"));
     }
 
     #[test]
