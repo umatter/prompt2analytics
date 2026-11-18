@@ -10,7 +10,7 @@ This document validates the p2a-core implementation of autocorrelation functions
 - `ccf()` - Cross-correlation function
 
 **Key Parameters:**
-- `lag_max` - Maximum lag to compute (default: `min(10*log10(n), n-1)`)
+- `lag_max` - Maximum lag to compute (default: `floor(10*log10(n))`, at most `n-1`; `ccf` uses `floor(10*log10(n/2))`, as R)
 - `acf_type` - Type: correlation, covariance, or partial
 - `demean` - Whether to subtract mean (default: true)
 - `adjusted` - Whether to use (n-k) denominator instead of n (default: false)

@@ -44,7 +44,7 @@ pub struct CcfRequest {
 
     /// Maximum lag
     #[schemars(
-        description = "Maximum lag to compute (in both directions). Default: floor(10 log10(n)), at most n - 1 (R's lag.max)."
+        description = "Maximum lag to compute (in both directions). Default: R's ccf lag.max, floor(10 log10(n / 2)), at most n - 1."
     )]
     pub lag_max: Option<usize>,
 }

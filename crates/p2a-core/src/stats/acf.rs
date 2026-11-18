@@ -581,7 +581,8 @@ fn cross_covariance(x: &[f64], y: &[f64], lag_max: usize) -> Vec<(i32, f64)> {
 ///
 /// * `x` - First time series
 /// * `y` - Second time series
-/// * `lag_max` - Maximum lag (computes for -lag_max to +lag_max)
+/// * `lag_max` - Maximum lag (computes for -lag_max to +lag_max); `None` uses R's `ccf`
+///   default, `floor(10 log10(n / 2))`, at most `n - 1`
 /// * `ccf_type` - Type of CCF (Correlation or Covariance)
 ///
 /// # References
@@ -615,9 +616,10 @@ pub fn ccf(
         });
     }
 
-    // Default lag_max: min(10 * log10(n), n-1)
+    // Default lag_max, R's ccf (acf's rule for two series): floor(10 log10(n / 2)), at most
+    // n - 1. n >= 2 here, so the rule is not negative.
     let max_lag = lag_max.unwrap_or_else(|| {
-        let default = (10.0 * (n as f64).log10()).floor() as usize;
+        let default = (10.0 * (n as f64 / 2.0).log10()).floor() as usize;
         default.min(n - 1)
     });
 
@@ -842,6 +844,19 @@ mod tests {
                 v
             );
         }
+    }
+
+    #[test]
+    fn ccf_default_lag_follows_r() {
+        // R: ccf(x, y)$lag runs over -16..16 for n = 100, as lag.max = floor(10 log10(n / 2)).
+        let x: Vec<f64> = (0..100).map(|i| (i as f64 * 0.7).sin() + 0.01 * i as f64).collect();
+        let y: Vec<f64> = (0..100).map(|i| (i as f64 * 0.5).cos() - 0.02 * i as f64).collect();
+        let r = ccf(&x, &y, None, CcfType::Correlation).unwrap();
+        assert_eq!(r.lags.first(), Some(&-16));
+        assert_eq!(r.lags.last(), Some(&16));
+        // At most n - 1: two values give lag 0 only (floor(10 log10(1)) = 0).
+        let r = ccf(&[1.0, 2.0], &[2.0, 1.5], None, CcfType::Correlation).unwrap();
+        assert_eq!(r.lags, vec![0]);
     }
 
     #[test]
