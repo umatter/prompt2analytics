@@ -145,6 +145,13 @@ pub fn histogram(
     } else {
         range / n_bins as f64
     };
+    if constant && !(min_val + n_bins as f64 * bin_width).is_finite() {
+        return Err(VisualizationError::InvalidData(format!(
+            "every value is {min_val:e}: the {n_bins} bins above it would end beyond the \
+             largest floating-point number ({:e}); rescale the data",
+            f64::MAX
+        )));
+    }
 
     let mut counts = resource::try_vec(n_bins, 0u32, "histogram bins").map_err(invalid_data)?;
     let n_edges = n_bins
@@ -2631,6 +2638,14 @@ mod tests {
         // Below magnitude ~1e15 the width stays 1, as before.
         let r = histogram(&[5.0; 3], Some(2), ChartConfig::default()).unwrap();
         assert_eq!(r.breaks, [5.0, 6.0, 7.0]);
+        // At f64::MAX the breaks above the value would be infinite: refused.
+        let Err(e) = histogram(&[f64::MAX; 3], Some(2), ChartConfig::default()) else {
+            panic!("constant data at f64::MAX was not refused");
+        };
+        assert!(
+            e.to_string().contains("largest floating-point number"),
+            "{e}"
+        );
     }
 
     #[test]
