@@ -147,6 +147,22 @@ pub struct GenerateTitleResponse {
     pub title: String,
 }
 
+/// `POST /api/llm/models` request: the chat routes' provider settings, or
+/// none for the server's default local endpoint.
+#[derive(Debug, Clone, Serialize)]
+pub struct LlmModelsRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<ProviderConfig>,
+}
+
+/// `POST /api/llm/models` answer
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelsResponse {
+    pub provider: String,
+    #[serde(default)]
+    pub models: Vec<String>,
+}
+
 /// Image data from tool results
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImageData {
@@ -396,6 +412,21 @@ pub struct ReloadSkip {
 #[cfg(test)]
 mod tests {
     use super::{DatasetMeta, StreamEvent};
+
+    /// The answer of `POST /api/llm/models` (API_ENDPOINTS.md "List Available LLM Models").
+    #[test]
+    fn models_response_parses() {
+        let got: super::ApiResponse<super::ModelsResponse> = serde_json::from_str(
+            r#"{"success":true,"data":{"provider":"ollama","models":["llama3.2:latest","qwen2.5:7b"]}}"#,
+        )
+        .unwrap();
+        let data = got.data.unwrap();
+        assert_eq!(data.provider, "ollama");
+        assert_eq!(data.models, ["llama3.2:latest", "qwen2.5:7b"]);
+        // The request carries only `provider` (the server refuses unknown fields).
+        let body = serde_json::to_value(super::LlmModelsRequest { provider: None }).unwrap();
+        assert_eq!(body, serde_json::json!({}));
+    }
 
     /// The 0.6.0 server's `tool_end` and `error` events (API_ENDPOINTS.md "Tool End", "Error")
     /// and an older server's, without `status` and `code`.

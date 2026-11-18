@@ -644,6 +644,26 @@ impl ApiClient {
         }
     }
 
+    /// The models a provider offers (`POST /api/llm/models`); the server
+    /// applies the chat routes' egress and key policy to the provider.
+    pub async fn list_models(
+        &self,
+        provider: Option<ProviderConfig>,
+    ) -> Result<Vec<String>, String> {
+        let request = LlmModelsRequest { provider };
+        let response: ApiResponse<ModelsResponse> = self.post("/api/llm/models", &request).await?;
+        if response.success {
+            response
+                .data
+                .map(|d| d.models)
+                .ok_or_else(|| "No models in response".to_string())
+        } else {
+            Err(response
+                .error
+                .unwrap_or_else(|| "Unknown error".to_string()))
+        }
+    }
+
     // === Tool Call History endpoints ===
 
     /// Get all tool calls for a conversation

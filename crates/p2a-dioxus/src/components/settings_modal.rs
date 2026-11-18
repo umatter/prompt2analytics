@@ -5,7 +5,7 @@ use dioxus::prelude::*;
 
 use crate::api::ApiClient;
 use crate::app::apply_theme;
-use crate::state::settings::{KeySource, Provider, Settings, Theme};
+use crate::state::settings::{KeySource, Provider, Settings, Theme, model_hint};
 use crate::state::{
     ConversationState, SESSION_ENDED_TEXT, SessionState, ensure_session, on_session_lost,
     session_lost_text,
@@ -95,6 +95,16 @@ fn capitalize(s: &str) -> String {
     }
 }
 
+/// What the modal says when listing the models failed: a server older than
+/// 0.6.0 has no `POST /api/llm/models`.
+fn list_models_error_text(error: &str) -> String {
+    if error.contains("HTTP error: 405") || error.contains("HTTP 405") {
+        "This server cannot list models; type the model id.".to_string()
+    } else {
+        format!("Cannot list the models: {error}")
+    }
+}
+
 /// Props for SettingsModal
 #[derive(Props, Clone, PartialEq)]
 pub struct SettingsModalProps {
@@ -123,6 +133,9 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
     let mut local_base_url = use_signal(|| settings.read().ollama_base_url.clone());
     let mut local_access_token = use_signal(|| settings.read().backend_access_token.clone());
     let mut token_error = use_signal(|| None::<String>);
+    // The provider's models, listed on request ("List models")
+    let mut listed_models = use_signal(Vec::<String>::new);
+    let mut models_note = use_signal(|| None::<String>);
 
     // Data loading state
     let mut file_path = use_signal(String::new);
@@ -161,6 +174,8 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
         local_access_token.set(s.backend_access_token.clone());
         token_error.set(None);
         save_error.set(None);
+        listed_models.set(Vec::new());
+        models_note.set(None);
     }
 
     // Update tracking state
@@ -231,6 +246,41 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
         };
         local_api_key.set(api_key);
         local_model.set(model);
+        listed_models.set(Vec::new());
+        models_note.set(None);
+    };
+
+    // List the selected provider's models through the backend (the key is
+    // sent only now, when the user asks).
+    let handle_list_models = move |_| {
+        let mut probe = settings.read().clone();
+        probe.provider = *local_provider.read();
+        probe.set_current_api_key(&local_api_key.read());
+        probe.set_current_model(&local_model.read());
+        if probe.provider == Provider::Ollama {
+            probe.ollama_base_url = local_base_url.read().clone();
+        }
+        let Some(provider) = probe.to_provider_config() else {
+            models_note.set(Some("Choose a provider first.".to_string()));
+            return;
+        };
+        models_note.set(Some("Listing models...".to_string()));
+        spawn(async move {
+            match ApiClient::new().list_models(Some(provider)).await {
+                Ok(models) => {
+                    models_note.set(if models.is_empty() {
+                        Some("The provider listed no models.".to_string())
+                    } else {
+                        None
+                    });
+                    listed_models.set(models);
+                }
+                Err(e) => {
+                    listed_models.set(Vec::new());
+                    models_note.set(Some(list_models_error_text(&e)));
+                }
+            }
+        });
     };
 
     let handle_theme_change = move |evt: Event<FormData>| {
@@ -610,11 +660,31 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
                                 label { class: "block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5",
                                     "Model"
                                 }
-                                input {
-                                    class: "w-full px-3 py-2.5 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-teal-500 focus:border-transparent",
-                                    r#type: "text",
-                                    value: "{local_model}",
-                                    oninput: move |evt| local_model.set(evt.value().clone())
+                                div { class: "flex gap-2",
+                                    input {
+                                        class: "flex-1 min-w-0 px-3 py-2.5 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-teal-500 focus:border-transparent",
+                                        r#type: "text",
+                                        list: "p2a-model-options",
+                                        value: "{local_model}",
+                                        oninput: move |evt| local_model.set(evt.value().clone())
+                                    }
+                                    button {
+                                        class: "px-3 py-2 text-sm font-medium text-gray-700 dark:text-gray-200 bg-gray-100 dark:bg-gray-700 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-600 transition-colors whitespace-nowrap",
+                                        title: "Ask the provider which models it offers",
+                                        onclick: handle_list_models,
+                                        "List models"
+                                    }
+                                }
+                                datalist { id: "p2a-model-options",
+                                    for m in listed_models.read().iter() {
+                                        option { key: "{m}", value: "{m}" }
+                                    }
+                                }
+                                if let Some(ref note) = *models_note.read() {
+                                    p { class: "text-xs text-gray-500 dark:text-gray-400 mt-1", "{note}" }
+                                }
+                                if let Some(hint) = model_hint(&local_model.read(), &listed_models.read()) {
+                                    p { class: "text-xs text-orange-600 dark:text-orange-400 mt-1", "{hint}" }
                                 }
                             }
 
@@ -897,6 +967,16 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_server_without_the_models_route_is_named() {
+        assert_eq!(
+            list_models_error_text("HTTP error: 405"),
+            "This server cannot list models; type the model id."
+        );
+        let other = list_models_error_text("Missing API key (invalid_provider)");
+        assert!(other.contains("invalid_provider"), "{other}");
+    }
 
     #[test]
     fn upload_size_check() {

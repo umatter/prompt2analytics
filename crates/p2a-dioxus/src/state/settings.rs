@@ -18,6 +18,25 @@ use serde::{Deserialize, Serialize};
 /// Storage key for settings
 const SETTINGS_KEY: &str = "p2a-settings";
 
+/// The Anthropic model a new install uses (the user can list the provider's
+/// models in Settings).
+pub const DEFAULT_ANTHROPIC_MODEL: &str = "claude-sonnet-5-5";
+
+/// The retired Anthropic default of earlier versions: stored settings that
+/// still hold it get [`DEFAULT_ANTHROPIC_MODEL`] at load.
+const RETIRED_ANTHROPIC_DEFAULT: &str = "claude-sonnet-4-20250514";
+
+/// A hint when `current` is not among the provider's `listed` models; none
+/// when nothing was listed.
+pub fn model_hint(current: &str, listed: &[String]) -> Option<String> {
+    if listed.is_empty() || listed.iter().any(|m| m == current) {
+        return None;
+    }
+    Some(format!(
+        "'{current}' is not offered by this provider; pick one of the listed models."
+    ))
+}
+
 /// Providers that take an API key.
 const KEYED_PROVIDERS: [Provider; 3] =
     [Provider::Anthropic, Provider::Openai, Provider::Openrouter];
@@ -188,7 +207,7 @@ impl Default for Settings {
             ollama_base_url: "http://localhost:11434".to_string(),
             ollama_model: "llama3.2".to_string(),
             anthropic_api_key: String::new(),
-            anthropic_model: "claude-sonnet-4-20250514".to_string(),
+            anthropic_model: DEFAULT_ANTHROPIC_MODEL.to_string(),
             openai_api_key: String::new(),
             openai_model: "gpt-4o".to_string(),
             openrouter_api_key: String::new(),
@@ -247,6 +266,12 @@ impl Settings {
         };
 
         settings.mark_stored_keys();
+
+        // The old default model is retired; a user who never chose another
+        // gets the new default.
+        if settings.anthropic_model == RETIRED_ANTHROPIC_DEFAULT {
+            settings.anthropic_model = DEFAULT_ANTHROPIC_MODEL.to_string();
+        }
 
         if let Some(lookup) = env {
             tracing::info!("Checking environment variables for API keys...");
@@ -697,6 +722,37 @@ mod tests {
         fn contains_key(&self, _key: &str) -> bool {
             false
         }
+    }
+
+    #[test]
+    fn default_anthropic_model_is_the_chosen_fallback() {
+        assert_eq!(Settings::default().anthropic_model, DEFAULT_ANTHROPIC_MODEL);
+        assert_eq!(DEFAULT_ANTHROPIC_MODEL, "claude-sonnet-5-5");
+
+        // Stored settings that still hold the retired default get the new one.
+        let storage = MemoryStorage::default();
+        let mut old = serde_json::to_value(Settings::default()).unwrap();
+        old["anthropic_model"] = "claude-sonnet-4-20250514".into();
+        storage.set(SETTINGS_KEY, &old).unwrap();
+        let none: Option<fn(&str) -> Option<String>> = None;
+        let s = Settings::load_from(&storage, none);
+        assert_eq!(s.anthropic_model, DEFAULT_ANTHROPIC_MODEL);
+
+        // A model the user chose is kept.
+        let mut chosen = serde_json::to_value(Settings::default()).unwrap();
+        chosen["anthropic_model"] = "a-model-the-user-chose".into();
+        storage.set(SETTINGS_KEY, &chosen).unwrap();
+        let s = Settings::load_from(&storage, none);
+        assert_eq!(s.anthropic_model, "a-model-the-user-chose");
+    }
+
+    #[test]
+    fn model_hint_names_an_unlisted_model() {
+        assert_eq!(model_hint("gpt-4o", &[]), None);
+        let listed = vec!["gpt-4o".to_string(), "gpt-4o-mini".to_string()];
+        assert_eq!(model_hint("gpt-4o", &listed), None);
+        let hint = model_hint("gpt-3", &listed).expect("not listed");
+        assert!(hint.contains("not offered by this provider"), "{hint}");
     }
 
     #[test]
