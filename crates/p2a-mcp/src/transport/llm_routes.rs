@@ -2500,6 +2500,66 @@ mod disconnect_tests {
         release.store(true, Ordering::SeqCst);
         assert!(holder.await.unwrap().is_ok());
     }
+
+    /// A tool's own error result (a `CallToolResult` with `is_error`) is
+    /// stored as an `Error` row with the tool's text, and reaches the model
+    /// as an error.
+    #[tokio::test]
+    async fn an_error_tool_result_is_stored_as_an_error() {
+        let db = Arc::new(DbConnection::connect_memory().await.unwrap());
+        let sessions = Arc::new(SessionManager::new(SessionConfig {
+            ttl_minutes: 60,
+            max_sessions: 10,
+            evict_idle_minutes: None,
+        }));
+        let sid = sessions.create_session(None).await.unwrap();
+        let session = sessions.get_session(&sid).await.unwrap();
+        let conv = db.create_conversation(&sid, "t").await.unwrap().id_string();
+        let msg = db
+            .add_message(&conv, "assistant", "")
+            .await
+            .unwrap()
+            .id_string();
+        let governor = Arc::new(ToolGovernor::new(ExecConfig::default(), sessions.clone()));
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<ProgressEvent>(16);
+        let executor = StreamingToolExecutor::new(
+            governor,
+            Arc::new(crate::server::AnalyticsServer::new()),
+            ChatSession::new(sessions, session),
+            Arc::new(AuditLogger::disabled()),
+            ChatEvents::new(tx),
+        )
+        .with_persistence(db.clone(), conv.clone(), msg.clone(), sid.clone());
+
+        let err = executor
+            .execute(
+                "describe_dataset",
+                serde_json::json!({"dataset": "no_such_dataset"}),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.contains("'no_such_dataset' not found"), "{err}");
+
+        let calls = db.get_tool_calls_for_message(&msg).await.unwrap();
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert_eq!(calls[0].status, ToolCallStatus::Error);
+        assert!(
+            calls[0]
+                .error
+                .as_deref()
+                .is_some_and(|e| e.contains("'no_such_dataset' not found")),
+            "{:?}",
+            calls[0]
+        );
+        assert!(calls[0].result.is_none(), "{:?}", calls[0]);
+        let mut end_status = None;
+        while let Ok(event) = rx.try_recv() {
+            if let ProgressEvent::ToolEnd { status, .. } = event {
+                end_status = Some(status);
+            }
+        }
+        assert_eq!(end_status, Some("error"));
+    }
 }
 
 /// The streaming tool loop's dataset-metadata capture.
