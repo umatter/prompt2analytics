@@ -40,9 +40,10 @@
 //!   bound a fit's cost before it starts: they refuse one whose work exceeds
 //!   [`Limits::arima_fit_work`], and one whose series holds a nonzero value below
 //!   [`ARIMA_MIN_MAGNITUDE`], a floor with a wide margin above the values whose differences,
-//!   products and squares in the fit would be subnormal and much slower to compute. The fit itself checks the call's budget every iteration and every few
-//!   thousand rows of a pass, so the deadline stops it as well; the check up front refuses a fit
-//!   whose work could not fit the deadline instead of starting it.
+//!   products and squares in the fit would be subnormal and much slower to compute. The fit
+//!   itself checks the call's budget every iteration and every few thousand rows of a pass, so
+//!   the deadline stops it as well; the check up front refuses a fit whose work could not fit
+//!   the deadline instead of starting it.
 //!
 //! Every refusal is a [`LimitViolation`] whose message tells an LLM caller what to change. It never
 //! contains filesystem paths, environment variable names or internals; `override_key` names the
@@ -1118,7 +1119,7 @@ fn magnitude_exceeds(u: Option<u64>, i: Option<i64>, f: Option<f64>, cap: u64) -
 
 /// True when a tolerance, given as the number's `f64` reading, is refused against `min`: below
 /// it, NaN, or without an `f64` reading, so that the check fails closed.
-fn below_min_tolerance(f: Option<f64>, min: f64) -> bool {
+fn tolerance_refused(f: Option<f64>, min: f64) -> bool {
     match f {
         Some(x) if x >= min => false,
         // `None` is reachable only with serde_json's `arbitrary_precision` feature (for example
@@ -2048,7 +2049,7 @@ impl Limits {
                     return Ok(());
                 };
                 let reading = n.as_f64();
-                if !below_min_tolerance(reading, min) {
+                if !tolerance_refused(reading, min) {
                     return Ok(());
                 }
                 let shown = n.to_string();
@@ -2425,16 +2426,16 @@ mod tests {
     }
 
     #[test]
-    fn a_tolerance_without_an_f64_reading_is_below_every_minimum() {
+    fn a_tolerance_without_an_f64_reading_is_refused_against_every_minimum() {
         // Only serde_json's `arbitrary_precision` feature produces such a number (-1e400); the
         // minimum-tolerance check must refuse it rather than let it through.
-        assert!(below_min_tolerance(None, 1e-12));
-        assert!(!below_min_tolerance(Some(1e-12), 1e-12));
-        assert!(below_min_tolerance(Some(9.999e-13), 1e-12));
-        assert!(!below_min_tolerance(Some(1e-8), 1e-12));
-        assert!(below_min_tolerance(Some(0.0), 1e-12));
-        assert!(below_min_tolerance(Some(-1.0), 1e-12));
-        assert!(below_min_tolerance(Some(f64::NAN), 1e-12));
+        assert!(tolerance_refused(None, 1e-12));
+        assert!(!tolerance_refused(Some(1e-12), 1e-12));
+        assert!(tolerance_refused(Some(9.999e-13), 1e-12));
+        assert!(!tolerance_refused(Some(1e-8), 1e-12));
+        assert!(tolerance_refused(Some(0.0), 1e-12));
+        assert!(tolerance_refused(Some(-1.0), 1e-12));
+        assert!(tolerance_refused(Some(f64::NAN), 1e-12));
         // the hosted minimum itself is accepted
         let h = Limits::hosted();
         assert!(h.check_with("t", &json!({"tol": 1e-15}), T).is_ok());
