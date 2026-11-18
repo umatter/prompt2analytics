@@ -219,8 +219,8 @@ measurements under load 4.3-12.4 (their input files were not kept).
 Above 1.10x: the Stata load now converts the `%td` and `%tc` columns to dates (two O(n) passes and the
 `<formats>` and `<value_labels>` sections; about 40 ns per date cell, 17 µs fixed), and the strL variant
 reads the file's string table and looks up every cell, where v0.5.0 wrote a constant placeholder and
-read no table (1.6-1.9x; the table is read in one pass without per-block system calls and the text is
-taken over without a copy). Peak RSS at 10,000 rows (`/usr/bin/time`, median of 3): 9.1 to 16.5 MiB without
+read no table (1.6-1.9x; the table is read in one pass without per-block system calls, and each cell's text is
+copied once from the table into the column). Peak RSS at 10,000 rows (`/usr/bin/time`, median of 3): 9.1 to 16.5 MiB without
 strL and 9.5 to 18.1 MiB with it, of which 4.3 MiB is the larger idle footprint of the head's harness
 binary.
 
