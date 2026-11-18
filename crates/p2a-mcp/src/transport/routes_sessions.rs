@@ -564,4 +564,50 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(body["code"], "not_found", "{body}");
     }
+
+    /// With persistence, a session whose rows cannot be deleted answers 500
+    /// `internal` with the generic text, and the session stays live.
+    #[cfg(feature = "db")]
+    #[tokio::test]
+    async fn a_failed_persistent_delete_is_internal_with_a_code() {
+        let (app, state) = super::super::http::build_app(&crate::config::ServerConfig::default())
+            .await
+            .unwrap();
+        let pm = state.persistent_manager.clone().expect("persistence");
+        let id = pm.sessions().create_session(None).await.unwrap();
+        pm.db()
+            .set_session_last_accessed(&id, chrono::Utc::now())
+            .await
+            .unwrap();
+        let meta = crate::db::DatasetMeta::new(
+            id.clone(),
+            "d".into(),
+            "csv".into(),
+            3,
+            1,
+            vec!["x".into()],
+        );
+        pm.db().save_dataset_meta(&meta).await.unwrap();
+        pm.db()
+            .db()
+            .query(
+                "DEFINE EVENT refuse_meta ON TABLE dataset_meta WHEN $event = 'DELETE' \
+                 THEN { THROW 'refused' }",
+            )
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+
+        let req = Request::delete(format!("/api/sessions/{id}"))
+            .header(header::HOST, "localhost")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = body_of(resp).await;
+        assert_eq!(body["code"], "internal", "{body}");
+        assert_eq!(body["error"], "internal error", "{body}");
+        assert!(pm.sessions().get_session(&id).await.is_ok());
+    }
 }
