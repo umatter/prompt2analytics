@@ -847,11 +847,15 @@ fn create_base_router(state: AppState, config: &ServerConfig) -> Router {
     let router = {
         use super::llm_routes::{
             llm_chat, llm_chat_stream, llm_env_keys, llm_generate_title, llm_list_models,
+            llm_list_models_for,
         };
         router
             .route("/api/llm/chat", post(llm_chat))
             .route("/api/llm/chat/stream", post(llm_chat_stream))
-            .route("/api/llm/models", get(llm_list_models))
+            .route(
+                "/api/llm/models",
+                get(llm_list_models).post(llm_list_models_for),
+            )
             .route("/api/llm/env-keys", get(llm_env_keys))
             .route("/api/llm/generate-title", post(llm_generate_title))
     };

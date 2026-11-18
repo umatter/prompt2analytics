@@ -26,6 +26,7 @@ Examples in this document marked "captured" are real responses of a sandboxed se
 | POST | `/api/llm/chat` | `llm` | always | body `session_id` |
 | POST | `/api/llm/chat/stream` | `llm` | always | body `session_id` |
 | GET | `/api/llm/models` | `llm` | always | none |
+| POST | `/api/llm/models` | `llm` | always | none |
 | GET | `/api/llm/env-keys` | `llm` | always | none |
 | POST | `/api/llm/generate-title` | `llm` | always | none |
 | POST | `/api/conversations` | `db` | with the session database | body `session_id` |
@@ -249,6 +250,8 @@ A tool that runs and fails still answers HTTP 200, with `data.success: false` (c
 {"success":true,"data":{"success":false,"content":[{"type":"text","text":"Failed to load dataset: File not found: missing.csv"}],"error":"Failed to load dataset: File not found: missing.csv"}}
 ```
 
+Where a `response_bytes` cap applies, the `error` copy is cut so that `content` and `error` together stay within it, and an error message longer than the cap is cut to it; a cut text ends with ` [cut: response_bytes]` (when `content` leaves no room for that marker, the copy is the marker alone).
+
 An argument the tool does not take is refused before the tool runs: 400 `invalid_arguments`, with serde's message naming the field and listing the accepted ones (abridged):
 
 ```json
@@ -257,7 +260,7 @@ An argument the tool does not take is refused before the tool runs: 400 `invalid
 
 The same holds for limits a tool checks while it runs (file size, export size, join output, table cells), and for the free-form DuckDB tools in the hosted profile: while `sql_freeform` is false (the hosted default; `P2A_LIMIT_OVERRIDES=sql_freeform=true` re-enables them), `db_duckdb_query` and `db_query_file` answer with a tool error whose text is "free-form SQL is not available on the public demo; load the file with load_dataset instead". `db_sqlite_query` and the table and schema tools are not affected.
 
-Every call runs under the server's execution governor. An unknown session answers 404 `"Session not found"` and an expired one 410 `"Session expired"`, both without a `code`. An unknown tool, invalid arguments, a request limit, a quota, a busy session or server, memory pressure and the deadline answer with the error contract below (400, 422, 429, 503 or 504, with `code`).
+Every call runs under the server's execution governor. An unknown session answers 404 `not_found` ("Session not found") and an expired one 410 `session_expired` ("Session expired"). An unknown tool, invalid arguments, a request limit, a quota, a busy session or server, memory pressure and the deadline answer with the error contract below (400, 422, 429, 503 or 504, with `code`).
 
 ---
 
@@ -301,9 +304,11 @@ POST /api/llm/chat
 ```
 
 - `interpret` (default `true`): after a round of tool calls the model is called again with the results, until it answers without calling a tool; the answer is the model's final message. With `false` the loop stops after the first round and answers that round's calls and results without calling the model again. Tools run in both modes.
-- `history` is sent before `message` and takes precedence over the stored history. A message that carries both `tool_calls` and `tool_results` (the answer with `interpret: false`) can be sent back as it is; each result reaches the model right after its call.
+- `history` is sent before `message` and takes precedence over the stored history. A last `history` entry that is a user turn without tool results and whose text equals `message` is dropped, since the route appends `message` itself. A message that carries both `tool_calls` and `tool_results` (the answer with `interpret: false`) can be sent back as it is; each result reaches the model right after its call.
 - `conversation_id` (servers with the `db` feature): the conversation must belong to `session_id`, otherwise the answer is 404 `not_found` "Conversation not found", before anything is stored or sent to the provider. With an empty `history` and `retrieve_history: true` (the default) the conversation's stored messages are the history. The reply is stored in the conversation as an assistant message, with its tool calls. The user's `message` is not stored (post it with `POST /api/conversations/{id}/messages`). The streaming route does the same.
 - `max_tool_iterations`: model calls per request (default 25), clamped to `llm_max_tool_iterations` (25 hosted, 50 otherwise).
+
+A model round runs at most 16 tool calls; the calls past them do not run and answer with an error result ("not run: a round may make at most 16 tool calls; make the rest in the next round"), so the model can make them in its next round. One tool name may appear in at most 3 rounds of a request (calls of one tool in the same round count once): a round that would be its fourth stops the loop before it runs. The loop also stops on a round that repeats the previous one exactly and at the `max_tool_iterations` cap. A stopped loop answers with the model's last text or, when it wrote none, a note: "Analysis stopped: tool '<name>' was called in more than 3 rounds. Ask again with a narrower request.", "Analysis detected a repeated tool call pattern and stopped. Please try rephrasing your request." or "Analysis stopped at the limit of model calls for one request before the model wrote an answer. Ask again with a narrower request.". A tool's error result reaches the model as an error (its text starts with `Error: `).
 
 **Response** with `interpret: true`: the model's final message; the tools that ran are reported only by the stream route's events.
 ```json
@@ -348,7 +353,7 @@ POST /api/llm/chat/stream
 
 A `conversation_id` the session does not own ends the stream with an `error` event "Conversation not found", before anything is stored or sent to the provider. Closing the SSE connection stops the tool loop.
 
-An unknown or expired `session_id` does not change the HTTP status: the response is 200 and the stream ends with an `error` event ("Session not found" / "Session expired"). A busy session (one already running `llm_streams_per_session` chat requests; 1 in the hosted profile) is refused before the stream starts, with 429 `session_busy`.
+An unknown or expired `session_id` does not change the HTTP status: the response is 200 and the stream ends with an `error` event ("Session not found" / "Session expired", `code` `not_found` / `session_expired`). A busy session (one already running `llm_streams_per_session` chat requests; 1 in the hosted profile) is refused before the stream starts, with 429 `session_busy`.
 
 **Response:** Server-Sent Events (SSE) stream with events:
 
@@ -378,9 +383,12 @@ An unknown or expired `session_id` does not change the HTTP status: the response
   "type": "tool_end",
   "tool": "load_dataset",
   "elapsed_ms": 1234,
-  "result": "Successfully loaded dataset 'sales_data'"
+  "result": "Successfully loaded dataset 'sales_data'",
+  "status": "success"
 }
 ```
+
+`status` is `success`, or `error` when the call failed or the tool answered with an error result.
 
 #### Event 4: Tool Result (for visualization tools)
 ```json
@@ -421,9 +429,12 @@ With `interpret: true` the message is the model's final answer, as in the non-st
 ```json
 {
   "type": "error",
-  "error": "Failed to load dataset: file not found"
+  "error": "Ollama returned HTTP 500; the provider is unavailable; try again later",
+  "code": "upstream_error"
 }
 ```
+
+`code` is the code the JSON routes give the same refusal: `invalid_provider`, `upstream_error`, `upstream_timeout`, `provider_unavailable`, a session code (`not_found`, `session_not_found`, `session_expired`) or a governor code. A tool's error does not end the stream; it is reported in its `tool_end` event.
 
 **SSE Format Details:**
 - Each event is sent as a line: `data: <JSON>`
@@ -435,9 +446,21 @@ With `interpret: true` the message is the model's final answer, as in the non-st
 ### List Available LLM Models
 ```
 GET /api/llm/models
+POST /api/llm/models
 ```
 
-Lists the models of the server's default local Ollama endpoint (`http://localhost:11434`, its `/api/tags`). It takes no provider configuration, so it never lists another provider's models.
+`GET` lists the models of the server's default local Ollama endpoint (`http://localhost:11434`, its `/api/tags`). `POST` takes the provider settings of the chat routes and lists that provider's models; without a provider it answers as `GET`.
+
+**Request** (`POST`):
+```json
+{
+  "provider": {
+    "provider_type": "openai",
+    "api_key": "sk-...",
+    "model": "gpt-4o-mini"
+  }
+}
+```
 
 **Response** (200):
 ```json
@@ -453,15 +476,15 @@ Lists the models of the server's default local Ollama endpoint (`http://localhos
 }
 ```
 
-The endpoint must pass the server's LLM egress policy, which allows it only while `llm_allow_loopback` is true (the Off profile's default) and `P2A_LLM_ALLOWED_HOSTS` is unset or lists `localhost`. Otherwise the route answers 503 without contacting anything. The hosted profile, which open public mode implies, sets `llm_allow_loopback=false`, so a hosted server answers this unless `P2A_LIMIT_OVERRIDES` sets `llm_allow_loopback=true` and `P2A_LLM_ALLOWED_HOSTS` is unset or lists `localhost` (the shipped `deploy/fly.toml` lists only the three provider hosts) (captured, open public server):
+The default endpoint must pass the server's LLM egress policy, which allows it only while `llm_allow_loopback` is true (the Off profile's default) and `P2A_LLM_ALLOWED_HOSTS` is unset or lists `localhost`. Otherwise `GET` answers 503 `provider_unavailable` without contacting anything. The hosted profile, which open public mode implies, sets `llm_allow_loopback=false`, so a hosted server answers this unless `P2A_LIMIT_OVERRIDES` sets `llm_allow_loopback=true` and `P2A_LLM_ALLOWED_HOSTS` is unset or lists `localhost` (the shipped `deploy/fly.toml` lists only the three provider hosts) (open public server):
 
 ```
 HTTP/1.1 503 Service Unavailable
 
-{"success":false,"error":"LLM provider not available: the default local Ollama endpoint is not enabled on this server"}
+{"success":false,"error":"LLM provider not available: the default local Ollama endpoint is not enabled on this server","code":"provider_unavailable"}
 ```
 
-When the endpoint is allowed but Ollama is not running or does not answer, the route also answers 503, with `"error": "LLM provider not available: "` followed by the reason. Neither 503 carries a `code`.
+When the default endpoint is allowed but Ollama is not running or does not answer, `GET` also answers 503 `provider_unavailable`, with `"error": "LLM provider not available: "` followed by the reason. `POST` applies the egress and key policy of the chat routes to its provider: a refused endpoint or a missing key answers 400 `invalid_provider`, and a failed list answers with the chat routes' status and code (502 `upstream_error`, 503 `provider_unavailable`, 504 `upstream_timeout`).
 
 ### Get LLM Environment Keys
 ```
@@ -754,7 +777,7 @@ A websocket for tool calls. It exists only when the server is built with the `we
 | server → client | `error` | `id`, `message`, `code` (optional) |
 | server → client | `pong` | |
 
-A connection authenticates once with `auth`; each `tool` message then runs under the same governor and request limits as `POST /api/tools/{name}`, and the session is looked up again for every call. An `error` carries a `code` when a tool message is refused: a governor or limit code from the table below (`unknown_tool`, `limit_exceeded`, `session_busy`, ...), or `session_not_found` / `session_expired` when the authenticated session has gone; a tool message sent before `auth` is answered `Not authenticated` without a code. Messages and frames are capped at the HTTP body cap (`P2A_MAX_HTTP_BODY_MB`). Every answer to a `tool` or `chat` message carries its `id`, which may be at most 256 bytes: a message with a longer one is refused before it runs, with an `error` whose `id` is `system` and whose `code` is `id_too_long`. That id also answers, without a code, a message that is not valid JSON or not one of the types above; its error gives the parser's message, which quotes the offending value; one longer than 256 bytes is cut to its first 160 bytes and its last 96 (where the parser says what it expected and where), around a note of how many bytes were left out. A `tool` message whose `args` do not deserialise is refused as `invalid_arguments` with the parser's message cut the same way. A tool's own error or result is not cut: it can quote an argument, such as a dataset or column name, in full. An edge rate limiter counts the whole connection as one request.
+A connection authenticates once with `auth`; each `tool` message then runs under the same governor and request limits as `POST /api/tools/{name}`, and the session is looked up again for every call. An `error` carries a `code` when a tool message is refused: a governor or limit code from the table below (`unknown_tool`, `limit_exceeded`, `session_busy`, ...), or `session_not_found` / `session_expired` when the authenticated session has gone; a tool message sent before `auth` is answered `Not authenticated` without a code. Messages and frames are capped at the HTTP body cap (`P2A_MAX_HTTP_BODY_MB`). Every answer to a `tool` or `chat` message carries its `id`, which may be at most 256 bytes: a message with a longer one is refused before it runs, with an `error` whose `id` is `system` and whose `code` is `id_too_long`. That id also answers, without a code, a message that is not valid JSON or not one of the types above; its error gives the parser's message, which quotes the offending value; one longer than 256 bytes is cut to its first 160 bytes and its last 96 (where the parser says what it expected and where), around a note of how many bytes were left out. A `tool` message whose `args` do not deserialise is refused as `invalid_arguments` with the parser's message cut the same way. A tool's own error or result is not cut: it can quote an argument, such as a dataset or column name, in full, up to the `response_bytes` cap where one is set, its `error` copy included. An edge rate limiter counts the whole connection as one request.
 
 A connection handles one message at a time, in the order they arrive, and keeps reading while it does. A close frame, or a connection that drops, cancels the tool call it is running, as a disconnect cancels `POST /api/tools/{name}`: work that checks its budget stops at its next checkpoint, and its audit entry has the outcome `cancelled`. Protocol pings and `ping` messages are answered at once, also while a call runs. Other messages wait their turn, at most 16 of them and at most the body cap in bytes together; one more is refused at once with an `error` whose `code` is `connection_busy` and whose message names the bound it met (the size bound by its variable, `P2A_MAX_HTTP_BODY_MB`), and can be sent again once the waiting messages are answered.
 
@@ -909,11 +932,12 @@ An error response has this shape; `data` is absent, and `code` and `details` app
 | Status | `code` | Meaning |
 |---|---|---|
 | 400 | `unknown_tool` | no tool has this name |
+| 400 | `invalid_provider` | an LLM route refused the provider configuration: a host the egress policy does not allow, or a missing key |
 | 400 | `invalid_arguments` | malformed tool arguments (the parser's message, which quotes the offending value, is cut to its first 160 and last 96 bytes when it is longer than 256), `user_id`, message role, or a missing or conflicting session id on the conversation routes |
 | 401 | none | a token is configured and the request has none or a wrong one: plain-text body `missing or invalid bearer token` and `WWW-Authenticate: Bearer` |
-| 404 | `not_found` | missing, or not owned by the caller's session, including a `conversation_id` the session does not own on `/api/llm/chat`. A route not registered in this mode answers 404 with an empty body; a session that is unknown when a request on `POST /api/tools/{name}` or `/api/llm/chat` starts answers 404 `"Session not found"` without a `code` (the stream route reports these as an SSE `error` event); a session that goes while `/api/llm/chat` runs answers with a code (`session_not_found`, `session_expired`) |
+| 404 | `not_found` | missing, or not owned by the caller's session, including a `conversation_id` the session does not own on `/api/llm/chat`. A route not registered in this mode answers 404 with an empty body; a session that is unknown when a request on `POST /api/tools/{name}` or `/api/llm/chat` starts answers 404 `not_found` "Session not found" (the stream route reports it as an SSE `error` event with that code); a session that goes while `/api/llm/chat` runs answers with a code (`session_not_found`, `session_expired`) |
 | 404 | `session_not_found` | the session of a running chat (`/api/llm/chat`) or of an authenticated websocket was deleted or evicted (the websocket sends it as the `code` of an `error` message) |
-| 410 | `session_expired` | the session expired (session and conversation routes); a session that has expired when a request on `POST /api/tools/{name}` or `/api/llm/chat` starts answers 410 `"Session expired"` without a `code` (the stream route reports these as an SSE `error` event); a session that expires while `/api/llm/chat` runs answers 410 with `code` `session_expired`, and an authenticated websocket's `error` carries the same code |
+| 410 | `session_expired` | the session expired (session and conversation routes); a session that has expired when a request on `POST /api/tools/{name}` or `/api/llm/chat` starts answers 410 `session_expired` "Session expired" (the stream route reports it as an SSE `error` event with that code); a session that expires while `/api/llm/chat` runs answers 410 with `code` `session_expired`, and an authenticated websocket's `error` carries the same code |
 | 413 | `payload_too_large` | a message, title or settings string above `message_bytes`. A request body above `P2A_MAX_HTTP_BODY_MB` answers 413 with the plain-text body `length limit exceeded` and no `code`; one sent without a `Content-Length` is cut off at the cap and answers 413 with the plain-text body `Failed to buffer the request body: length limit exceeded`. In the hosted profile a JSON body may be at most 2 MiB (or the cap, when that is lower); a longer one within the cap answers 413 with that second body |
 | 421 | `misdirected` | a local server received a request addressed to a host other than `localhost` or a loopback address |
 | 422 | `limit_exceeded` | a request limit refused a parameter, the dataset's row count, a pivot's output shape (`pivot_columns`, `pivot_cells`) or the response size; `details {parameter, requested, limit}` |
@@ -922,12 +946,15 @@ An error response has this shape; `data` is absent, and `code` and `details` app
 | 503 | `server_busy` | every tool slot is taken: `Retry-After: 5` |
 | 503 | `memory_pressure` | the process is above its memory soft limit; before refusing a tool call, the server hands its freed heap memory back to the operating system, at most once every 10 s: `Retry-After: 15` |
 | 503 | `capacity` | the session table is full: `Retry-After: 60` |
+| 502 | `upstream_error` | the LLM provider answered with an error status, reported an error in its answer, ended its streamed answer before it was complete, or sent a response the server could not read |
+| 503 | `provider_unavailable` | the LLM provider could not be reached; `GET /api/llm/models` when the default local Ollama endpoint is not enabled or does not answer |
+| 504 | `upstream_timeout` | the LLM provider did not answer within `llm_timeout_secs` |
 | 504 | `deadline_exceeded` | the tool call ran past the server's time limit; `details {limit_secs}` |
 | 500 | `internal` | the tool panicked or the server failed; the session survives |
 
 A request body that does not deserialize into the route's request type answers 422 (400 for malformed JSON) with axum's plain-text message and no `code`.
 
-The non-streaming `/api/llm/chat` also answers 400 for a refused provider configuration (host not allowed, missing key), 502 when the provider returned an error and 504 when it did not answer in time, without a `code`.
+The LLM routes answer a refused provider configuration with 400 `invalid_provider`, a provider's error with 502 `upstream_error`, an unreachable provider with 503 `provider_unavailable` and a provider that did not answer in time with 504 `upstream_timeout`; the stream route sends the same codes in its `error` event. The provider's response body is never part of the error.
 
 A limit refusal (captured, open public server):
 
