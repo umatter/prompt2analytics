@@ -421,6 +421,11 @@ pub struct LoessRequest {
         description = "Use robust fitting with iterative reweighting to downweight outliers. Default: false (gaussian family). Set true for 'symmetric' family."
     )]
     pub robust: Option<bool>,
+    /// Return every value (default false: the first 20 and a note)
+    #[schemars(
+        description = "Return every fitted value (default false: the first 20, with a note giving the total)."
+    )]
+    pub full: Option<bool>,
 }
 
 /// Request for super smoother (supsmu).
@@ -458,6 +463,11 @@ pub struct SupsmuRequest {
     /// Periodic boundary conditions
     #[schemars(description = "Whether to treat x as periodic on [0, 1]. Default is false.")]
     pub periodic: Option<bool>,
+    /// Return every value (default false: the first 20 and a note)
+    #[schemars(
+        description = "Return every fitted value (default false: the first 20, with a note giving the total)."
+    )]
+    pub full: Option<bool>,
 }
 
 /// Request for Tukey's resistant line.
@@ -479,6 +489,11 @@ pub struct LineRequest {
     /// Number of slope steps
     #[schemars(description = "Number of slope steps (R's line(iter)), at least 1. Default 1.")]
     pub iter: Option<usize>,
+    /// Return every value (default false: the first 20 and a note)
+    #[schemars(
+        description = "Return every fitted value (default false: the first 20, with a note giving the total)."
+    )]
+    pub full: Option<bool>,
 }
 
 /// Request for stepwise regression.
@@ -594,6 +609,11 @@ pub struct SmoothSplineRequest {
         description = "Criterion that chooses the smoothing when neither spar nor df is given: 'gcv' (generalized cross-validation, default, R smooth.spline(cv = FALSE)) or 'cv' (ordinary leave-one-out, cv = TRUE)."
     )]
     pub criterion: Option<String>,
+    /// Return every value (default false: the first 20 and a note)
+    #[schemars(
+        description = "Return every fitted value (default false: the first 20, with a note giving the total). Predictions at xout are always returned in full."
+    )]
+    pub full: Option<bool>,
 }
 
 /// Request for glmnet (elastic net, lasso, ridge) regression.

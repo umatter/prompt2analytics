@@ -105,7 +105,7 @@
       ],
       "quantities": ["weighted mean", "n used", "sum of weights", "missing", "covariance (unbiased and ML)", "center", "correlation", "normalised weights", "n_obs", "refusal of missing values and weights"],
       "tolerance": "validation/README.md, n = 10-12 (< 100): weighted means, centres, sums of weights and normalised weights 1e-6, covariances and correlations 1e-5 relative; counts exact",
-      "deviations": [{"finding": "TOOL-23", "quantity": "stats_cov_wt with center = false", "note": "the tool uses center to switch the correlation matrix and always centres the data (R cov.wt(center = FALSE) does not); pinned only with center omitted"}],
+      "deviations": [],
       "supersedes_legacy": []
     },
     {
@@ -166,18 +166,15 @@
       "category": "stats",
       "reference": "stats::fivenum, IQR(na.rm = TRUE), mad(na.rm = TRUE), ecdf; approx and spline(method = 'natural') on complete (x, y) pairs",
       "doc": "validation/stats/robust.md",
-      "cases": ["stat_descriptive_na"],
+      "cases": ["stat_descriptive_na", "stat_density_mcp_na_t4"],
       "tests": [
         "p2a-mcp::tools::handlers::stats::tests::test_validate_mcp_stats_robust_summaries_na",
-        "p2a-mcp::tools::handlers::stats::tests::test_validate_mcp_stats_spline_approx_na"
+        "p2a-mcp::tools::handlers::stats::tests::test_validate_mcp_stats_spline_approx_na",
+        "p2a-mcp::tier3::wp56_stats_ts::test_validate_mcp_density_bw_nrd0"
       ],
-      "quantities": ["five-number summary", "IQR (type 7)", "MAD (median and mean centre)", "ECDF at points", "n used", "approx (linear) at xout", "natural spline at xout", "missing", "density: n used only"],
+      "quantities": ["five-number summary", "IQR (type 7)", "MAD (median and mean centre)", "ECDF at points", "n used", "approx (linear) at xout", "natural spline at xout", "missing", "density: bw (bw.nrd0), x and y at 512 points"],
       "tolerance": "validation/README.md, n = 12-15 (< 100): order statistics and centres 1e-6, other values 1e-5 relative; counts exact",
-      "deviations": [
-        {"finding": "STAT-37", "quantity": "density curve", "note": "FFT grid mislabelled when n is not a power of two; density values not pinned"},
-        {"finding": "STAT-65", "quantity": "density bandwidth", "note": "default bandwidth is not bw.nrd0 and non-Gaussian kernels scale bw differently; not pinned"},
-        {"finding": "STAT-87", "quantity": "stats_fivenum iqr field", "note": "the hinge spread, not R's IQR; not pinned"}
-      ],
+      "deviations": [],
       "supersedes_legacy": []
     },
     {

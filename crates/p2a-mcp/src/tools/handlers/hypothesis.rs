@@ -52,6 +52,10 @@ static CMH_ALTERNATIVE: Choices<CmhAlternative> = Choices {
     ],
 };
 
+/// Numbers in one stratum's JSON entry (a, b, c, d, n, expected_a, variance_a, odds_ratio
+/// and the label), charged against the response budget per stratum.
+const STRATUM_JSON_FIELDS: u64 = 9;
+
 #[tool_router(router = hypothesis_router, vis = "pub")]
 impl AnalyticsServer {
     /// Run Bartlett's test for homogeneity of variances.
@@ -768,29 +772,9 @@ impl AnalyticsServer {
             .map(|s| s.stratum.clone())
             .collect();
         let with_strata = fits_response_budget(
-            (result.n_strata as u64).saturating_mul(9),
+            (result.n_strata as u64).saturating_mul(STRATUM_JSON_FIELDS),
             label_budget_bytes(&labels),
         );
-        let stratum_stats: Vec<serde_json::Value> = result
-            .stratum_stats
-            .iter()
-            .take(if with_strata { usize::MAX } else { 0 })
-            .map(|s| {
-                serde_json::json!({
-                    "stratum": s.stratum,
-                    "counts": {
-                        "a": json_number(s.counts[0]),
-                        "b": json_number(s.counts[1]),
-                        "c": json_number(s.counts[2]),
-                        "d": json_number(s.counts[3])
-                    },
-                    "n": json_number(s.n),
-                    "expected_a": json_number(s.expected_a),
-                    "variance_a": json_number(s.variance_a),
-                    "odds_ratio": json_number(s.odds_ratio)
-                })
-            })
-            .collect();
 
         let alt_desc = match result.alternative {
             CmhAlternative::TwoSided => "true common odds ratio is not equal to 1",
@@ -830,6 +814,25 @@ impl AnalyticsServer {
             "col_levels": result.col_levels,
         });
         if with_strata {
+            let stratum_stats: Vec<serde_json::Value> = result
+                .stratum_stats
+                .iter()
+                .map(|s| {
+                    serde_json::json!({
+                        "stratum": s.stratum,
+                        "counts": {
+                            "a": json_number(s.counts[0]),
+                            "b": json_number(s.counts[1]),
+                            "c": json_number(s.counts[2]),
+                            "d": json_number(s.counts[3])
+                        },
+                        "n": json_number(s.n),
+                        "expected_a": json_number(s.expected_a),
+                        "variance_a": json_number(s.variance_a),
+                        "odds_ratio": json_number(s.odds_ratio)
+                    })
+                })
+                .collect();
             output["stratum_statistics"] = serde_json::json!(stratum_stats);
         } else {
             output["per_stratum_statistics"] = serde_json::json!(format!(

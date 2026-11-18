@@ -74,9 +74,9 @@
       "doc": "validation/stats/modeltables.md",
       "cases": ["stat_modeltables_t3"],
       "tests": ["p2a-core::stats::modeltables::tests::test_validate_modeltables_t3_empty_cell"],
-      "quantities": ["cell means (NaN for empty cells)", "cell sizes", "factor A margins and sizes", "factor B margins (raw)", "grand mean", "residual df and SS"],
+      "quantities": ["cell means (NaN for empty cells)", "cell sizes", "factor A margins and sizes", "factor B means of model.tables (projections of the sequential fit)", "grand mean", "residual df and SS"],
       "tolerance": "Tol::coef(23), Tol::stat(23); counts exact",
-      "deviations": [{"finding": "STAT-75", "quantity": "b_means_model_tables", "note": "on an unbalanced layout model.tables gives projection-based margins for the second factor of the sequential fit; p2a reports raw marginal means, pinned to tapply (b_means_raw)"}],
+      "deviations": [],
       "supersedes_legacy": []
     },
     {

@@ -117,6 +117,54 @@ fn mean_sd(x: &[f64]) -> (f64, f64) {
     (mean, sd)
 }
 
+/// Why [`check_file_size`] refused a file.
+#[derive(Debug)]
+pub(crate) enum FileSizeRefusal {
+    /// Its size could not be read (the I/O error, for the caller's log).
+    Unreadable(std::io::Error),
+    /// It is larger than the `load_file_bytes` budget.
+    OverLimit(Box<crate::tools::limits::LimitViolation>),
+}
+
+/// The file-size check before a file is parsed, shared by `load_dataset`
+/// and the conversation store's dataset reload: only when the limits set a
+/// `load_file_bytes` budget (hosted 64 MiB, none when limits are off,
+/// `P2A_LIMIT_OVERRIDES` in any mode) is the size read on disk and compared
+/// with it. Returns the size when it was read. Each caller logs a refusal
+/// with its own fields and words its own message.
+pub(crate) fn check_file_size(path: &Path, tool: &str) -> Result<Option<u64>, FileSizeRefusal> {
+    let limits = crate::tools::limits::current();
+    if limits.load_file_bytes.is_none() {
+        return Ok(None);
+    }
+    let size = std::fs::metadata(path)
+        .map_err(FileSizeRefusal::Unreadable)?
+        .len();
+    limits
+        .check_budget(tool, "load_file_bytes", size, limits.load_file_bytes)
+        .map_err(|v| FileSizeRefusal::OverLimit(Box::new(v)))?;
+    Ok(Some(size))
+}
+
+/// Count each factor code of column `name` into `counts` (one slot per
+/// level) and return the number of non-missing codes. `factor_options` gives
+/// only codes below the level count; a code outside them is an error rather
+/// than a value counted as missing.
+fn count_levels(codes: &[Option<u32>], counts: &mut [usize], name: &str) -> Result<usize, String> {
+    let n_levels = counts.len();
+    let mut n = 0usize;
+    for &code in codes.iter().flatten() {
+        let Some(c) = counts.get_mut(code as usize) else {
+            return Err(format!(
+                "factor code {code} outside the {n_levels} levels of column '{name}'"
+            ));
+        };
+        *c += 1;
+        n += 1;
+    }
+    Ok(n)
+}
+
 /// The summary of column `name` (see [`ColumnSummary`]).
 pub(crate) fn summarize_column(df: &DataFrame, name: &str) -> Result<ColumnSummary, String> {
     use p2a_core::data::columns;
@@ -172,13 +220,7 @@ pub(crate) fn summarize_column(df: &DataFrame, name: &str) -> Result<ColumnSumma
         let (codes, levels) = columns::factor_options(df, name).map_err(|e| e.to_string())?;
         let mut counts: Vec<usize> = try_vec(levels.len(), 0usize, "describe_dataset level counts")
             .map_err(|e| e.to_string())?;
-        let mut n = 0usize;
-        for code in codes.iter().flatten() {
-            if let Some(c) = counts.get_mut(*code as usize) {
-                *c += 1;
-                n += 1;
-            }
-        }
+        let n = count_levels(&codes, &mut counts, name)?;
         let mut order: Vec<usize> = try_with_capacity(levels.len(), "describe_dataset levels")
             .map_err(|e| e.to_string())?;
         order.extend(0..levels.len());
@@ -393,7 +435,7 @@ impl Serialize for CellJson<'_> {
 
 /// What decoding a parquet file allocates at least, read from its footer
 /// and page headers before anything is decoded (see
-/// [`parquet_decoded_bytes`]).
+/// [`footer_decoded_bytes`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct DecodedBound {
     /// The least the dataset quotas charge for the dataset once it is
@@ -406,46 +448,17 @@ struct DecodedBound {
     transient: u64,
 }
 
-/// What decoding the parquet file at `path` allocates at least, read from
-/// its footer and page headers before anything is decoded. A small file can
-/// declare hundreds of millions of rows, one row holding a list of as many
-/// values (one value run-length encoded), or a page that decompresses to
-/// gigabytes, and the quotas only see a dataset once it is built.
-///
-/// The dataset part is the least the quotas will charge once the file is
-/// decoded: each column's values at their in-memory width, a list's from
-/// the entries counted below it (see [`least_value_bytes`]), plus the
-/// dataset's structure. It is taken per row group and summed: polars
-/// decodes each row group on its own (several at once), so what one group
-/// declares cannot cancel what another holds. The labels of a Categorical
-/// column are the exception: polars keeps one mapping a column, so a label
-/// that several row groups' dictionaries hold is held once, and each
-/// distinct label of the column's dictionary pages is counted once, at what
-/// the quotas charge for it, as is each value of a page that is not
-/// dictionary-encoded (see [`DictionaryLabels`]). An Enum column's labels
-/// are the categories its type declares, counted once a column (see
-/// [`session::frozen_label_bytes`]). The transient part is the decoder's
-/// buffers for the column chunks it decodes at once (see
-/// [`chunk_transient`] and [`decode_threads`]).
-///
-/// The counts are the ones the decoder follows, not the footer's summary of
-/// them: the rows are each row group's own (polars decodes those and never
-/// reads the file-level count), and a leaf column's entries and page sizes
-/// are what the page headers declare over the pages the decoder reads (see
-/// [`PageWalk::chunk`]) where that is more than the column chunk's footer
-/// entry says. So a footer that understates either is still charged what
-/// decoding the file allocates.
-///
-/// `Ok(None)` when the footer cannot be read; the loader then reports the
-/// file's error. `Err` says why the file is not read: its footer declares
-/// what no writer produces (see [`read_footer`]), or the call was cancelled
-/// or passed its deadline while the page headers or dictionaries were read.
+/// [`footer_decoded_bytes`] of the parquet file at `path`, with the default
+/// dictionary budget (tests only; `admit_parquet_source` reads the footer
+/// once and calls `footer_decoded_bytes` itself).
+#[cfg(test)]
 fn parquet_decoded_bytes(path: &Path) -> Result<Option<DecodedBound>, String> {
     parquet_decoded_bytes_within(ParquetSource::File(path), &mut DictionaryBudget::default())
 }
 
-/// [`parquet_decoded_bytes`] of the parquet file `source`, reading no more
-/// dictionary pages than `budget` allows.
+/// [`footer_decoded_bytes`] of the parquet file `source`, reading no more
+/// dictionary pages than `budget` allows (tests only).
+#[cfg(test)]
 fn parquet_decoded_bytes_within(
     source: ParquetSource<'_>,
     budget: &mut DictionaryBudget,
@@ -535,8 +548,43 @@ fn read_footer(source: ParquetSource<'_>) -> Result<Option<Footer<'_>>, String> 
     }))
 }
 
-/// [`parquet_decoded_bytes_within`] of the file `source`, whose footer
-/// [`read_footer`] read.
+/// What decoding the parquet file `source` (whose footer [`read_footer`]
+/// read) allocates at least, read from its footer and page headers before
+/// anything is decoded. A small file can
+/// declare hundreds of millions of rows, one row holding a list of as many
+/// values (one value run-length encoded), or a page that decompresses to
+/// gigabytes, and the quotas only see a dataset once it is built.
+///
+/// The dataset part is the least the quotas will charge once the file is
+/// decoded: each column's values at their in-memory width, a list's from
+/// the entries counted below it (see [`least_value_bytes`]), plus the
+/// dataset's structure. It is taken per row group and summed: polars
+/// decodes each row group on its own (several at once), so what one group
+/// declares cannot cancel what another holds. The labels of a Categorical
+/// column are the exception: polars keeps one mapping a column, so a label
+/// that several row groups' dictionaries hold is held once, and each
+/// distinct label of the column's dictionary pages is counted once, at what
+/// the quotas charge for it, as is each value of a page that is not
+/// dictionary-encoded (see [`DictionaryLabels`]). An Enum column's labels
+/// are the categories its type declares, counted once a column (see
+/// [`session::frozen_label_bytes`]). The transient part is the decoder's
+/// buffers for the column chunks it decodes at once (see
+/// [`chunk_transient`] and [`decode_threads`]).
+///
+/// The counts are the ones the decoder follows, not the footer's summary of
+/// them: the rows are each row group's own (polars decodes those and never
+/// reads the file-level count), and a leaf column's entries and page sizes
+/// are what the page headers declare over the pages the decoder reads (see
+/// [`PageWalk::chunk`]) where that is more than the column chunk's footer
+/// entry says. So a footer that understates either is still charged what
+/// decoding the file allocates.
+///
+/// `Ok(None)` when the footer cannot be read; the loader then reports the
+/// file's error. `Err` says why the file is not read: its footer declares
+/// what no writer produces (see [`read_footer`]), or the call was cancelled
+/// or passed its deadline while the page headers or dictionaries were read.
+///
+/// Dictionary pages are read only as far as `budget` allows.
 fn footer_decoded_bytes(
     source: ParquetSource<'_>,
     footer: Footer<'_>,
@@ -610,7 +658,11 @@ fn footer_decoded_bytes(
             // the file's columns, which is the order of its leaves.
             let chunks = group.columns_under_root_iter(name).into_iter().flatten();
             for (i, chunk) in chunks.enumerate() {
-                let read = walk.chunk(chunk.byte_range(), chunk.num_values())?;
+                // polars' own footer type: this stops compiling when the
+                // thrift parser the walk uses is not the one polars reads
+                // the file with (see Cargo.toml).
+                let codec: polars_parquet_format::CompressionCodec = chunk.metadata().codec;
+                let read = walk.chunk(chunk.byte_range(), chunk.num_values(), codec)?;
                 // Not negative: check_chunk_counts refused the file.
                 let declared = u64::try_from(chunk.num_values()).unwrap_or(0);
                 leaves.push(LeafChunks {
@@ -620,10 +672,6 @@ fn footer_decoded_bytes(
                         .max(read.page_bytes),
                     data_page_bytes: read.page_bytes.saturating_sub(read.dict_bytes),
                 });
-                // polars' own footer type: this stops compiling when the
-                // thrift parser the walk uses is not the one polars reads
-                // the file with (see Cargo.toml).
-                let codec: polars_parquet_format::CompressionCodec = chunk.metadata().codec;
                 transients.push(chunk_transient(
                     &read,
                     leaf_types.get(i).copied(),
@@ -1107,8 +1155,20 @@ impl<'a> PageWalk<'a> {
     /// dictionary page past the first, a page without its type's header or
     /// with a negative size, or a page past the chunk's end. `Err` when the
     /// call is cancelled or past its deadline.
-    fn chunk(&mut self, range: std::ops::Range<u64>, declared: i64) -> Result<ChunkPages, String> {
+    ///
+    /// A page's bytes are its header's `uncompressed_page_size`, except in a
+    /// chunk whose `codec` is UNCOMPRESSED: polars reads such a page where it
+    /// lies and ignores that field, so it holds at least its stored
+    /// (`compressed_page_size`) bytes, and the larger of the two is counted.
+    fn chunk(
+        &mut self,
+        range: std::ops::Range<u64>,
+        declared: i64,
+        codec: polars_parquet_format::CompressionCodec,
+    ) -> Result<ChunkPages, String> {
         use polars_parquet_format::PageType;
+        let stored = codec == polars_parquet_format::CompressionCodec::UNCOMPRESSED;
+        let page_bytes = |size: u64, bytes: u64| if stored { bytes.max(size) } else { bytes };
         let mut read = ChunkPages::default();
         let end = range.end.min(self.file_len);
         if range.start >= end || !self.seek_to(range.start) {
@@ -1128,6 +1188,7 @@ impl<'a> PageWalk<'a> {
             let (Some(Ok(entries)), Ok(size), Ok(bytes)) = (entries, size, bytes) else {
                 return Ok(read);
             };
+            let bytes = page_bytes(size, bytes);
             let at = end - left;
             if !self.skip(size, &mut left) {
                 return Ok(read);
@@ -1166,6 +1227,7 @@ impl<'a> PageWalk<'a> {
             else {
                 break;
             };
+            let bytes = page_bytes(size, bytes);
             if !self.skip(size, &mut left) {
                 break;
             }
@@ -1361,7 +1423,7 @@ fn page_label_bytes(bytes: u64, entries: u64) -> u64 {
 }
 
 /// The labels of one Categorical leaf column over a file's row groups, for
-/// [`parquet_decoded_bytes`]: what polars puts into the column's mapping
+/// [`footer_decoded_bytes`]: what polars puts into the column's mapping
 /// while it decodes it, at what the quotas charge for each label once the
 /// file is loaded (see [`session::label_bytes`]).
 ///
@@ -1475,7 +1537,7 @@ const OFFSET_BYTES: u64 = 8;
 
 /// The least memory the values of `dtype` take in polars, for `slots` of it,
 /// from what the footer and page headers say about each leaf column
-/// (`leaves`, consumed in order, one per leaf; see [`parquet_decoded_bytes`]).
+/// (`leaves`, consumed in order, one per leaf; see [`footer_decoded_bytes`]).
 ///
 /// A leaf column's value takes its physical width (a view per String or
 /// Binary value, a code per Categorical one); a list its offsets, plus what
@@ -1495,7 +1557,7 @@ const OFFSET_BYTES: u64 = 8;
 /// left to the caller, which counts each label once over the row groups
 /// (see [`DictionaryLabels`]), and `holds_labels` gets one entry per leaf
 /// consumed, in order: whether it is a Categorical leaf that holds values
-/// (an Enum leaf's labels are its type's, see [`parquet_decoded_bytes`]).
+/// (an Enum leaf's labels are its type's, see [`footer_decoded_bytes`]).
 /// A fixed-width leaf's charge does not grow with its pages, which also
 /// hold levels its values in memory do not; what decoding its pages
 /// allocates is counted with the decoder's buffers instead (see
@@ -1625,6 +1687,14 @@ pub(crate) enum NotAdmitted {
 /// SAS file is charged only once decoded, and a CSV can decode to several
 /// times its size on disk. `load_dataset` and a dataset reload
 /// (`persistent_session::load_reload_source`) run it.
+///
+/// Known overcount: the bound can exceed what the quotas charge once the
+/// file is loaded, never the other way round. Text that polars decodes as
+/// views and then casts is counted at both forms' widths (see
+/// [`chunk_transient`]), and a Categorical value of a page that is not
+/// dictionary-encoded is counted as a label of its own
+/// ([`MAPPING_LABEL_BYTES`]) once per mapping it may enter. A file close to
+/// its quota can therefore be refused before decoding that would load.
 pub(crate) async fn admit_parquet(path: &Path, name: &str) -> Result<(), NotAdmitted> {
     let is_parquet = path
         .extension()
@@ -1639,7 +1709,7 @@ pub(crate) async fn admit_parquet(path: &Path, name: &str) -> Result<(), NotAdmi
 /// Refuse, before decoding it, the parquet file `source` that the dataset
 /// quotas would refuse once it was loaded as `name` (see
 /// [`session::admit_dataset`]), counting what decoding it allocates on top
-/// of the dataset (see [`parquet_decoded_bytes`]).
+/// of the dataset (see [`footer_decoded_bytes`]).
 ///
 /// A parquet file whose footer declares what no writer produces (see
 /// [`read_footer`]) is not loaded whether or not the call has quotas: those
@@ -1785,23 +1855,15 @@ impl AnalyticsServer {
         // The configurable maximum file size: checked on disk before any
         // parsing, only when the limits set a load_file_bytes budget (hosted
         // 64 MiB, none when limits are off, P2A_LIMIT_OVERRIDES in any mode).
-        let limits = crate::tools::limits::current();
-        if limits.load_file_bytes.is_some() {
-            let size = match std::fs::metadata(&path) {
-                Ok(meta) => meta.len(),
-                Err(_) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Failed to load dataset: File not found: {}",
-                        path_jail::display_path(&path)
-                    ))]));
-                }
-            };
-            if let Err(v) = limits.check_budget(
-                "load_dataset",
-                "load_file_bytes",
-                size,
-                limits.load_file_bytes,
-            ) {
+        match check_file_size(&path, "load_dataset") {
+            Ok(_) => {}
+            Err(FileSizeRefusal::Unreadable(_)) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Failed to load dataset: File not found: {}",
+                    path_jail::display_path(&path)
+                ))]));
+            }
+            Err(FileSizeRefusal::OverLimit(v)) => {
                 tracing::info!(
                     tool = "load_dataset",
                     override_key = v.override_key,
@@ -2222,7 +2284,7 @@ impl AnalyticsServer {
 
     /// Preview the first rows of a dataset.
     #[tool(
-        description = "Preview the first N rows of a loaded dataset (default: 5 rows). Returns data in a formatted table."
+        description = "Preview the first n rows of a loaded dataset (default 5, at most 1000) as a plain text table of every column, with each column's type; cells longer than 40 characters are cut."
     )]
     pub async fn head_dataset(
         &self,
@@ -2234,18 +2296,159 @@ impl AnalyticsServer {
 
         let n = request.n.unwrap_or(5);
         let df = dataset.df();
-        let preview = df.head(Some(n));
+        let (shown, shown_columns, _) = head_shape(df, n);
+        let capped = if n > HEAD_MAX_ROWS {
+            format!("; n = {n} capped at {HEAD_MAX_ROWS}")
+        } else {
+            String::new()
+        };
+        let columns = if shown_columns < df.width() {
+            format!("{} columns, first {shown_columns} shown", df.width())
+        } else {
+            format!("{} columns", df.width())
+        };
+        let table = match render_head(df, n) {
+            Ok(table) => table,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Preview stopped: {e}"
+                ))]));
+            }
+        };
 
         let result = format!(
-            "Dataset: {} (showing first {} of {} rows)\n\n{}",
+            "Dataset: {} (showing first {shown} of {} rows, {columns}{capped})\n\n{table}",
             request.dataset,
-            n.min(df.height()),
             df.height(),
-            preview
         );
 
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
+}
+
+/// Most rows a preview shows (`head_dataset`'s `n` is capped here).
+pub(crate) const HEAD_MAX_ROWS: usize = 1000;
+/// Characters a preview cell shows before it is cut with an ellipsis.
+pub(crate) const HEAD_CELL_CHARS: usize = 40;
+
+/// Most cells a preview shows. A tighter `table_cells` budget lowers it; the
+/// shown columns are cut first, then (with one column left) the rows.
+pub(crate) const HEAD_MAX_CELLS: usize = 100_000;
+
+/// The rows and columns a preview of the first `rows` rows of `df` shows: at
+/// most [`HEAD_MAX_ROWS`] rows and [`HEAD_MAX_CELLS`] cells (or the limits'
+/// `table_cells`, when lower), columns cut before rows.
+pub(crate) fn head_shape(df: &DataFrame, rows: usize) -> (usize, usize, usize) {
+    let rows = rows.min(HEAD_MAX_ROWS).min(df.height());
+    let cap = crate::tools::limits::current()
+        .table_cells
+        .map_or(HEAD_MAX_CELLS, |c| usize::try_from(c).unwrap_or(usize::MAX))
+        .clamp(1, HEAD_MAX_CELLS);
+    let columns = df.width().min((cap / rows.max(1)).max(1));
+    let rows = rows.min(cap / columns.max(1));
+    (rows, columns, cap)
+}
+
+/// One preview cell: control characters (a line break or tab would break the
+/// table) as spaces, cut to [`HEAD_CELL_CHARS`] characters.
+fn head_cell(column: &Column, i: usize) -> String {
+    let text = match column.get(i) {
+        Ok(AnyValue::String(v)) => v.to_string(),
+        Ok(AnyValue::StringOwned(v)) => v.to_string(),
+        Ok(v) => v.to_string(),
+        Err(_) => "?".to_string(),
+    };
+    let text = text.replace(|c: char| c.is_control(), " ");
+    p2a_text::ellipsize(&text, HEAD_CELL_CHARS).into_owned()
+}
+
+/// The first `rows` rows of `df` as a plain table: the column names, their
+/// types as polars prints them (`str`, `i64`, `f64`, ...), a rule, and one line per row.
+/// Cells are cut to [`HEAD_CELL_CHARS`] characters, a missing value prints `null`, and
+/// columns are aligned by characters, not bytes. Rows and columns follow [`head_shape`]
+/// (every column of a frame within the cell cap); a cut, and a stop once the text reaches
+/// the limits' `response_bytes`, is noted on a last line. The cells are formatted twice
+/// (widths, then rows) rather than held, so the work is bounded by the shown cells.
+pub(crate) fn render_head(df: &DataFrame, rows: usize) -> Result<String, String> {
+    use std::fmt::Write as _;
+    let requested = rows.min(HEAD_MAX_ROWS).min(df.height());
+    let (rows, n_columns, cap) = head_shape(df, rows);
+    let columns = &df.get_columns()[..n_columns];
+    let headers = |column: &Column| {
+        [
+            p2a_text::ellipsize(column.name().as_str(), HEAD_CELL_CHARS).into_owned(),
+            p2a_text::ellipsize(&column.dtype().to_string(), HEAD_CELL_CHARS).into_owned(),
+        ]
+    };
+    let mut widths = Vec::with_capacity(columns.len());
+    for column in columns {
+        p2a_core::resource::checkpoint().map_err(|e| e.to_string())?;
+        let mut w = headers(column)
+            .iter()
+            .map(|c| c.chars().count())
+            .max()
+            .unwrap_or(0);
+        for i in 0..rows {
+            w = w.max(head_cell(column, i).chars().count());
+        }
+        widths.push(w);
+    }
+    let byte_cap = crate::tools::limits::current()
+        .response_bytes
+        .map(|b| usize::try_from(b).unwrap_or(usize::MAX));
+    let mut out = String::new();
+    let mut line = String::new();
+    let push_line = |out: &mut String, line: &mut String| {
+        out.push_str(line.trim_end());
+        out.push('\n');
+        line.clear();
+    };
+    let pad = |line: &mut String, cell: &str, w: usize, first: bool| {
+        if !first {
+            line.push_str(" | ");
+        }
+        line.push_str(cell);
+        let n = w.saturating_sub(cell.chars().count());
+        line.extend(std::iter::repeat_n(' ', n));
+    };
+    let header_cells: Vec<[String; 2]> = columns.iter().map(headers).collect();
+    for k in 0..2 {
+        for (j, (cells, &w)) in header_cells.iter().zip(&widths).enumerate() {
+            pad(&mut line, &cells[k], w, j == 0);
+        }
+        push_line(&mut out, &mut line);
+    }
+    let rule: Vec<String> = widths.iter().map(|&w| "-".repeat(w)).collect();
+    line.push_str(&rule.join("-+-"));
+    push_line(&mut out, &mut line);
+    let mut written = 0;
+    for i in 0..rows {
+        p2a_core::resource::checkpoint().map_err(|e| e.to_string())?;
+        if byte_cap.is_some_and(|cap| out.len() >= cap) {
+            break;
+        }
+        for (j, (column, &w)) in columns.iter().zip(&widths).enumerate() {
+            pad(&mut line, &head_cell(column, i), w, j == 0);
+        }
+        push_line(&mut out, &mut line);
+        written += 1;
+    }
+    if written < rows {
+        let _ = writeln!(
+            out,
+            "({written} of {requested} rows shown: the output reached this server's response \
+             limit of {} bytes)",
+            byte_cap.unwrap_or_default()
+        );
+    } else if n_columns < df.width() || rows < requested {
+        let _ = writeln!(
+            out,
+            "({n_columns} of {} columns and {rows} of {requested} rows shown: a preview shows \
+             at most {cap} cells)",
+            df.width()
+        );
+    }
+    Ok(out)
 }
 
 /// Load `path` as `load_dataset` does: [`DataLoader::load`] without `na_strings`, or
@@ -2265,6 +2468,16 @@ mod tests {
     use super::*;
     use p2a_core::polars::prelude::*;
     use serde_json::json;
+
+    #[test]
+    fn count_levels_refuses_a_code_outside_the_levels() {
+        let mut counts = [0usize; 2];
+        let n = count_levels(&[Some(0), None, Some(1), Some(1)], &mut counts, "g");
+        assert_eq!(n, Ok(3));
+        assert_eq!(counts, [1, 2]);
+        let e = count_levels(&[Some(0), Some(2)], &mut [0usize; 2], "g").unwrap_err();
+        assert_eq!(e, "factor code 2 outside the 2 levels of column 'g'");
+    }
 
     /// LLM-6, full precision: validation/r/cases/mcp_data_t3.R, case data_describe_columns (summary(), sd(),
     /// table()). Counts, min, max and the level tables exact; mean and quartiles at the coefficient and sd
@@ -2972,10 +3185,15 @@ mod tests {
                 // row groups, from the page's size in one); an Enum's
                 // categories once. Pre-fix a label counted its bytes in the
                 // page (1,004 and 10 bytes) and an Enum's categories nothing.
+                // In one row group the 2,000 distinct 6-byte labels count
+                // from their dictionary page's size (`page_label_bytes`):
+                // each its 6 bytes of text, 2 (half the text less a half,
+                // rounded down) and the per-label overhead.
+                const SHORT_ONE_GROUP_BYTES: u64 = 2_000 * (6 + 2 + session::LABEL_OVERHEAD_BYTES);
                 let least = match name {
                     "labels" => 40 * session::label_bytes(1_000),
                     "short" if groups.is_some() => 2_000 * session::label_bytes(6),
-                    "short" => 2_000 * 168,
+                    "short" => SHORT_ONE_GROUP_BYTES,
                     "levels" => session::frozen_label_bytes(&frozen),
                     _ => 0,
                 };
@@ -3079,10 +3297,10 @@ mod tests {
     #[test]
     fn a_struct_chunk_that_declares_more_entries_counts_them() {
         // polars reserves room for a nested column chunk's footer count, at
-        // the leaf's width, before it decodes the chunk (`collect_nested`);
-        // a one-row struct column whose chunk declares billions of entries
-        // makes that reservation fail, which aborts the process. Pre-fix
-        // the bound counted the struct's rows only.
+        // the leaf's width, before it decodes the chunk (`collect_nested`),
+        // so the bound has to count that reservation and not only the rows
+        // the struct holds. Pre-fix the bound counted the struct's rows
+        // only.
         use p2a_core::polars::prelude::{IntoSeries, NamedFrom, Series, StructChunked};
         let a = Series::new("a".into(), [0.5f64, 1.75]);
         let s = StructChunked::from_series("s".into(), 2, [a].iter())
@@ -3153,8 +3371,8 @@ mod tests {
         // An array of size zero holds no values, whatever its chunk says,
         // but polars still reserves room for the chunk's footer count at
         // the leaf's width (and a validity bit each) before it decodes it
-        // (`collect_nested`). Pre-fix nothing counted that reservation, so
-        // a small file whose chunk declares billions of entries passed.
+        // (`collect_nested`). The bound counts that reservation from the
+        // footer's count; pre-fix nothing counted it.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("empty.parquet");
         empty_arrays_parquet(&path, 1_000);
@@ -3216,7 +3434,13 @@ mod tests {
         let mut dictionaries = 0;
         for group in &metadata.row_groups {
             for chunk in group.parquet_columns() {
-                let read = walk.chunk(chunk.byte_range(), chunk.num_values()).unwrap();
+                let read = walk
+                    .chunk(
+                        chunk.byte_range(),
+                        chunk.num_values(),
+                        chunk.metadata().codec,
+                    )
+                    .unwrap();
                 assert_eq!(read.entries, chunk.num_values() as u64);
                 assert!(read.page_bytes > 0);
                 assert!(read.page_bytes <= chunk.uncompressed_size() as u64);
@@ -3409,6 +3633,50 @@ mod tests {
         std::fs::write(path, bytes).unwrap();
     }
 
+    /// polars reads an uncompressed page where it lies, whatever its header's
+    /// `uncompressed_page_size` says, so the walk counts at least the page's
+    /// stored size there; in a compressed chunk the header's figure stands.
+    #[test]
+    fn an_uncompressed_page_counts_at_least_its_stored_size() {
+        use p2a_core::polars::prelude::{ParquetCompression, ParquetWriter};
+        use polars_parquet_format::CompressionCodec;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plain.parquet");
+        let mut df = df! {
+            "x" => (0..10_000).map(|i| f64::from(i) * 1.37 + 0.11).collect::<Vec<_>>(),
+        }
+        .unwrap();
+        ParquetWriter::new(std::fs::File::create(&path).unwrap())
+            .with_compression(ParquetCompression::Uncompressed)
+            .finish(&mut df)
+            .unwrap();
+        let first_page = |path: &Path, codec| {
+            let metadata = std::sync::Arc::clone(
+                ParquetReader::new(std::fs::File::open(path).unwrap())
+                    .get_metadata()
+                    .unwrap(),
+            );
+            let chunk = &metadata.row_groups[0].parquet_columns()[0];
+            assert_eq!(chunk.metadata().codec, CompressionCodec::UNCOMPRESSED);
+            walk_of(path)
+                .chunk(chunk.byte_range(), chunk.num_values(), codec)
+                .unwrap()
+                .page_bytes
+        };
+        let honest = first_page(&path, CompressionCodec::UNCOMPRESSED);
+        let mut stored = 0;
+        rewrite_first_page_header(&path, |header| {
+            stored = header.compressed_page_size;
+            assert!(stored >= 8_192 * 2, "{stored}");
+            header.uncompressed_page_size = stored / 2;
+        });
+        // The understated header is charged the page's stored size.
+        assert_eq!(first_page(&path, CompressionCodec::UNCOMPRESSED), honest);
+        // Read as a compressed chunk, the header's figure would stand.
+        let as_snappy = first_page(&path, CompressionCodec::SNAPPY);
+        assert_eq!(as_snappy, honest - (stored - stored / 2) as u64);
+    }
+
     #[test]
     fn an_unreadable_dictionary_page_counts_every_page_from_its_size() {
         // Seven row groups, each with a dictionary page of the same 40
@@ -3434,7 +3702,13 @@ mod tests {
         let mut pages = 0;
         for group in &metadata.row_groups {
             let chunk = &group.parquet_columns()[0];
-            let read = walk.chunk(chunk.byte_range(), chunk.num_values()).unwrap();
+            let read = walk
+                .chunk(
+                    chunk.byte_range(),
+                    chunk.num_values(),
+                    chunk.metadata().codec,
+                )
+                .unwrap();
             assert!(read.dict_bytes >= 40 * 1_004);
             pages += read.dict_bytes;
         }
@@ -3892,6 +4166,157 @@ mod tests {
             row_old.as_object_mut().unwrap().remove("s");
             assert_eq!(&row_new, row_old);
         }
+    }
+
+    fn head(rt: &tokio::runtime::Runtime, server: &AnalyticsServer, n: Option<usize>) -> String {
+        use crate::tools::common::test_support::text;
+        let req = HeadDatasetRequest {
+            dataset: "d".into(),
+            n,
+        };
+        let r = rt.block_on(server.head_dataset(Parameters(req))).unwrap();
+        assert_eq!(r.is_error, Some(false));
+        text(&r)
+    }
+
+    /// LLM-13: every requested row and every column is shown, and the header says so (polars'
+    /// display showed 10 rows and 8 columns whatever n asked for).
+    #[test]
+    fn test_head_dataset_shows_all_requested_rows_and_columns() {
+        use crate::tools::common::test_support::server_with;
+        let cols: Vec<Column> = (1..=12)
+            .map(|j| {
+                Column::new(
+                    format!("col{j}").into(),
+                    (0..30)
+                        .map(|i| i as f64 * 1.5 + j as f64)
+                        .collect::<Vec<f64>>(),
+                )
+            })
+            .collect();
+        let df = DataFrame::new(cols).unwrap();
+        let (rt, server) = server_with(vec![("d", df)]);
+        let t = head(&rt, &server, Some(25));
+        assert!(
+            t.starts_with("Dataset: d (showing first 25 of 30 rows, 12 columns)"),
+            "{t}"
+        );
+        let lines: Vec<&str> = t.lines().skip(2).collect();
+        // names, types, rule and 25 rows
+        assert_eq!(lines.len(), 28, "{t}");
+        for j in 1..=12 {
+            assert!(lines[0].contains(&format!("col{j}")), "{t}");
+        }
+        assert_eq!(lines[1].split(" | ").count(), 12, "{t}");
+        assert!(lines[1].starts_with("f64"), "{t}");
+        for row in &lines[3..] {
+            assert_eq!(row.split(" | ").count(), 12, "{row}");
+        }
+        assert!(!t.contains('…') && !t.contains("..."), "{t}");
+    }
+
+    /// LLM-13: n above the cap shows the cap and says so.
+    #[test]
+    fn test_head_dataset_caps_rows_and_says_so() {
+        use crate::tools::common::test_support::server_with;
+        let df = df!("x" => (0..5000).map(|i| i as f64 * 0.25).collect::<Vec<f64>>()).unwrap();
+        let (rt, server) = server_with(vec![("d", df)]);
+        let t = head(&rt, &server, Some(3000));
+        assert!(
+            t.starts_with(
+                "Dataset: d (showing first 1000 of 5000 rows, 1 columns; n = 3000 capped at 1000)"
+            ),
+            "{}",
+            &t[..200]
+        );
+        assert_eq!(t.lines().skip(2).count(), 3 + HEAD_MAX_ROWS);
+        let small = head(&rt, &server, None);
+        assert!(small.starts_with("Dataset: d (showing first 5 of 5000 rows, 1 columns)\n"));
+    }
+
+    /// A wide frame shows at most the preview's cells: columns are cut first and the
+    /// cut is noted, under the hosted limits and under a smaller `table_cells` budget.
+    #[test]
+    fn test_head_preview_is_bounded_by_cells() {
+        use crate::tools::limits::{self, Limits};
+        let width = 300;
+        let columns: Vec<Column> = (0..width)
+            .map(|j| {
+                let v: Vec<f64> = (0..600).map(|i| (i * 7 + j) as f64 * 0.37 + 0.01).collect();
+                Series::new(format!("c{j}").into(), v).into()
+            })
+            .collect();
+        let df = DataFrame::new(columns).unwrap();
+        // Hosted: 1,000 rows of 300 columns are over the cap, so columns are cut.
+        let t = limits::with_limits(Limits::hosted(), || render_head(&df, 1000)).unwrap();
+        let (rows, cols, cap) = limits::with_limits(Limits::hosted(), || head_shape(&df, 1000));
+        assert_eq!(cap, HEAD_MAX_CELLS);
+        assert_eq!(rows, 600);
+        assert!(cols < width && cols * rows <= cap, "{cols} x {rows}");
+        let lines: Vec<&str> = t.lines().collect();
+        assert_eq!(lines.len(), 3 + rows + 1);
+        assert_eq!(lines[0].split(" | ").count(), cols);
+        assert_eq!(
+            *lines.last().unwrap(),
+            format!(
+                "({cols} of {width} columns and 600 of 600 rows shown: a preview shows at most \
+                 {cap} cells)"
+            )
+        );
+        // A smaller table_cells budget: one column, and its rows cut.
+        let mut small = Limits::off();
+        small.table_cells = Some(50);
+        let t = limits::with_limits(small, || render_head(&df, 1000)).unwrap();
+        let lines: Vec<&str> = t.lines().collect();
+        assert_eq!(lines.len(), 3 + 50 + 1, "{t}");
+        assert!(lines[0].starts_with("c0") && !lines[0].contains('|'), "{t}");
+        assert_eq!(
+            *lines.last().unwrap(),
+            "(1 of 300 columns and 50 of 600 rows shown: a preview shows at most 50 cells)"
+        );
+        // And the response limit stops the rows, with a note.
+        let mut bytes = Limits::off();
+        bytes.response_bytes = Some(2_000);
+        let t = limits::with_limits(bytes, || render_head(&df, 1000)).unwrap();
+        // The header lines alone pass 2,000 bytes here, so no row follows them.
+        assert_eq!(t.lines().count(), 3 + 1, "{t}");
+        assert!(
+            t.trim_end()
+                .ends_with("(0 of 600 rows shown: the output reached this server's response limit of 2000 bytes)"),
+            "{}",
+            &t[t.len() - 200..]
+        );
+        // The header of head_dataset says how many columns are shown.
+        use crate::tools::common::test_support::server_with;
+        let (rt, server) = server_with(vec![("d", df.clone())]);
+        let h = limits::with_limits(Limits::hosted(), || head(&rt, &server, Some(10)));
+        assert!(
+            h.starts_with("Dataset: d (showing first 10 of 600 rows, 300 columns)"),
+            "{}",
+            &h[..100]
+        );
+        let mut tiny = Limits::off();
+        tiny.table_cells = Some(100);
+        let h = limits::with_limits(tiny, || head(&rt, &server, Some(10)));
+        assert!(
+            h.starts_with("Dataset: d (showing first 10 of 600 rows, 300 columns, first 10 shown)"),
+            "{}",
+            &h[..100]
+        );
+    }
+
+    /// LLM-13: a long multibyte cell is cut on a character boundary; a missing value is `null`.
+    #[test]
+    fn test_head_dataset_cells_are_cut_on_char_boundaries() {
+        let long = "é".repeat(200);
+        let df = df!("s" => [Some(long.as_str()), None, Some("a\nb")]).unwrap();
+        let t = render_head(&df, 3).unwrap();
+        let lines: Vec<&str> = t.lines().collect();
+        assert_eq!(lines.len(), 6, "{t}");
+        assert_eq!(lines[3].chars().count(), HEAD_CELL_CHARS, "{t}");
+        assert!(lines[3].starts_with("ééé"), "{t}");
+        assert_eq!(lines[4].trim_end(), "null", "{t}");
+        assert_eq!(lines[5].trim_end(), "a b", "{t}");
     }
 
     /// The (dtype, null count) of `column` in the server's dataset `name`.

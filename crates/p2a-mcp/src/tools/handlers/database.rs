@@ -13,11 +13,13 @@ use rmcp::{
     tool, tool_router,
 };
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::path_jail;
 use crate::server::AnalyticsServer;
+use crate::tools::handlers::data::render_head;
 use crate::tools::requests::database::*;
 
 use p2a_core::{
@@ -261,26 +263,24 @@ impl AnalyticsServer {
         let note = truncation_note(&outcome, &opts);
         let result = outcome.result;
 
-        // Get preview before moving dataframe
-        let preview = result.dataframe.head(Some(5));
-
-        // Create dataset from result
+        let preview = render_head(&result.dataframe, PREVIEW_ROWS)
+            .unwrap_or_else(|e| format!("(preview stopped: {e})\n"));
         let dataset = Dataset::new(result.dataframe);
 
-        // Generate name
-        let name = request.name.unwrap_or_else(|| {
-            format!(
+        // A default name never replaces another dataset; an explicit one may, and says so.
+        let mut datasets = self.datasets.write().await;
+        let (name, replaced) = store_result(
+            &mut datasets,
+            request.name,
+            &format!(
                 "sqlite_query_{}",
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs()
-            )
-        });
-
-        // Store dataset
-        let mut datasets = self.datasets.write().await;
-        datasets.insert(name.clone(), dataset);
+            ),
+            dataset,
+        );
 
         let output = format!(
             "SQLite Query Results\n\
@@ -289,13 +289,15 @@ impl AnalyticsServer {
              {}\
              Columns: {}\n\
              {}\n\
-             Dataset stored as: '{}'\n\n\
-             Preview (first 5 rows):\n{}",
+             Dataset stored as: '{}'{}\n\n\
+             Preview (first {} rows, every column):\n{}",
             result.rows,
             note,
             result.columns.join(", "),
             warning_lines(&result.warnings),
             name,
+            replaced,
+            PREVIEW_ROWS,
             preview
         );
 
@@ -407,26 +409,24 @@ impl AnalyticsServer {
         let note = truncation_note(&outcome, &opts);
         let result = outcome.result;
 
-        // Get preview before moving dataframe
-        let preview = result.dataframe.head(Some(5));
-
-        // Create dataset from result
+        let preview = render_head(&result.dataframe, PREVIEW_ROWS)
+            .unwrap_or_else(|e| format!("(preview stopped: {e})\n"));
         let dataset = Dataset::new(result.dataframe);
 
-        // Generate name
-        let name = request.name.unwrap_or_else(|| {
-            format!(
+        // A default name never replaces another dataset; an explicit one may, and says so.
+        let mut datasets = self.datasets.write().await;
+        let (name, replaced) = store_result(
+            &mut datasets,
+            request.name,
+            &format!(
                 "duckdb_query_{}",
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs()
-            )
-        });
-
-        // Store dataset
-        let mut datasets = self.datasets.write().await;
-        datasets.insert(name.clone(), dataset);
+            ),
+            dataset,
+        );
 
         let output = format!(
             "DuckDB Query Results\n\
@@ -435,13 +435,15 @@ impl AnalyticsServer {
              {}\
              Columns: {}\n\
              {}\n\
-             Dataset stored as: '{}'\n\n\
-             Preview (first 5 rows):\n{}",
+             Dataset stored as: '{}'{}\n\n\
+             Preview (first {} rows, every column):\n{}",
             result.rows,
             note,
             result.columns.join(", "),
             warning_lines(&result.warnings),
             name,
+            replaced,
+            PREVIEW_ROWS,
             preview
         );
 
@@ -524,7 +526,7 @@ impl AnalyticsServer {
 
     /// Query a Parquet or CSV file directly using DuckDB SQL.
     #[tool(
-        description = "Execute exactly one read-only SQL statement with DuckDB on one Parquet or CSV file, file_path, and load the result as a dataset, for example to filter or aggregate the file before loading it. Refer to the file as {file}, also inside reader functions, for example SELECT * FROM {file} or read_csv_auto({file}, header = true). The query can read no other file, so it cannot join files. The rules and caps of db_duckdb_query apply: EXPLAIN ANALYZE, ATTACH, COPY, INSTALL/LOAD, SET and any second statement are refused, and the server may cap the number of rows, the result size and the run time; a truncated result is reported. Not available when the server disables free-form SQL (the public demo); use load_dataset there."
+        description = "Execute exactly one read-only SQL statement with DuckDB on one Parquet or CSV file, file_path, and load the result as a dataset. Refer to the file as {file}, also inside reader functions, for example SELECT * FROM {file} or read_csv_auto({file}, header = true). The query can read no other file, so it cannot join files. The rules and caps of db_duckdb_query apply (one read-only statement; the server may cap the rows, the result size and the run time, and reports a truncated result). Without a name the result gets a free name. Not available when the server disables free-form SQL (the public demo); use load_dataset there."
     )]
     pub async fn db_query_file(
         &self,
@@ -549,26 +551,24 @@ impl AnalyticsServer {
         let note = truncation_note(&outcome, &opts);
         let result = outcome.result;
 
-        // Get preview before moving dataframe
-        let preview = result.dataframe.head(Some(5));
-
-        // Convert to Dataset
+        let preview = render_head(&result.dataframe, PREVIEW_ROWS)
+            .unwrap_or_else(|e| format!("(preview stopped: {e})\n"));
         let dataset = Dataset::new(result.dataframe);
 
-        // Generate name
-        let name = request.name.unwrap_or_else(|| {
-            format!(
+        // A default name never replaces another dataset; an explicit one may, and says so.
+        let mut datasets = self.datasets.write().await;
+        let (name, replaced) = store_result(
+            &mut datasets,
+            request.name,
+            &format!(
                 "file_query_{}",
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs()
-            )
-        });
-
-        // Store in datasets
-        let mut datasets = self.datasets.write().await;
-        datasets.insert(name.clone(), dataset);
+            ),
+            dataset,
+        );
 
         let output = format!(
             "DuckDB File Query Results\n\
@@ -578,8 +578,8 @@ impl AnalyticsServer {
              {}\
              Columns: {}\n\
              {}\n\
-             Dataset stored as: '{}'\n\n\
-             Preview (first 5 rows):\n{}",
+             Dataset stored as: '{}'{}\n\n\
+             Preview (first {} rows, every column):\n{}",
             // The path as the caller sent it, never the resolved server path.
             request.file_path,
             result.rows,
@@ -587,11 +587,45 @@ impl AnalyticsServer {
             result.columns.join(", "),
             warning_lines(&result.warnings),
             name,
+            replaced,
+            PREVIEW_ROWS,
             preview
         );
 
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
+}
+
+/// Rows of the preview a query answer shows.
+const PREVIEW_ROWS: usize = 5;
+
+/// `base` if no dataset has that name, else the first free `base_2`, `base_3`, ... Called
+/// under the datasets' write lock, so the name is still free when the result is inserted.
+pub(crate) fn unique_result_name(datasets: &HashMap<String, Dataset>, base: &str) -> String {
+    if !datasets.contains_key(base) {
+        return base.to_string();
+    }
+    (2usize..)
+        .map(|k| format!("{base}_{k}"))
+        .find(|name| !datasets.contains_key(name))
+        .expect("a free suffix exists")
+}
+
+/// Stores a query result under the caller's `explicit` name, replacing a dataset of that name,
+/// or under a free name made from `base`. Returns the name and, when a dataset was replaced, a
+/// sentence saying so (empty otherwise).
+fn store_result(
+    datasets: &mut HashMap<String, Dataset>,
+    explicit: Option<String>,
+    base: &str,
+    dataset: Dataset,
+) -> (String, String) {
+    let name = explicit.unwrap_or_else(|| unique_result_name(datasets, base));
+    let replaced = match datasets.insert(name.clone(), dataset) {
+        Some(_) => format!("\n(replaced the existing dataset '{name}')"),
+        None => String::new(),
+    };
+    (name, replaced)
 }
 
 /// One `Warning: ...` line per conversion warning of a query result (each
@@ -738,6 +772,44 @@ mod tests {
             assert!(d.contains(needle), "{needle:?} missing from: {d}");
         }
         assert!(!d.contains("joining large files"), "{d}");
+        assert!(d.len() <= 661, "{} characters: {d}", d.len());
+    }
+
+    #[test]
+    fn test_unique_result_name() {
+        let ds =
+            || p2a_core::Dataset::new(p2a_core::polars::prelude::df!("x" => [1.5, 2.25]).unwrap());
+        let mut map = std::collections::HashMap::new();
+        assert_eq!(super::unique_result_name(&map, "q"), "q");
+        map.insert("q".to_string(), ds());
+        assert_eq!(super::unique_result_name(&map, "q"), "q_2");
+        map.insert("q_2".to_string(), ds());
+        assert_eq!(super::unique_result_name(&map, "q"), "q_3");
+    }
+
+    /// LLM-14: two results with the same default base (two queries in one second) keep both;
+    /// an explicit name that exists is replaced, and the answer says so.
+    #[test]
+    fn test_db_query_default_names_do_not_collide() {
+        let ds = |v: f64| {
+            p2a_core::Dataset::new(p2a_core::polars::prelude::df!("x" => [v, v + 0.5]).unwrap())
+        };
+        let mut map = std::collections::HashMap::new();
+        let (a, ra) = super::store_result(&mut map, None, "sqlite_query_7", ds(1.0));
+        let (b, rb) = super::store_result(&mut map, None, "sqlite_query_7", ds(2.0));
+        assert_eq!(
+            (a.as_str(), b.as_str()),
+            ("sqlite_query_7", "sqlite_query_7_2")
+        );
+        assert!(ra.is_empty() && rb.is_empty());
+        assert_eq!(map.len(), 2);
+        let (c, rc) = super::store_result(&mut map, Some("sqlite_query_7".into()), "x", ds(3.0));
+        assert_eq!(c, "sqlite_query_7");
+        assert!(
+            rc.contains("replaced the existing dataset 'sqlite_query_7'"),
+            "{rc}"
+        );
+        assert_eq!(map.len(), 2);
     }
 
     #[test]
@@ -871,6 +943,40 @@ mod tests {
         })
         .unwrap();
         (result, server)
+    }
+
+    /// LLM-13: the query preview shows every column of a 10-column result (polars' display
+    /// hid those past the eighth), and an explicit name that exists is reported as replaced.
+    #[test]
+    fn duckdb_query_preview_shows_every_column() {
+        let cols: Vec<String> = (1..=10).map(|j| format!("{j}.5 AS c{j}")).collect();
+        let query = format!("SELECT {}", cols.join(", "));
+        let (result, server) = duckdb_off(&query, "wide");
+        let text = text_of(&result);
+        assert_ne!(result.is_error, Some(true), "{text}");
+        let preview = text.split("every column):\n").nth(1).unwrap();
+        let header = preview.lines().next().unwrap();
+        for j in 1..=10 {
+            assert!(header.contains(&format!("c{j}")), "c{j}: {text}");
+        }
+        assert!(!text.contains("replaced the existing dataset"), "{text}");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let again = limits::with_limits(Limits::off(), || {
+            rt.block_on(server.db_duckdb_query(Parameters(DuckDBQueryRequest {
+                db_path: ":memory:".into(),
+                query: "SELECT 1.5 AS z".into(),
+                name: Some("wide".into()),
+            })))
+        })
+        .unwrap();
+        let text = text_of(&again);
+        assert!(
+            text.contains("(replaced the existing dataset 'wide')"),
+            "{text}"
+        );
     }
 
     #[test]

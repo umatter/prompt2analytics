@@ -958,6 +958,21 @@ async fn test_validate_mcp_spml() {
         6,
         "sarar lambda SE",
     );
+    for (i, name) in ["x1", "x2"].iter().enumerate() {
+        let r = row(&sarar, name);
+        printed(
+            r[0],
+            case.vector("individual_sarar_coef")[i],
+            6,
+            &format!("sarar {name}"),
+        );
+        printed(
+            r[1],
+            case.vector("individual_sarar_se")[i],
+            6,
+            &format!("sarar {name} SE"),
+        );
+    }
     let lag = ok(&call(
         &server,
         &s,
@@ -978,12 +993,21 @@ async fn test_validate_mcp_spml() {
         6,
         "lag rho SE",
     );
-    printed(
-        row(&lag, "x1")[0],
-        case.vector("individual_lag_coef")[0],
-        6,
-        "lag x1",
-    );
+    for (i, name) in ["x1", "x2"].iter().enumerate() {
+        let r = row(&lag, name);
+        printed(
+            r[0],
+            case.vector("individual_lag_coef")[i],
+            6,
+            &format!("lag {name}"),
+        );
+        printed(
+            r[1],
+            case.vector("individual_lag_se")[i],
+            6,
+            &format!("lag {name} SE"),
+        );
+    }
     assert!(!lag.contains("Spatial error coefficient (lambda)"), "{lag}");
     let re = ok(&call(
         &server,
@@ -1020,7 +1044,14 @@ async fn test_validate_mcp_spml() {
         "sigma_mu",
     );
     for (i, name) in ["(Intercept)", "x1", "x2"].iter().enumerate() {
-        printed(row(&re, name)[0], case.vector("random_b_coef")[i], 6, name);
+        let r = row(&re, name);
+        printed(r[0], case.vector("random_b_coef")[i], 6, name);
+        printed(
+            r[1],
+            case.vector("random_b_se")[i],
+            6,
+            &format!("{name} SE"),
+        );
     }
 }
 
@@ -2334,4 +2365,118 @@ async fn test_mcp_causal_forest_description_and_notes() {
     assert_eq!(j["se_method"], json!("AIPW scores"));
     assert!(j["warnings"].is_array(), "{j}");
     assert_eq!(j["w_hat_range"].as_array().map(Vec::len), Some(2), "{j}");
+}
+
+/// The spatial probit effects add up: for sarprobit each covariate's total is its direct
+/// plus its indirect effect; semprobit has no spillover (indirect 0, total = direct); every
+/// rho and lambda draw lies in (-1, 1). A property test on the probit sessions' data and
+/// weights (k = 4 nearest neighbours, row-standardised), with a fixed seed and few draws.
+#[test]
+fn test_mcp_spatial_probit_effects_add_up() {
+    use p2a_core::econometrics::spatialprobit::{
+        SpatialProbitConfig, run_sar_probit, run_sem_probit,
+    };
+    use p2a_core::spatial::{Neighbors, SpatialWeights, WeightStyle};
+    let (_, mut df) = case_df("spatial_weights_moran");
+    let yb: Vec<i64> = col_f64(&df, "y")
+        .into_iter()
+        .map(|v| i64::from(v > 1.9))
+        .collect();
+    df.with_column(Series::new("yb".into(), yb)).unwrap();
+    let coords: Vec<(f64, f64)> = col_f64(&df, "cx")
+        .into_iter()
+        .zip(col_f64(&df, "cy"))
+        .collect();
+    let ds = dataset(df);
+    let config = || {
+        let mut c = SpatialProbitConfig::default();
+        c.n_draws = 80;
+        c.burn_in = 20;
+        c.seed = Some(11);
+        c
+    };
+    let weights =
+        || SpatialWeights::from_neighbors(&Neighbors::from_knn(&coords, 4), WeightStyle::RowStd);
+    let in_unit = |draws: &[f64], what: &str| {
+        assert!(
+            draws.iter().all(|d| d.abs() < 1.0),
+            "{what} draws outside (-1, 1)"
+        );
+    };
+    let sar = run_sar_probit(&ds, "yb", &["x1", "x2"], &mut weights(), config()).unwrap();
+    in_unit(sar.rho_draws.as_slice().unwrap(), "rho");
+    let impacts = sar.impacts.as_ref().expect("sarprobit impacts");
+    assert_eq!(impacts.var_names, ["x1", "x2"]);
+    for i in 0..impacts.var_names.len() {
+        let sum = impacts.direct[i] + impacts.indirect[i];
+        assert!(
+            (impacts.total[i] - sum).abs() <= 1e-12,
+            "{}: total {} vs direct + indirect {sum}",
+            impacts.var_names[i],
+            impacts.total[i]
+        );
+    }
+    let sem = run_sem_probit(&ds, "yb", &["x1", "x2"], &mut weights(), config()).unwrap();
+    in_unit(sem.rho_draws.as_slice().unwrap(), "lambda");
+    // The core computes semprobit impacts when asked (the default config does).
+    let impacts = sem.impacts.as_ref().expect("semprobit impacts");
+    assert_eq!(impacts.var_names, ["x1", "x2"]);
+    for i in 0..impacts.var_names.len() {
+        assert_eq!(impacts.indirect[i], 0.0, "{}", impacts.var_names[i]);
+        assert_eq!(
+            impacts.total[i], impacts.direct[i],
+            "{}",
+            impacts.var_names[i]
+        );
+    }
+}
+
+/// The same property through the tools (dispatch path, fixed seed, few draws):
+/// sar_probit_model's printed impacts add up (total = direct + indirect within
+/// the printed six decimals) and its rho interval lies in (-1, 1);
+/// sem_probit_model prints no impacts block (the handler asks for none: an
+/// error model has no spatial multiplier) and its lambda interval lies in (-1, 1).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_mcp_spatial_probit_tools_effects_add_up() {
+    let (s, server) = probit_session().await;
+    let a = json!({"dataset": "spatial_sim", "y": "yb", "x": ["x1", "x2"], "weights": "w4",
+                   "n_draws": 80, "burn_in": 20, "seed": 11});
+    let interval = |t: &str| -> (f64, f64) {
+        let l = line(t, "95% Credible Interval:");
+        let inner = l
+            .split('(')
+            .nth(1)
+            .and_then(|r| r.split(')').next())
+            .unwrap_or_else(|| panic!("no interval in {l}"));
+        let mut it = inner.split(',').map(|v| v.trim().parse::<f64>().unwrap());
+        (it.next().unwrap(), it.next().unwrap())
+    };
+    let sar = ok(&call(&server, &s, "sar_probit_model", a.clone()).await);
+    let (lo, hi) = interval(&sar);
+    assert!(
+        -1.0 < lo && lo <= hi && hi < 1.0,
+        "rho interval ({lo}, {hi})"
+    );
+    let block = sar
+        .split("Spatial impacts")
+        .nth(1)
+        .unwrap_or_else(|| panic!("no impacts in {sar}"));
+    for name in ["x1", "x2"] {
+        // Direct (SD) Indirect (SD) Total (SD)
+        let v = row(block, name);
+        assert_eq!(v.len(), 6, "{name}: {block}");
+        let sum = v[0] + v[2];
+        assert!(
+            (v[4] - sum).abs() <= 1.5e-6,
+            "{name}: total {} vs direct + indirect {sum}\n{block}",
+            v[4]
+        );
+    }
+    let sem = ok(&call(&server, &s, "sem_probit_model", a).await);
+    assert!(!sem.contains("Spatial impacts"), "{sem}");
+    let (lo, hi) = interval(&sem);
+    assert!(
+        -1.0 < lo && lo <= hi && hi < 1.0,
+        "lambda interval ({lo}, {hi})"
+    );
 }

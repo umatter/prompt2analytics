@@ -43,7 +43,7 @@ R cases by area (each in `validation/r/cases/<file>.R`, values in `validation/ex
 - regression: `glmnet_paths`, `gls_compsymm`, `gls_ar1`, `rq_br_se`, `ols_aliased`,
   `ols_diagnostics_grunfeld`, `diag_bgtest_ar1`, `reset_princomp`, `diag_wald_sim`,
   `diag_harvtest_nonlin`, `hac_ar1`, `dk_panel`, `step_legacy`, `nls_expdecay`,
-  `loess_x10_direct`, `smoothers_gcv_periodic_loess`, `supsmu_sine`;
+  `loess_x10_direct`, `smoothers_gcv_periodic_loess`, `supsmu_sine`, `smooth_spline_t4`;
 - discrete: `disc_mlogit_fishing`, `disc_binary_glm`, `disc_multinom_overlap`,
   `disc_hurdle_zero`, `feglm_families`;
 - survival: `surv_cox_robust`, `surv_aft`, `mcp_competing_risks`;
@@ -79,6 +79,7 @@ Tests of `crates/p2a-mcp/tests/tier3/wp58_models.rs` unless the module is named.
 | `test_validate_mcp_regression_hac_dk` | regression_hac, regression_driscoll_kraay | `coef`, `kernhac_parzen_bw4` (lag 3); `coef`, `n_periods`, `vcovpl_lag2` | printed | TOOL-32 |
 | `test_validate_mcp_loess_x10_and_mass_point` | regression_loess | `fit_s075_d2`, `fit_s075_d1`, `fit_s12_d2`, `loess_masspoint_expected` | `Tol::coef(10)`, `Tol::coef(100)` | TOOL-32 |
 | `test_validate_mcp_supsmu_span_and_periodic` | regression_supsmu | `cv_x`, `span03_y`, `weighted_y`, `supsmu_periodic_y`, `supsmu_plain_y` | `Tol::coef(100)` | TOOL-32 |
+| `test_validate_mcp_smooth_spline_smooth_spline_t4` | regression_smooth_spline | `r_a_{gcv,cv,df6}_{spar,lambda,df,cv_crit,fit}`, `r_a_spar05_{lambda,df,fit}` | `Tol::iterative(1e-6)`; `Tol::coef(n)` | REG-29, REG-30 |
 | `test_validate_mcp_regression_step` | regression_step | `forward_aic`, `backward_bic` | `Tol::stat(n)` | TOOL-32 |
 | `test_validate_mcp_regression_nls` | regression_nls | `coef`, `se` | printed | TOOL-32 |
 | `test_validate_mcp_mlogit_asc` | mlogit | `asc_coef_tight`, `asc_se_tight`, `asc_loglik`, `noasc_*`, `pier_*_tight` | printed | TOOL-32 |
@@ -116,7 +117,6 @@ R-pinned.
 | `test_mcp_quantreg_empty_taus_is_error` | regression_quantreg | refusals | TOOL-14 |
 | `test_mcp_regression_options_reject_unknown` | bgtest, resettest, bootstrap_cov, step, nls | refusals | TOOL-32 |
 | `test_mcp_bootstrap_cov_is_seeded` | regression_bootstrap_cov | equal text for equal seeds | TOOL-32 |
-| `test_mcp_smooth_spline_criterion` | regression_smooth_spline | library equality (not R-pinned) | TOOL-32 |
 | `test_mcp_discrete_options_and_boundaries` | mixed_logit, ordered_model, zeroinfl, hurdle_model, feglm | refusals | TOOL-14, TOOL-32 |
 | `test_mcp_mixed_logit_uses_session_seed` | mixed_logit | equal text for equal seeds | TOOL-32 |
 | `test_mcp_cox_options_are_checked` | cox_ph | refusals | TOOL-32 |
@@ -137,11 +137,9 @@ R-pinned.
 
 Registry deviations (quantities not pinned through MCP):
 
-- REG-29, REG-30: smooth.spline fit, df, lambda and criterion value (the property test
-  `test_mcp_smooth_spline_criterion` compares with the library and checks that GCV and CV
-  differ).
 - Smoke tests only: Holt-Winters forecasts (TS-23, TS-24), VAR IRF, factanal (STAT-23; the core fit and
-  scores are pinned in [factanal.md](../multivariate/factanal.md), the handler side of STAT-49 is open).
+  scores are pinned in [factanal.md](../multivariate/factanal.md); a just-identified model, df = 0, gets
+  no goodness-of-fit verdict, `tier3::wp56_stats_ts::test_mcp_factanal_df0_has_no_fit_verdict`).
 
 Compared with R in the core tests rather than through MCP: the FEGLM standard errors and
 deviance of the non-Gaussian families ([feglm.md](../econometrics/feglm.md); the Gaussian fit is

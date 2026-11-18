@@ -11,29 +11,34 @@
 //!
 //! μ̂ᵢ = ȳᵢ. (sample mean for level i)
 //!
-//! Standard error: SE(μ̂ᵢ) = √(MSE/nᵢ)
-//!
 //! ## Table of Effects
 //!
 //! The effect for level i is the deviation from the grand mean:
 //!
 //! αᵢ = μ̂ᵢ - μ̂.. where Σᵢ nᵢαᵢ = 0
 //!
-//! For balanced designs: αᵢ = ȳᵢ. - ȳ..
-//!
 //! ## Two-Way ANOVA
 //!
-//! For factors A (levels i) and B (levels j):
+//! The tables are R's projections of the sequential fit `y ~ a + b + a:b` (the term order of
+//! `aov`), each averaged over the term's cells:
 //!
-//! - Main effect A: αᵢ = μ̂ᵢ. - μ̂..
-//! - Main effect B: βⱼ = μ̂.ⱼ - μ̂..
-//! - Interaction: (αβ)ᵢⱼ = μ̂ᵢⱼ - μ̂ᵢ. - μ̂.ⱼ + μ̂..
+//! - effect of a: fit(a) - grand mean, where fit(a) is the a level mean;
+//! - effect of b: fit(a + b) - fit(a), with fit(a + b) the least-squares additive fit;
+//! - effect of a:b: fit(a * b) - fit(a + b), fit(a * b) being the cell mean.
+//!
+//! A term's means are the grand mean plus the effects of the term and of its margins, so the a
+//! and a:b means are the raw level and cell means, while on an unbalanced layout the b means
+//! are not the raw b margins. On a balanced layout every table is the raw margin.
 //!
 //! ## Standard Errors
 //!
-//! Using pooled MSE from ANOVA:
-//! - For means: SE = √(MSE/n)
-//! - For effects: SE = √(MSE × (1/nᵢ + 1/n..))  approximately
+//! As R, one number per term and only for a balanced design, with r the replication of the
+//! term (n / levels):
+//! - means: the standard error of a difference of two means, √(2 MSE / r);
+//! - effects: the standard error of an effect, √(MSE / r).
+//!
+//! An unbalanced design gets no standard error, and the note R prints instead
+//! ([`UNBALANCED_SE_NOTE`]).
 //!
 //! # References
 //!
@@ -54,6 +59,14 @@
 
 use crate::stats::AnovaResult;
 use serde::{Deserialize, Serialize};
+
+/// What R's `model.tables` prints instead of standard errors for an unbalanced design.
+pub const UNBALANCED_SE_NOTE: &str = "Design is unbalanced - use se.contrast() for se's";
+
+/// The kind of standard error of a means table (R: "Standard errors for differences of means").
+pub const SE_KIND_MEANS: &str = "differences of means";
+/// The kind of standard error of an effects table (R: "Standard errors of effects").
+pub const SE_KIND_EFFECTS: &str = "effects";
 
 /// Type of table to compute.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -89,8 +102,16 @@ pub struct ModelTablesResult {
     pub values: Vec<f64>,
     /// Group sample sizes
     pub n: Vec<usize>,
-    /// Standard errors (if applicable)
+    /// The term's standard error, one value (R reports one number per term): for a means
+    /// table the standard error of a difference of two means, for an effects table that of an
+    /// effect. `None` when not asked for or when the design is unbalanced (see `se_note`).
     pub se: Option<Vec<f64>>,
+    /// What `se` is: [`SE_KIND_MEANS`] or [`SE_KIND_EFFECTS`]
+    #[serde(default)]
+    pub se_kind: Option<String>,
+    /// Why there is no standard error although one was asked for ([`UNBALANCED_SE_NOTE`])
+    #[serde(default)]
+    pub se_note: Option<String>,
     /// Replications (sample sizes)
     pub replications: Vec<usize>,
     /// Mean squared error from ANOVA
@@ -114,39 +135,64 @@ pub struct TwoWayModelTablesResult {
     pub factor_a_n: Vec<usize>,
     /// Factor B names
     pub factor_b_names: Vec<String>,
-    /// Factor B values (means or effects)
+    /// Factor B values (means or effects). On an unbalanced layout these are R's projections
+    /// (fit(a + b) - fit(a) averaged over each b level), not the raw b margins.
     pub factor_b_values: Vec<f64>,
     /// Factor B sample sizes
     pub factor_b_n: Vec<usize>,
-    /// Cell means or effects (factor_a x factor_b)
+    /// The a:b table (factor_a x factor_b): the cell means, or for effects R's a:b effects
+    /// (the interaction, cell mean - fit(a + b)). An empty cell is NaN.
     pub cell_values: Option<Vec<Vec<f64>>>,
     /// Cell sample sizes
     pub cell_n: Option<Vec<Vec<usize>>>,
-    /// Interaction effects (if applicable)
+    /// Interaction effects (effects tables only; the same values as `cell_values`)
     pub interaction: Option<Vec<Vec<f64>>>,
-    /// Standard errors
+    /// Standard errors, one value per term (balanced designs only)
     pub se: Option<ModelTablesSE>,
+    /// What `se` is: [`SE_KIND_MEANS`] or [`SE_KIND_EFFECTS`]
+    #[serde(default)]
+    pub se_kind: Option<String>,
+    /// Why there is no standard error although one was asked for
+    #[serde(default)]
+    pub se_note: Option<String>,
     /// Mean squared error from ANOVA
     pub mse: f64,
     /// Degrees of freedom for MSE
     pub df_mse: f64,
 }
 
-/// Standard errors for model tables.
+/// Standard errors for model tables: one value per term, as R reports them (each vector has
+/// length 1, `cells` is 1 x 1).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelTablesSE {
     /// SE for factor A means/effects
     pub factor_a: Option<Vec<f64>>,
     /// SE for factor B means/effects
     pub factor_b: Option<Vec<f64>>,
-    /// SE for cell means/effects
+    /// SE for the a:b means/effects
     pub cells: Option<Vec<Vec<f64>>>,
+}
+
+/// The term's standard error: √(2 MSE / r) for a means table (a difference of two means),
+/// √(MSE / r) for an effects table.
+fn term_se(table_type: TableType, mse: f64, r: f64) -> f64 {
+    match table_type {
+        TableType::Means => (2.0 * mse / r).sqrt(),
+        TableType::Effects => (mse / r).sqrt(),
+    }
+}
+
+fn se_kind_of(table_type: TableType) -> String {
+    match table_type {
+        TableType::Means => SE_KIND_MEANS.to_string(),
+        TableType::Effects => SE_KIND_EFFECTS.to_string(),
+    }
 }
 
 /// Compute model tables from one-way ANOVA result.
 ///
 /// Returns tables of means or effects (deviations from grand mean)
-/// along with standard errors.
+/// along with R's standard error of the term (balanced designs only).
 ///
 /// # Arguments
 /// * `anova` - The ANOVA result
@@ -189,12 +235,19 @@ pub fn model_tables(
         }
     };
 
-    let se = if compute_se {
-        // SE for group means: sqrt(MSE / n_i)
-        // SE for effects: same as for means in one-way ANOVA
-        Some(group_ns.iter().map(|&n| (mse / n as f64).sqrt()).collect())
+    // R: one standard error for the term, and none for an unbalanced design.
+    let balanced = group_ns[0] > 0 && group_ns.iter().all(|&n| n == group_ns[0]);
+    let (se, se_kind, se_note) = if !compute_se {
+        (None, None, None)
+    } else if !balanced {
+        (None, None, Some(UNBALANCED_SE_NOTE.to_string()))
     } else {
-        None
+        let r = group_ns[0] as f64;
+        (
+            Some(vec![term_se(table_type, mse, r)]),
+            Some(se_kind_of(table_type)),
+            None,
+        )
     };
 
     Ok(ModelTablesResult {
@@ -207,6 +260,8 @@ pub fn model_tables(
         values,
         n: group_ns.clone(),
         se,
+        se_kind,
+        se_note,
         replications: group_ns,
         mse,
         df_mse,
@@ -320,125 +375,111 @@ pub fn model_tables_two_way(
         0.0
     };
 
-    // Compute marginal means for factor A
+    // Raw margins of factor A (fit(a), R's a means) and the level counts of both factors
     let mut factor_a_means = vec![f64::NAN; a_levels];
     let mut factor_a_n = vec![0usize; a_levels];
+    let mut factor_b_n = vec![0usize; b_levels];
     for i in 0..a_levels {
         let mut sum = 0.0;
-        let mut n = 0;
         for j in 0..b_levels {
-            for &x in &data[i][j] {
-                sum += x;
-                n += 1;
+            let n = cell_n[i][j];
+            if n > 0 {
+                sum += cell_means[i][j] * n as f64;
+                factor_a_n[i] += n;
+                factor_b_n[j] += n;
             }
         }
-        if n > 0 {
-            factor_a_means[i] = sum / n as f64;
-            factor_a_n[i] = n;
+        if factor_a_n[i] > 0 {
+            factor_a_means[i] = sum / factor_a_n[i] as f64;
         }
     }
 
-    // Compute marginal means for factor B
-    let mut factor_b_means = vec![f64::NAN; b_levels];
-    let mut factor_b_n = vec![0usize; b_levels];
-    for j in 0..b_levels {
-        let mut sum = 0.0;
-        let mut n = 0;
-        for i in 0..a_levels {
-            for &x in &data[i][j] {
-                sum += x;
-                n += 1;
-            }
+    // Balanced: every cell holds the same number r > 0 of rows. Then the additive fit is
+    // the sum of the raw margins and every table is a raw margin.
+    let r_cell = cell_n[0][0];
+    let balanced = r_cell > 0 && cell_n.iter().flatten().all(|&n| n == r_cell);
+
+    // fit(a + b) at each non-empty cell (constant within a cell)
+    let fit_ab: Vec<Vec<f64>> = if balanced {
+        let mut factor_b_means = vec![0.0; b_levels];
+        for (j, m) in factor_b_means.iter_mut().enumerate() {
+            *m = (0..a_levels).map(|i| cell_means[i][j]).sum::<f64>() / a_levels as f64;
         }
-        if n > 0 {
-            factor_b_means[j] = sum / n as f64;
-            factor_b_n[j] = n;
-        }
-    }
-
-    // Compute values based on table type
-    let (factor_a_values, factor_b_values, cell_values, interaction) = match table_type {
-        TableType::Means => (
-            factor_a_means.clone(),
-            factor_b_means.clone(),
-            Some(cell_means.clone()),
-            None,
-        ),
-        TableType::Effects => {
-            // Main effects: deviation from grand mean
-            let a_effects: Vec<f64> = factor_a_means.iter().map(|m| m - grand_mean).collect();
-            let b_effects: Vec<f64> = factor_b_means.iter().map(|m| m - grand_mean).collect();
-
-            // Cell effects: cell_mean - grand_mean
-            let cell_effects: Vec<Vec<f64>> = cell_means
-                .iter()
-                .map(|row| row.iter().map(|m| m - grand_mean).collect())
-                .collect();
-
-            // Interaction effects: cell_effect - a_effect - b_effect
-            let interaction_effects: Vec<Vec<f64>> = (0..a_levels)
-                .map(|i| {
-                    (0..b_levels)
-                        .map(|j| cell_effects[i][j] - a_effects[i] - b_effects[j])
-                        .collect()
-                })
-                .collect();
-
-            (
-                a_effects,
-                b_effects,
-                Some(cell_effects),
-                Some(interaction_effects),
-            )
-        }
-    };
-
-    // Compute standard errors
-    let se = if compute_se && mse > 0.0 {
-        let factor_a_se: Vec<f64> = factor_a_n
-            .iter()
-            .map(|&n| {
-                if n > 0 {
-                    (mse / n as f64).sqrt()
-                } else {
-                    f64::NAN
-                }
-            })
-            .collect();
-
-        let factor_b_se: Vec<f64> = factor_b_n
-            .iter()
-            .map(|&n| {
-                if n > 0 {
-                    (mse / n as f64).sqrt()
-                } else {
-                    f64::NAN
-                }
-            })
-            .collect();
-
-        let cell_se: Vec<Vec<f64>> = cell_n
-            .iter()
-            .map(|row| {
-                row.iter()
-                    .map(|&n| {
-                        if n > 0 {
-                            (mse / n as f64).sqrt()
-                        } else {
-                            f64::NAN
-                        }
-                    })
+        (0..a_levels)
+            .map(|i| {
+                (0..b_levels)
+                    .map(|j| factor_a_means[i] + factor_b_means[j] - grand_mean)
                     .collect()
             })
-            .collect();
-
-        Some(ModelTablesSE {
-            factor_a: Some(factor_a_se),
-            factor_b: Some(factor_b_se),
-            cells: Some(cell_se),
-        })
+            .collect()
     } else {
-        None
+        additive_cell_fit(&cell_means, &cell_n)?
+    };
+
+    // Effects: a = fit(a) - grand; b = fit(a + b) - fit(a) averaged over the b level;
+    // a:b = fit(a * b) - fit(a + b), the cell mean minus the additive fit.
+    let a_effects: Vec<f64> = factor_a_means.iter().map(|m| m - grand_mean).collect();
+    let mut b_effects = vec![f64::NAN; b_levels];
+    for (j, eff) in b_effects.iter_mut().enumerate() {
+        if factor_b_n[j] > 0 {
+            let s: f64 = (0..a_levels)
+                .filter(|&i| cell_n[i][j] > 0)
+                .map(|i| cell_n[i][j] as f64 * (fit_ab[i][j] - factor_a_means[i]))
+                .sum();
+            *eff = s / factor_b_n[j] as f64;
+        }
+    }
+    let ab_effects: Vec<Vec<f64>> = (0..a_levels)
+        .map(|i| {
+            (0..b_levels)
+                .map(|j| {
+                    if cell_n[i][j] > 0 {
+                        cell_means[i][j] - fit_ab[i][j]
+                    } else {
+                        f64::NAN
+                    }
+                })
+                .collect()
+        })
+        .collect();
+
+    // A term's means: the grand mean plus the effects of the term and its margins (for a:b
+    // that is the cell mean).
+    let (factor_a_values, factor_b_values, cell_values, interaction) = match table_type {
+        TableType::Means => (
+            factor_a_means,
+            b_effects.iter().map(|e| grand_mean + e).collect(),
+            Some(cell_means),
+            None,
+        ),
+        TableType::Effects => (
+            a_effects,
+            b_effects,
+            Some(ab_effects.clone()),
+            Some(ab_effects),
+        ),
+    };
+
+    // Standard errors: one per term, balanced designs with residual df only. The term's
+    // replication is n / (its number of cells): r * B for a, r * A for b, r for a:b.
+    let (se, se_kind, se_note) = if !compute_se {
+        (None, None, None)
+    } else if !balanced {
+        (None, None, Some(UNBALANCED_SE_NOTE.to_string()))
+    } else if df_within == 0 {
+        (
+            None,
+            None,
+            Some("no residual degrees of freedom: no standard errors".to_string()),
+        )
+    } else {
+        let r = r_cell as f64;
+        let se = ModelTablesSE {
+            factor_a: Some(vec![term_se(table_type, mse, r * b_levels as f64)]),
+            factor_b: Some(vec![term_se(table_type, mse, r * a_levels as f64)]),
+            cells: Some(vec![vec![term_se(table_type, mse, r)]]),
+        };
+        (Some(se), Some(se_kind_of(table_type)), None)
     };
 
     Ok(TwoWayModelTablesResult {
@@ -457,9 +498,50 @@ pub fn model_tables_two_way(
         cell_n: Some(cell_n),
         interaction,
         se,
+        se_kind,
+        se_note,
         mse,
         df_mse: df_within as f64,
     })
+}
+
+/// The least-squares additive fit fit(a + b) of `y ~ a + b`, at each non-empty cell: the
+/// cell means regressed on an intercept and treatment dummies of both factors, weighted by
+/// the cell counts (the same fitted values as the fit on the rows). Dummies of levels with no
+/// rows are aliased. Empty cells get NaN.
+fn additive_cell_fit(
+    cell_means: &[Vec<f64>],
+    cell_n: &[Vec<usize>],
+) -> Result<Vec<Vec<f64>>, String> {
+    use ndarray::Array1;
+    let (a_levels, b_levels) = (cell_n.len(), cell_n[0].len());
+    let cells: Vec<(usize, usize)> = (0..a_levels)
+        .flat_map(|i| (0..b_levels).map(move |j| (i, j)))
+        .filter(|&(i, j)| cell_n[i][j] > 0)
+        .collect();
+    let p = a_levels + b_levels - 1;
+    let mut x = crate::resource::try_zeros2(cells.len(), p, "additive fit of the model tables")
+        .map_err(|e| e.to_string())?;
+    let mut y = Array1::zeros(cells.len());
+    let mut w = Array1::zeros(cells.len());
+    for (k, &(i, j)) in cells.iter().enumerate() {
+        x[[k, 0]] = 1.0;
+        if i > 0 {
+            x[[k, i]] = 1.0;
+        }
+        if j > 0 {
+            x[[k, a_levels - 1 + j]] = 1.0;
+        }
+        y[k] = cell_means[i][j];
+        w[k] = cell_n[i][j] as f64;
+    }
+    let fit = crate::linalg::solve::weighted_least_squares(x.view(), y.view(), w.view())
+        .map_err(|e| format!("additive fit of the model tables failed: {e}"))?;
+    let mut out = vec![vec![f64::NAN; b_levels]; a_levels];
+    for (k, &(i, j)) in cells.iter().enumerate() {
+        out[i][j] = fit.fitted[k];
+    }
+    Ok(out)
 }
 
 /// Convenience wrapper for model.tables.
@@ -471,35 +553,37 @@ pub fn run_model_tables(
     model_tables(anova, table_type, compute_se)
 }
 
-/// Format model tables result as a string table.
+/// Format model tables result as a string table, followed by R's standard-error line (or the
+/// note R prints for an unbalanced design).
 pub fn format_model_tables(result: &ModelTablesResult) -> String {
     let mut output = String::new();
 
     output.push_str(&format!("Tables of {} \n\n", result.table_type));
     output.push_str(&format!("Grand mean: {:.4}\n\n", result.grand_mean));
 
-    // Header
-    output.push_str(" Group     |     Value     |      n      ");
-    if result.se.is_some() {
-        output.push_str("|      SE      ");
-    }
-    output.push('\n');
-    output.push_str("-----------+---------------+-------------");
-    if result.se.is_some() {
-        output.push_str("+--------------");
-    }
-    output.push('\n');
-
-    // Data rows
+    output.push_str(" Group     |     Value     |      n      \n");
+    output.push_str("-----------+---------------+-------------\n");
     for (i, name) in result.group_names.iter().enumerate() {
         output.push_str(&format!(
-            " {:<9} | {:>13.4} | {:>11} ",
+            " {:<9} | {:>13.4} | {:>11} \n",
             name, result.values[i], result.n[i]
         ));
-        if let Some(ref se) = result.se {
-            output.push_str(&format!("| {:>12.4} ", se[i]));
-        }
-        output.push('\n');
+    }
+
+    if let (Some(se), Some(kind)) = (&result.se, &result.se_kind) {
+        let title = if kind == SE_KIND_MEANS {
+            "Standard errors for differences of means"
+        } else {
+            "Standard errors of effects"
+        };
+        output.push_str(&format!("\n{title}\n"));
+        output.push_str(&format!("        {:.4}\n", se[0]));
+        output.push_str(&format!(
+            "replic. {}\n",
+            result.n.first().copied().unwrap_or(0)
+        ));
+    } else if let Some(note) = &result.se_note {
+        output.push_str(&format!("\n{note}\n"));
     }
 
     output
@@ -693,8 +777,9 @@ mod tests {
         assert!(data[2][1].is_empty(), "the (C, L) cell is empty");
         let r =
             model_tables_two_way(&data, &fa.levels, &fb.levels, TableType::Means, true).unwrap();
-        // deviation STAT-75: the standard errors are not compared (p2a's are SEs of single
-        // means, R's model.tables SEs are for differences and R refuses unbalanced designs).
+        // Unbalanced: R gives no standard errors, only its note.
+        assert!(r.se.is_none() && r.se_kind.is_none());
+        assert_eq!(r.se_note.as_deref(), Some(UNBALANCED_SE_NOTE));
         Check::new(&case)
             .scalar("empty_resid_df", r.df_mse, Tol::exact())
             .scalar("empty_resid_ss", r.mse * r.df_mse, Tol::stat(13))
@@ -708,7 +793,9 @@ mod tests {
         let anova = run_one_way_anova(&ds, "y", "g").unwrap();
         let r = model_tables(&anova, TableType::Means, true).unwrap();
         let sizes: Vec<f64> = r.n.iter().map(|&n| n as f64).collect();
-        // deviation STAT-75: the standard errors are not compared (see above).
+        // Groups of 2, 2 and 1 rows: unbalanced, so no standard error, only R's note.
+        assert!(r.se.is_none());
+        assert_eq!(r.se_note.as_deref(), Some(UNBALANCED_SE_NOTE));
         Check::new(&case)
             .named("aov_group_means", &r.group_names, &r.values, Tol::stat(5))
             .named("aov_group_n", &r.group_names, &sizes, Tol::exact())
@@ -783,7 +870,7 @@ mod tests {
             )
             .named("a_n", &m.factor_a_names, &a_n, Tol::exact())
             .named(
-                "b_means_raw",
+                "b_means_model_tables",
                 &m.factor_b_names,
                 &m.factor_b_values,
                 Tol::coef(23),
@@ -793,8 +880,9 @@ mod tests {
             .scalar("resid_ss", m.mse * m.df_mse, Tol::stat(23))
             .finish();
         assert!(cells[7].is_nan()); // A3:B2
-        let se = m.se.unwrap();
-        assert!(se.cells.unwrap()[2][1].is_nan());
+        // unbalanced: no standard errors, R's note instead
+        assert!(m.se.is_none());
+        assert_eq!(m.se_note.as_deref(), Some(UNBALANCED_SE_NOTE));
         let e =
             model_tables_two_way(&data, &names(al), &names(bl), TableType::Effects, false).unwrap();
         assert!(e.cell_values.unwrap()[2][1].is_nan());
@@ -807,8 +895,189 @@ mod tests {
         let g =
             model_tables_two_way(&gap, &names(al), &names(bl), TableType::Means, false).unwrap();
         assert!(g.factor_a_values[2].is_nan() && g.factor_a_n[2] == 0);
-        // deviation STAT-75: b_means_model_tables, R's sequential margins, differ from p2a's raw B margins on this
-        // unbalanced layout.
+    }
+
+    // ========================================================================
+    // R-pinned: model.tables standard errors and two-way projections (stats_mcp_t4)
+    // ========================================================================
+
+    fn mcp_t4_dataset(name: &str) -> Dataset {
+        let path = p2a_validation::repo_path(&format!("validation/datasets/generated/{name}.csv"));
+        Dataset::new(crate::data::DataLoader::load_csv(&path).unwrap())
+    }
+
+    /// A two-way layout data[a][b] of y ~ a * b from a stats_mcp_t4 dataset.
+    fn two_way_layout(name: &str) -> (Vec<Vec<Vec<f64>>>, Vec<String>, Vec<String>, usize) {
+        let ds = mcp_t4_dataset(name);
+        let cols = ColumnRequest::new(ds.df())
+            .numeric("y")
+            .factor("a")
+            .factor("b")
+            .na(NaPolicy::Omit)
+            .extract()
+            .unwrap();
+        let (fa, fb) = (cols.factor("a"), cols.factor("b"));
+        let mut data = vec![vec![Vec::new(); fb.n_levels()]; fa.n_levels()];
+        let y = cols.numeric("y");
+        for (i, &v) in y.iter().enumerate() {
+            data[fa.codes[i] as usize][fb.codes[i] as usize].push(v);
+        }
+        (data, fa.levels.clone(), fb.levels.clone(), y.len())
+    }
+
+    /// STAT-75: a balanced one-way table has R's one standard error per term: of a difference
+    /// of means for the means table, of an effect for the effects table.
+    #[test]
+    fn test_validate_model_tables_one_way_se_stats_mcp_t4() {
+        let case = p2a_validation::Case::load("stats_mcp_t4");
+        let ds = mcp_t4_dataset("modeltables_t4_oneway");
+        let anova = run_one_way_anova(&ds, "y", "g").unwrap();
+        let n = 12;
+        for (tt, key, se_key, kind) in [
+            (TableType::Means, "ow_means_g", "ow_se_means", SE_KIND_MEANS),
+            (
+                TableType::Effects,
+                "ow_effects_g",
+                "ow_se_effects",
+                SE_KIND_EFFECTS,
+            ),
+        ] {
+            let r = model_tables(&anova, tt, true).unwrap();
+            let se = r.se.as_ref().unwrap();
+            assert_eq!(se.len(), 1, "one standard error per term");
+            assert_eq!(r.se_kind.as_deref(), Some(kind));
+            assert!(r.se_note.is_none());
+            let sizes: Vec<f64> = r.n.iter().map(|&n| n as f64).collect();
+            Check::new(&case)
+                .vector(key, &r.values, Tol::coef(n))
+                .scalar("ow_grand", r.grand_mean, Tol::coef(n))
+                .scalar("ow_mse", r.mse, Tol::stat(n))
+                .scalar("ow_df_resid", r.df_mse, Tol::exact())
+                .scalar(se_key, se[0], Tol::se(n))
+                .scalar("ow_n", sizes[0], Tol::exact())
+                .finish();
+            let text = format_model_tables(&r);
+            let title = if tt == TableType::Means {
+                "Standard errors for differences of means"
+            } else {
+                "Standard errors of effects"
+            };
+            assert!(text.contains(title) && text.contains("replic. 4"), "{text}");
+        }
+    }
+
+    /// STAT-75: an unbalanced one-way design gets no standard error, only R's note.
+    #[test]
+    fn test_validate_model_tables_one_way_unbalanced_stats_mcp_t4() {
+        let case = p2a_validation::Case::load("stats_mcp_t4");
+        let ds = mcp_t4_dataset("modeltables_t4_oneway");
+        let anova = run_one_way_anova(&ds, "yu", "gu").unwrap();
+        for (tt, key) in [
+            (TableType::Means, "owu_means_g"),
+            (TableType::Effects, "owu_effects_g"),
+        ] {
+            let r = model_tables(&anova, tt, true).unwrap();
+            assert!(r.se.is_none() && r.se_kind.is_none());
+            assert_eq!(r.se_note.as_deref(), Some(UNBALANCED_SE_NOTE));
+            let sizes: Vec<f64> = r.n.iter().map(|&n| n as f64).collect();
+            Check::new(&case)
+                .vector(key, &r.values, Tol::coef(12))
+                .scalar("owu_grand", r.grand_mean, Tol::coef(12))
+                .scalar("owu_mse", r.mse, Tol::stat(12))
+                .vector("owu_n", &sizes, Tol::exact())
+                .finish();
+            assert!(format_model_tables(&r).contains(UNBALANCED_SE_NOTE));
+        }
+    }
+
+    /// TOOL-22, STAT-75: two-way tables are R's projections of the sequential fit on balanced,
+    /// unbalanced and empty-cell layouts; standard errors only for the balanced one.
+    #[test]
+    fn test_validate_model_tables_two_way_stats_mcp_t4() {
+        let case = p2a_validation::Case::load("stats_mcp_t4");
+        for (prefix, name) in [
+            ("bal_", "modeltables_t4_bal"),
+            ("unbal_", "modeltables_t4_unbal"),
+            ("empty_", "modeltables_t4_empty"),
+        ] {
+            let (data, la, lb, n) = two_way_layout(name);
+            for (tt, kind) in [(TableType::Means, "means"), (TableType::Effects, "effects")] {
+                let r = model_tables_two_way(&data, &la, &lb, tt, true).unwrap();
+                let ab: Vec<f64> = r
+                    .cell_values
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .flatten()
+                    .copied()
+                    .collect();
+                let cell_n: Vec<f64> = r
+                    .cell_n
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .flatten()
+                    .map(|&c| c as f64)
+                    .collect();
+                let k = |t: &str| format!("{prefix}{kind}_{t}");
+                // the empty cell's a1:b3 effect is -2.8e-17 in R: an absolute floor
+                let ab_tol = if prefix == "empty_" && tt == TableType::Effects {
+                    Tol::new(1e-8, 1e-12)
+                } else {
+                    Tol::coef(n)
+                };
+                Check::new(&case)
+                    .vector(&k("a"), &r.factor_a_values, Tol::coef(n))
+                    .vector(&k("b"), &r.factor_b_values, Tol::coef(n))
+                    .vector(&k("ab"), &ab, ab_tol)
+                    .scalar(&format!("{prefix}grand"), r.grand_mean, Tol::coef(n))
+                    .scalar(&format!("{prefix}mse"), r.mse, Tol::stat(n))
+                    .scalar(&format!("{prefix}df_resid"), r.df_mse, Tol::exact())
+                    .vector(&format!("{prefix}cell_n"), &cell_n, Tol::exact())
+                    .finish();
+                if tt == TableType::Effects {
+                    // equal cell by cell, an empty cell NaN in both
+                    let bits = |m: &Vec<Vec<f64>>| -> Vec<u64> {
+                        m.iter().flatten().map(|v| v.to_bits()).collect()
+                    };
+                    assert_eq!(
+                        bits(r.interaction.as_ref().unwrap()),
+                        bits(r.cell_values.as_ref().unwrap())
+                    );
+                }
+                if prefix == "bal_" {
+                    let se = r.se.as_ref().unwrap();
+                    let got = [
+                        se.factor_a.as_ref().unwrap()[0],
+                        se.factor_b.as_ref().unwrap()[0],
+                        se.cells.as_ref().unwrap()[0][0],
+                    ];
+                    let key = if tt == TableType::Means {
+                        "bal_se_means"
+                    } else {
+                        "bal_se_effects"
+                    };
+                    Check::new(&case).vector(key, &got, Tol::se(n)).finish();
+                    assert_eq!(r.se_kind.as_deref(), Some(kind_of(tt)));
+                } else {
+                    assert!(r.se.is_none());
+                    assert_eq!(r.se_note.as_deref(), Some(UNBALANCED_SE_NOTE));
+                }
+            }
+        }
+        // the unbalanced b means are the projections, not the raw margins
+        let (data, la, lb, _) = two_way_layout("modeltables_t4_unbal");
+        let m = model_tables_two_way(&data, &la, &lb, TableType::Means, false).unwrap();
+        let raw = case.vector("unbal_b_raw_means");
+        assert!((m.factor_b_values[0] - raw[0]).abs() > 0.1);
+        assert!(m.se.is_none() && m.se_note.is_none(), "se not asked for");
+    }
+
+    fn kind_of(tt: TableType) -> &'static str {
+        match tt {
+            TableType::Means => SE_KIND_MEANS,
+            TableType::Effects => SE_KIND_EFFECTS,
+        }
     }
 
     #[test]

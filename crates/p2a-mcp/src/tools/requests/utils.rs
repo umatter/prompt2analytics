@@ -185,7 +185,7 @@ pub struct ExportSessionRequest {
 
     /// Whether to include dataset data (default: true)
     #[schemars(
-        description = "Include full dataset data. If false, only metadata and file paths are saved."
+        description = "Include full dataset data (default true). If false, only each dataset's schema and size are saved; a file exported with include_data = false holds no data and cannot be imported."
     )]
     pub include_data: Option<bool>,
 }

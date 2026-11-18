@@ -76,7 +76,9 @@ pub struct ModelTablesRequest {
     pub table_type: Option<String>,
 
     /// Whether to compute standard errors
-    #[schemars(description = "Whether to compute standard errors. Default is true.")]
+    #[schemars(
+        description = "Whether to compute standard errors (default true). As R's model.tables: one value per term, the standard error of a difference of two means (means table) or of an effect (effects table), for balanced designs only; an unbalanced design gets se_note instead."
+    )]
     pub se: Option<bool>,
 }
 
@@ -156,9 +158,15 @@ pub struct CovWtRequest {
 
     /// Whether to center the data
     #[schemars(
-        description = "Whether to center the data (subtract weighted mean). Default is true."
+        description = "Whether to centre the data at the weighted mean (default true); false uses a centre of zero, as R's cov.wt(center = FALSE)."
     )]
     pub center: Option<bool>,
+
+    /// Whether to return the correlation matrix
+    #[schemars(
+        description = "Also return the correlation matrix (default true here; R's cov.wt default is FALSE)."
+    )]
+    pub cor: Option<bool>,
 
     /// Covariance method
     #[schemars(
@@ -292,7 +300,7 @@ pub struct DensityRequest {
 
     /// Bandwidth
     #[schemars(
-        description = "Bandwidth for smoothing. If omitted, uses Silverman's rule of thumb."
+        description = "Bandwidth for smoothing (the kernel's standard deviation, as R). Default bw.nrd0 (Silverman's rule of thumb with R's 0.9 min(sd, IQR/1.34) n^-1/5)."
     )]
     pub bw: Option<f64>,
 
@@ -321,7 +329,7 @@ pub struct SplineRequest {
 
     /// Points at which to interpolate
     #[schemars(
-        description = "Points at which to evaluate the spline. If omitted, the spline is evaluated at n equally spaced points over the range of x (default 3 times the number of distinct x values among the complete (x, y) pairs, as R's spline(), capped at 200; tied x values are refused, where R averages them)."
+        description = "Points at which to evaluate the spline. If omitted, the spline is evaluated at n equally spaced points over the range of x (default 3 times the number of distinct x values among the complete (x, y) pairs, as R's spline(), capped at 200; tied x values are averaged first, as R, with a warning)."
     )]
     pub xout: Option<Vec<f64>>,
 
@@ -333,7 +341,7 @@ pub struct SplineRequest {
 
     /// Spline method
     #[schemars(
-        description = "Spline method: 'fmm' (default, Forsythe-Malcolm-Moler), 'natural', 'periodic' or 'monoH.FC' (monotone Fritsch-Carlson; also 'hyman', 'monotone'). Other values are refused."
+        description = "Spline method: 'fmm' (default, Forsythe-Malcolm-Moler), 'natural' (zero second derivatives at the ends), 'periodic' (first and last y should agree), 'monoH.FC' (monotone Hermite spline with Fritsch-Carlson slopes; also 'monotone') or 'hyman' (the fmm spline with Hyman's monotonicity filter, as R's spline(method = 'hyman'); y must be monotone). Other values are refused."
     )]
     pub method: Option<String>,
 }
@@ -546,7 +554,7 @@ pub struct PowerAnovaTestRequest {
 
     /// Sample size per group
     #[schemars(
-        description = "Sample size per group. Leave None to solve for required sample size."
+        description = "Sample size per group. Leave None to solve for required sample size. In the hosted profile at most the server's power_sample_size limit (1,000,000 by default)."
     )]
     pub n: Option<f64>,
 
@@ -728,7 +736,7 @@ pub struct TwoWayAnovaRequest {
 pub struct PowerTTestRequest {
     /// Sample size (per group for two-sample)
     #[schemars(
-        description = "Sample size per group. Leave None to solve for required sample size."
+        description = "Sample size per group. Leave None to solve for required sample size. In the hosted profile at most the server's power_sample_size limit (1,000,000 by default)."
     )]
     pub n: Option<f64>,
 

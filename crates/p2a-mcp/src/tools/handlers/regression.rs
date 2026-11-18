@@ -40,12 +40,12 @@ use crate::tools::requests::regression::{
 
 use p2a_core::data::Dataset;
 use p2a_core::data::columns::ColumnRequest;
-use p2a_core::regression::OlsResult;
 use p2a_core::regression::{
-    BgTestType, CovarianceType, GlmnetConfig, GlmnetFamily, ResetType, SmoothSplineConfig, bg_test,
-    harvey_collier_test, reset_test, run_cv_glmnet, run_diagnostics, run_glmnet, run_lasso,
-    run_line, run_loess, run_ols, run_ols_clustered, run_ridge, run_step, run_vcov_bootstrap,
-    run_vcov_driscoll_kraay, run_vcov_hac, smooth_spline, smooth_spline_predict, supsmu, wald_test,
+    BgTestType, CovarianceType, GlmnetConfig, GlmnetFamily, OlsResult, ResetType,
+    SmoothSplineConfig, bg_test, harvey_collier_test, reset_test, run_cv_glmnet, run_diagnostics,
+    run_glmnet, run_lasso, run_line, run_loess, run_ols, run_ols_clustered, run_ridge, run_step,
+    run_vcov_bootstrap, run_vcov_driscoll_kraay, run_vcov_hac, smooth_spline,
+    smooth_spline_predict, supsmu, wald_test,
 };
 
 use p2a_core::EconError;
@@ -326,9 +326,41 @@ fn ols_options(request: &OlsRequest) -> Result<(bool, CovarianceType), String> {
     Ok((intercept, cov_type))
 }
 
-/// Runs the OLS a request describes on `dataset`.
-fn run_ols_request(dataset: &Dataset, request: &OlsRequest) -> Result<OlsResult, String> {
-    let (intercept, cov_type) = ols_options(request)?;
+/// How many fitted values a smoother returns without `full`.
+const SMOOTHER_SAMPLE: usize = 20;
+
+/// Put a smoother's vectors into `output` by the one rule the four smoothers
+/// share: with `full` every value under its key; otherwise the first
+/// [`SMOOTHER_SAMPLE`] under `<key>_sample`, and, when there are more, a
+/// `note` giving the total.
+fn insert_smoother_values(
+    output: &mut serde_json::Value,
+    full: bool,
+    n: usize,
+    vectors: &[(&str, &[f64])],
+) {
+    for (key, values) in vectors {
+        if full {
+            output[*key] = serde_json::json!(values);
+        } else {
+            let shown = &values[..values.len().min(SMOOTHER_SAMPLE)];
+            output[format!("{key}_sample")] = serde_json::json!(shown);
+        }
+    }
+    if !full && n > SMOOTHER_SAMPLE {
+        output["note"] = serde_json::json!(format!(
+            "first {SMOOTHER_SAMPLE} of {n} values; set full = true for all"
+        ));
+    }
+}
+
+/// Runs the OLS a request describes on `dataset`, with its options as
+/// [`ols_options`] parsed them.
+fn run_ols_request(
+    dataset: &Dataset,
+    request: &OlsRequest,
+    (intercept, cov_type): (bool, CovarianceType),
+) -> Result<OlsResult, String> {
     let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
     run_ols(dataset, &request.y, &x_refs, intercept, cov_type)
         .map_err(|e| format!("Regression failed: {e}"))
@@ -345,15 +377,16 @@ impl AnalyticsServer {
         Parameters(request): Parameters<OlsRequest>,
     ) -> Result<CallToolResult, McpError> {
         // An unknown cov_type is refused before the dataset is looked up.
-        if let Err(msg) = ols_options(&request) {
-            return Ok(CallToolResult::error(vec![Content::text(msg)]));
-        }
+        let options = match ols_options(&request) {
+            Ok(options) => options,
+            Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
+        };
 
         let datasets = self.datasets.read().await;
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        match run_ols_request(dataset, &request) {
+        match run_ols_request(dataset, &request, options) {
             Ok(result) => {
                 let mut text = result.to_string();
                 if !request.intercept.unwrap_or(true) {
@@ -876,7 +909,7 @@ impl AnalyticsServer {
 
     /// Run LOESS (local polynomial regression) smoothing.
     #[tool(
-        description = "Fit a LOESS (LOcally Estimated Scatterplot Smoothing) model. LOESS fits local polynomial regressions at each point, weighted by distance from the target point using tricubic weights. Useful for non-parametric trend estimation, data smoothing, and exploring nonlinear relationships. Returns fitted values, residuals, R-squared, and equivalent number of parameters. Neighbourhoods as R's loess with surface = 'direct'; a tied predictor value shared by more points than the span gives the tie mean with a warning (lowess's rule; R's loess returns 0 there). The JSON lists the warnings."
+        description = "Fit a LOESS (LOcally Estimated Scatterplot Smoothing) model. LOESS fits local polynomial regressions at each point, weighted by distance from the target point using tricubic weights. Useful for non-parametric trend estimation, data smoothing, and exploring nonlinear relationships. Returns R-squared, the equivalent number of parameters and the fitted values and residuals (the first 20 with a note unless full = true). Neighbourhoods as R's loess with surface = 'direct'; a tied predictor value shared by more points than the span gives the tie mean with a warning (lowess's rule; R's loess returns 0 there). The JSON lists the warnings."
     )]
     pub async fn regression_loess(
         &self,
@@ -924,9 +957,16 @@ impl AnalyticsServer {
             "residual_standard_error": result.residual_se,
             "r_squared": result.r_squared,
             "robust_iterations": result.robust_iterations,
-            "fitted_values": result.fitted,
-            "residuals": result.residuals,
         });
+        insert_smoother_values(
+            &mut output,
+            request.full.unwrap_or(false),
+            result.fitted.len(),
+            &[
+                ("fitted_values", &result.fitted),
+                ("residuals", &result.residuals),
+            ],
+        );
         if let Some(m) = missing_json(&result.missing) {
             output["missing"] = m;
         }
@@ -939,7 +979,7 @@ impl AnalyticsServer {
 
     /// Fit Friedman's SuperSmoother.
     #[tool(
-        description = "Friedman's SuperSmoother - a variable-bandwidth smoother that locally adapts to the data. Uses cross-validation to select optimal span at each point. Returns smoothed y values and can handle periodic data. periodic = true needs x in [0, 1], as R."
+        description = "Friedman's SuperSmoother - a variable-bandwidth smoother that locally adapts to the data. Uses cross-validation to select optimal span at each point. Returns the smoothed y values (the first 20 with a note unless full = true) and can handle periodic data. periodic = true needs x in [0, 1], as R."
     )]
     pub async fn regression_supsmu(
         &self,
@@ -1000,10 +1040,13 @@ impl AnalyticsServer {
             "n_unique_points": result.n,
             "bass": result.bass,
             "periodic": result.periodic,
-            "x_sample": result.x.iter().take(20).collect::<Vec<_>>(),
-            "y_smoothed_sample": result.y.iter().take(20).collect::<Vec<_>>(),
-            "note": if result.n > 20 { Some(format!("Showing first 20 of {} points", result.n)) } else { None::<String> }
         });
+        insert_smoother_values(
+            &mut output,
+            request.full.unwrap_or(false),
+            result.x.len(),
+            &[("x", &result.x), ("y_smoothed", &result.y)],
+        );
         if let Some(m) = missing_json(cols.missing()) {
             output["missing"] = m;
         }
@@ -1015,7 +1058,7 @@ impl AnalyticsServer {
 
     /// Fit Tukey's resistant line.
     #[tool(
-        description = "Tukey's resistant line - robust regression using medians instead of means, making it resistant to outliers. Divides data into three groups and uses group medians to determine slope and intercept. Returns coefficients, fitted values, and residuals."
+        description = "Tukey's resistant line - robust regression using medians instead of means, making it resistant to outliers. Divides data into three groups and uses group medians to determine slope and intercept. Returns coefficients, fitted values and residuals (the first 20 with a note unless full = true)."
     )]
     pub async fn regression_line(
         &self,
@@ -1070,10 +1113,16 @@ impl AnalyticsServer {
                 "intercept": result.intercept,
                 "slope": result.slope
             },
-            "fitted_sample": result.fitted.iter().take(20).collect::<Vec<_>>(),
-            "residuals_sample": result.residuals.iter().take(20).collect::<Vec<_>>(),
-            "note": if result.n > 20 { Some(format!("Showing first 20 of {} values", result.n)) } else { None::<String> }
         });
+        insert_smoother_values(
+            &mut output,
+            request.full.unwrap_or(false),
+            result.fitted.len(),
+            &[
+                ("fitted_values", &result.fitted),
+                ("residuals", &result.residuals),
+            ],
+        );
         if let Some(m) = missing_json(cols.missing()) {
             output["missing"] = m;
         }
@@ -1269,7 +1318,7 @@ impl AnalyticsServer {
 
     /// Fit a smoothing spline.
     #[tool(
-        description = "Cubic smoothing spline. spar or df fix the smoothing; otherwise lambda is chosen by criterion: 'gcv' (default, R smooth.spline(cv = FALSE)) or 'cv' (leave-one-out, cv = TRUE). Returns JSON with the fitted values (or predictions at xout), df, lambda (on R's scale, x scaled to [0, 1]), the criterion used (null when spar or df was given), its value and warnings."
+        description = "Cubic smoothing spline. spar or df fix the smoothing; otherwise lambda is chosen by criterion: 'gcv' (default, R smooth.spline(cv = FALSE)) or 'cv' (leave-one-out, cv = TRUE). Returns JSON with the fitted values (the first 20 with a note unless full = true) or every prediction at xout, df, lambda (on R's scale, x scaled to [0, 1]), the criterion used (null when spar or df was given), its value and warnings."
     )]
     pub async fn regression_smooth_spline(
         &self,
@@ -1321,10 +1370,11 @@ impl AnalyticsServer {
                     (result.x.clone(), result.y.clone())
                 };
 
-                let json_output = serde_json::json!({
+                // Predictions at xout are always returned in full (the xout
+                // array rule bounds them); fitted values follow `full`.
+                let full = request.full.unwrap_or(false) || request.xout.is_some();
+                let mut json_output = serde_json::json!({
                     "model": "Smoothing Spline",
-                    "x": pred_x,
-                    "fitted": pred_y,
                     "spar": result.spar,
                     "df": result.df,
                     "lambda": result.lambda,
@@ -1334,6 +1384,12 @@ impl AnalyticsServer {
                     "n_knots": result.n_knots,
                     "warnings": notes_json(None, &result.warnings)["warnings"].clone()
                 });
+                insert_smoother_values(
+                    &mut json_output,
+                    full,
+                    pred_x.len(),
+                    &[("x", &pred_x), ("fitted", &pred_y)],
+                );
 
                 Ok(CallToolResult::success(vec![Content::text(json_text(
                     &json_output,
@@ -1491,6 +1547,84 @@ mod tests {
     use p2a_core::data::{DataLoader, Dataset};
     use p2a_validation::{Case, Check, Tol};
     use serde_json::{Value, json};
+
+    /// The four smoothers return their vectors by one rule: the first 20 under
+    /// `<key>_sample` with a note by default, every value with `full`.
+    #[test]
+    fn test_smoothers_share_one_output_policy() {
+        let n = 56usize;
+        let x: Vec<f64> = (0..n).map(|i| i as f64 * 0.25).collect();
+        let y: Vec<f64> = x
+            .iter()
+            .enumerate()
+            .map(|(i, v)| v.sin() + 0.1 * ((i * 7 % 11) as f64 - 5.0) / 5.0)
+            .collect();
+        let df = p2a_core::polars::prelude::df!("x" => x, "y" => y).unwrap();
+        let (rt, server) = server_with(vec![("d", df)]);
+        let run = |tool: &str, extra: Value| -> Value {
+            let mut args = json!({"dataset": "d", "x": "x", "y": "y"});
+            for (k, v) in extra.as_object().unwrap() {
+                args[k] = v.clone();
+            }
+            let r = rt
+                .block_on(async {
+                    match tool {
+                        "loess" => {
+                            server
+                                .regression_loess(Parameters(serde_json::from_value(args).unwrap()))
+                                .await
+                        }
+                        "supsmu" => {
+                            server
+                                .regression_supsmu(Parameters(
+                                    serde_json::from_value(args).unwrap(),
+                                ))
+                                .await
+                        }
+                        "line" => {
+                            server
+                                .regression_line(Parameters(serde_json::from_value(args).unwrap()))
+                                .await
+                        }
+                        _ => {
+                            server
+                                .regression_smooth_spline(Parameters(
+                                    serde_json::from_value(args).unwrap(),
+                                ))
+                                .await
+                        }
+                    }
+                })
+                .unwrap();
+            assert_ne!(r.is_error, Some(true), "{tool}: {}", text(&r));
+            json_of(&r)
+        };
+        let note = "first 20 of 56 values; set full = true for all";
+        for (tool, keys) in [
+            ("loess", &["fitted_values", "residuals"][..]),
+            ("supsmu", &["x", "y_smoothed"][..]),
+            ("line", &["fitted_values", "residuals"][..]),
+            ("spline", &["x", "fitted"][..]),
+        ] {
+            let sampled = run(tool, json!({}));
+            assert_eq!(sampled["note"], note, "{tool}: {sampled}");
+            let full = run(tool, json!({"full": true}));
+            assert!(full.get("note").is_none(), "{tool}: {full}");
+            for key in keys {
+                let sample = sampled[format!("{key}_sample")].as_array().unwrap();
+                assert_eq!(sample.len(), 20, "{tool} {key}");
+                assert!(sampled.get(*key).is_none(), "{tool} {key}");
+                let all = full[*key].as_array().unwrap();
+                assert_eq!(all.len(), 56, "{tool} {key}");
+                assert_eq!(&all[..20], &sample[..], "{tool} {key}");
+            }
+        }
+        // Predictions at xout are always returned in full.
+        let xout: Vec<f64> = (0..30).map(|i| i as f64 * 0.4).collect();
+        let j = run("spline", json!({"xout": xout}));
+        assert_eq!(j["fitted"].as_array().unwrap().len(), 30, "{j}");
+        assert!(j.get("note").is_none(), "{j}");
+    }
 
     #[test]
     fn test_parse_choice_parses_and_reports_the_option() {
@@ -1689,7 +1823,8 @@ mod tests {
                 Some(s) => json!({"cov_type": s}),
                 None => json!({}),
             };
-            let r = run_ols_request(&ds, &request(extra)).unwrap();
+            let req = request(extra);
+            let r = run_ols_request(&ds, &req, ols_options(&req).unwrap()).unwrap();
             let n = r.n_obs;
             let names: Vec<&str> = r.coefficients.iter().map(|c| c.name.as_str()).collect();
             let pick = |f: fn(&p2a_core::regression::OlsCoefficient) -> f64| -> Vec<f64> {
@@ -2012,7 +2147,7 @@ mod tests {
             rt.block_on(server.regression_loess(Parameters(req)))
                 .unwrap()
         };
-        let r = call(json!({"dataset": "smoothers_na", "y": "y", "x": "x"}));
+        let r = call(json!({"dataset": "smoothers_na", "y": "y", "x": "x", "full": true}));
         assert_ne!(r.is_error, Some(true), "{}", text(&r));
         let j = json_of(&r);
         Check::new(&case)

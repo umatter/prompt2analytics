@@ -26,7 +26,7 @@ pub struct SqliteQueryRequest {
 
     /// Optional name for the resulting dataset
     #[schemars(
-        description = "Optional name for the resulting dataset. If not provided, a default name will be generated."
+        description = "Name for the resulting dataset; an existing dataset of that name is replaced, and the answer says so. If omitted, a default name (the query kind and time) is used, with a numeric suffix (_2, _3, ...) when that name is taken, so no dataset is replaced."
     )]
     pub name: Option<String>,
 }
@@ -74,7 +74,9 @@ pub struct DuckDBQueryRequest {
     pub query: String,
 
     /// Optional name for the resulting dataset
-    #[schemars(description = "Optional name for the resulting dataset.")]
+    #[schemars(
+        description = "Name for the resulting dataset; an existing dataset of that name is replaced, and the answer says so. If omitted, a default name (the query kind and time) is used, with a numeric suffix (_2, _3, ...) when that name is taken, so no dataset is replaced."
+    )]
     pub name: Option<String>,
 }
 
@@ -118,7 +120,7 @@ pub struct DuckDBFileQueryRequest {
 
     /// Optional name for the resulting dataset
     #[schemars(
-        description = "Optional name for the resulting dataset. If not provided, one will be generated."
+        description = "Name for the resulting dataset; an existing dataset of that name is replaced, and the answer says so. If omitted, a default name (the query kind and time) is used, with a numeric suffix (_2, _3, ...) when that name is taken, so no dataset is replaced."
     )]
     pub name: Option<String>,
 }

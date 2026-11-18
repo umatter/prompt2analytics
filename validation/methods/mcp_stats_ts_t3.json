@@ -266,7 +266,8 @@
         "stat_quantile_types",
         "stat_pp_t3",
         "mcp_series_t3",
-        "ts_filter_ar_cpt"
+        "ts_filter_ar_cpt",
+        "stats_mcp_t4"
       ],
       "tests": [
         "p2a-mcp::tier3::wp56_stats_ts::test_validate_mcp_tukey_hsd",
@@ -294,11 +295,6 @@
       ],
       "tolerance": "validation/README.md by n; printed values at their decimals; counts exact",
       "deviations": [
-        {
-          "finding": "STAT-75",
-          "quantity": "model-table SEs",
-          "note": "means, grand mean and group sizes pinned"
-        },
         {
           "finding": "TS-26",
           "quantity": "MSTL components",
