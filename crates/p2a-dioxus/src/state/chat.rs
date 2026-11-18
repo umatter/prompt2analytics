@@ -232,6 +232,78 @@ pub struct ChatState {
     /// The prompt Retry sends when the transcript was cleared (the session
     /// ended); kept by `clear_messages`.
     pub retry_prompt: Option<String>,
+    /// The live transcripts (plots and tool results included) of the
+    /// conversations left in this page session, least recently left first;
+    /// at most `LIVE_CACHE_CONVERSATIONS`.
+    live: Vec<(String, Vec<ChatMessage>)>,
+}
+
+/// How many left conversations keep their live transcript.
+pub const LIVE_CACHE_CONVERSATIONS: usize = 8;
+
+/// What the chat panel's sync effect reads: the conversation shown and the
+/// one the transcript was last synced to, the stored rows of the current
+/// conversation now and at the last sync, and the transcript's state.
+#[derive(Debug, Clone, Copy)]
+pub struct SyncInput<'a> {
+    pub current: Option<&'a str>,
+    pub synced: Option<&'a str>,
+    pub stored_len: usize,
+    pub prev_stored_len: usize,
+    /// The transcript holds messages (after the left one was stashed)
+    pub chat_has_messages: bool,
+    pub busy: bool,
+    /// The current conversation has a live transcript in the cache
+    pub has_live: bool,
+    /// The transcript shown was restored from the cache for the current
+    /// conversation
+    pub restored: bool,
+}
+
+/// What the sync effect does with the transcript.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncAction {
+    /// Leave it
+    Skip,
+    /// Leave it and track the current conversation (no stored rows yet)
+    Track,
+    /// Show the current conversation's live transcript
+    Restore,
+    /// Rebuild it from the stored rows
+    Rebuild,
+    /// Empty it (the stored rows, if any, arrive later)
+    Clear,
+}
+
+/// The sync effect's decision, as a pure function.
+pub fn decide_sync(i: &SyncInput) -> SyncAction {
+    if i.busy {
+        return SyncAction::Skip;
+    }
+    let Some(current) = i.current else {
+        return if i.synced.is_some() {
+            SyncAction::Clear
+        } else {
+            SyncAction::Skip
+        };
+    };
+    if i.synced == Some(current) {
+        let rows_arrived = i.stored_len > 0 && i.prev_stored_len == 0;
+        return if rows_arrived && !i.restored {
+            SyncAction::Rebuild
+        } else {
+            SyncAction::Skip
+        };
+    }
+    if i.has_live {
+        SyncAction::Restore
+    } else if i.stored_len > 0 {
+        SyncAction::Rebuild
+    } else if i.chat_has_messages {
+        SyncAction::Clear
+    } else {
+        SyncAction::Track
+    }
 }
 
 impl Default for ChatState {
@@ -253,7 +325,55 @@ impl ChatState {
             history_index: -1,
             active_tool: None,
             retry_prompt: None,
+            live: Vec::new(),
         }
+    }
+
+    /// Keep the transcript of `conv_id`, which is being left, for this page
+    /// session (moved, not copied); the transcript is empty afterwards. The
+    /// least recently left conversation beyond the cache's bound is dropped.
+    pub fn stash_live(&mut self, conv_id: &str) {
+        let messages = std::mem::take(&mut self.messages);
+        self.live.retain(|(id, _)| id != conv_id);
+        self.live.push((conv_id.to_string(), messages));
+        if self.live.len() > LIVE_CACHE_CONVERSATIONS {
+            let excess = self.live.len() - LIVE_CACHE_CONVERSATIONS;
+            self.live.drain(..excess);
+        }
+    }
+
+    /// Show the live transcript of `conv_id`, taken out of the cache;
+    /// false (and nothing changed) when there is none.
+    pub fn restore_live(&mut self, conv_id: &str) -> bool {
+        let Some(pos) = self.live.iter().position(|(id, _)| id == conv_id) else {
+            return false;
+        };
+        self.messages = self.live.remove(pos).1;
+        true
+    }
+
+    /// Whether `conv_id` has a live transcript in the cache.
+    pub fn has_live(&self, conv_id: &str) -> bool {
+        self.live.iter().any(|(id, _)| id == conv_id)
+    }
+
+    /// The cached live transcript of `conv_id`, if any (a late tool-call
+    /// load fills it in).
+    pub fn live_messages_mut(&mut self, conv_id: &str) -> Option<&mut Vec<ChatMessage>> {
+        self.live
+            .iter_mut()
+            .find(|(id, _)| id == conv_id)
+            .map(|(_, m)| m)
+    }
+
+    /// Drop the live transcript of `conv_id` (deleted).
+    pub fn forget_live(&mut self, conv_id: &str) {
+        self.live.retain(|(id, _)| id != conv_id);
+    }
+
+    /// Drop every live transcript (the session and its conversations ended).
+    pub fn clear_live(&mut self) {
+        self.live.clear();
     }
 
     /// Whether an answer is being written (a send runs).
@@ -1125,6 +1245,119 @@ mod tests {
         chat.stop_processing();
         let history = send(&mut chat, "describe sales");
         assert_eq!(turns(&history), pairs(&[("user", "load and describe")]));
+    }
+
+    fn input<'a>(current: Option<&'a str>, synced: Option<&'a str>) -> SyncInput<'a> {
+        SyncInput {
+            current,
+            synced,
+            stored_len: 0,
+            prev_stored_len: 0,
+            chat_has_messages: false,
+            busy: false,
+            has_live: false,
+            restored: false,
+        }
+    }
+
+    #[test]
+    fn decide_sync_table() {
+        use SyncAction::*;
+        let a = Some("a");
+        let b = Some("b");
+        // An answer streams: nothing is touched.
+        let i = SyncInput {
+            busy: true,
+            has_live: true,
+            ..input(b, a)
+        };
+        assert_eq!(decide_sync(&i), Skip);
+        // Same conversation, no stored rows came.
+        assert_eq!(decide_sync(&input(a, a)), Skip);
+        let i = SyncInput {
+            stored_len: 4,
+            prev_stored_len: 4,
+            ..input(a, a)
+        };
+        assert_eq!(decide_sync(&i), Skip, "rows already synced");
+        // Stored rows arrived: rebuilt, unless the view was restored live.
+        let i = SyncInput {
+            stored_len: 4,
+            ..input(a, a)
+        };
+        assert_eq!(decide_sync(&i), Rebuild);
+        let i = SyncInput {
+            restored: true,
+            ..i
+        };
+        assert_eq!(decide_sync(&i), Skip);
+        // A switch to a conversation with a live transcript.
+        let i = SyncInput {
+            has_live: true,
+            stored_len: 4,
+            ..input(b, a)
+        };
+        assert_eq!(decide_sync(&i), Restore);
+        // A switch without one: rebuilt from rows already there, else wait.
+        let i = SyncInput {
+            stored_len: 4,
+            ..input(b, a)
+        };
+        assert_eq!(decide_sync(&i), Rebuild);
+        let i = SyncInput {
+            chat_has_messages: true,
+            ..input(b, None)
+        };
+        assert_eq!(decide_sync(&i), Clear);
+        assert_eq!(decide_sync(&input(b, a)), Track);
+        // No conversation any more; none before and none now keeps the chat.
+        assert_eq!(decide_sync(&input(None, a)), Clear);
+        let i = SyncInput {
+            chat_has_messages: true,
+            ..input(None, None)
+        };
+        assert_eq!(decide_sync(&i), Skip);
+    }
+
+    #[test]
+    fn stash_and_restore_move_the_transcript() {
+        let mut chat = ChatState::new();
+        send(&mut chat, "plot sales");
+        chat.add_image("iVBORw0KGgo=");
+        chat.set_active_tool("plot".into(), json!({"dataset": "sales"}));
+        chat.clear_active_tool(Some("ok".into()), Some("success"));
+        finish(&mut chat, reply("Here it is."));
+        let ptr = chat.messages.as_ptr();
+        let before: Vec<(String, String)> = contents(&chat);
+
+        chat.stash_live("a");
+        assert!(chat.messages.is_empty());
+        assert!(chat.has_live("a"));
+        assert!(!chat.has_live("b"));
+        assert!(chat.restore_live("a"));
+        assert_eq!(chat.messages.as_ptr(), ptr, "moved, not cloned");
+        assert_eq!(contents(&chat), before);
+        assert_eq!(chat.messages[1].images, vec!["iVBORw0KGgo=".to_string()]);
+        assert_eq!(chat.messages[1].tool_calls.len(), 1);
+        assert!(!chat.has_live("a"), "restored entries leave the cache");
+        assert!(!chat.restore_live("a"));
+    }
+
+    #[test]
+    fn the_live_cache_keeps_the_most_recent_conversations() {
+        let mut chat = ChatState::new();
+        for i in 0..=LIVE_CACHE_CONVERSATIONS {
+            chat.add_user_message(&format!("q{i}"));
+            chat.stash_live(&format!("c{i}"));
+        }
+        assert!(!chat.has_live("c0"), "the least recently stashed went");
+        for i in 1..=LIVE_CACHE_CONVERSATIONS {
+            assert!(chat.has_live(&format!("c{i}")), "c{i}");
+        }
+        chat.forget_live("c3");
+        assert!(!chat.has_live("c3"));
+        chat.clear_live();
+        assert!(!chat.has_live("c4"));
     }
 
     /// A second chip click while the first send runs is refused.

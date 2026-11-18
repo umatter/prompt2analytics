@@ -10,8 +10,8 @@ use crate::components::{ChatInput, ExportMenu, MessageList, P2aWordmark, Setting
 use crate::state::settings::Theme;
 use crate::state::{
     ChatMessage, ChatState, ConversationState, SESSION_ENDED_TEXT, SessionState, Settings,
-    ToolCallInfo, ensure_session, needs_title, on_session_lost, session_lost, session_lost_text,
-    turn_persistence,
+    SyncAction, SyncInput, ToolCallInfo, decide_sync, ensure_session, needs_title, on_session_lost,
+    session_lost, session_lost_text, turn_persistence,
 };
 
 /// The session `old_id` ended during a send of `prompt`: the turn is ended,
@@ -33,6 +33,8 @@ fn recover_lost_session(
     on_session_lost(session, conv, old_id);
     let mut c = chat.write();
     c.clear_messages();
+    // The session's conversations went with it.
+    c.clear_live();
     c.retry_prompt = Some(prompt.to_string());
     c.set_error(Some(SESSION_ENDED_TEXT.to_string()));
 }
@@ -82,153 +84,159 @@ pub fn ChatPanel() -> Element {
     // The Stop handle of the answer being written, if one is.
     let mut stream_stop = use_signal(|| None::<StreamStop>);
 
-    // Sync messages from conversation state to chat state when:
-    // 1. User explicitly selects a DIFFERENT conversation (not the same one)
-    // 2. OR when messages are loaded for the current conversation
-    // 3. AND we're not in the middle of streaming/processing
-    //
-    // IMPORTANT: This effect should NEVER clear chat_state.messages if they exist,
-    // unless the user is switching to a different conversation.
+    // The conversation whose live transcript is shown (restored from the
+    // cache); its stored rows do not replace it.
+    let mut restored_conv = use_signal(|| Option::<String>::None);
+
+    // Keep the transcript in step with the current conversation
+    // (state::decide_sync): a conversation left keeps its live transcript
+    // for this page session (plots and tool results included) and gets it
+    // back when selected again; one without is rebuilt from its stored rows.
+    // An answer being written is never touched.
     use_effect(move || {
         let conv_state = conversation_state.read();
         let current_conv_id = conv_state.current_conversation_id.clone();
-        let current_messages = conv_state.current_messages.clone();
-        let current_messages_len = current_messages.len();
+        let current_messages_len = conv_state.current_messages.len();
         let synced_id = synced_conv_id.read().clone();
         let prev_messages_len = *synced_messages_len.read();
+        let mut chat = chat_state;
 
-        // Don't interfere with active streaming/processing
-        // BUT still update synced_conv_id to prevent re-triggering when processing completes
-        let is_processing = chat_state.read().is_processing;
-        if is_processing {
-            tracing::debug!(
-                "[ChatPanel Sync] Skipping - is_processing=true, but updating synced_conv_id"
-            );
-            // Update synced tracking to match current state so we don't re-trigger after processing
+        if chat.read().is_busy() {
+            // Track the conversation the send created, so the end of the
+            // send does not look like a switch.
             if current_conv_id != synced_id {
                 synced_conv_id.set(current_conv_id.clone());
-                synced_messages_len.set(0); // Reset since we're not loading messages now
+                synced_messages_len.set(0);
             }
             return;
         }
 
-        // Check if conversation changed OR if messages were loaded for current conversation
-        let conv_changed = current_conv_id != synced_id;
-        let messages_loaded =
-            current_conv_id == synced_id && current_messages_len > 0 && prev_messages_len == 0;
+        // A switch away from a conversation that still exists: keep its
+        // live transcript (a deleted or reset one is dropped).
+        if current_conv_id != synced_id
+            && let Some(left) = synced_id.as_deref()
+            && conv_state.conversations.iter().any(|c| c.id == left)
+            && !chat.read().messages.is_empty()
+        {
+            chat.write().stash_live(left);
+        }
 
-        // Also check if chat_state already has messages (don't clear user's in-progress work)
-        let chat_has_messages = !chat_state.read().messages.is_empty();
-        let chat_message_count = chat_state.read().messages.len();
-
-        tracing::debug!(
-            "[ChatPanel Sync] conv_changed={}, messages_loaded={}, chat_has_messages={}, chat_message_count={}, current_conv_id={:?}, synced_id={:?}, current_messages_len={}, prev_messages_len={}",
-            conv_changed,
-            messages_loaded,
+        let (chat_has_messages, has_live) = {
+            let c = chat.read();
+            let has_live = current_conv_id.as_deref().is_some_and(|id| c.has_live(id));
+            (!c.messages.is_empty(), has_live)
+        };
+        let restored = current_conv_id.is_some() && *restored_conv.peek() == current_conv_id;
+        let action = decide_sync(&SyncInput {
+            current: current_conv_id.as_deref(),
+            synced: synced_id.as_deref(),
+            stored_len: current_messages_len,
+            prev_stored_len: prev_messages_len,
             chat_has_messages,
-            chat_message_count,
+            busy: false,
+            has_live,
+            restored,
+        });
+        tracing::debug!(
+            "[ChatPanel Sync] {:?}: current={:?} synced={:?} stored={} prev={}",
+            action,
             current_conv_id,
             synced_id,
             current_messages_len,
             prev_messages_len
         );
 
-        if conv_changed || messages_loaded {
-            if let Some(conv_id) = current_conv_id.clone() {
-                let mut chat = chat_state;
-                let conv_id_for_async = conv_id.clone();
-
-                // Determine if this is a real conversation switch (user selected different conv)
-                let is_switching_conversations =
-                    synced_id.is_some() && synced_id != current_conv_id;
-
-                if !current_messages.is_empty() {
-                    // Load persisted messages from database
-                    tracing::debug!(
-                        "[ChatPanel Sync] Loading {} persisted messages",
-                        current_messages_len
+        match action {
+            SyncAction::Skip => {
+                if restored && prev_messages_len != current_messages_len {
+                    synced_messages_len.set(current_messages_len);
+                }
+            }
+            SyncAction::Track => {
+                restored_conv.set(None);
+                synced_conv_id.set(current_conv_id);
+                synced_messages_len.set(0);
+            }
+            SyncAction::Clear => {
+                chat.write().clear_messages();
+                restored_conv.set(None);
+                synced_conv_id.set(current_conv_id);
+                synced_messages_len.set(0);
+            }
+            SyncAction::Restore => {
+                if let Some(id) = current_conv_id.as_deref() {
+                    let mut c = chat.write();
+                    c.clear_messages();
+                    c.restore_live(id);
+                }
+                restored_conv.set(current_conv_id.clone());
+                synced_conv_id.set(current_conv_id);
+                synced_messages_len.set(current_messages_len);
+            }
+            SyncAction::Rebuild => {
+                let Some(conv_id) = current_conv_id.clone() else {
+                    return;
+                };
+                {
+                    let mut c = chat.write();
+                    c.clear_messages();
+                    c.messages.extend(
+                        conv_state
+                            .current_messages
+                            .iter()
+                            .map(ChatMessage::from_conversation_message),
                     );
-                    chat.write().clear_messages();
+                }
+                restored_conv.set(None);
+                synced_conv_id.set(current_conv_id);
+                synced_messages_len.set(current_messages_len);
 
-                    for msg in current_messages.iter() {
-                        let chat_msg = ChatMessage::from_conversation_message(msg);
-                        chat.write().messages.push(chat_msg);
-                    }
+                // Load tool calls asynchronously
+                spawn(async move {
+                    let client = api();
+                    match client.get_conversation_tool_calls(&conv_id).await {
+                        Ok(tool_calls) => {
+                            if tool_calls.is_empty() {
+                                return;
+                            }
+                            tracing::debug!("[ChatPanel] Loaded {} tool calls", tool_calls.len());
+                            let mut tool_calls_by_message: std::collections::HashMap<
+                                String,
+                                Vec<PersistedToolCall>,
+                            > = std::collections::HashMap::new();
+                            for tc in tool_calls {
+                                tool_calls_by_message
+                                    .entry(tc.message_id.clone())
+                                    .or_default()
+                                    .push(tc);
+                            }
 
-                    // Load tool calls asynchronously
-                    spawn(async move {
-                        let client = api();
-                        match client.get_conversation_tool_calls(&conv_id_for_async).await {
-                            Ok(tool_calls) => {
-                                if !tool_calls.is_empty() {
-                                    tracing::debug!(
-                                        "[ChatPanel] Loaded {} tool calls",
-                                        tool_calls.len()
-                                    );
-
-                                    let mut tool_calls_by_message: std::collections::HashMap<
-                                        String,
-                                        Vec<PersistedToolCall>,
-                                    > = std::collections::HashMap::new();
-                                    for tc in tool_calls {
-                                        tool_calls_by_message
-                                            .entry(tc.message_id.clone())
-                                            .or_default()
-                                            .push(tc);
-                                    }
-
-                                    // Only into the transcript of the conversation
-                                    // they belong to, if it is still shown.
-                                    let still_current = conversation_state
-                                        .read()
-                                        .current_conversation_id
-                                        .as_deref()
-                                        == Some(conv_id_for_async.as_str());
-                                    if !still_current || chat.read().is_busy() {
-                                        return;
-                                    }
-                                    let mut chat_write = chat.write();
-                                    for msg in chat_write.messages.iter_mut() {
-                                        if let Some(tcs) = tool_calls_by_message.get(&msg.id) {
-                                            msg.tool_calls =
-                                                tcs.iter().map(ToolCallInfo::from).collect();
-                                        }
-                                    }
+                            // Into the transcript of the conversation they
+                            // belong to: the one shown, or its live copy when
+                            // it was left meanwhile.
+                            let still_current =
+                                conversation_state.read().current_conversation_id.as_deref()
+                                    == Some(conv_id.as_str());
+                            if chat.read().is_busy() && still_current {
+                                return;
+                            }
+                            let mut chat_write = chat.write();
+                            let messages = if still_current {
+                                Some(&mut chat_write.messages)
+                            } else {
+                                chat_write.live_messages_mut(&conv_id)
+                            };
+                            for msg in messages.into_iter().flatten() {
+                                if let Some(tcs) = tool_calls_by_message.get(&msg.id) {
+                                    msg.tool_calls = tcs.iter().map(ToolCallInfo::from).collect();
                                 }
                             }
-                            Err(e) => {
-                                tracing::warn!("[ChatPanel] Failed to load tool calls: {}", e);
-                            }
                         }
-                    });
-
-                    synced_messages_len.set(current_messages_len);
-                } else if is_switching_conversations && !chat_has_messages {
-                    // Switching to a new/empty conversation AND chat is already empty
-                    // Just update tracking, don't clear (nothing to clear)
-                    tracing::debug!(
-                        "[ChatPanel Sync] Switching to empty conversation, chat already empty"
-                    );
-                    synced_messages_len.set(0);
-                } else if is_switching_conversations && chat_has_messages {
-                    // Switching to a different conversation that has no persisted messages yet
-                    // Clear the old conversation's messages
-                    tracing::debug!(
-                        "[ChatPanel Sync] Switching conversations, clearing old messages"
-                    );
-                    chat.write().clear_messages();
-                    synced_messages_len.set(0);
-                }
-                // If NOT switching conversations and current_messages is empty,
-                // preserve whatever is in chat_state (user might be typing/streaming)
-
-                synced_conv_id.set(current_conv_id);
-            } else {
-                // No conversation selected, clear chat
-                tracing::debug!("[ChatPanel Sync] No conversation selected, clearing chat");
-                chat_state.write().clear_messages();
-                synced_conv_id.set(None);
-                synced_messages_len.set(0);
+                        Err(e) => {
+                            tracing::warn!("[ChatPanel] Failed to load tool calls: {}", e);
+                        }
+                    }
+                });
             }
         }
     });

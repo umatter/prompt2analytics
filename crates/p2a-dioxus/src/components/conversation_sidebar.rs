@@ -116,13 +116,21 @@ pub fn ConversationSidebar() -> Element {
     // Handle select conversation. Refused while an answer streams: the stream
     // writes into the selected conversation's transcript. The messages are
     // kept only if the conversation is still current when they arrive.
+    // Selecting the current conversation does nothing; one with a live
+    // transcript (left in this page session) is shown from it, unloaded.
     let handle_select = move |id: String| {
+        if conversation_state.read().current_conversation_id.as_deref() == Some(id.as_str()) {
+            return;
+        }
         if !may_switch(chat_state, conversation_state) {
             return;
         }
         let mut conv = conversation_state;
         spawn(async move {
             conv.write().set_current_conversation(Some(id.clone()));
+            if chat_state.read().has_live(&id) {
+                return;
+            }
 
             // Load messages for the selected conversation
             let state = conv.read().clone();
@@ -199,6 +207,7 @@ pub fn ConversationSidebar() -> Element {
         }
         let id = delete_confirm_id.read().clone();
         let mut conv = conversation_state;
+        let mut chat = chat_state;
         let mut confirm_id = delete_confirm_id;
 
         if let Some(conversation_id) = id {
@@ -208,6 +217,7 @@ pub fn ConversationSidebar() -> Element {
                 match state.delete_conversation(&conversation_id).await {
                     Ok(()) => {
                         conv.write().remove_conversation(&conversation_id);
+                        chat.write().forget_live(&conversation_id);
 
                         // Auto-select the first remaining non-archived conversation
                         let remaining: Vec<_> = conv
