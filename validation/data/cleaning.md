@@ -61,28 +61,30 @@ harness binary per side pinned to core 2 (`taskset -c 2`, `RAYON_NUM_THREADS=1`,
 cwd `/dev/shm`); 9 interleaved processes per side, each the median of 2,001 / 301 / 41 calls (n = 100 /
 1,000 / 10,000) after 10 warm-ups; the table gives the median of the 9 medians. Seeded data with noise
 (ChaCha8 in the harness, `set.seed(n)` for the files R writes). Load average during the runs 4.3-12.4
-(other work on the machine).
+(other work on the machine). The quality, filter, drop_na and fill_na rows were re-timed after the
+float NaN count of the completeness change was vectorised: same harness, 7 interleaved processes per
+side, load average 7.8-10.5; the other rows are from the first run.
 
 | Hot path | n | v0.5.0 (µs) | lane (µs) | lane/v0.5.0 |
 |---|---|---|---|---|
-| quality profile (5 columns: 2 numeric with NaN, ISO dates, phones, words) | 100 | 153.5 | 161.7 | 1.05x |
-| quality profile (5 columns: 2 numeric with NaN, ISO dates, phones, words) | 1,000 | 1,021.7 | 1,117.8 | 1.09x |
-| quality profile (5 columns: 2 numeric with NaN, ISO dates, phones, words) | 10,000 | 10,044.0 | 11,009.4 | 1.10x |
+| quality profile (5 columns: 2 numeric with NaN, ISO dates, phones, words) | 100 | 153.5 | 161.3 | 1.05x |
+| quality profile (5 columns: 2 numeric with NaN, ISO dates, phones, words) | 1,000 | 1,022.2 | 1,112.8 | 1.09x |
+| quality profile (5 columns: 2 numeric with NaN, ISO dates, phones, words) | 10,000 | 10,065.1 | 10,987.6 | 1.09x |
 | estimate_dataset_memory (10 columns, 4 text) | 100 | 0.1 | 0.4 | 4.05x |
 | estimate_dataset_memory (10 columns, 4 text) | 1,000 | 0.1 | 0.4 | 4.07x |
 | estimate_dataset_memory (10 columns, 4 text) | 10,000 | 0.1 | 0.4 | 3.87x |
-| preview filter `>=` (Float64) | 100 | 1.6 | 23.6 | 14.48x |
-| preview filter `>=` (Float64) | 1,000 | 10.1 | 35.8 | 3.55x |
-| preview filter `>=` (Float64) | 10,000 | 95.7 | 295.8 | 3.09x |
-| preview filter `contains` (text) | 100 | 22.1 | 42.8 | 1.93x |
-| preview filter `contains` (text) | 1,000 | 110.6 | 113.2 | 1.02x |
-| preview filter `contains` (text) | 10,000 | 1,087.9 | 967.5 | 0.89x |
-| preview drop_na (3 columns, 10% missing) | 100 | 32.6 | 42.2 | 1.29x |
-| preview drop_na (3 columns, 10% missing) | 1,000 | 321.3 | 80.4 | 0.25x |
-| preview drop_na (3 columns, 10% missing) | 10,000 | 3,233.7 | 490.3 | 0.15x |
-| preview fill_na median (10% missing) | 100 | 9.5 | 8.8 | 0.92x |
-| preview fill_na median (10% missing) | 1,000 | 33.4 | 31.0 | 0.93x |
-| preview fill_na median (10% missing) | 10,000 | 262.7 | 252.7 | 0.96x |
+| preview filter `>=` (Float64) | 100 | 1.6 | 24.1 | 14.81x |
+| preview filter `>=` (Float64) | 1,000 | 10.1 | 31.5 | 3.13x |
+| preview filter `>=` (Float64) | 10,000 | 98.7 | 208.3 | 2.11x |
+| preview filter `contains` (text) | 100 | 12.4 | 28.7 | 2.32x |
+| preview filter `contains` (text) | 1,000 | 64.9 | 61.7 | 0.95x |
+| preview filter `contains` (text) | 10,000 | 721.3 | 530.6 | 0.74x |
+| preview drop_na (3 columns, 10% missing) | 100 | 20.3 | 28.1 | 1.38x |
+| preview drop_na (3 columns, 10% missing) | 1,000 | 202.2 | 44.2 | 0.22x |
+| preview drop_na (3 columns, 10% missing) | 10,000 | 1,986.5 | 203.2 | 0.10x |
+| preview fill_na median (10% missing) | 100 | 9.6 | 8.7 | 0.91x |
+| preview fill_na median (10% missing) | 1,000 | 33.6 | 32.0 | 0.95x |
+| preview fill_na median (10% missing) | 10,000 | 267.2 | 255.8 | 0.96x |
 | preview trim | 100 | 6.3 | 5.8 | 0.91x |
 | preview trim | 1,000 | 33.6 | 29.0 | 0.86x |
 | preview trim | 10,000 | 348.3 | 294.6 | 0.85x |
@@ -95,7 +97,8 @@ Above 1.10x:
   count by a fixed width: 0.1 to 0.4 µs a call, whatever the rows.
 - The filter preview runs the apply's own `filter` and materialises the kept rows, where v0.5.0 counted
   a mask of its own (which treated `contains` as a regex and an unknown operator as no rows): up to
-  0.3 ms at 10,000 rows. A mask-only filter would have to come from the munging module.
+  0.2 ms at 10,000 rows (the NaN count of the completeness change is vectorised). A mask-only
+  filter would have to come from the munging module.
 - `contains` at 100 rows and drop_na at 100 rows: the same fixed cost of the real operation (20 µs and
   10 µs); at 1,000 rows and above both are as fast or faster (drop_na 4-7x faster: one vectorised
   mask instead of a per-cell lookup).

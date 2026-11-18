@@ -15,7 +15,9 @@ use super::munging::clean::{
     FillStrategy, ReplaceOptions, deduplicate, drop_na, fill_na_with, replace_with,
 };
 use super::munging::transform::{drop_columns, filter};
-use super::quality::{DataIssue, DataQualityProfile, completeness, generate_quality_profile};
+use super::quality::{
+    DataIssue, DataQualityProfile, completeness, generate_quality_profile, missing_cells,
+};
 
 /// Result of a cleaning operation with verification.
 #[derive(Clone, Serialize, Deserialize)]
@@ -329,18 +331,6 @@ fn pct_of(n: usize, rows: usize) -> f64 {
 /// The completeness change from `before` to `after` in percentage points.
 fn completeness_change(before: &DataFrame, after: &DataFrame) -> f64 {
     100.0 * (completeness(after) - completeness(before))
-}
-
-/// The missing cells of `col` (null, or NaN in a float column).
-fn missing_count(col: &Column) -> usize {
-    let mut n = col.null_count();
-    if matches!(col.dtype(), DataType::Float64 | DataType::Float32)
-        && let Ok(cast) = col.cast(&DataType::Float64)
-        && let Ok(ca) = cast.f64()
-    {
-        n += ca.iter().flatten().filter(|v| v.is_nan()).count();
-    }
-    n
 }
 
 /// Calls `f` with each row a fill changed in one column (missing in `before`, present in
@@ -724,7 +714,7 @@ fn preview_replace(
             {
                 let cells = row_count.saturating_mul(df.width());
                 quality_change =
-                    pct_of(missing_count(before), cells) - pct_of(missing_count(after), cells);
+                    pct_of(missing_cells(before), cells) - pct_of(missing_cells(after), cells);
             }
             if total_affected == 0 {
                 warnings.push(format!(
@@ -1437,6 +1427,46 @@ mod tests {
                 p.warnings
             );
         }
+    }
+
+    #[test]
+    fn fill_and_drop_previews_measure_the_completeness_change() {
+        // Three columns, one complete: filling x's 2 missing cells moves completeness from 9/12
+        // to 11/12, +16.67 points; the old pct_affected * 0.5 rule said 25.
+        let mut wide = half_missing().df().clone();
+        wide.with_column(Column::new("z".into(), [1.5, 2.5, 3.5, 4.5]))
+            .unwrap();
+        let p = preview_cleaning(
+            &Dataset::new(wide),
+            &CleaningOperation::FillNa {
+                columns: Some(vec!["x".into()]),
+                strategy: "median".into(),
+                value: None,
+            },
+            5,
+        );
+        assert_eq!(p.cells_affected, 2);
+        let want = 100.0 * 2.0 / 12.0;
+        assert!(
+            (p.estimated_quality_change - want).abs() < 1e-12,
+            "{}",
+            p.estimated_quality_change
+        );
+        // Dropping the rows with any missing cell keeps rows 1 and 4: 5/8 -> 1, +37.5 points.
+        let p = preview_cleaning(
+            &half_missing(),
+            &CleaningOperation::DropNa {
+                columns: None,
+                how: "any".into(),
+            },
+            5,
+        );
+        assert_eq!(p.rows_affected, 2);
+        assert!(
+            (p.estimated_quality_change - 37.5).abs() < 1e-12,
+            "{}",
+            p.estimated_quality_change
+        );
     }
 
     #[test]

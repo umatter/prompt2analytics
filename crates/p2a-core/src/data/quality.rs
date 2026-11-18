@@ -326,17 +326,21 @@ fn completeness_of(missing: usize, cells: usize) -> f64 {
 /// [`DataQualityProfile::completeness_score`] of `df` without the rest of the profile: null
 /// cells, and NaN cells of float columns, count as missing (as `describe` counts them).
 pub(crate) fn completeness(df: &DataFrame) -> f64 {
-    let mut missing = 0usize;
-    for col in df.get_columns() {
-        missing += col.null_count();
-        if matches!(col.dtype(), DataType::Float64 | DataType::Float32)
-            && let Ok(cast) = col.cast(&DataType::Float64)
-            && let Ok(ca) = cast.f64()
-        {
-            missing += ca.iter().flatten().filter(|v| v.is_nan()).count();
-        }
-    }
+    let missing: usize = df.get_columns().iter().map(missing_cells).sum();
     completeness_of(missing, df.height() * df.width())
+}
+
+/// The missing cells of `col`: nulls, and NaN cells of a float column.
+pub(crate) fn missing_cells(col: &Column) -> usize {
+    let mut n = col.null_count();
+    if matches!(col.dtype(), DataType::Float64 | DataType::Float32)
+        && let Ok(cast) = col.cast(&DataType::Float64)
+        && let Ok(ca) = cast.f64()
+    {
+        // A null slot's NaN test is null, and the sum skips it.
+        n += ca.is_nan().sum().unwrap_or(0) as usize;
+    }
+    n
 }
 
 /// Profile a single column.
