@@ -157,8 +157,14 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
     // Track previous open state to detect when modal opens
     let mut was_open = use_signal(|| false);
 
-    // Escape closes the modal as Cancel does.
-    crate::app::use_escape_close(props.is_open, props.on_close);
+    // Every way out but Save (Cancel, Done, the backdrop, the close button,
+    // Escape): the saved theme replaces the preview, then the modal closes.
+    let on_close = props.on_close;
+    let dismiss = use_callback(move |()| {
+        apply_theme(settings.read().theme);
+        on_close.call(());
+    });
+    crate::app::use_escape_close(props.is_open, dismiss);
 
     // Sync local state when modal opens (transition from closed to open)
     if props.is_open && !*was_open.read() {
@@ -220,9 +226,7 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
         }
     };
 
-    let handle_cancel = move |_| {
-        props.on_close.call(());
-    };
+    let handle_cancel = move |_| dismiss.call(());
 
     let handle_provider_change = move |evt: Event<FormData>| {
         let value = evt.value();
@@ -498,7 +502,7 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
             // Backdrop - separate clickable layer behind modal
             div {
                 class: "absolute inset-0 bg-black/50 backdrop-blur-sm",
-                onclick: move |_| props.on_close.call(()),
+                onclick: move |_| dismiss.call(()),
             }
 
             // Modal - positioned above backdrop, clicks don't propagate to backdrop
@@ -510,7 +514,7 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
                     h2 { class: "text-xl font-semibold text-gray-900 dark:text-white", "Settings" }
                     button {
                         class: "p-2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors",
-                        onclick: move |_| props.on_close.call(()),
+                        onclick: move |_| dismiss.call(()),
                         svg {
                             class: "w-5 h-5",
                             fill: "none",

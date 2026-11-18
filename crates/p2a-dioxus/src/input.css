@@ -1,41 +1,13 @@
 @import "tailwindcss";
 
+/* `dark:` utilities follow the class apply_theme sets on <html> (`dark` or
+   `light`, always one of them), not the OS preference: the theme selector
+   resolves System itself. */
+@custom-variant dark (&:where(.dark, .dark *));
+
 /* Configure Tailwind to scan Rust files */
 @source "../src/**/*.rs";
 @source "../index.html";
-
-/* Custom scrollbar */
-::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
-}
-
-::-webkit-scrollbar-track {
-  background: #f1f1f1;
-  border-radius: 4px;
-}
-
-::-webkit-scrollbar-thumb {
-  background: #c1c1c1;
-  border-radius: 4px;
-}
-
-::-webkit-scrollbar-thumb:hover {
-  background: #a1a1a1;
-}
-
-/* Dark mode scrollbar */
-.dark ::-webkit-scrollbar-track {
-  background: #374151;
-}
-
-.dark ::-webkit-scrollbar-thumb {
-  background: #6b7280;
-}
-
-.dark ::-webkit-scrollbar-thumb:hover {
-  background: #9ca3af;
-}
 
 /* Message animations */
 @keyframes fadeIn {
@@ -49,182 +21,321 @@
   }
 }
 
-.message-enter {
-  animation: fadeIn 0.2s ease-out;
-}
-
 /* Streaming cursor */
 @keyframes blink {
   0%, 50% { opacity: 1; }
   51%, 100% { opacity: 0; }
 }
 
-.streaming-cursor::after {
-  content: "▋";
-  animation: blink 1s infinite;
-  color: #3b82f6;
-}
+/* Every hand-written rule sits in the components layer, so a utility on the
+   same element (for example `dark:text-white` on a markdown heading) wins. */
+@layer components {
+  /* Custom scrollbar */
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
 
-/* Code block styling */
-.prose pre {
-  background-color: #1e293b;
-  border-radius: 0.5rem;
-  padding: 1rem;
-  overflow-x: auto;
-  font-size: 0.875rem;
-  line-height: 1.5;
-}
+  ::-webkit-scrollbar-track {
+    background: #f1f1f1;
+    border-radius: 4px;
+  }
 
-.prose code {
-  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
-}
+  ::-webkit-scrollbar-thumb {
+    background: #c1c1c1;
+    border-radius: 4px;
+  }
 
-.prose :not(pre) > code {
-  background-color: #f1f5f9;
-  padding: 0.125rem 0.375rem;
-  border-radius: 0.25rem;
-  font-size: 0.875em;
-  color: #e11d48;
-}
+  ::-webkit-scrollbar-thumb:hover {
+    background: #a1a1a1;
+  }
 
-.dark .prose :not(pre) > code {
-  background-color: #374151;
-  color: #fb7185;
-}
+  .dark ::-webkit-scrollbar-track {
+    background: #374151;
+  }
 
-/* Tool call card */
-.tool-card {
-  transition: all 0.2s ease;
-}
+  .dark ::-webkit-scrollbar-thumb {
+    background: #6b7280;
+  }
 
-.tool-card:hover {
-  box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
-}
+  .dark ::-webkit-scrollbar-thumb:hover {
+    background: #9ca3af;
+  }
 
-/* Settings modal backdrop */
-.modal-backdrop {
-  backdrop-filter: blur(4px);
-}
+  .message-enter {
+    animation: fadeIn 0.2s ease-out;
+  }
 
-/* Button focus ring */
-button:focus-visible {
-  outline: 2px solid #3b82f6;
-  outline-offset: 2px;
-}
+  .streaming-cursor::after {
+    content: "▋";
+    animation: blink 1s infinite;
+    color: var(--color-teal-500);
+  }
 
-/* Input focus styles */
-input:focus, textarea:focus, select:focus {
-  outline: none;
-  ring: 2px;
-  ring-color: #3b82f6;
-  border-color: #3b82f6;
-}
+  /* Code block styling */
+  .prose pre {
+    background-color: #1e293b;
+    border-radius: 0.5rem;
+    padding: 1rem;
+    overflow-x: auto;
+    font-size: 0.875rem;
+    line-height: 1.5;
+  }
 
-/* Markdown prose styles */
-.prose h1 {
-  font-size: 1.875rem;
-  font-weight: 700;
-  margin-top: 1.5rem;
-  margin-bottom: 0.75rem;
-  color: #111827;
-}
+  .prose code {
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
 
-.prose h2 {
-  font-size: 1.5rem;
-  font-weight: 600;
-  margin-top: 1.25rem;
-  margin-bottom: 0.625rem;
-  color: #1f2937;
-}
+  .prose :not(pre) > code {
+    background-color: #f1f5f9;
+    padding: 0.125rem 0.375rem;
+    border-radius: 0.25rem;
+    font-size: 0.875em;
+    color: #e11d48;
+  }
 
-.prose h3 {
-  font-size: 1.25rem;
-  font-weight: 600;
-  margin-top: 1rem;
-  margin-bottom: 0.5rem;
-  color: #374151;
-}
+  .dark .prose :not(pre) > code {
+    background-color: #374151;
+    color: #fb7185;
+  }
 
-.prose p {
-  margin-top: 0.75rem;
-  margin-bottom: 0.75rem;
-  line-height: 1.625;
-}
+  /* Tool call card */
+  .tool-card {
+    transition: all 0.2s ease;
+  }
 
-.prose ul {
-  list-style-type: disc;
-  padding-left: 1.5rem;
-  margin-top: 0.5rem;
-  margin-bottom: 0.5rem;
-}
+  .tool-card:hover {
+    box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+  }
 
-.prose ol {
-  list-style-type: decimal;
-  padding-left: 1.5rem;
-  margin-top: 0.5rem;
-  margin-bottom: 0.5rem;
-}
+  /* Settings modal backdrop */
+  .modal-backdrop {
+    backdrop-filter: blur(4px);
+  }
 
-.prose li {
-  margin-top: 0.25rem;
-  margin-bottom: 0.25rem;
-}
+  /* Focus */
+  button:focus-visible {
+    outline: 2px solid var(--color-teal-500);
+    outline-offset: 2px;
+  }
 
-.prose blockquote {
-  border-left: 4px solid #e5e7eb;
-  padding-left: 1rem;
-  margin: 1rem 0;
-  color: #6b7280;
-  font-style: italic;
-}
+  input:focus, textarea:focus, select:focus {
+    outline: none;
+    border-color: var(--color-teal-500);
+  }
 
-.prose a {
-  color: #2563eb;
-  text-decoration: underline;
-}
+  /* Markdown prose styles */
+  .prose h1 {
+    font-size: 1.875rem;
+    font-weight: 700;
+    margin-top: 1.5rem;
+    margin-bottom: 0.75rem;
+    color: #111827;
+  }
 
-.prose a:hover {
-  color: #1d4ed8;
-}
+  .prose h2 {
+    font-size: 1.5rem;
+    font-weight: 600;
+    margin-top: 1.25rem;
+    margin-bottom: 0.625rem;
+    color: #1f2937;
+  }
 
-.prose strong {
-  font-weight: 600;
-}
+  .prose h3 {
+    font-size: 1.25rem;
+    font-weight: 600;
+    margin-top: 1rem;
+    margin-bottom: 0.5rem;
+    color: #374151;
+  }
 
-.prose em {
-  font-style: italic;
-}
+  .prose p {
+    margin-top: 0.75rem;
+    margin-bottom: 0.75rem;
+    line-height: 1.625;
+  }
 
-.prose hr {
-  border: none;
-  border-top: 1px solid #e5e7eb;
-  margin: 1.5rem 0;
-}
+  .prose ul {
+    list-style-type: disc;
+    padding-left: 1.5rem;
+    margin-top: 0.5rem;
+    margin-bottom: 0.5rem;
+  }
 
-.dark .prose h1,
-.dark .prose h2,
-.dark .prose h3 {
-  color: #f9fafb;
-}
+  .prose ol {
+    list-style-type: decimal;
+    padding-left: 1.5rem;
+    margin-top: 0.5rem;
+    margin-bottom: 0.5rem;
+  }
 
-.dark .prose p,
-.dark .prose li {
-  color: #e5e7eb;
-}
+  .prose li {
+    margin-top: 0.25rem;
+    margin-bottom: 0.25rem;
+  }
 
-.dark .prose blockquote {
-  border-left-color: #4b5563;
-  color: #9ca3af;
-}
+  .prose blockquote {
+    border-left: 4px solid #e5e7eb;
+    padding-left: 1rem;
+    margin: 1rem 0;
+    color: #6b7280;
+    font-style: italic;
+  }
 
-.dark .prose a {
-  color: #60a5fa;
-}
+  .prose a {
+    color: var(--color-teal-600);
+    text-decoration: underline;
+  }
 
-.dark .prose a:hover {
-  color: #93c5fd;
-}
+  .prose a:hover {
+    color: var(--color-teal-700);
+  }
 
-.dark .prose hr {
-  border-top-color: #4b5563;
+  .prose strong {
+    font-weight: 600;
+  }
+
+  .prose em {
+    font-style: italic;
+  }
+
+  .prose hr {
+    border: none;
+    border-top: 1px solid #e5e7eb;
+    margin: 1.5rem 0;
+  }
+
+  .dark .prose h1,
+  .dark .prose h2,
+  .dark .prose h3 {
+    color: #f9fafb;
+  }
+
+  .dark .prose p,
+  .dark .prose li {
+    color: #e5e7eb;
+  }
+
+  .dark .prose blockquote {
+    border-left-color: #4b5563;
+    color: #9ca3af;
+  }
+
+  .dark .prose a {
+    color: var(--color-teal-400);
+  }
+
+  .dark .prose a:hover {
+    color: var(--color-teal-300);
+  }
+
+  .dark .prose hr {
+    border-top-color: #4b5563;
+  }
+
+  /* Conversation action buttons: hover colours */
+  .action-btn-rename:hover svg {
+    color: var(--color-teal-600);
+  }
+
+  .action-btn-archive:hover svg {
+    color: var(--color-orange-600);
+  }
+
+  .action-btn-delete:hover svg {
+    color: var(--color-red-500);
+  }
+
+  .dark .action-btn-rename:hover svg {
+    color: var(--color-teal-400);
+  }
+
+  .dark .action-btn-archive:hover svg {
+    color: var(--color-orange-400);
+  }
+
+  .dark .action-btn-delete:hover svg {
+    color: var(--color-red-400);
+  }
+
+  /* Autocomplete dropdown, above the input */
+  .autocomplete-dropdown {
+    position: absolute;
+    bottom: 100%;
+    left: 0;
+    right: 0;
+    margin-bottom: 0.25rem;
+    background-color: var(--color-white);
+    border: 1px solid var(--color-gray-200);
+    border-radius: 0.5rem;
+    box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.1);
+    max-height: 16rem;
+    overflow-y: auto;
+    z-index: 50;
+  }
+
+  .dark .autocomplete-dropdown {
+    background-color: var(--color-gray-800);
+    border-color: var(--color-gray-700);
+  }
+
+  .autocomplete-item {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.5rem 0.75rem;
+    cursor: pointer;
+    transition: background-color 0.15s ease;
+  }
+
+  .autocomplete-item:hover {
+    background-color: var(--color-gray-50);
+  }
+
+  .dark .autocomplete-item:hover {
+    background-color: var(--color-gray-700);
+  }
+
+  .autocomplete-item.selected {
+    background-color: var(--color-teal-50);
+  }
+
+  .dark .autocomplete-item.selected {
+    background-color: rgba(19, 78, 74, 0.3);
+  }
+
+  .autocomplete-item:first-child {
+    border-top-left-radius: 0.5rem;
+    border-top-right-radius: 0.5rem;
+  }
+
+  .autocomplete-item:last-child {
+    border-bottom-left-radius: 0.5rem;
+    border-bottom-right-radius: 0.5rem;
+  }
+
+  .autocomplete-dropdown::-webkit-scrollbar {
+    width: 6px;
+  }
+
+  .autocomplete-dropdown::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .autocomplete-dropdown::-webkit-scrollbar-thumb {
+    background: var(--color-gray-300);
+    border-radius: 3px;
+  }
+
+  .autocomplete-dropdown::-webkit-scrollbar-thumb:hover {
+    background: var(--color-gray-400);
+  }
+
+  .dark .autocomplete-dropdown::-webkit-scrollbar-thumb {
+    background: var(--color-gray-600);
+  }
+
+  .dark .autocomplete-dropdown::-webkit-scrollbar-thumb:hover {
+    background: var(--color-gray-500);
+  }
 }

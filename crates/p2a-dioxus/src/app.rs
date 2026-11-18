@@ -12,60 +12,130 @@ use crate::state::{
     switch_blocked,
 };
 
-/// Apply theme to the document
-/// Strategy:
-/// - System: no classes, let media queries handle it
-/// - Light: add "light" class to override media query dark styles
-/// - Dark: add "dark" class to force dark mode
-#[cfg(target_arch = "wasm32")]
-pub fn apply_theme(theme: Theme) {
-    if let Some(window) = web_sys::window() {
-        if let Some(document) = window.document() {
-            if let Some(html) = document.document_element() {
-                let class_list = html.class_list();
-
-                // Remove both classes first
-                let _ = class_list.remove_1("dark");
-                let _ = class_list.remove_1("light");
-
-                match theme {
-                    Theme::System => {
-                        // No class - let media queries handle it
-                        tracing::info!("Theme: System (no class, using media queries)");
-                    }
-                    Theme::Light => {
-                        // Add light class to force light mode (overrides media query)
-                        let _ = class_list.add_1("light");
-                        tracing::info!("Theme: Light (added light class)");
-                    }
-                    Theme::Dark => {
-                        // Add dark class to force dark mode
-                        let _ = class_list.add_1("dark");
-                        tracing::info!("Theme: Dark (added dark class)");
-                    }
-                }
-            }
-        }
+/// Whether `theme` shows the dark palette; System follows the OS.
+pub fn theme_is_dark(theme: Theme, system_prefers_dark: bool) -> bool {
+    match theme {
+        Theme::Dark => true,
+        Theme::Light => false,
+        Theme::System => system_prefers_dark,
     }
 }
 
+/// The media query System follows.
+#[cfg(target_arch = "wasm32")]
+const PREFERS_DARK: &str = "(prefers-color-scheme: dark)";
+
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    /// The theme applied last, read by the OS-appearance listener.
+    static CURRENT_THEME: std::cell::Cell<Theme> = const { std::cell::Cell::new(Theme::Light) };
+    /// Whether the OS-appearance listener is installed (once per page).
+    static THEME_LISTENER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Set exactly one of `dark`/`light` on `<html>` (web).
+#[cfg(target_arch = "wasm32")]
+fn set_theme_class(window: &web_sys::Window, theme: Theme) {
+    let prefers_dark = window
+        .match_media(PREFERS_DARK)
+        .ok()
+        .flatten()
+        .is_some_and(|mq| mq.matches());
+    let dark = theme_is_dark(theme, prefers_dark);
+    if let Some(html) = window.document().and_then(|d| d.document_element()) {
+        let class_list = html.class_list();
+        let (on, off) = if dark {
+            ("dark", "light")
+        } else {
+            ("light", "dark")
+        };
+        let _ = class_list.remove_1(off);
+        let _ = class_list.add_1(on);
+    }
+}
+
+/// Apply theme to the document: `<html>` always carries `dark` or `light`
+/// (the `dark:` utilities key on the class). System resolves through the OS
+/// preference and follows its changes while System is the theme.
+#[cfg(target_arch = "wasm32")]
+pub fn apply_theme(theme: Theme) {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    CURRENT_THEME.with(|t| t.set(theme));
+    set_theme_class(&window, theme);
+    if !THEME_LISTENER.with(|l| l.replace(true))
+        && let Ok(Some(mq)) = window.match_media(PREFERS_DARK)
+    {
+        let on_change =
+            wasm_bindgen::closure::Closure::<dyn FnMut(web_sys::MediaQueryListEvent)>::new(
+                move |_event: web_sys::MediaQueryListEvent| {
+                    let theme = CURRENT_THEME.with(|t| t.get());
+                    if theme == Theme::System
+                        && let Some(window) = web_sys::window()
+                    {
+                        set_theme_class(&window, theme);
+                    }
+                },
+            );
+        let _ = mq.add_event_listener_with_callback("change", on_change.as_ref().unchecked_ref());
+        // Kept for the page's life: the listener is installed once.
+        on_change.forget();
+    }
+    tracing::info!("Applied theme: {:?}", theme);
+}
+
+/// Installs the OS-appearance listener once (`window.__p2aThemeMq`), which
+/// re-applies while the theme is System.
+#[cfg(not(target_arch = "wasm32"))]
+macro_rules! theme_listener_js {
+    () => {
+        "var w = window; \
+         if (!w.__p2aThemeMq) { \
+           w.__p2aThemeMq = w.matchMedia('(prefers-color-scheme: dark)'); \
+           w.__p2aThemeMq.addEventListener('change', function () { \
+             if (w.__p2aTheme === 'system') { \
+               var c = document.documentElement.classList; \
+               var d = w.__p2aThemeMq.matches; \
+               c.remove(d ? 'light' : 'dark'); c.add(d ? 'dark' : 'light'); \
+             } \
+           }); \
+         } "
+    };
+}
+
+/// The script the desktop webview runs for `theme`: exactly one of
+/// `dark`/`light` on `<html>`; System resolves through the OS preference
+/// and follows its changes.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn theme_script(theme: Theme) -> &'static str {
+    match theme {
+        Theme::Light => concat!(
+            theme_listener_js!(),
+            "w.__p2aTheme = 'light'; \
+             document.documentElement.classList.remove('dark'); \
+             document.documentElement.classList.add('light');"
+        ),
+        Theme::Dark => concat!(
+            theme_listener_js!(),
+            "w.__p2aTheme = 'dark'; \
+             document.documentElement.classList.remove('light'); \
+             document.documentElement.classList.add('dark');"
+        ),
+        Theme::System => concat!(
+            theme_listener_js!(),
+            "w.__p2aTheme = 'system'; \
+             var c = document.documentElement.classList; \
+             var d = w.__p2aThemeMq.matches; \
+             c.remove(d ? 'light' : 'dark'); c.add(d ? 'dark' : 'light');"
+        ),
+    }
+}
+
+/// Apply theme to the document (desktop: a script in the webview).
 #[cfg(not(target_arch = "wasm32"))]
 pub fn apply_theme(theme: Theme) {
-    // For desktop, use document::eval to run JavaScript in the webview
-    let js = match theme {
-        Theme::System => {
-            "document.documentElement.classList.remove('dark'); document.documentElement.classList.remove('light');"
-        }
-        Theme::Light => {
-            "document.documentElement.classList.remove('dark'); document.documentElement.classList.add('light');"
-        }
-        Theme::Dark => {
-            "document.documentElement.classList.remove('light'); document.documentElement.classList.add('dark');"
-        }
-    };
-
-    // Use dioxus document eval to run JavaScript
-    dioxus::document::eval(js);
+    dioxus::document::eval(theme_script(theme));
     tracing::info!("Applied theme: {:?}", theme);
 }
 
@@ -399,5 +469,43 @@ mod tests {
         assert!(is_text_field("DIV", true));
         assert!(!is_text_field("DIV", false));
         assert!(!is_text_field("BUTTON", false));
+    }
+}
+
+#[cfg(test)]
+mod theme_tests {
+    use super::*;
+
+    #[test]
+    fn theme_is_dark_resolves_system_by_the_os() {
+        assert!(!theme_is_dark(Theme::System, false));
+        assert!(theme_is_dark(Theme::System, true));
+        assert!(!theme_is_dark(Theme::Light, false));
+        assert!(!theme_is_dark(Theme::Light, true));
+        assert!(theme_is_dark(Theme::Dark, false));
+        assert!(theme_is_dark(Theme::Dark, true));
+    }
+
+    #[test]
+    fn theme_script_sets_one_class() {
+        let light = theme_script(Theme::Light);
+        assert!(light.contains("classList.add('light')"), "{light}");
+        assert!(light.contains("classList.remove('dark')"), "{light}");
+        let dark = theme_script(Theme::Dark);
+        assert!(dark.contains("classList.add('dark')"), "{dark}");
+        assert!(dark.contains("classList.remove('light')"), "{dark}");
+        let system = theme_script(Theme::System);
+        assert!(system.contains("prefers-color-scheme: dark"), "{system}");
+        assert!(system.contains("__p2aThemeMq"), "{system}");
+    }
+
+    #[test]
+    fn input_css_uses_the_dark_class() {
+        let css = include_str!("input.css");
+        assert!(css.contains("@custom-variant dark (&:where(.dark, .dark *));"));
+        assert!(css.contains("@layer components"));
+        assert!(!css.contains("html.light"));
+        assert!(!css.contains("@media (prefers-color-scheme"));
+        assert!(!css.contains("ring-color"));
     }
 }
