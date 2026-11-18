@@ -252,7 +252,9 @@ impl Settings {
             tracing::info!("Checking environment variables for API keys...");
             if settings.populate_from_env_with(lookup) {
                 tracing::info!("Rewriting settings without the stored environment key");
-                settings.write_to(storage);
+                if let Err(e) = settings.write_to(storage) {
+                    tracing::error!("{e}");
+                }
             }
         }
 
@@ -357,18 +359,26 @@ impl Settings {
 
     /// Save settings to platform-appropriate storage. Keys read from the
     /// environment are not written. Also publishes the backend access token
-    /// for ApiClient and the chat stream.
-    pub fn save(&self) {
-        self.write_to(&create_storage());
+    /// for ApiClient and the chat stream (also when the write fails, so the
+    /// running app uses what the user entered). The error says why the
+    /// settings could not be kept; callers show it.
+    pub fn save(&self) -> Result<(), String> {
+        let written = self.write_to(&create_storage());
         crate::platform::set_backend_access_token(Some(&self.backend_access_token));
+        written
     }
 
-    /// Write [`Settings::to_persisted`] to `storage`, logging a failure.
-    fn write_to<S: StorageBackend>(&self, storage: &S) {
-        if let Err(e) = storage.set(SETTINGS_KEY, &self.to_persisted()) {
-            tracing::error!("Failed to save settings: {}", e);
-        } else {
-            tracing::info!("Settings saved to storage");
+    /// Write [`Settings::to_persisted`] to `storage`.
+    fn write_to<S: StorageBackend>(&self, storage: &S) -> Result<(), String> {
+        match storage.set(SETTINGS_KEY, &self.to_persisted()) {
+            Ok(()) => {
+                tracing::info!("Settings saved to storage");
+                Ok(())
+            }
+            Err(e) => {
+                tracing::error!("Failed to save settings: {}", e);
+                Err(format!("The settings could not be saved: {e}"))
+            }
         }
     }
 
@@ -659,6 +669,44 @@ mod tests {
         fn contains_key(&self, key: &str) -> bool {
             self.0.borrow().contains_key(key)
         }
+    }
+
+    /// Storage whose writes fail, as a full disk or a refused localStorage would.
+    struct FailingStorage;
+
+    impl StorageBackend for FailingStorage {
+        fn get<T: serde::de::DeserializeOwned>(
+            &self,
+            key: &str,
+        ) -> Result<T, crate::platform::StorageError> {
+            Err(crate::platform::StorageError(format!("no {key}")))
+        }
+
+        fn set<T: Serialize>(
+            &self,
+            _key: &str,
+            _value: &T,
+        ) -> Result<(), crate::platform::StorageError> {
+            Err(crate::platform::StorageError("quota exceeded".to_string()))
+        }
+
+        fn remove(&self, _key: &str) -> Result<(), crate::platform::StorageError> {
+            Ok(())
+        }
+
+        fn contains_key(&self, _key: &str) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn save_reports_a_storage_failure() {
+        let s = Settings::default();
+        let err = s.write_to(&FailingStorage).unwrap_err();
+        assert!(err.contains("quota exceeded"), "{err}");
+        let ok = MemoryStorage::default();
+        assert_eq!(s.write_to(&ok), Ok(()));
+        assert!(ok.contains_key(SETTINGS_KEY));
     }
 
     #[test]

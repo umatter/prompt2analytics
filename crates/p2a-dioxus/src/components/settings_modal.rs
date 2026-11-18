@@ -46,6 +46,52 @@ fn parse_dimensions(msg: &str) -> (usize, usize) {
     (0, 0)
 }
 
+/// The largest file the upload sends: the server's absolute request-body cap
+/// (32 MiB) holds a base64 body of about this many file bytes. A server may
+/// accept less (the hosted demo about 1.5 MB); it then answers 413.
+const UPLOAD_CAP_BYTES: u64 = 24_000_000;
+
+/// A size in decimal megabytes with one decimal, e.g. `24.0 MB`.
+fn megabytes(bytes: u64) -> String {
+    format!("{:.1} MB", bytes as f64 / 1_000_000.0)
+}
+
+/// The refusal for a file above `cap_bytes`, before it is read; `None` when
+/// it fits.
+fn upload_too_large(size_bytes: u64, cap_bytes: u64) -> Option<String> {
+    (size_bytes > cap_bytes).then(|| {
+        format!(
+            "The file is {}; uploads are limited to {}. Load it by path instead.",
+            megabytes(size_bytes),
+            megabytes(cap_bytes)
+        )
+    })
+}
+
+/// The error a failed upload shows: the server's text, plus the reason when
+/// the server refused the request as too large.
+fn upload_error_text(error: &str, file_size: Option<u64>) -> String {
+    let too_large = error.contains("HTTP 413") || error.contains("(payload_too_large)");
+    if !too_large {
+        return error.to_string();
+    }
+    let file = file_size
+        .map(|n| format!("the file ({})", megabytes(n)))
+        .unwrap_or_else(|| "the file".to_string());
+    format!(
+        "{error}. {} is larger than this server accepts; the hosted demo accepts about 1.5 MB.",
+        capitalize(&file)
+    )
+}
+
+fn capitalize(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
 /// Props for SettingsModal
 #[derive(Props, Clone, PartialEq)]
 pub struct SettingsModalProps {
@@ -84,6 +130,9 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
     // File upload state (for browser file picker)
     let mut selected_file_name = use_signal(|| None::<String>);
     let mut selected_file_content = use_signal(|| None::<String>); // base64 encoded
+    let mut selected_file_size = use_signal(|| None::<u64>);
+    // Why the last save did not keep the settings
+    let mut save_error = use_signal(|| None::<String>);
 
     // Current tab - always start with the prop value
     let mut active_tab = use_signal(|| "llm".to_string());
@@ -104,6 +153,7 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
         local_base_url.set(s.ollama_base_url.clone());
         local_access_token.set(s.backend_access_token.clone());
         token_error.set(None);
+        save_error.set(None);
     }
 
     // Update tracking state
@@ -135,8 +185,17 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
         if s.provider == Provider::Ollama {
             s.ollama_base_url = local_base_url.read().clone();
         }
-        s.save();
-        props.on_close.call(());
+        let saved = s.save();
+        drop(s);
+        match saved {
+            Ok(()) => {
+                save_error.set(None);
+                props.on_close.call(());
+            }
+            // The settings apply to this run; the modal stays open and says
+            // that they were not kept.
+            Err(e) => save_error.set(Some(e)),
+        }
     };
 
     let handle_cancel = move |_| {
@@ -185,7 +244,17 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
         let files = evt.files();
         if let Some(file) = files.into_iter().next() {
             let file_name = file.name();
+            // Refuse a file too large to send before reading it into memory.
+            if let Some(refusal) = upload_too_large(file.size(), UPLOAD_CAP_BYTES) {
+                selected_file_name.set(None);
+                selected_file_content.set(None);
+                selected_file_size.set(None);
+                load_status.set(None);
+                load_error.set(Some(refusal));
+                return;
+            }
             selected_file_name.set(Some(file_name.clone()));
+            selected_file_size.set(Some(file.size()));
             load_status.set(Some("Reading file...".to_string()));
             load_error.set(None);
 
@@ -213,6 +282,7 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
         let selected_file_type = file_type.read().clone();
         let uploaded_file_name = selected_file_name.read().clone();
         let uploaded_file_content = selected_file_content.read().clone();
+        let uploaded_file_size = *selected_file_size.read();
 
         // Determine if we're using uploaded file or path
         let use_upload = uploaded_file_content.is_some() && uploaded_file_name.is_some();
@@ -307,6 +377,7 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
                         dataset_name.set(String::new());
                         selected_file_name.set(None);
                         selected_file_content.set(None);
+                        selected_file_size.set(None);
 
                         // Parse rows/cols from result message (format: "Dimensions: X rows x Y columns")
                         let (rows, cols) = {
@@ -336,7 +407,12 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
                     }
                 }
                 Err(e) => {
-                    load_error.set(Some(e));
+                    let shown = if use_upload {
+                        upload_error_text(&e, uploaded_file_size)
+                    } else {
+                        e
+                    };
+                    load_error.set(Some(shown));
                     load_status.set(None);
                 }
             }
@@ -680,6 +756,7 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
                                         if !evt.value().is_empty() {
                                             selected_file_name.set(None);
                                             selected_file_content.set(None);
+                                            selected_file_size.set(None);
                                         }
                                     }
                                 }
@@ -786,6 +863,12 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
                     }
                 }
 
+                if let Some(ref error) = *save_error.read() {
+                    p { class: "px-6 pt-3 text-sm text-red-600 dark:text-red-400",
+                        "{error}"
+                    }
+                }
+
                 // Footer
                 div { class: "px-6 py-4 border-t border-gray-200 dark:border-gray-800 flex justify-end gap-3",
                     button {
@@ -815,6 +898,31 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn upload_size_check() {
+        let cap = 24_000_000;
+        assert_eq!(upload_too_large(cap, cap), None);
+        assert_eq!(upload_too_large(0, cap), None);
+        let msg = upload_too_large(cap + 1, cap).expect("over the cap");
+        assert!(msg.contains("24.0 MB"), "{msg}");
+        let msg = upload_too_large(31_450_000, cap).expect("over the cap");
+        assert!(msg.contains("31.4 MB") || msg.contains("31.5 MB"), "{msg}");
+    }
+
+    #[test]
+    fn a_refused_upload_names_the_demo_limit() {
+        let too_large =
+            "The request is too large for this server (HTTP 413: length limit exceeded)";
+        let msg = upload_error_text(too_large, Some(3_000_000));
+        assert!(msg.starts_with(too_large), "{msg}");
+        assert!(msg.contains("3.0 MB") && msg.contains("1.5 MB"), "{msg}");
+        let coded = "message is 300000 bytes; this server accepts at most 262144 bytes per message (payload_too_large)";
+        assert!(upload_error_text(coded, None).contains("1.5 MB"));
+        // Other errors are shown as they are.
+        let other = "Dataset 'x' not found (not_found)";
+        assert_eq!(upload_error_text(other, Some(10)), other);
+    }
 
     #[test]
     fn key_storage_copy_is_platform_specific() {

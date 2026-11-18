@@ -558,7 +558,10 @@ pub fn ChatPanel() -> Element {
             Theme::Dark => Theme::System,
         };
         settings.write().theme = next;
-        settings.read().save();
+        let saved = settings.read().save();
+        if let Err(e) = saved {
+            chat_state.write().set_error(Some(e));
+        }
         apply_theme(next);
     };
 
