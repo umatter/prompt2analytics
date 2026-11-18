@@ -105,6 +105,6 @@ Above 1.10x:
   text, and the NaN count taken apart from the value buffer.
 
 Rule 5: the filter preview runs above its pre-approved ceiling of 1.5x (14.4x / 3.0x / 2.1x for `>=`,
-4.9x for `contains` at 100 rows): awaiting sign-off. `estimate_dataset_memory` and the drop_na preview
-at 100 rows are in no sign-off: awaiting sign-off.
+4.9x for `contains` at 100 rows), and `estimate_dataset_memory` and the drop_na preview at 100 rows were
+in no earlier sign-off: all signed off by the user on 2026-11-18 at these figures.
 

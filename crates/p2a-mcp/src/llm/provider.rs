@@ -242,7 +242,10 @@ impl Message {
     /// Cost: the converters that replay these results take 1.7-2.3x what they took when they
     /// dropped them (and the provider answered 400) on a quiet machine, 4.6x on a loaded run;
     /// linear in the number of results and under 10 ms at 10,000 attached results (signed off
-    /// 2026-11-08). Text-only messages are unchanged.
+    /// 2026-11-08). Text-only messages are unchanged. Keeping a result repeated for one call id
+    /// once (a map of the answered ids instead of a set lookup) costs 1.13x of v0.5.0 at 100
+    /// results (5.83 to 6.61 µs) and 1.08x / 1.06x at 1,000 / 10,000 (quiet re-time, one core,
+    /// nine interleaved rounds); signed off by the user on 2026-11-18.
     pub fn attached_tool_results(&self) -> Vec<&ToolResult> {
         if self.role != MessageRole::Assistant {
             return Vec::new();

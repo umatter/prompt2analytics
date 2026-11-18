@@ -225,7 +225,8 @@ strL and 9.5 to 18.1 MiB with it, of which 4.3 MiB is the larger idle footprint 
 binary.
 
 Rule 5: the strL load is above its pre-approved ceiling of 1.4x and the load without strL (1.18-1.41x)
-is in no sign-off: both awaiting sign-off.
+was in no earlier sign-off; both, with their peak RSS, were signed off by the user on 2026-11-18 at these
+figures.
 
 ## Tests
 

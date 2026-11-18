@@ -2476,8 +2476,6 @@ pub(crate) fn render_head(df: &DataFrame, rows: usize) -> Result<String, String>
     Ok(out)
 }
 
-/// Load `path` as `load_dataset` does: [`DataLoader::load`] without `na_strings`, or
-/// [`DataLoader::load_with_na`] with them (a non-CSV file is then refused).
 /// The most (value, label) pairs `load_dataset` lists per Stata column.
 const STATA_LABELS_SHOWN: usize = 10;
 /// The most characters of one Stata value label `load_dataset` shows.
@@ -2532,6 +2530,8 @@ fn stata_notes(notes: &[String]) -> String {
     out
 }
 
+/// Load `path` as `load_dataset` does: [`DataLoader::load`] without `na_strings`, or
+/// [`DataLoader::load_with_na`] with them (a non-CSV file is then refused).
 fn load_with_request_na(path: &Path, na_strings: Option<&[String]>) -> Result<Dataset, LoadError> {
     match na_strings {
         None => DataLoader::load(path),

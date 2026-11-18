@@ -377,8 +377,9 @@ Rows of existing paths above 1.10x:
   (n/20)^2 more); the null-free rows above are the comparison. Peak RSS of the full join at 10,000 rows:
   25.3 MiB base, 40.8 MiB head (`/usr/bin/time`, median of 3).
 
-Rule 5: none of these rows is in a sign-off (the `group_by` sort comes back to the user above 1.10x by the
-2026-11-17 decisions): awaiting sign-off.
+Rule 5: none of these rows was in an earlier sign-off (the `group_by` sort came back to the user above 1.10x
+by the 2026-11-17 decisions); all, the peak RSS of the join with missing keys included, were signed off by
+the user on 2026-11-18 at these figures.
 
 The positional shifts, `normalize`, one-hot and the categorical replace run their own column arithmetic
 instead of a query plan, which is where the 0.1-0.4x come from. The new opt-in paths have no base:

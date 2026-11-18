@@ -351,7 +351,11 @@ HTTP), and they never depend on the resource profile:
   A client write past it answers 422 `quota_exceeded`; text the server produces
   (assistant replies, tool results) is truncated to the room left; a dataset
   whose metadata row would pass it is loaded but not listed; deleting a
-  conversation frees its bytes.
+  conversation frees its bytes. Under the budget a session also keeps at most
+  1,000 dataset metadata rows. Every dataset a tool makes (generated data,
+  munging results, imports) takes a row as a loaded one does, so many
+  intermediate datasets can leave a later load unlisted and not reloadable
+  after a restart, and leave less of the budget to the conversations.
 - **Memory.** While RSS is above `P2A_MEMORY_SOFT_LIMIT_MB`, writes to the store
   answer 503 `memory_pressure` (`Retry-After: 15`). The store does not hand
   memory back itself; it reads the same RSS, so it accepts writes again once the

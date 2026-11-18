@@ -188,6 +188,22 @@ unbalanced, so it has no standard error. A row whose length differs from `data[0
 The factor B means are R's `model.tables` margins of the sequential fit (`b_means_model_tables`),
 not the raw `tapply` margins (`b_means_raw`, kept in the case for comparison).
 
+## Wall-clock (T4-WP31)
+
+`stats_model_tables` through the MCP dispatch path (`call_tool_with_session`), two factors, against
+v0.5.0 (`f80b0131`): quiet re-time of 2026-11-18, release builds, one core, nine interleaved rounds
+(load average 1.2-2.0); medians, the ratio of the minima in brackets.
+
+| Layout | n = 100 | n = 1,000 | n = 10,000 |
+|---|---|---|---|
+| two-way unbalanced, no se | 261.5 -> 306.7 µs, 1.17x [1.16] | 483.8 -> 532.1 µs, 1.10x [1.10] | 2.53 -> 2.64 ms, 1.04x [1.06] |
+| two-way balanced, with the se row | 260.1 -> 306.4 µs, 1.18x [1.16] | 465.2 -> 537.3 µs, 1.16x [1.17] | 2.48 -> 2.59 ms, 1.04x [1.04] |
+
+The added time is the rewrite to R's sequential projections and the standard errors (a balanced
+layout takes the fast path through the raw margins); not profiled further. The unbalanced rows are
+within the ceilings signed off on 2026-11-17 (1.5 / 1.2 / 1.1x); the balanced rows with the se row
+were signed off by the user on 2026-11-18 at these figures.
+
 ## Numerical Precision Summary
 
 | Design | Mean Tolerance | SE Tolerance |

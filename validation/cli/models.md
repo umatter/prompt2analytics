@@ -141,7 +141,7 @@ Release builds of `p2a` (`--no-default-features --features spectral-analysis`) a
 | `reg hac` | 1,000 | 28.2 | 28.9 | 1.02x | 1.03x | 1.94-1.95 |
 | `reg hac` | 10,000 | 33.7 | 34.0 | 1.01x | 1.01x | 1.95-1.96 |
 
-`survival km --group -F json` at n = 10,000 is 1.15x here and 1.11x in the 5-round run (30.98 ms base, 34.35 ms head); peak RSS 28.3 MiB base, 35.7 MiB head. The head prints one JSON document where the base printed one per group; the nested, pretty-printed curves are about 24% more bytes (1.67 MB against 1.35 MB), the likely cause of the difference. Above 1.10x and in no sign-off: awaiting sign-off. The v0.5.2 (90a99318) column was not measured.
+`survival km --group -F json` at n = 10,000 is 1.15x here and 1.11x in the 5-round run (30.98 ms base, 34.35 ms head); peak RSS 28.3 MiB base, 35.7 MiB head. The head prints one JSON document where the base printed one per group; the nested, pretty-printed curves are about 24% more bytes (1.67 MB against 1.35 MB), the likely cause of the difference. Above 1.10x, with the higher peak RSS: signed off by the user on 2026-11-18. The v0.5.2 (90a99318) column was not measured.
 
 ## Reproduce
 

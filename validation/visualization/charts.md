@@ -170,5 +170,5 @@ Head/base above 1.10x:
 - `viz_boxplot` at n = 10,000 (1.11x, 4.67 to 5.18 ms; 1.02x below): not profiled; the tool now reads its
   columns with their missing values counted.
 
-Rule 5: the interactive charts, the 40-variable heatmap and the box plot at 10,000 rows are in no sign-off:
-awaiting sign-off.
+Rule 5: the interactive charts, the 40-variable heatmap and the box plot at 10,000 rows were in no earlier
+sign-off: signed off by the user on 2026-11-18 at these figures.
