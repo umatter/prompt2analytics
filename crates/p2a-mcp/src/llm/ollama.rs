@@ -196,20 +196,7 @@ impl OllamaProvider {
 
         let chat_response: OllamaChatResponse =
             read_json_capped(response, MAX_UPSTREAM_BODY_BYTES).await?;
-
-        // Convert response to our Message format
-        let tool_calls = chat_response
-            .message
-            .tool_calls
-            .unwrap_or_default()
-            .into_iter()
-            .map(OllamaToolCall::into_call)
-            .collect();
-
-        Ok(AssistantTurn {
-            content: chat_response.message.content,
-            tool_calls,
-        })
+        turn_from_response(chat_response)
     }
 
     /// Make a streaming API call to Ollama.
@@ -478,6 +465,25 @@ struct OllamaChatResponse {
     error: Option<Value>,
 }
 
+/// The turn of a non-streamed answer. An `error` object (which some Ollama versions send with
+/// status 200) fails the call rather than read as an empty answer.
+fn turn_from_response(chat_response: OllamaChatResponse) -> Result<AssistantTurn, LlmError> {
+    if let Some(error) = chat_response.error {
+        return Err(stream_failed(PROVIDER, None, &error.to_string()));
+    }
+    let tool_calls = chat_response
+        .message
+        .tool_calls
+        .unwrap_or_default()
+        .into_iter()
+        .map(OllamaToolCall::into_call)
+        .collect();
+    Ok(AssistantTurn {
+        content: chat_response.message.content,
+        tool_calls,
+    })
+}
+
 #[derive(Debug, Default, Deserialize)]
 struct OllamaResponseMessage {
     #[serde(default)]
@@ -569,6 +575,25 @@ mod tests {
             .map(|m| m["role"].as_str().unwrap())
             .collect();
         assert_eq!(roles, ["system", "user", "assistant", "user"]);
+    }
+
+    /// A non-streamed answer that is an error object fails the call (it read as an empty
+    /// answer before); an answer without one is the turn.
+    #[test]
+    fn a_non_streamed_error_object_fails_the_call() {
+        let error: OllamaChatResponse =
+            serde_json::from_str(r#"{"error": "model 'x' not found"}"#).unwrap();
+        assert!(matches!(
+            turn_from_response(error),
+            Err(LlmError::StreamFailed { .. })
+        ));
+        let ok: OllamaChatResponse = serde_json::from_str(
+            r#"{"message": {"role": "assistant", "content": "hi"}, "done": true}"#,
+        )
+        .unwrap();
+        let turn = turn_from_response(ok).unwrap();
+        assert_eq!(turn.content, "hi");
+        assert!(turn.tool_calls.is_empty());
     }
 
     #[test]
