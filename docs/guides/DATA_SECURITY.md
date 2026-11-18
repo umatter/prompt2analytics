@@ -40,9 +40,9 @@ The CLI does not create files in hidden directories or system locations, apart f
 |-----------|----------|-------|
 | Datasets | in memory, per session | gone when the session ends or the process stops |
 | Files tools read and write | under `P2A_DATA_ROOT` (default: the working directory) | every path is confined to this root |
-| Per-session directories (open public mode) | `<P2A_DATA_ROOT>/sessions/<session id>/`, mode 0700 | deleted with the session; left-over directories are purged at the first file access after a restart, except those of sessions a RocksDB session store can still adopt (accessed within the session TTL; at most `P2A_MAX_SESSIONS` directories, those of the most recently used sessions that have one), which go when the store deletes the session's rows or with the session once it has come back and used its files |
-| Temporary files of writes | `.<file name>.<uuid>.p2a-tmp` beside the target, mode 0600 | renamed over the target when the write ends; one left by a process that stopped mid-write is removed by the first sweep of its folder after nobody has written to it for ten minutes. A tool path that resolves through the data-root jail sweeps the root (or the session's directory) and the folder the path lies in or names, the first time in a process and then at most once every ten minutes |
-| Session database (feature `db`) | in-memory SurrealDB unless `P2A_DB_PATH` names a RocksDB directory | conversations, messages, tool calls, settings, dataset metadata; `P2A_DB_PATH` must lie outside `P2A_DATA_ROOT` for an authenticated or open public server |
+| Per-session directories (open public mode) | `<P2A_DATA_ROOT>/sessions/<session id>/`, mode 0700 | deleted with the session; left-over directories are purged at the first file access after a restart, except those of sessions an on-disk (SurrealKV) session store can still adopt (accessed within the session TTL; at most `P2A_MAX_SESSIONS` directories, those of the most recently used sessions that have one), which go when the store deletes the session's rows or with the session once it has come back and used its files |
+| Temporary files of writes | `.<file name>.<uuid>.p2a-tmp` beside the target, mode 0600 | renamed over the target when the write ends; one left by a process that stopped mid-write is removed by the first sweep of its folder after the temporary file has not been written for ten minutes. A tool path that resolves through the data-root jail sweeps the root (or the session's directory) and the folder the path lies in or names, the first time in a process and then at most once every ten minutes |
+| Session database (feature `db`) | in-memory SurrealDB unless `P2A_DB_PATH` names a SurrealKV directory (a RocksDB store written by v0.5.0 or earlier is set aside at start-up, [DEPLOYMENT.md](DEPLOYMENT.md)) | conversations, messages, tool calls, settings, dataset metadata; `P2A_DB_PATH` must lie outside `P2A_DATA_ROOT` for an authenticated or open public server |
 | Audit log | off by default; `p2a-audit.log` in the working directory, or `P2A_AUDIT_PATH` | mode 0600; rotates at `P2A_AUDIT_MAX_MB` (default 50, keeps 3 old files, `0` = never rotate). Keep it outside `P2A_DATA_ROOT` |
 | Server logs | stderr | filter `RUST_LOG`, default `p2a_mcp=info,p2a_core=warn` (the embedded desktop server: `p2a_mcp=info,p2a_core=info`); info-level lines include session ids |
 
@@ -59,8 +59,10 @@ plaintext. Keys the app reads from the `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` or
 `OPENROUTER_API_KEY` environment variables are used but never written. The app
 does not use the operating system's keychain.
 
-The desktop app starts an embedded backend on `127.0.0.1:8081` (local mode, no
-resource limits). Its file tools can reach everything under its data root, which
+The desktop app starts an embedded backend on a free loopback port that the
+operating system chooses (`127.0.0.1`, local mode, no resource limits). Its
+session lives 30 days from its last use, so conversations and datasets survive
+restarts and idle hours; the session id is kept in the configuration directory. Its file tools can reach everything under its data root, which
 is `P2A_DATA_ROOT` or the app's working directory. An app started from a
 launcher often has the home directory as its working directory, so set
 `P2A_DATA_ROOT` to a dedicated folder.
@@ -135,9 +137,19 @@ every path, with `origin` `http`, `llm_tool`, `websocket` or `stdio`, and one
 line for each call refused before it runs: at admission (memory pressure, a
 busy session or a busy server), by a request limit or malformed arguments,
 for a name no tool has (`unknown_tool`, on every path), and, for the
-assistant, for an internal tool it is never offered (`not_available`). A call
-refused because its session no longer exists (on any path, including a chat
-whose session was removed while it ran) is not audited.
+assistant, for an internal tool it is never offered (`not_available`). These
+are not audited, because no call reaches the governor:
+
+- a call refused because its session no longer exists (on any path, including
+  a chat whose session was removed while it ran);
+- the tool calls of an assistant reply that the chat's loop detection stops
+  (an exact repeat of the previous round, or a tool called too often), and the
+  calls of a round beyond the per-round cap, which get an error result without
+  running;
+- websocket messages refused before they are handled: a tool message sent
+  before the `auth` message that names the connection's session, and a
+  message refused with `connection_busy` because the connection's queue is
+  full.
 
 Each entry records the timestamp, `session_id`, `origin`, `tool_name`, the
 sanitised `arguments`, `success`, `outcome` (`ok`, `tool_error`, `cancelled`,
