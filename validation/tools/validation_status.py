@@ -97,11 +97,19 @@ def strip_ansi(text: str) -> str:
 TARGET_RE = re.compile(r"^\s*Running (unittests )?(\S+)( \(.*\))?\s*$")
 DOC_RE = re.compile(r"^\s*Doc-tests ")
 LIST_RE = re.compile(r"^(\S+): (test|bench)$")
+# A line of `select` output: `<target flag>\t<libtest name>`.
+SELECTION_RE = re.compile(r"^(--(?:lib|bins|bin \S+|test \S+))\t(\S+)$")
 RUN_RE = re.compile(r"(?:^|\s)test (\S+)(?: - should panic)? \.\.\. (ok|FAILED|ignored)\b")
 TOTALS_RE = re.compile(r"^test result: (ok|FAILED)\. (\d+) passed; (\d+) failed; (\d+) ignored;")
 # rustc's `error[E0425]: ...` lines and cargo's `error: could not compile `<crate>` ...`.
 COMPILE_ERROR_RE = re.compile(r"^(?:error\[E\d+\]|error: could not compile\b)")
 RUN_STATUS = {"ok": "ok", "FAILED": "failed", "ignored": "ignored"}
+
+
+def id_prefix(package: str, binary=None) -> str:
+    """The test-id prefix of a test target: `<package>::<binary>::` for an integration
+    test binary, `<package>::` for the other targets."""
+    return f"{package}::{binary}::" if binary else f"{package}::"
 
 
 def target_of(path: str, package: str):
@@ -110,14 +118,14 @@ def target_of(path: str, package: str):
     p = path.replace("\\", "/")
     m = re.search(r"(?:^|/)src/(lib|main)\.rs$", p)
     if m:
-        return ("--lib" if m.group(1) == "lib" else "--bins", package + "::", None)
+        return ("--lib" if m.group(1) == "lib" else "--bins", id_prefix(package), None)
     m = re.search(r"(?:^|/)src/bin/([^/]+?)(?:\.rs|/main\.rs)$", p)
     if m:
-        return ("--bin " + m.group(1), package + "::", None)
+        return ("--bin " + m.group(1), id_prefix(package), None)
     m = re.search(r"(?:^|/)tests/([^/]+?)(?:\.rs|/main\.rs)$", p)
     if m:
         binary = m.group(1)
-        return ("--test " + binary, f"{package}::{binary}::", binary)
+        return ("--test " + binary, id_prefix(package, binary), binary)
     return None
 
 
@@ -154,7 +162,8 @@ def read_test_list(path, package: str) -> str:
     if not _scan_list(text, package)[2]:
         raise UsageError(
             f"test list {path} has no cargo `Running <target>` line; expected the output "
-            f"of `cargo test -p {package} --tests -- --list`"
+            f"of `cargo test -p {package} --tests -- --list` with its standard error "
+            f"(cargo writes the `Running` lines there: redirect with `> <file> 2>&1`)"
         )
     return text
 
@@ -467,15 +476,15 @@ def read_selection(path, package: str) -> list:
     other targets' `<package>::<name>`, as parse_cargo_log names them."""
     ids = []
     for no, line in enumerate(read_text(path).splitlines(), start=1):
-        if not line.strip():
+        # Only an empty line is skipped: the runner counts every other line (`grep -c .`).
+        if not line:
             continue
-        target, sep, name = line.partition("\t")
-        if not sep or not name.strip() or not re.match(r"^--(?:lib|bins|bin \S+|test \S+)$", target):
+        m = SELECTION_RE.match(line)
+        if not m:
             raise UsageError(f"{path}:{no}: not a `<target>\\t<libtest name>` line: {line!r}")
-        if target.startswith("--test "):
-            ids.append(f"{package}::{target[len('--test '):]}::{name.strip()}")
-        else:
-            ids.append(f"{package}::{name.strip()}")
+        target, name = m.groups()
+        binary = target[len("--test "):] if target.startswith("--test ") else None
+        ids.append(id_prefix(package, binary) + name)
     return ids
 
 
@@ -1110,9 +1119,11 @@ def lint(root: Path, test_lists, strict=False) -> list:
         for name, line, start, end in functions:
             loads = [(m.group(1), keep.count("\n", 0, m.start()) + 1) for m in _LOAD_RE.finditer(keep, start, end)]
             scanned_loads.setdefault((package, name), set()).update(cid for cid, _ in loads)
-            scanned_literals.setdefault((package, name), set()).update(
-                _ID_LITERAL_RE.findall(keep, start, end)
-            )
+            literals = set(_ID_LITERAL_RE.findall(keep, start, end))
+            scanned_literals.setdefault((package, name), set()).update(literals)
+            # A case id in a string literal: loaded through a helper, as
+            # registered-test-loads-no-case accepts it.
+            named = literals & set(case_files)
             for cid, load_line in loads:
                 if cid not in case_files:
                     findings.append(
@@ -1137,7 +1148,7 @@ def lint(root: Path, test_lists, strict=False) -> list:
                             f"that case with a {package} test named `{name}`",
                         )
                     )
-            if loads:
+            if loads or named:
                 continue
             for c_start, c_end in comments:
                 if start <= c_start < end and _CSV_CITATION_RE.search(text, c_start, c_end):

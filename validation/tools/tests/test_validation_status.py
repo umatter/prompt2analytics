@@ -308,6 +308,22 @@ class TestCollect(unittest.TestCase):
         self.assertEqual(code, 2, text)
         self.assertIn("--selection needs --package", text)
 
+    def test_selection_line_rule(self):
+        # One pattern and one id rule: the selection's ids are the ids the logs give.
+        self.assertTrue(vs.SELECTION_RE.match("--test validation_x\ttest_validate_a"))
+        self.assertFalse(vs.SELECTION_RE.match("--tests\ttest_validate_a"))
+        self.assertEqual(vs.id_prefix("p2a-core", "validation_x"), "p2a-core::validation_x::")
+        self.assertEqual(vs.id_prefix("p2a-core"), "p2a-core::")
+        self.assertEqual(vs.target_of("tests/validation_x.rs", "p2a-core")[1], vs.id_prefix("p2a-core", "validation_x"))
+        # A whitespace-only line is a malformed line (the runner counts it as a line).
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "sel.txt"
+            path.write_text("--lib\tstats::tests::test_validate_a\n \n")
+            with self.assertRaises(vs.UsageError):
+                vs.read_selection(path, "p2a-core")
+            path.write_text("--lib\tstats::tests::test_validate_a\n\n")
+            self.assertEqual(vs.read_selection(path, "p2a-core"), ["p2a-core::stats::tests::test_validate_a"])
+
     def test_selected_zero_is_no_tests(self):
         code, text, results = self.collect("--package", "p2a-cli", "--selected", "0")
         self.assertEqual(code, 0, text)
@@ -534,6 +550,8 @@ class TestSelect(unittest.TestCase):
                     code, lines = self.select(fixture=path)
                     self.assertEqual(code, 2, lines)
                     self.assertTrue(any(str(path) in ln and "Running" in ln for ln in lines), lines)
+                    # cargo writes `Running` to stderr: the message says to capture it.
+                    self.assertTrue(any("2>&1" in ln for ln in lines), lines)
 
     def test_category_of(self):
         b = {"validation_ml_advanced", "validation_boosting_methods", "validation_new_methods"}
@@ -791,6 +809,23 @@ class TestLint(TreeCase):
         )
         code, text = self.lint("--strict")
         self.assertEqual(code, 0, text)
+        with self.subTest("a test that loads its case through a helper"):
+            src.write_text(
+                original.replace(
+                    "        #[test]\n        fn test_selftest()",
+                    "        fn demo_case(id: &str) -> p2a_validation::Case {\n"
+                    "            p2a_validation::Case::load(id)\n"
+                    "        }\n\n"
+                    "        #[test]\n"
+                    "        fn test_validate_helper() {\n"
+                    "            // reference values from validation/expected/legacy_b.csv\n"
+                    '            let c = demo_case("demo_var_case");\n'
+                    "        }\n\n"
+                    "        #[test]\n        fn test_selftest()",
+                )
+            )
+            code, text = self.lint()
+            self.assertNotIn("csv-citation", text)
 
     def test_strict_dead_link(self):
         doc = self.path("validation/stats/demo.md")
