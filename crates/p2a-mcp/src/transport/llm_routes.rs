@@ -2733,8 +2733,9 @@ mod chat_tests {
         );
     }
 
-    /// A stream error from the callback never overtakes held text: with the channel full it
-    /// waits behind the text, and once there is room both arrive, text first.
+    /// A stream error from the callback never overtakes held text. With the channel full the
+    /// error is not sent; a call that finds room sends the held text, and when that refills the
+    /// channel its own error is dropped. A later error with room arrives after the text.
     #[tokio::test]
     async fn a_stream_error_follows_the_held_text() {
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
@@ -2751,11 +2752,13 @@ mod chat_tests {
             matches!(rx.recv().await, Some(ProgressEvent::Content { ref text }) if text == "first ")
         );
         assert!(rx.try_recv().is_err());
-        // Room: the held text, then the error.
+        // Room: the held text goes out and fills the channel, so this error is dropped.
         events.error(error());
         assert!(
             matches!(rx.recv().await, Some(ProgressEvent::Content { ref text }) if text == "held")
         );
+        assert!(rx.try_recv().is_err());
+        // Room again: the error arrives.
         events.error(error());
         assert!(matches!(rx.recv().await, Some(ProgressEvent::Error { .. })));
     }

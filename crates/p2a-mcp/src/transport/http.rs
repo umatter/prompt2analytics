@@ -875,7 +875,7 @@ fn create_base_router(state: AppState, config: &ServerConfig) -> Router {
 /// no JSON content type) is refused with the status axum gives the rejection,
 /// in the server's JSON error body with code `invalid_arguments`; the
 /// parser's message, which quotes the offending value, is cut as the
-/// websocket cuts it ([`crate::server::quote_cut`]). A body above the size
+/// websocket cuts it (`server::quote_cut`). A body above the size
 /// cap keeps axum's plain-text 413, as the body-limit layer answers it.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct JsonBody<T>(pub T);
