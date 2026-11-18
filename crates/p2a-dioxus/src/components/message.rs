@@ -12,13 +12,21 @@ pub struct MessageProps {
     pub message: ChatMessage,
 }
 
+/// Whether a message must be redrawn: its text, streaming and interrupted
+/// state, its plot count, and each tool call's id, outcome and result size.
 impl PartialEq for ChatMessage {
     fn eq(&self, other: &Self) -> bool {
         self.id == other.id
-            && self.content == other.content
             && self.is_streaming == other.is_streaming
+            && self.interrupted == other.interrupted
             && self.images.len() == other.images.len()
             && self.tool_calls.len() == other.tool_calls.len()
+            && self.content == other.content
+            && self.tool_calls.iter().zip(&other.tool_calls).all(|(a, b)| {
+                a.id == b.id
+                    && a.success == b.success
+                    && a.result.as_ref().map(String::len) == b.result.as_ref().map(String::len)
+            })
     }
 }
 
@@ -161,5 +169,37 @@ pub fn Message(props: MessageProps) -> Element {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::ToolCallInfo;
+
+    fn with_call(success: Option<bool>, result: Option<&str>) -> ChatMessage {
+        let mut m = ChatMessage::assistant_streaming();
+        m.id = "m1".into();
+        m.content = "Fitted.".into();
+        m.tool_calls.push(ToolCallInfo {
+            id: "call_1".into(),
+            name: "regression_ols".into(),
+            arguments: serde_json::json!({"dataset": "sales"}),
+            result: result.map(str::to_string),
+            success,
+            is_expanded: false,
+        });
+        m
+    }
+
+    #[test]
+    fn a_tool_call_status_change_redraws_the_message() {
+        let running = with_call(None, None);
+        assert_eq!(running, with_call(None, None));
+        assert_ne!(running, with_call(Some(false), None), "failed");
+        assert_ne!(running, with_call(None, Some("OLS results")), "result came");
+        let mut interrupted = running.clone();
+        interrupted.interrupted = true;
+        assert_ne!(running, interrupted);
     }
 }
