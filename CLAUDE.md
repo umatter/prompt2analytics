@@ -398,7 +398,7 @@ crates/p2a-core/src/
 │   ├── latex.rs           # LaTeX tables (OLS, Panel, Discrete)
 │   ├── markdown.rs        # Markdown tables for documentation
 │   ├── html.rs            # Self-contained HTML tables
-│   └── csv.rs             # CsvExport trait for all result types
+│   └── csv.rs             # CsvExport: OLS, discrete, panel, Hausman, PCA, k-means, DBSCAN results
 │
 ├── reports/               # Report generation
 │   └── html.rs            # HTML report builder
@@ -541,7 +541,7 @@ let missing = cols.missing().clone();           // what was dropped
     dropped, gaps joined with a warning, as `plm::purtest`); the weighted mean (complete value-weight
     pairs); Mauchly (complete subjects); `loglin` (`xtabs`) and `prop.trend.test` (a missing group is
     dropped); SVM, PPR; the CLI viz commands (complete rows of the plotted columns; the heatmap
-    pairwise, as the correlation matrix).
+    correlates the rows complete in all its columns, `cor(use = "complete.obs")`).
   - **Fail:** long-format choice models (conditional and mixed logit), because one dropped row breaks a
     choice situation; weighting, matching, TMLE, gsynth; spatial; time series (`stl`, `HoltWinters`,
     `acf`/`pacf`, `Box.test`; dropping an interior value would splice the series); `cov.wt` and `isoreg`; k-means,
@@ -955,8 +955,11 @@ test names are not, and the paper's Makefile uses them.
 (`validation/run_validation.sh --write-status`), never hand-edited. Regenerate it once per
 wave integration, after merging lanes, not inside a lane. CI fails its status-page check
 (`P2A_CHECK_STATUS_PAGE=1`, `validation/tools/tests/test_status_page.py`) when the page's
-per-package `test_validate` counts differ from `cargo test -- --list`. A run in which a
-selected test has no parsed result fails and leaves the page as it was.
+per-package `test_validate` counts differ from `cargo test -- --list`, and when an entry is
+added to or removed from `validation/methods/*.json` without a new page. A run in which a
+selected test has no parsed result, a parsed result was not selected, a test list or selection
+failed, or the results could not be collected fails and leaves the page as it was. A failing
+`registered-property` test marks its method FAIL.
 
 **Lint.** `python3 validation/tools/validation_status.py lint --strict --tests target/*-tests.txt`
 (a CI gate, with the three `--list` outputs CI writes; the commands that write them are in
@@ -1111,7 +1114,9 @@ Auto-discovered guidance:
   `dataset_quotas.rs`, `serve_limits.rs`, `serve_limits_hold.rs`, `uploads.rs`, `orphan_sweep_memory.rs`);
   their feature gates and commands are in `docs/guides/TESTING.md`. The websocket tests run in CI;
   everything behind `db` is outside it (`sessions.rs`, `orphan_sweep_memory.rs`, the conversation test in
-  `llm_egress.rs`, and every `#[cfg(feature = "db")]` item in the lib, among them the `db`, `persistent_session`
+  `llm_egress.rs`, and every item in the lib gated on `db`, alone or with another feature
+  (`#[cfg(feature = "db")]`, `#[cfg(all(feature = "http", feature = "db"))]`,
+  `#[cfg(all(test, feature = "db"))]`), among them the `db`, `persistent_session`
   and `transport::conversation` modules and the `db` tests in `transport::http` and `transport::llm_routes`):
   run `cargo test -p p2a-mcp --features full` (or `--no-default-features --features "http,llm,auth,db"`) when
   touching sessions, the DB or any `db`-gated code.
@@ -1123,7 +1128,8 @@ Auto-discovered guidance:
   `start_http_transport` install the limits of the configuration they serve and refuse a start whose limits or
   process policies differ from those of a server still running in the process (held until its last connection or
   websocket session closes), so a test serves a configuration whose resource profile is off, with no overrides and
-  the default policies, or runs in a binary whose servers share one config (`crates/p2a-mcp/tests/serve_limits.rs`).
+  the default policies, or runs in a binary whose servers share one config (`crates/p2a-mcp/tests/serve_limits.rs`),
+  or in a binary whose tests run one at a time (`crates/p2a-mcp/tests/serve_limits_hold.rs`).
 - **Clippy runs but does not gate** (with the test step's feature sets, plus `p2a-chat` and `p2a-text`; lib and bin targets
   only, no `--tests`): p2a-core has a pre-existing backlog of clippy violations, and `Cargo.toml`
   `[workspace.lints]` allows a long list of lints (dead_code, unused_imports, too_many_arguments, ...). Do
@@ -1155,7 +1161,7 @@ Auto-discovered guidance:
   (50,000 entities, 10 s), and `duckdb_query_stops_at_timeout` (5 s, `database` feature); in p2a-mcp,
   `each_columns_own_mapping_is_charged_once` (250 ms). The panel tests guard against per-entity work
   turning quadratic; the code keeps no operation count that a deterministic test could check instead.
-  Bounded polling loops with a deadline (the governor, serve and websocket tests) fail instead of
+  Bounded polling loops with a deadline (the governor, serve, websocket and stdio tests) fail instead of
   hanging and are not timing assertions. Do not add ungated timing assertions — they fail on loaded
   or slower machines and make `cargo test` machine-dependent, which the paper's reviewers will run.
 
@@ -1216,7 +1222,8 @@ let df = df! {
    - LaTeX tables (publication-ready, OLS/Panel/Discrete)
    - Markdown tables (documentation, GitHub)
    - HTML tables (self-contained with CSS)
-   - CSV via `CsvExport` trait (all result types)
+   - CSV via the `CsvExport` trait (`OlsResult`, `DiscreteResult`, `PanelResult`, `HausmanResult`,
+     `PCAResult`, `KMeansResult`, `DBSCANResult`)
 6. **ARM64 builds**: On aarch64-linux, debug builds require `opt-level = 1` due to relocation range limits with large binaries. Create `.cargo/config.toml` locally (see ARM64 Build Notes); it is gitignored. Release builds work without modification.
 8. **Filesystem access in p2a-mcp**: any tool or HTTP handler that takes a path must call `path_jail::validate_data_path` first (writers: `validate_data_path_for_write` + `write_atomically`), and messages show `display_path` only, never absolute paths. Paths are session-scoped automatically, because the governor enters `path_jail::enter_session_scope` on the blocking thread that runs the handler; handlers must therefore not spawn threads or tasks that validate paths (those have no scope and are refused). The hosted demo (p2a.qamelab.org) runs in open public mode with the hosted resource profile; see `docs/guides/DEPLOYMENT.md` for the threat model before changing anything on the HTTP surface.
 9. **Native Dioxus builds embed the backend**: `desktop`/`mobile` features depend on `p2a-mcp` and start an in-process server (`start_embedded_server` in `p2a-dioxus/src/main.rs`); the web build talks to `P2A_BACKEND_URL` baked in at build time. A change to `p2a-mcp`'s public API can break the desktop build even when the web build passes.
