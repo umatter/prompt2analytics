@@ -346,3 +346,83 @@ fn test_cli_script_run_json_mode_prints_only_the_child_output() {
     assert!(out.status.success(), "{out:?}");
     assert_eq!(String::from_utf8_lossy(&out.stdout), "plain\n");
 }
+
+/// `data load --value-labels`: a Stata file keeps its codes and lists its labels and the
+/// reader's notes; `text` loads the labels and is kept for the session's reloads; the flag
+/// is refused for a file of another format.
+#[test]
+fn data_load_value_labels_for_stata_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let dta = dir.path().join("f.dta");
+    std::fs::copy(
+        p2a_validation::repo_path("validation/datasets/files/dta118_formats.dta"),
+        &dta,
+    )
+    .unwrap();
+    let session = dir.path().join("s.json");
+    let run = |args: &[&str]| {
+        let out = p2a()
+            .arg("--session")
+            .arg(&session)
+            .args(args)
+            .output()
+            .unwrap();
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).to_string(),
+        )
+    };
+    let path = dta.to_str().unwrap();
+    let (ok, text) = run(&["data", "load", path, "--name", "codes"]);
+    assert!(ok, "{text}");
+    assert!(text.contains("Value labels (codes kept;"), "{text}");
+    assert!(text.contains("    gl (gl): "), "{text}");
+    assert!(text.contains("Note: ") && text.contains("%tm"), "{text}");
+
+    let (ok, json) = run(&[
+        "-F",
+        "json",
+        "data",
+        "load",
+        path,
+        "--name",
+        "t",
+        "--value-labels",
+        "text",
+    ]);
+    assert!(ok, "{json}");
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(v["value_labels_applied"], "text", "{v}");
+    assert_eq!(v["value_labels"].as_array().unwrap().len(), 2, "{v}");
+    // the reload of a later command reads the labels as text again
+    let (ok, describe) = run(&["-F", "json", "data", "describe", "t"]);
+    assert!(ok, "{describe}");
+    assert!(describe.contains("\"gl\""), "{describe}");
+    let saved = std::fs::read_to_string(&session).unwrap();
+    assert!(saved.contains("\"value_labels\": \"text\""), "{saved}");
+    let (_, head) = run(&["-F", "json", "data", "head", "t", "-n", "3"]);
+    let (_, head_codes) = run(&["-F", "json", "data", "head", "codes", "-n", "3"]);
+    assert_ne!(head, head_codes);
+
+    let csv = dir.path().join("c.csv");
+    std::fs::write(&csv, "a\n1\n").unwrap();
+    let out = p2a()
+        .args([
+            "data",
+            "load",
+            csv.to_str().unwrap(),
+            "--value-labels",
+            "codes",
+        ])
+        .output()
+        .unwrap();
+    let all = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        all.contains("--value-labels applies to Stata (.dta) files only"),
+        "{all}"
+    );
+}

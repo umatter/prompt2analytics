@@ -1898,9 +1898,33 @@ impl AnalyticsServer {
             }
         }
 
-        // Load the dataset
-        let dataset = match load_with_request_na(&path, request.na_strings.as_deref()) {
-            Ok(ds) => ds,
+        // Load the dataset (a Stata file with its value labels and the reader's notes)
+        let value_labels = match crate::tools::common::parse_option(
+            request.value_labels.as_deref(),
+            p2a_core::data::ValueLabels::Codes,
+        ) {
+            Ok(v) => v,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
+        let is_stata = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("dta"));
+        if request.value_labels.is_some() && !is_stata {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "value_labels applies only to Stata (.dta) files. Nothing was loaded.",
+            )]));
+        }
+        let loaded = if is_stata && request.na_strings.is_none() {
+            let mut options = p2a_core::data::StataOptions::default();
+            options.value_labels = value_labels;
+            DataLoader::load_stata_dataset(&path, &options)
+        } else {
+            load_with_request_na(&path, request.na_strings.as_deref())
+                .map(|ds| (ds, Vec::new(), Vec::new()))
+        };
+        let (dataset, labels, notes) = match loaded {
+            Ok(loaded) => loaded,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
                     "Failed to load dataset: {}",
@@ -1945,6 +1969,7 @@ impl AnalyticsServer {
                 .collect::<Vec<_>>()
                 .join("\n")
         );
+        let result = result + &stata_label_report(&labels, value_labels) + &stata_notes(&notes);
 
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
@@ -2453,6 +2478,60 @@ pub(crate) fn render_head(df: &DataFrame, rows: usize) -> Result<String, String>
 
 /// Load `path` as `load_dataset` does: [`DataLoader::load`] without `na_strings`, or
 /// [`DataLoader::load_with_na`] with them (a non-CSV file is then refused).
+/// The most (value, label) pairs `load_dataset` lists per Stata column.
+const STATA_LABELS_SHOWN: usize = 10;
+/// The most characters of one Stata value label `load_dataset` shows.
+const STATA_LABEL_CHARS: usize = 40;
+
+/// The value labels of a Stata load, one line per labelled column; empty when no column
+/// is labelled.
+fn stata_label_report(
+    labels: &[p2a_core::data::ColumnLabels],
+    applied: p2a_core::data::ValueLabels,
+) -> String {
+    if labels.is_empty() {
+        return String::new();
+    }
+    let how = match applied {
+        p2a_core::data::ValueLabels::Codes => "codes kept; value_labels 'text' loads the labels",
+        p2a_core::data::ValueLabels::Text => "loaded as text",
+    };
+    let mut out = format!("\n\nValue labels ({how}):");
+    for c in labels {
+        let shown: Vec<String> = c
+            .labels
+            .iter()
+            .take(STATA_LABELS_SHOWN)
+            .map(|(v, l)| format!("{v} = {:?}", p2a_text::ellipsize(l, STATA_LABEL_CHARS)))
+            .collect();
+        let more = c.labels.len().saturating_sub(STATA_LABELS_SHOWN);
+        let more = if more > 0 {
+            format!(", ... ({more} more)")
+        } else {
+            String::new()
+        };
+        out.push_str(&format!(
+            "\n  - {} ({}): {}{more}",
+            c.column,
+            c.label_set,
+            shown.join(", ")
+        ));
+    }
+    out
+}
+
+/// The notes of a Stata load ("Notes:" and one line each); empty when there are none.
+fn stata_notes(notes: &[String]) -> String {
+    if notes.is_empty() {
+        return String::new();
+    }
+    let mut out = "\n\nNotes:".to_string();
+    for n in notes {
+        out.push_str(&format!("\n  - {n}"));
+    }
+    out
+}
+
 fn load_with_request_na(path: &Path, na_strings: Option<&[String]>) -> Result<Dataset, LoadError> {
     match na_strings {
         None => DataLoader::load(path),
@@ -4397,5 +4476,61 @@ mod tests {
             "{}",
             text(&r)
         );
+    }
+
+    /// value_labels: a Stata file keeps its codes and lists the labels and the reader's
+    /// notes (a %tm column kept numeric), loads the labels as text on request, and the
+    /// option is refused for a file of another format or a value outside codes/text.
+    #[test]
+    fn test_mcp_load_dataset_stata_value_labels() {
+        use crate::tools::common::test_support::{server_with, text};
+        let (rt, server) = server_with(vec![]);
+        let dir = tempfile::Builder::new()
+            .prefix("t4w4_dta_")
+            .tempdir_in(crate::path_jail::allowed_data_root().unwrap())
+            .unwrap();
+        let dta = dir.path().join("f.dta");
+        std::fs::copy(
+            p2a_validation::repo_path("validation/datasets/files/dta118_formats.dta"),
+            &dta,
+        )
+        .unwrap();
+        let csv = dir.path().join("c.csv");
+        std::fs::write(&csv, "a\n1\n").unwrap();
+        let load = |args: serde_json::Value| {
+            let req: LoadDatasetRequest = serde_json::from_value(args).unwrap();
+            rt.block_on(server.load_dataset(Parameters(req))).unwrap()
+        };
+        let path = dta.to_str().unwrap();
+        let r = load(json!({"path": path, "name": "codes"}));
+        assert_ne!(r.is_error, Some(true), "{}", text(&r));
+        let t = text(&r);
+        assert!(t.contains("Value labels (codes kept;"), "{t}");
+        assert!(t.contains("  - gl (gl): "), "{t}");
+        assert!(t.contains("Notes:") && t.contains("%tm"), "{t}");
+        assert_ne!(
+            column_state(&rt, &server, "codes", "gl").0,
+            DataType::String
+        );
+
+        let r = load(json!({"path": path, "name": "text", "value_labels": "text"}));
+        assert_ne!(r.is_error, Some(true), "{}", text(&r));
+        assert!(
+            text(&r).contains("Value labels (loaded as text)"),
+            "{}",
+            text(&r)
+        );
+        assert_eq!(column_state(&rt, &server, "text", "gl").0, DataType::String);
+
+        let r = load(json!({"path": csv.to_str().unwrap(), "value_labels": "codes"}));
+        assert_eq!(r.is_error, Some(true));
+        assert!(
+            text(&r).contains("value_labels applies only to Stata"),
+            "{}",
+            text(&r)
+        );
+        let r = load(json!({"path": path, "value_labels": "labels"}));
+        assert_eq!(r.is_error, Some(true));
+        assert!(text(&r).contains("text"), "{}", text(&r));
     }
 }

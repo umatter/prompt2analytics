@@ -13,7 +13,7 @@
 //! | **Parquet** | `parquet`, `pq` | [`DataLoader`] | Apache Parquet columnar format |
 //! | **JSON** | `jsonl`, `ndjson`, `json` | [`DataLoader`] | JSON Lines, or a JSON array of records |
 //! | **Excel** | `xlsx`, `xls`, `xlsb`, `ods` | [`DataLoader`] | Workbooks (feature: `file-formats`) |
-//! | **Stata** | `dta` | [`load_stata`] | Stata .dta files |
+//! | **Stata** | `dta` | [`load_stata`], [`load_stata_with`] | Stata .dta files: dates as dates, value labels reported or applied ([`StataOptions`]) |
 //! | **SAS** | `sas7bdat` | [`load_sas`] | SAS .sas7bdat files |
 //! | **SQLite** | | `query_sqlite` | SQLite queries (feature: `database`) |
 //! | **DuckDB** | | `query_duckdb` | DuckDB queries (feature: `database`) |
@@ -191,7 +191,9 @@ pub mod verification;
 pub use dataset::{Dataset, DatasetInfo};
 pub use loader::{CsvChunkIterator, DataLoader, FileInfo, LoadError};
 pub use sas::{SasError, load_sas};
-pub use stata::{StataError, load_stata};
+pub use stata::{
+    ColumnLabels, StataError, StataLoad, StataOptions, ValueLabels, load_stata, load_stata_with,
+};
 
 pub use cleaning_session::{
     CheckpointInfo, CleaningSession, OperationRecord, SessionCheckpoint, SessionStatus,

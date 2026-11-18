@@ -812,6 +812,35 @@ impl DataLoader {
         Self::load_impl(path.as_ref(), Some(na_strings))
     }
 
+    /// As [`DataLoader::load`] for a Stata file read with `options`: the dataset, the value
+    /// labels of its labelled columns and notes on what the reader left unconverted. A file
+    /// of any other extension is [`LoadError::UnsupportedFormat`].
+    pub fn load_stata_dataset(
+        path: impl AsRef<Path>,
+        options: &super::stata::StataOptions,
+    ) -> Result<(Dataset, Vec<super::stata::ColumnLabels>, Vec<String>), LoadError> {
+        let path = path.as_ref();
+        if !path.exists() {
+            return Err(LoadError::FileNotFound(path.display().to_string()));
+        }
+        let extension = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        if extension != "dta" {
+            return Err(LoadError::UnsupportedFormat(format!(
+                "value labels apply only to Stata (.dta) files, not '.{extension}' files"
+            )));
+        }
+        let load = Self::load_stata_with(path, options)?;
+        let mut dataset = Dataset::new(load.df).with_source_path(path);
+        if let Some(name) = path.file_stem().and_then(|s| s.to_str()) {
+            dataset = dataset.with_name(name);
+        }
+        Ok((dataset, load.value_labels, load.notes))
+    }
+
     fn load_impl(path: &Path, na_strings: Option<&[&str]>) -> Result<Dataset, LoadError> {
         if !path.exists() {
             return Err(LoadError::FileNotFound(path.display().to_string()));

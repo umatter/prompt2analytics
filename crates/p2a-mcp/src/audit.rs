@@ -1806,7 +1806,7 @@ mod tests {
 
     /// Fields whose names contain a payload word but that hold parameters
     /// (column names, formats, counts), reviewed one by one.
-    const NOT_PAYLOAD: &[&str] = &["content_type", "value_name", "value_vars"];
+    const NOT_PAYLOAD: &[&str] = &["content_type", "value_labels", "value_name", "value_vars"];
 
     /// Collects every string or array property of `schema`, following
     /// `$ref`s into `$defs`/`definitions` (each definition once).

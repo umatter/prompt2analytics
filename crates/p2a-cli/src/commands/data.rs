@@ -1,14 +1,15 @@
 //! Data loading and inspection commands
 
 use clap::Subcommand;
-use p2a_core::data::LoadError;
+use p2a_core::data::{ColumnLabels, LoadError, StataOptions, ValueLabels};
 use p2a_core::simulation::{ColumnSpec, Distribution, generate_random_data};
 use p2a_core::{DataLoader, Dataset};
 use polars::prelude::*;
 use std::path::{Path, PathBuf};
 
 use crate::output::{
-    OutputFormat, any_value_json, format_dataset_summary, print_error, print_json, print_message,
+    OutputFormat, any_value_json, format_dataset_summary, parse_core_option, print_error,
+    print_json, print_message,
 };
 use crate::progress::Progress;
 use crate::session::SessionManager;
@@ -41,6 +42,13 @@ EXAMPLES:
         /// for a marker that starts with '-'.
         #[arg(long = "na-strings", value_delimiter = ',', value_name = "LIST")]
         na_strings: Option<Vec<String>>,
+
+        /// Stata (.dta) files only: what value-labelled columns load as. `codes` (the
+        /// default) keeps the numeric codes and lists the labels; `text` loads each labelled
+        /// value as its label (an unlabelled value as its number; haven::as_factor). Kept
+        /// for every reload of the dataset in the session.
+        #[arg(long = "value-labels", value_name = "codes|text", value_parser = parse_core_option::<ValueLabels>)]
+        value_labels: Option<ValueLabels>,
     },
 
     /// List the session's datasets; reads every dataset to report those whose file is no
@@ -130,10 +138,12 @@ pub fn execute(
             path,
             name,
             na_strings,
+            value_labels,
         } => execute_load(
             path,
             name.as_deref(),
             na_strings.as_deref(),
+            *value_labels,
             format,
             quiet,
             session,
@@ -165,21 +175,106 @@ pub fn execute(
 /// Read a data file of any format [`DataLoader::load`] reads, with the `--na-strings`
 /// markers of a CSV load (`None`: the loader's default, `NA` and the empty field).
 /// `data load` and the session's reload share it, so a reload reads the file as the load
-/// did.
-pub(crate) fn load_with_markers(path: &Path, na: Option<&[String]>) -> Result<Dataset, LoadError> {
+/// did; a Stata file is read with `value_labels` (`None`: the codes).
+pub(crate) fn load_with_markers(
+    path: &Path,
+    na: Option<&[String]>,
+    value_labels: Option<ValueLabels>,
+) -> Result<Dataset, LoadError> {
+    Ok(load_file(path, na, value_labels)?.0)
+}
+
+/// [`load_with_markers`] with, for a Stata file, its value labels and the reader's notes
+/// (empty for other formats).
+fn load_file(
+    path: &Path,
+    na: Option<&[String]>,
+    value_labels: Option<ValueLabels>,
+) -> Result<(Dataset, Vec<ColumnLabels>, Vec<String>), LoadError> {
+    let is_stata = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("dta"));
     match na {
         Some(na) => {
             let na: Vec<&str> = na.iter().map(String::as_str).collect();
-            DataLoader::load_with_na(path, &na)
+            DataLoader::load_with_na(path, &na).map(|d| (d, Vec::new(), Vec::new()))
         }
-        None => DataLoader::load(path),
+        None if is_stata => {
+            let mut options = StataOptions::default();
+            options.value_labels = value_labels.unwrap_or_default();
+            DataLoader::load_stata_dataset(path, &options)
+        }
+        None => DataLoader::load(path).map(|d| (d, Vec::new(), Vec::new())),
     }
+}
+
+/// The most (value, label) pairs the text output lists per Stata column.
+const LABELS_SHOWN: usize = 10;
+
+/// The value-label and note lines of a Stata load in text form (empty when there are none).
+fn stata_text(labels: &[ColumnLabels], applied: ValueLabels, notes: &[String]) -> Vec<String> {
+    let mut lines = Vec::new();
+    if !labels.is_empty() {
+        lines.push(match applied {
+            ValueLabels::Codes => {
+                "  Value labels (codes kept; --value-labels text loads the labels):".to_string()
+            }
+            ValueLabels::Text => "  Value labels (loaded as text):".to_string(),
+        });
+        for c in labels {
+            let shown: Vec<String> = c
+                .labels
+                .iter()
+                .take(LABELS_SHOWN)
+                .map(|(v, l)| format!("{v} = {l:?}"))
+                .collect();
+            let more = c.labels.len().saturating_sub(LABELS_SHOWN);
+            let more = if more > 0 {
+                format!(", ... ({more} more)")
+            } else {
+                String::new()
+            };
+            lines.push(format!(
+                "    {} ({}): {}{more}",
+                c.column,
+                c.label_set,
+                shown.join(", ")
+            ));
+        }
+    }
+    lines.extend(notes.iter().map(|n| format!("Note: {n}")));
+    lines
+}
+
+/// The JSON form of a Stata load's value labels and notes, for `data load -F json`.
+fn stata_json(
+    labels: &[ColumnLabels],
+    applied: ValueLabels,
+    notes: &[String],
+) -> serde_json::Value {
+    serde_json::json!({
+        "value_labels_applied": match applied {
+            ValueLabels::Codes => "codes",
+            ValueLabels::Text => "text",
+        },
+        "value_labels": labels
+            .iter()
+            .map(|c| serde_json::json!({
+                "column": c.column,
+                "label_set": c.label_set,
+                "labels": c.labels.iter().map(|(v, l)| serde_json::json!([v, l])).collect::<Vec<_>>(),
+            }))
+            .collect::<Vec<_>>(),
+        "notes": notes,
+    })
 }
 
 fn execute_load(
     path: &PathBuf,
     name: Option<&str>,
     na_strings: Option<&[String]>,
+    value_labels: Option<ValueLabels>,
     format: &OutputFormat,
     quiet: bool,
     session: Option<&mut SessionManager>,
@@ -234,10 +329,17 @@ fn execute_load(
         return Ok(());
     }
 
+    // --value-labels is a Stata option: refused for every other extension
+    if value_labels.is_some() && extension != "dta" {
+        progress.finish_and_clear();
+        print_error("--value-labels applies to Stata (.dta) files only", format);
+        return Ok(());
+    }
+
     // Load the dataset (an unknown extension is an error listing the readable ones)
-    let loaded = load_with_markers(path, na_strings);
+    let loaded = load_file(path, na_strings, value_labels);
     progress.finish_and_clear();
-    let dataset = loaded?;
+    let (dataset, labels, notes) = loaded?;
 
     let df = dataset.df();
     let nrows = df.height();
@@ -265,12 +367,32 @@ fn execute_load(
             &dataset,
             na_strings.map(<[String]>::to_vec),
         );
+        if value_labels == Some(ValueLabels::Text) {
+            mgr.set_value_labels(&dataset_name, "text");
+        }
         mgr.store_dataset(dataset_name.clone(), dataset);
     }
 
-    // Output success message
-    let summary = format_dataset_summary(&dataset_name, nrows, ncols, &columns, format);
+    // Output success message (a Stata file adds its value labels and the reader's notes)
+    let applied = value_labels.unwrap_or_default();
+    let is_stata = extension == "dta";
+    let mut summary = format_dataset_summary(&dataset_name, nrows, ncols, &columns, format);
+    if is_stata && matches!(format, OutputFormat::Json) {
+        let mut json: serde_json::Value = serde_json::from_str(&summary)?;
+        if let (Some(map), serde_json::Value::Object(extra)) =
+            (json.as_object_mut(), stata_json(&labels, applied, &notes))
+        {
+            map.extend(extra);
+        }
+        // json-ok: re-renders the one summary document with the Stata fields added
+        summary = serde_json::to_string_pretty(&json)?;
+    }
     println!("{}", summary);
+    if is_stata && !matches!(format, OutputFormat::Json) {
+        for line in stata_text(&labels, applied, &notes) {
+            println!("{line}");
+        }
+    }
 
     Ok(())
 }

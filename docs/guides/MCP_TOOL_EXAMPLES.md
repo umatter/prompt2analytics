@@ -39,6 +39,7 @@ Load a dataset from a file (CSV, Parquet, Excel, Stata, SAS).
 /load_dataset path:/path/to/data.csv
 /load_dataset path:/data/survey.xlsx
 /load_dataset path:/data/panel.dta
+/load_dataset path:/data/survey.dta value_labels:text
 /load_dataset path:/data/stata_export.csv na_strings:[".", "NA", ""]
 ```
 
@@ -47,6 +48,10 @@ Load a dataset from a file (CSV, Parquet, Excel, Stata, SAS).
 - `na_strings` (optional, CSV only): strings read as missing values; default `["NA", ""]`, as R's
   `read.csv`. Unquoted empty fields are always missing; `[]` keeps the text `NA` as a value. It is
   refused for other formats, which store missing values natively.
+- `value_labels` (optional, Stata only): `codes` (default) keeps value-labelled columns as their
+  numeric codes and lists the labels in the reply; `text` loads each labelled value as its label
+  (`haven::as_factor`). Stata `%td`/`%tc` columns load as dates; the reply notes any format left
+  numeric.
 
 `create_dataset` (`name`, `csv_content`) loads inline CSV text and takes the same `na_strings`.
 

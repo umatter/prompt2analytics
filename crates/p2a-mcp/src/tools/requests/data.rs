@@ -35,6 +35,13 @@ pub struct LoadDatasetRequest {
         description = "Optional declared file type: 'auto' (default), 'csv', 'parquet', 'excel', 'stata' or 'sas'. The file is read by its extension; a declared type that the extension contradicts is refused, so a mislabelled file is never parsed."
     )]
     pub file_type: Option<String>,
+
+    /// What value-labelled Stata columns load as.
+    #[serde(default)]
+    #[schemars(
+        description = "Stata (.dta) files only: 'codes' (default) keeps value-labelled columns as their numeric codes and lists the labels in the reply; 'text' loads each labelled value as its label (an unlabelled value as its number, a missing value stays missing; haven::as_factor). Not allowed for other files."
+    )]
+    pub value_labels: Option<String>,
 }
 
 /// Request to upload and load a dataset from base64-encoded content.

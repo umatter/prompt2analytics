@@ -31,6 +31,11 @@ pub struct DatasetMeta {
     /// (`NA` and the empty field). Absent in older session files.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub na_strings: Option<Vec<String>>,
+    /// What value-labelled columns of a Stata file load as (`data load --value-labels`),
+    /// used again on every reload; `None` means their codes (the default). Absent in older
+    /// session files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_labels: Option<String>,
     /// Written by this session (munge result, data generate) to
     /// `sidecar_dir(session)/<file>.parquet`; `source_path` is then relative to the session
     /// file's directory. Absent in older session files and for loaded files.
@@ -382,7 +387,14 @@ fn reload_dataset(
         "csv" => meta.na_strings.as_deref(),
         _ => None,
     };
-    let dataset = crate::commands::data::load_with_markers(&path, na)?;
+    let value_labels = match meta.value_labels.as_deref() {
+        Some(v) => Some(
+            v.parse::<p2a_core::data::ValueLabels>()
+                .map_err(|e| anyhow::anyhow!(crate::output::core_message(e)))?,
+        ),
+        None => None,
+    };
+    let dataset = crate::commands::data::load_with_markers(&path, na, value_labels)?;
     let warnings = reload_warnings(meta, &path, file.as_ref(), &dataset);
     Ok((dataset, warnings))
 }
@@ -652,6 +664,14 @@ impl SessionManager {
         self.saved.get_mut().touched.insert(name.to_string());
     }
 
+    /// Records the `--value-labels` choice of the loaded dataset `name` (see
+    /// [`DatasetMeta::value_labels`]); a name the session does not hold is ignored.
+    pub fn set_value_labels(&mut self, name: &str, value_labels: &str) {
+        if let Some(meta) = self.session.datasets.get_mut(name) {
+            meta.value_labels = Some(value_labels.to_string());
+        }
+    }
+
     /// Removes the stored file of `name` when the session entry it is about to replace
     /// was derived. A file already gone is fine; any other failure is a warning.
     fn remove_derived_copy(&self, name: &str) {
@@ -838,6 +858,7 @@ fn dataset_meta(
             .collect(),
         loaded_at: Utc::now(),
         na_strings,
+        value_labels: None,
         derived,
         source_bytes: None,
         source_modified: None,
@@ -1337,7 +1358,7 @@ mod reload_tests {
             s.push_str(&format!("{}.5,{}.25\n", i, 2 * i + 1));
         }
         std::fs::write(path, s).unwrap();
-        crate::commands::data::load_with_markers(path, None).unwrap()
+        crate::commands::data::load_with_markers(path, None, None).unwrap()
     }
 
     #[test]
