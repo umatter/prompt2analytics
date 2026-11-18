@@ -1506,8 +1506,10 @@ impl ChatEvents {
     }
 
     /// An error event from the synchronous stream callback, sent after any held text so it
-    /// does not overtake it. Without room in the channel, the text and the error are dropped
-    /// (the route's own error or end event follows when the stream returns).
+    /// does not overtake it. Without room in the channel the error is dropped and any held text
+    /// stays held, to go out before the next event (the route's own error or end event follows
+    /// when the stream returns); the error is dropped too when the held text was sent but
+    /// filled the channel.
     pub(crate) fn error(&self, event: ProgressEvent) {
         let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
         if !pending.is_empty() {
