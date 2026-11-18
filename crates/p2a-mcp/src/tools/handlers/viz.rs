@@ -1574,6 +1574,73 @@ mod tests {
         assert!(text(&r).contains("Column 'names'"), "{}", text(&r));
     }
 
+    /// A `Date` x axis is plotted as days since 1970-01-01, a missing date dropping its row; a
+    /// `Datetime` x axis is refused as not numeric, naming the column.
+    #[test]
+    fn date_axes_are_plotted_and_datetime_axes_refused() {
+        let days = [
+            Some(19_000i32),
+            Some(19_001),
+            None,
+            Some(19_003),
+            Some(19_004),
+        ];
+        let mut df = df!(
+            "y" => [1.3, 1.9, 3.2, 3.8, 5.1],
+            "ms" => [1_000i64, 2_000, 3_000, 4_000, 5_000]
+        )
+        .unwrap();
+        let date = Series::new("day".into(), days.as_slice())
+            .cast(&DataType::Date)
+            .unwrap();
+        let stamp = df
+            .column("ms")
+            .unwrap()
+            .cast(&DataType::Datetime(TimeUnit::Milliseconds, None))
+            .unwrap()
+            .with_name("stamp".into());
+        df.with_column(date).unwrap();
+        df.with_column(stamp).unwrap();
+        let server = server_with(vec![("d", df)]);
+        let note = "Missing values: 1 of 5 rows dropped because of missing values (day: 1)";
+
+        let scatter = |x: &str| {
+            run(
+                Limits::off(),
+                server.viz_scatter(Parameters(ScatterPlotRequest {
+                    dataset: "d".into(),
+                    x_column: x.into(),
+                    y_column: "y".into(),
+                    title: None,
+                })),
+            )
+        };
+        let r = scatter("day");
+        assert_ne!(r.is_error, Some(true), "{}", text(&r));
+        let t = text(&r);
+        assert!(t.contains("Points: 4") && t.ends_with(note), "{t}");
+
+        let r = run(
+            Limits::off(),
+            server.viz_line(Parameters(LineChartRequest {
+                dataset: "d".into(),
+                x_column: "day".into(),
+                y_columns: vec!["y".into()],
+                title: None,
+            })),
+        );
+        assert_ne!(r.is_error, Some(true), "{}", text(&r));
+        assert!(text(&r).ends_with(note), "{}", text(&r));
+
+        let r = scatter("stamp");
+        assert_eq!(r.is_error, Some(true), "{}", text(&r));
+        let t = text(&r);
+        assert!(
+            t.contains("Column 'stamp'") && t.contains("non-numeric"),
+            "{t}"
+        );
+    }
+
     fn heatmap(server: &AnalyticsServer, columns: Option<Vec<&str>>) -> CallToolResult {
         run(
             Limits::off(),
