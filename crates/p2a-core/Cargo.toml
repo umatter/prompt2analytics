@@ -19,7 +19,7 @@ full = ["visualization", "forecasting", "file-formats", "database", "spectral-an
 # paths are tested locally / on the self-hosted runner instead.
 ci = ["visualization", "forecasting", "file-formats", "spectral-analysis"]
 cuda = ["dep:cudarc"]
-visualization = ["dep:plotters", "dep:plotlars", "dep:image", "dep:base64"]
+visualization = ["dep:plotters", "dep:image", "dep:base64"]
 forecasting = ["dep:augurs-core", "dep:augurs-mstl", "dep:augurs-ets", "dep:stlrs"]
 file-formats = ["dep:calamine"]
 database = ["dep:rusqlite", "dep:duckdb"]
@@ -67,7 +67,6 @@ duckdb = { workspace = true, optional = true }
 
 # Visualization (optional - enable with "visualization" feature)
 plotters = { workspace = true, optional = true }
-plotlars = { workspace = true, optional = true }
 image = { workspace = true, optional = true }
 base64 = { workspace = true, optional = true }
 

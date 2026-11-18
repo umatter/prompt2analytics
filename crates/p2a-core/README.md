@@ -12,7 +12,7 @@ The crate is organized into optional features to reduce compile times and binary
 
 | Feature | Description | Dependencies |
 |---------|-------------|--------------|
-| `visualization` | Charts, plots, and heatmaps | plotters, plotlars, image, base64 |
+| `visualization` | Charts, plots, and heatmaps | plotters, image, base64 |
 | `forecasting` | ARIMA, MSTL, ETS, and time series forecasting | arima, augurs-*, stlrs |
 | `file-formats` | Excel file support (xlsx, xls, xlsb, ods) | calamine |
 | `database` | SQLite and DuckDB connectivity | rusqlite, duckdb |

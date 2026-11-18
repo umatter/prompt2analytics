@@ -176,7 +176,7 @@ Expected encodings: `DATE '2024-03-01'` is day 19783, `TIMESTAMP '2024-03-01 12:
 ### Interactive charts
 
 A null in the group column of `scatter_interactive` or `histogram_interactive` (text or
-numeric) is the group "NA"; the group column reaches plotlars as text.
+numeric) is the group "NA"; the group labels are written into the chart as text.
 
 ## R reference
 

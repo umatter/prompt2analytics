@@ -45,10 +45,10 @@ pub const CHART_PALETTE: [RGBColor; 6] = [
     BRAND_ORANGE_DARK,
 ];
 
-/// RGB tuple versions for plotlars/Plotly integration.
+/// RGB tuple versions for the interactive (Plotly) charts.
 ///
 /// Same colors as `CHART_PALETTE` but as (u8, u8, u8) tuples
-/// compatible with the plotlars `Rgb` type.
+/// for the Plotly colours the interactive charts write.
 pub const PLOTLY_PALETTE: [(u8, u8, u8); 6] = [
     (255, 107, 53), // Brand orange
     (0, 180, 216),  // Brand cyan
