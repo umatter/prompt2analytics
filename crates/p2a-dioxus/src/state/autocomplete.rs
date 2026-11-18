@@ -88,9 +88,6 @@ impl Suggestion {
 /// Returns a byte offset (not a char index) so callers can slice the input
 /// string directly. The trigger characters are single-byte ASCII, so the
 /// offset immediately after the trigger is always a valid char boundary.
-/// (The previous version returned a `Vec<char>` index that callers used as a
-/// byte index — corrupting the filter text, or panicking, whenever a
-/// multi-byte character preceded the trigger.) Moved from components/chat_input.rs.
 pub fn find_last_trigger(input: &str, trigger: char) -> Option<usize> {
     let mut result = None;
     let mut prev_is_boundary = true; // start of string counts as a boundary
