@@ -8,7 +8,7 @@ use crate::components::{ChatInput, ExportMenu, MessageList, P2aWordmark, Setting
 use crate::state::settings::Theme;
 use crate::state::{
     ChatMessage, ChatState, ConversationState, SESSION_ENDED_TEXT, SessionState, Settings,
-    ToolCallInfo, ensure_session, on_session_lost, session_lost, session_lost_text,
+    ToolCallInfo, ensure_session, needs_title, on_session_lost, session_lost, session_lost_text,
     turn_persistence,
 };
 
@@ -172,6 +172,16 @@ pub fn ChatPanel() -> Element {
                                             .push(tc);
                                     }
 
+                                    // Only into the transcript of the conversation
+                                    // they belong to, if it is still shown.
+                                    let still_current = conversation_state
+                                        .read()
+                                        .current_conversation_id
+                                        .as_deref()
+                                        == Some(conv_id_for_async.as_str());
+                                    if !still_current || chat.read().is_busy() {
+                                        return;
+                                    }
                                     let mut chat_write = chat.write();
                                     for msg in chat_write.messages.iter_mut() {
                                         if let Some(tcs) = tool_calls_by_message.get(&msg.id) {
@@ -478,12 +488,9 @@ pub fn ChatPanel() -> Element {
                 let settings_clone = settings.read().clone();
                 let mut conv_state = conv;
 
-                // Check if conversation still has default title
-                let needs_title = conv_state
-                    .read()
-                    .get_current_conversation()
-                    .map(|c| c.title == "New Conversation")
-                    .unwrap_or(false);
+                // Whether the turn's conversation (not the one current now)
+                // still has the default title
+                let needs_title = needs_title(&conv_state.read().conversations, &conv_id);
 
                 if needs_title {
                     // Get the assistant's response from chat state

@@ -7,7 +7,9 @@ use wasm_bindgen::JsCast;
 use crate::api::api;
 use crate::components::{ChatPanel, ConversationSidebar, DatasetSidebar, ShortcutsModal};
 use crate::state::settings::Theme;
-use crate::state::{ChatState, ConversationState, SessionState, Settings, ensure_session};
+use crate::state::{
+    ChatState, ConversationState, SessionState, Settings, ensure_session, switch_blocked,
+};
 
 /// Apply theme to the document
 /// Strategy:
@@ -106,6 +108,7 @@ pub fn App() -> Element {
     let handle_global_keydown = {
         let session_state = session_state;
         let mut conversation_state = conversation_state;
+        let chat_state = chat_state;
         move |evt: Event<KeyboardData>| {
             let key = evt.key();
             let ctrl = evt.modifiers().ctrl();
@@ -159,7 +162,15 @@ pub fn App() -> Element {
                 // Ctrl+N or Cmd+N - New conversation
                 (Key::Character(c), true) if c == "n" => {
                     evt.prevent_default();
+                    // Refused while an answer streams or a conversation change
+                    // runs, as the sidebar's "+".
+                    let blocked = switch_blocked(&chat_state.read(), &conversation_state.read());
+                    if let Some(why) = blocked {
+                        conversation_state.write().error = Some(why.to_string());
+                        return;
+                    }
                     spawn(async move {
+                        conversation_state.write().set_operating(true);
                         let sid = match ensure_session(session_state).await {
                             Ok(sid) => sid,
                             Err(e) => {
@@ -171,10 +182,13 @@ pub fn App() -> Element {
                         match client.create_conversation(&sid, "New Conversation").await {
                             Ok(new_conv) => {
                                 let id = new_conv.id.clone();
-                                conversation_state.write().add_conversation(new_conv);
-                                conversation_state
-                                    .write()
-                                    .set_current_conversation(Some(id));
+                                let mut conv = conversation_state.write();
+                                conv.add_conversation(new_conv);
+                                // A send that started meanwhile keeps its conversation.
+                                if !chat_state.read().is_busy() {
+                                    conv.set_current_conversation(Some(id));
+                                }
+                                conv.set_operating(false);
                             }
                             Err(e) => {
                                 tracing::warn!("Failed to create conversation: {}", e);

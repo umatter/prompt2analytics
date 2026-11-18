@@ -9,8 +9,21 @@ use crate::api::Conversation;
 use crate::components::P2aIconMinimal;
 use crate::state::{
     ChatState, ConversationState, SESSION_ENDED_TEXT, SessionState, ensure_session,
-    on_session_lost, session_lost_text,
+    on_session_lost, session_lost_text, switch_blocked,
 };
+
+/// Whether a switch may run now; when not, the reason is shown in the
+/// sidebar.
+fn may_switch(chat: Signal<ChatState>, mut conv: Signal<ConversationState>) -> bool {
+    let blocked = switch_blocked(&chat.read(), &conv.read());
+    match blocked {
+        Some(why) => {
+            conv.write().error = Some(why.to_string());
+            false
+        }
+        None => true,
+    }
+}
 
 /// Show a failed conversation call in the sidebar; when it says the session
 /// ended, the session is forgotten and the conversations reset first.
@@ -61,12 +74,12 @@ pub fn ConversationSidebar() -> Element {
         }
     });
 
-    // Handle new conversation
+    // Handle new conversation. Refused while an answer streams (it would
+    // redirect the answer into the new conversation) or another change runs;
+    // a conversation created while a send started meanwhile is listed, not
+    // made current.
     let handle_new_conversation = move |_| {
-        // Starting a new conversation mid-stream would redirect the in-flight
-        // response into the new conversation; block it while streaming.
-        if chat_state.read().is_processing {
-            tracing::warn!("Ignoring new-conversation while a response is streaming");
+        if !may_switch(chat_state, conversation_state) {
             return;
         }
         let mut conv = conversation_state;
@@ -87,7 +100,9 @@ pub fn ConversationSidebar() -> Element {
                 Ok(conversation) => {
                     let id = conversation.id.clone();
                     conv.write().add_conversation(conversation);
-                    conv.write().set_current_conversation(Some(id));
+                    if !chat_state.read().is_busy() {
+                        conv.write().set_current_conversation(Some(id));
+                    }
                     conv.write().set_operating(false);
                 }
                 Err(e) => {
@@ -98,14 +113,11 @@ pub fn ConversationSidebar() -> Element {
         });
     };
 
-    // Handle select conversation
+    // Handle select conversation. Refused while an answer streams: the stream
+    // writes into the selected conversation's transcript. The messages are
+    // kept only if the conversation is still current when they arrive.
     let handle_select = move |id: String| {
-        // Do not switch conversations while a response is streaming: the
-        // in-flight stream writes into the currently-selected conversation's
-        // message list, so switching mid-stream would append streamed content
-        // to the wrong conversation in the UI.
-        if chat_state.read().is_processing {
-            tracing::warn!("Ignoring conversation switch while a response is streaming");
+        if !may_switch(chat_state, conversation_state) {
             return;
         }
         let mut conv = conversation_state;
@@ -116,7 +128,7 @@ pub fn ConversationSidebar() -> Element {
             let state = conv.read().clone();
             match state.load_messages(&id).await {
                 Ok(messages) => {
-                    conv.write().set_current_messages(messages);
+                    conv.write().set_current_messages(&id, messages);
                 }
                 Err(e) => {
                     tracing::error!("Failed to load messages: {}", e);
@@ -178,8 +190,8 @@ pub fn ConversationSidebar() -> Element {
     let handle_confirm_delete = move |_| {
         // Deleting a conversation while a response streams into it would leave
         // the stream writing to a removed conversation; block it.
-        if chat_state.read().is_processing {
-            tracing::warn!("Ignoring delete while a response is streaming");
+        if !may_switch(chat_state, conversation_state) {
+            delete_confirm_id.set(None);
             return;
         }
         let id = delete_confirm_id.read().clone();
@@ -203,7 +215,9 @@ pub fn ConversationSidebar() -> Element {
                             .cloned()
                             .collect();
 
-                        if let Some(next_conv) = remaining.first() {
+                        // No auto-selection when a send started meanwhile.
+                        let next = remaining.first().filter(|_| !chat_state.read().is_busy());
+                        if let Some(next_conv) = next {
                             let next_id = next_conv.id.clone();
                             tracing::debug!(
                                 "[ConversationSidebar] Auto-selecting conversation after delete: {}",
@@ -215,7 +229,7 @@ pub fn ConversationSidebar() -> Element {
                             let state = conv.read().clone();
                             match state.load_messages(&next_id).await {
                                 Ok(messages) => {
-                                    conv.write().set_current_messages(messages);
+                                    conv.write().set_current_messages(&next_id, messages);
                                 }
                                 Err(e) => {
                                     tracing::error!(
@@ -266,7 +280,9 @@ pub fn ConversationSidebar() -> Element {
         .collect();
     let current_id = state.current_conversation_id.clone();
     let is_loading = state.is_loading;
-    let is_operating = state.is_operating;
+    let sidebar_error = state.error.clone();
+    // Why "+" is unavailable now, if it is (shown as its tooltip).
+    let new_blocked = switch_blocked(&chat_state.read(), &state);
 
     // Track if we need to show delete dialog (read outside of sidebar div)
     let show_delete_dialog = delete_confirm_id.read().is_some();
@@ -289,9 +305,9 @@ pub fn ConversationSidebar() -> Element {
                         // New conversation button
                         button {
                             class: "p-1 text-gray-500 hover:text-teal-600 dark:text-gray-400 dark:hover:text-teal-400 hover:bg-gray-200 dark:hover:bg-gray-700 rounded transition-colors",
-                            disabled: is_operating,
+                            disabled: new_blocked.is_some(),
                             onclick: handle_new_conversation,
-                            title: "New Conversation",
+                            title: new_blocked.unwrap_or("New Conversation"),
                             svg {
                                 class: "w-4 h-4",
                                 fill: "none",
@@ -323,6 +339,22 @@ pub fn ConversationSidebar() -> Element {
                                 }
                             }
                         }
+                    }
+                }
+            }
+
+            // A refused switch or a failed conversation call, dismissable
+            if let Some(ref err) = sidebar_error {
+                div { class: "mx-2 mt-2 px-3 py-2 rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 flex items-start gap-2",
+                    p { class: "flex-1 text-xs text-red-700 dark:text-red-300", "{err}" }
+                    button {
+                        class: "text-red-500 hover:text-red-700 dark:hover:text-red-300 text-xs",
+                        title: "Dismiss",
+                        onclick: move |_| {
+                            let mut conv = conversation_state;
+                            conv.write().clear_error();
+                        },
+                        "\u{2715}"
                     }
                 }
             }

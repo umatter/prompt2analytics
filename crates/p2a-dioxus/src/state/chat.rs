@@ -245,6 +245,11 @@ impl ChatState {
         }
     }
 
+    /// Whether an answer is being written (a send runs).
+    pub fn is_busy(&self) -> bool {
+        self.is_processing
+    }
+
     /// Take the prompt Retry should send after the transcript was cleared.
     pub fn take_retry_prompt(&mut self) -> Option<String> {
         self.retry_prompt.take()

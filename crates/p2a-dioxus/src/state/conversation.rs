@@ -4,6 +4,27 @@
 
 use crate::api::{Conversation, ConversationMessage, api};
 
+/// Why the current conversation cannot be switched now, if it cannot: an
+/// answer streams into it, or a conversation call runs.
+pub fn switch_blocked(chat: &super::ChatState, conv: &ConversationState) -> Option<&'static str> {
+    if chat.is_busy() {
+        Some("An answer is being written. Stop it first to switch conversations.")
+    } else if conv.is_operating {
+        Some("A conversation change is still running; try again in a moment.")
+    } else {
+        None
+    }
+}
+
+/// Whether `conversation_id` still has the default title (and gets a
+/// generated one after its first turn).
+pub fn needs_title(conversations: &[Conversation], conversation_id: &str) -> bool {
+    conversations
+        .iter()
+        .find(|c| c.id == conversation_id)
+        .is_some_and(|c| c.title == "New Conversation")
+}
+
 /// Conversation state for managing conversation history
 #[derive(Clone)]
 pub struct ConversationState {
@@ -213,9 +234,19 @@ impl ConversationState {
         self.current_messages.clear();
     }
 
-    /// Set cached messages for the current conversation
-    pub fn set_current_messages(&mut self, messages: Vec<ConversationMessage>) {
+    /// Set the cached messages of `conversation_id`, if it is still the
+    /// current conversation; a load that returns after another conversation
+    /// was selected is dropped (returns false).
+    pub fn set_current_messages(
+        &mut self,
+        conversation_id: &str,
+        messages: Vec<ConversationMessage>,
+    ) -> bool {
+        if self.current_conversation_id.as_deref() != Some(conversation_id) {
+            return false;
+        }
         self.current_messages = messages;
+        true
     }
 
     /// Add a conversation to the list
@@ -310,5 +341,77 @@ impl ConversationState {
     /// Forget every conversation (their session ended).
     pub fn reset(&mut self) {
         *self = Self::new();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::ChatState;
+
+    fn conversation(id: &str, title: &str) -> Conversation {
+        Conversation {
+            id: id.into(),
+            session_id: "s".into(),
+            title: title.into(),
+            created_at: "2026-11-18T10:00:00Z".into(),
+            updated_at: "2026-11-18T10:00:00Z".into(),
+            is_archived: false,
+            message_count: 0,
+            last_message_preview: None,
+        }
+    }
+
+    fn message(conversation_id: &str, content: &str) -> ConversationMessage {
+        ConversationMessage {
+            id: format!("m-{content}"),
+            conversation_id: conversation_id.into(),
+            role: "user".into(),
+            content: content.into(),
+            created_at: "2026-11-18T10:00:00Z".into(),
+            token_count: None,
+            model: None,
+        }
+    }
+
+    /// A quick A-then-B selection: A's messages arrive after B became current and are dropped.
+    #[test]
+    fn stale_message_load_is_ignored() {
+        let mut state = ConversationState::new();
+        state.set_current_conversation(Some("B".into()));
+        assert!(!state.set_current_messages("A", vec![message("A", "from A")]));
+        assert!(state.current_messages.is_empty());
+        assert!(state.set_current_messages("B", vec![message("B", "from B")]));
+        assert_eq!(state.current_messages[0].content, "from B");
+        // A load for a conversation that is no longer current does not replace B's.
+        assert!(!state.set_current_messages("A", vec![message("A", "late")]));
+        assert_eq!(state.current_messages[0].content, "from B");
+    }
+
+    #[test]
+    fn switch_blocked_while_processing_or_operating() {
+        let mut chat = ChatState::new();
+        let mut conv = ConversationState::new();
+        assert_eq!(switch_blocked(&chat, &conv), None);
+        chat.start_processing();
+        assert!(chat.is_busy());
+        let why = switch_blocked(&chat, &conv).expect("blocked while streaming");
+        assert!(why.contains("answer is being written"), "{why}");
+        chat.stop_processing();
+        conv.set_operating(true);
+        let why = switch_blocked(&chat, &conv).expect("blocked while operating");
+        assert!(why.contains("conversation"), "{why}");
+    }
+
+    /// The title goes to the conversation the turn ran in, not to the one current when it ends.
+    #[test]
+    fn title_target_is_the_turns_conversation() {
+        let convs = vec![
+            conversation("new", "New Conversation"),
+            conversation("turn", "Sales analysis"),
+        ];
+        assert!(!needs_title(&convs, "turn"));
+        assert!(needs_title(&convs, "new"));
+        assert!(!needs_title(&convs, "gone"));
     }
 }
