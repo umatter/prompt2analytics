@@ -48,10 +48,14 @@ registry_row() {
     grep -F -- '`runner_mean`' "$1" 2>/dev/null
 }
 
-# runner <list dir: two|none> [VAR=value ...] -- [runner arguments ...]
+# runner <list dir: two|none|multi, or an absolute path> [VAR=value ...] -- [runner arguments ...]
 runner() {
     local list="$1"
     shift
+    case "$list" in
+        /*) ;;
+        *) list="$FIX/runner/$list" ;;
+    esac
     local envs=()
     while [ $# -gt 0 ] && [ "$1" != "--" ]; do
         envs+=("$1")
@@ -59,7 +63,7 @@ runner() {
     done
     [ $# -gt 0 ] && shift
     OUT="$(env PATH="$FIX/bin:$PATH" FAKE_CARGO_CALLS="$TREE/calls.txt" \
-        FAKE_CARGO_LIST_DIR="$FIX/runner/$list" ${envs[@]+"${envs[@]}"} \
+        FAKE_CARGO_LIST_DIR="$list" ${envs[@]+"${envs[@]}"} \
         bash "$TREE/validation/run_validation.sh" "$@" 2>&1 < /dev/null)"
     RC=$?
 }
@@ -294,6 +298,64 @@ expect_true '[ "$(cat "$TREE/validation/VALIDATION_STATUS.md")" = "previous page
 expect_true 'registry_row "$report_dir/report.md" | grep -q "| NOT RUN |$"' \
     "report.md's runner_mean row is not NOT RUN: $(registry_row "$report_dir/report.md")"
 finish lost-status-line
+
+# 16. A compile error shows at the --list step, which builds the test binaries: the run
+# fails and --write-status leaves the status page alone.
+new_tree
+add_registry
+printf 'previous page\n' > "$TREE/validation/VALIDATION_STATUS.md"
+runner two FAKE_CARGO_MODE=compile_error FAKE_R_MODE=pass -- --write-status
+expect_rc 1
+expect_out "validation/VALIDATION_STATUS.md not written: a test list failed"
+expect_true '[ "$(cat "$TREE/validation/VALIDATION_STATUS.md")" = "previous page" ]' \
+    "validation/VALIDATION_STATUS.md was overwritten after a failed test list"
+finish list-failed-keeps-page
+
+# 17. Results that could not be collected (collect exits 2, here through a Python wrapper)
+# also leave the status page alone.
+new_tree
+add_registry
+printf 'previous page\n' > "$TREE/validation/VALIDATION_STATUS.md"
+cat > "$WORK/python-collect-fails" <<'PYEOF'
+#!/bin/bash
+# validation_status.py with `collect --selection` exiting 2, as on a corrupt results.json.
+if [ "${2:-}" = collect ] && printf '%s\n' "$@" | grep -qx -- --selection; then
+    echo "error: results.json is not valid JSON" >&2
+    exit 2
+fi
+exec python3 "$@"
+PYEOF
+chmod +x "$WORK/python-collect-fails"
+runner two FAKE_R_MODE=pass PYTHON="$WORK/python-collect-fails" -- --write-status
+expect_rc 1
+expect_out "validation/VALIDATION_STATUS.md not written: the test results could not be collected"
+expect_true '[ "$(cat "$TREE/validation/VALIDATION_STATUS.md")" = "previous page" ]' \
+    "validation/VALIDATION_STATUS.md was overwritten after a failed collect"
+finish collect-failed-keeps-page
+
+# 18. A caller's quiet or verbose cargo settings do not change the output the runner parses.
+new_tree
+runner two CARGO_TERM_QUIET=true CARGO_TERM_VERBOSE=true -- --rust-only
+expect_rc 0
+expect_out "Rust p2a-core: PASS (selected 2, ran 2"
+finish quiet-cargo
+
+# 19. More than 20 missing tests: the first 20 are listed, then how many more.
+new_tree
+many="$WORK/many"
+mkdir -p "$many"
+{
+    echo "     Running unittests src/lib.rs (target/debug/deps/p2a_core-0000000000000000)"
+    for i in $(seq 1 25); do echo "stats::ttest::tests::test_validate_m$i: test"; done
+    echo ""
+    echo "25 tests, 0 benchmarks"
+} > "$many/p2a-core.list"
+cp "$FIX/runner/two/p2a-validation.list" "$many/"
+runner "$many" FAKE_CARGO_DROP_ALL=1 -- --rust-only --category stats
+expect_rc 1
+expect_out "missing: p2a-core::stats::ttest::tests::test_validate_m1"
+expect_out "... and 5 more (listed in"
+finish many-missing
 
 echo "test_run_validation.sh: $failed of $total scenarios failed"
 [ "$failed" -eq 0 ]

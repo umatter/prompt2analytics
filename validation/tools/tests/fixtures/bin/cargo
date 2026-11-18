@@ -8,7 +8,9 @@
 #                        not capture (as observed in a real run); it still counts as passed
 #   FAKE_CARGO_READ_STDIN  non-empty: a test run reads its standard input to the end, as a
 #                        test that reads stdin (or a child that inherits it) would
+#   FAKE_CARGO_DROP_ALL  non-empty: no test is reported
 #   CARGO_TERM_COLOR     always: colour the status lines as cargo does
+#   CARGO_TERM_QUIET     true: leave out the `Running` lines, as `cargo -q` does
 #   P2A_VALIDATION_VERBOSE  1: each test prints a Check line to stderr. Libtest's parallel
 #                        runner writes `test <name> ... `, `ok` and the newline separately,
 #                        so with --nocapture the Check output lands between them (the lines
@@ -52,9 +54,12 @@ if [ "${FAKE_CARGO_MODE:-}" = "compile_error" ]; then
   echo "error: could not compile \`$pkg\` (lib test) due to 1 previous error" >&2
   exit 101
 fi
-# Real cargo writes `Running` in bold bright green, padded to 12 columns, when colour is forced.
+# Real cargo writes `Running` in bold bright green, padded to 12 columns, when colour is
+# forced, and no `Running` line when quiet.
 colour() {
-  if [ "${CARGO_TERM_COLOR:-}" = always ]; then
+  if [ "${CARGO_TERM_QUIET:-}" = true ]; then
+    grep -v '^ *Running ' || true
+  elif [ "${CARGO_TERM_COLOR:-}" = always ]; then
     sed -E $'s/^( *(Finished|Running))/\x1b[1m\x1b[92m\\1\x1b[0m/'
   else
     cat
@@ -83,7 +88,9 @@ passed=0
 failed=0
 successes=()
 for n in ${names[@]+"${names[@]}"}; do
-  if [ "$n" = "${FAKE_CARGO_FAIL:-}" ]; then
+  if [ -n "${FAKE_CARGO_DROP_ALL:-}" ]; then
+    :
+  elif [ "$n" = "${FAKE_CARGO_FAIL:-}" ]; then
     echo "test $n ... FAILED"
     failed=$((failed + 1))
   elif [ "$n" = "${FAKE_CARGO_DROP:-}" ]; then

@@ -7,7 +7,8 @@
 # plus every self-test of p2a-validation. A non-zero cargo exit, a compile error, fewer
 # tests run than selected, a selected test without a parsed result (or a parsed result
 # for a test not selected), or no selected test_validate test at all is a failure; with
-# such a result mismatch, --write-status leaves validation/VALIDATION_STATUS.md alone.
+# such a result mismatch, a failed test list (a compile error) or selection, or results
+# that could not be collected, --write-status leaves validation/VALIDATION_STATUS.md alone.
 # --verbose runs the tests with P2A_VALIDATION_VERBOSE=1 and libtest's --show-output, so
 # the comparisons are printed after the status lines the logs are parsed from.
 # Full runs (no --category) also lint the methods registry (validation/methods/).
@@ -106,9 +107,10 @@ cd "$PROJECT_ROOT"
 
 PYTHON="${PYTHON:-python3}"
 P2A_RSCRIPT="${P2A_RSCRIPT:-Rscript}"
-# The cargo logs are parsed; keep them free of colour codes even when the caller's
-# environment forces colour (validation_status.py also strips them).
-export CARGO_TERM_COLOR=never
+# The cargo logs are parsed: keep cargo's output in the format validation_status.py
+# parses, free of colour codes and with its `Running` lines, whatever the caller's
+# environment sets (validation_status.py also strips colour codes).
+export CARGO_TERM_COLOR=never CARGO_TERM_QUIET=false CARGO_TERM_VERBOSE=false
 P2A_LEGACY_R_TIMEOUT="${P2A_LEGACY_R_TIMEOUT:-300}"
 # Only --legacy-r reads it. timeout(1) treats 0 as "no limit", so 0 (and leading zeros) are refused.
 if $LEGACY; then
@@ -139,9 +141,11 @@ fi
 
 FAILURES=()
 INCOMPLETE=false
-# A package whose parsed test ids differ from its selection (collect's missing/unexpected
-# lines): the results cannot describe the suite, so the status page is not written.
-RESULTS_MISMATCH=false
+# Why the results cannot describe the suite, so that the status page is not written: a
+# package whose test list or selection failed, whose results could not be collected
+# (collect exit 2), or whose parsed test ids differ from its selection (collect's
+# missing/unexpected lines). Empty when the page may be written.
+PAGE_REFUSED=""
 SCRATCH_DIRS=()
 
 cleanup() {
@@ -197,6 +201,9 @@ collect_line() {
     shift
     COLLECT_OUT="$REPORT_DIR/collect-output.txt"
     status_py collect "$@" > "$COLLECT_OUT"
+    if [ "$STATUS_RC" -ne 0 ] && [ "$STATUS_RC" -ne 1 ]; then
+        PAGE_REFUSED="the test results could not be collected"
+    fi
     COLLECT_LINE="$(grep -F -- "$prefix" "$COLLECT_OUT" | head -n 1 || true)"
 }
 
@@ -270,6 +277,7 @@ if $RUN_RUST; then
                 echo "${RED}Rust $pkg: FAIL (cargo test --list exited $rc; see $list)${NC}"
                 fail "Rust $pkg: cargo test --list exited $rc"
                 LIST_FAILED=true
+                PAGE_REFUSED="a test list failed"
                 continue
             fi
             SELECT=(select --package "$pkg")
@@ -283,6 +291,7 @@ if $RUN_RUST; then
             if [ "$STATUS_RC" -ne 0 ]; then
                 echo "${RED}Rust $pkg: FAIL (test selection failed)${NC}"
                 fail "Rust $pkg: test selection failed"
+                PAGE_REFUSED="a test selection failed"
                 continue
             fi
             n="$(grep -c . "$selection" || true)"
@@ -336,7 +345,7 @@ if $RUN_RUST; then
             detail="${detail%)}"
             mismatch="$(grep -F -e "collect: $pkg: missing: " -e "collect: $pkg: unexpected: " "$COLLECT_OUT" || true)"
             if [ -n "$mismatch" ]; then
-                RESULTS_MISMATCH=true
+                PAGE_REFUSED="the parsed test results do not match the selection"
             fi
             if [ "$pkg_status" = pass ]; then
                 echo "${GREEN}Rust $pkg: PASS ($detail)${NC}"
@@ -483,9 +492,9 @@ fi
 # ------------------------------------------------------------------------------------
 RENDER=(render --results "$RESULTS" -o "$REPORT_DIR/report.md")
 if $WRITE_STATUS; then
-    if $RESULTS_MISMATCH; then
-        echo "${RED}validation/VALIDATION_STATUS.md not written: the parsed test results do not match the selection (see above)${NC}"
-        fail "validation/VALIDATION_STATUS.md not written (parsed test results do not match the selection)"
+    if [ -n "$PAGE_REFUSED" ]; then
+        echo "${RED}validation/VALIDATION_STATUS.md not written: $PAGE_REFUSED (see above)${NC}"
+        fail "validation/VALIDATION_STATUS.md not written ($PAGE_REFUSED)"
     else
         RENDER+=(-o validation/VALIDATION_STATUS.md)
     fi
