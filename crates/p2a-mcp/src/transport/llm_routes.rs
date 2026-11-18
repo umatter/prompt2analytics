@@ -12,7 +12,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use super::http::{ApiResponse, AppState, ContentItem};
+use super::http::{ApiResponse, AppState, ContentItem, JsonBody};
 use super::routes_sessions::{LookupError, live_session, lookup_error_response};
 use crate::audit::{AuditEntry, AuditLogger, ResultSummary, sanitize_arguments};
 use crate::exec::{CallOrigin, ToolCallError, ToolGovernor};
@@ -1077,7 +1077,7 @@ fn drop_repeated_prompt(history: &mut Vec<Message>, prompt: &str) {
 /// reply and its tool calls stored in the conversation.
 pub async fn llm_chat(
     State(state): State<AppState>,
-    Json(request): Json<LlmChatRequest>,
+    JsonBody(request): JsonBody<LlmChatRequest>,
 ) -> Response {
     // At most llm_streams_per_session chat requests run per session; the
     // non-streaming chat runs the same tool loop, so it takes a slot too.
@@ -1268,7 +1268,7 @@ pub async fn llm_list_models(State(_state): State<AppState>) -> Response {
 /// provider it answers as `GET`.
 pub async fn llm_list_models_for(
     State(_state): State<AppState>,
-    Json(request): Json<LlmModelsRequest>,
+    JsonBody(request): JsonBody<LlmModelsRequest>,
 ) -> Response {
     list_models_response(request.provider, &LlmSettings::current()).await
 }
@@ -1361,7 +1361,7 @@ pub struct GenerateTitleResponse {
 }
 
 /// Generate a conversation title using the LLM.
-pub async fn llm_generate_title(Json(request): Json<GenerateTitleRequest>) -> Response {
+pub async fn llm_generate_title(JsonBody(request): JsonBody<GenerateTitleRequest>) -> Response {
     // Resolve the provider (egress policy, key policy) before any request.
     let settings = LlmSettings::current();
     let provider_config =
@@ -1799,7 +1799,7 @@ async fn run_until_client_gone<F: std::future::Future>(
 pub async fn llm_chat_stream(
     State(state): State<AppState>,
     hold: Option<axum::Extension<super::http::SharedHold>>,
-    Json(request): Json<LlmChatRequest>,
+    JsonBody(request): JsonBody<LlmChatRequest>,
 ) -> Response {
     let settings = LlmSettings::current();
     let slot = match acquire_chat_slot_or_busy(&request.session_id, settings.streams_per_session) {

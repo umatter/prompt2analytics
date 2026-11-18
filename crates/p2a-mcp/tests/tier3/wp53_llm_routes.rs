@@ -764,8 +764,12 @@ mod conversations {
         );
         let (s, b, _) = put(json!({"archived": true})).await;
         assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{b}");
+        assert_eq!(b["code"], "invalid_arguments", "{b}");
         assert!(
-            b.as_str().unwrap().contains("unknown field `archived`"),
+            b["error"]
+                .as_str()
+                .unwrap()
+                .contains("unknown field `archived`"),
             "{b}"
         );
     }

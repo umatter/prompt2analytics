@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{FromRequest, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{delete, get, post},
@@ -870,6 +870,49 @@ fn create_base_router(state: AppState, config: &ServerConfig) -> Router {
 // Request/Response Types
 // =============================================================================
 
+/// A JSON request body, read as `axum::Json` reads it. A body the route
+/// cannot read (malformed JSON, a value of the wrong type, an unknown field,
+/// no JSON content type) is refused with the status axum gives the rejection,
+/// in the server's JSON error body with code `invalid_arguments`; the
+/// parser's message, which quotes the offending value, is cut as the
+/// websocket cuts it ([`crate::server::quote_cut`]). A body above the size
+/// cap keeps axum's plain-text 413, as the body-limit layer answers it.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct JsonBody<T>(pub T);
+
+impl<T, S> axum::extract::FromRequest<S> for JsonBody<T>
+where
+    T: serde::de::DeserializeOwned,
+    S: Send + Sync,
+{
+    type Rejection = Response;
+
+    async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Response> {
+        match Json::<T>::from_request(req, state).await {
+            Ok(Json(value)) => Ok(Self(value)),
+            Err(rejection) => Err(json_rejection_response(rejection)),
+        }
+    }
+}
+
+/// The answer to a JSON body [`JsonBody`] could not read.
+fn json_rejection_response(rejection: axum::extract::rejection::JsonRejection) -> Response {
+    let status = rejection.status();
+    if status == StatusCode::PAYLOAD_TOO_LARGE {
+        return rejection.into_response();
+    }
+    let message = crate::server::quote_cut(&rejection.body_text());
+    (
+        status,
+        Json(ApiResponse::<()>::error_with_code(
+            message,
+            "invalid_arguments",
+            None,
+        )),
+    )
+        .into_response()
+}
+
 /// Response wrapper for API endpoints.
 #[derive(Debug, Serialize)]
 pub struct ApiResponse<T> {
@@ -1350,7 +1393,7 @@ mod serve_tests {
         let response = llm_chat_stream(
             axum::extract::State(state),
             Some(axum::Extension(Arc::new(hold))),
-            Json(request),
+            JsonBody(request),
         )
         .await;
         // The handler has returned; the chat is waiting on the provider.

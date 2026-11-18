@@ -9,7 +9,7 @@ use axum::{
 };
 use serde::Deserialize;
 
-use super::http::{ApiResponse, AppState};
+use super::http::{ApiResponse, AppState, JsonBody};
 use super::routes_sessions::{live_session, lookup_error_response};
 use crate::exec::CallOrigin;
 
@@ -136,10 +136,10 @@ pub(crate) async fn list_tools(State(state): State<AppState>) -> impl IntoRespon
 pub(crate) async fn call_tool(
     State(state): State<AppState>,
     Path(name): Path<String>,
-    Json(CallToolRequest {
+    JsonBody(CallToolRequest {
         session_id,
         arguments,
-    }): Json<CallToolRequest>,
+    }): JsonBody<CallToolRequest>,
 ) -> Response {
     // Get the session (a stored one is adopted)
     let session = match live_session(&state, &session_id).await {

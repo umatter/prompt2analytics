@@ -639,7 +639,7 @@ PUT /api/conversations/{conversation_id}
 {"title": "Updated Title", "is_archived": true}
 ```
 
-Applies `title`, then `is_archived`, and answers the updated conversation, in the shape of the archive response below. An empty body answers 400 `invalid_arguments` ("send `title`, `is_archived` or both"); any other field answers 422 with the plain-text message "Failed to deserialize the JSON body into the target type: unknown field `archived`, expected `title` or `is_archived` ...".
+Applies `title`, then `is_archived`, and answers the updated conversation, in the shape of the archive response below. An empty body answers 400 `invalid_arguments` ("send `title`, `is_archived` or both"); any other field answers 422 `invalid_arguments` with the message "Failed to deserialize the JSON body into the target type: unknown field `archived`, expected `title` or `is_archived` ..." (see [request bodies](#errors-status-codes-and-retries)).
 
 ### Archive Conversation
 ```
@@ -953,7 +953,7 @@ An error response has this shape; `data` is absent, and `code` and `details` app
 | 504 | `deadline_exceeded` | the tool call ran past the server's time limit; `details {limit_secs}` |
 | 500 | `internal` | the tool panicked or the server failed; the session survives |
 
-A request body that does not deserialize into the route's request type answers 422 (400 for malformed JSON) with axum's plain-text message and no `code`.
+A JSON request body that a route cannot read answers in the JSON error shape with code `invalid_arguments`: 422 for a body that does not deserialize into the route's request type (a value of the wrong type, an unknown or missing field), 400 for malformed JSON, 415 without a JSON `Content-Type`. The `error` is the parser's message, cut as the websocket cuts it: one longer than 256 bytes keeps its first 160 bytes and its last 96 around a note of how many bytes were left out. A body above `P2A_MAX_HTTP_BODY_MB` (or the hosted 2 MiB parse limit) still answers 413 with the plain-text body `length limit exceeded` (or `Failed to buffer the request body: length limit exceeded`). Before v0.7.0 these refusals were axum's plain text with no `code`.
 
 The LLM routes answer a refused provider configuration with 400 `invalid_provider`, a provider's error with 502 `upstream_error`, an unreachable provider with 503 `provider_unavailable` and a provider that did not answer in time with 504 `upstream_timeout`; the stream route sends the same codes in its `error` event. The provider's response body is never part of the error.
 

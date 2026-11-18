@@ -8,7 +8,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use super::http::{ApiResponse, AppState};
+use super::http::{ApiResponse, AppState, JsonBody};
 use crate::config::DeploymentMode;
 use crate::session::{SessionError, validate_user_id};
 
@@ -59,7 +59,7 @@ fn error_with(status: StatusCode, message: &str, code: &'static str) -> Response
 pub(crate) async fn create_session(
     State(state): State<AppState>,
     Extension(mode): Extension<DeploymentMode>,
-    Json(request): Json<CreateSessionRequest>,
+    JsonBody(request): JsonBody<CreateSessionRequest>,
 ) -> Response {
     let user_id = if mode == DeploymentMode::OpenPublic {
         None
@@ -427,6 +427,65 @@ mod tests {
         let body = body_of(resp).await;
         assert_eq!(body["code"], "not_found", "{body}");
         assert_eq!(body["error"], "Session not found", "{body}");
+    }
+
+    /// A JSON body a route cannot read answers the server's JSON error body
+    /// with code `invalid_arguments`, the status axum gives the rejection,
+    /// and the parser's quote cut as the websocket cuts it.
+    #[tokio::test]
+    async fn an_unreadable_json_body_is_refused_in_the_error_shape() {
+        let (app, _state) = super::super::http::build_app(&crate::config::ServerConfig::default())
+            .await
+            .unwrap();
+        let send = |uri: &str, content_type: Option<&str>, body: String| {
+            let mut req = Request::post(uri).header(header::HOST, "localhost");
+            if let Some(ct) = content_type {
+                req = req.header(header::CONTENT_TYPE, ct);
+            }
+            app.clone().oneshot(req.body(Body::from(body)).unwrap())
+        };
+        // A mistyped value quoting a 10 kB string: 422, cut to 160 + note + 96 bytes.
+        let long = "x".repeat(10_000);
+        for (uri, body) in [
+            (
+                "/api/tools/load_dataset",
+                serde_json::json!({"session_id": ["not", "a", &long], "arguments": {}}),
+            ),
+            (
+                "/api/sessions",
+                serde_json::json!({"user_id": ["not", "a", &long]}),
+            ),
+        ] {
+            let resp = send(uri, Some("application/json"), body.to_string())
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY, "{uri}");
+            let json = body_of(resp).await;
+            assert_eq!(json["success"], false, "{uri}: {json}");
+            assert_eq!(json["code"], "invalid_arguments", "{uri}: {json}");
+            let error = json["error"].as_str().unwrap();
+            assert!(error.len() < 400, "{uri}: {} bytes", error.len());
+        }
+        // Malformed JSON keeps 400, a missing content type 415, both with the JSON body.
+        for (content_type, body, status) in [
+            (
+                Some("application/json"),
+                "{not json".to_string(),
+                StatusCode::BAD_REQUEST,
+            ),
+            (None, "{}".to_string(), StatusCode::UNSUPPORTED_MEDIA_TYPE),
+        ] {
+            #[allow(unused_mut)]
+            let mut uris = vec!["/api/tools/load_dataset", "/api/sessions"];
+            #[cfg(feature = "llm")]
+            uris.push("/api/llm/generate-title");
+            for uri in uris {
+                let resp = send(uri, content_type, body.clone()).await.unwrap();
+                assert_eq!(resp.status(), status, "{uri}");
+                let json = body_of(resp).await;
+                assert_eq!(json["code"], "invalid_arguments", "{uri}: {json}");
+            }
+        }
     }
 
     /// The mapping the tool and chat routes use: an expired session is 410

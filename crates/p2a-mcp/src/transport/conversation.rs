@@ -23,7 +23,7 @@ use p2a_core::resource::Budget;
 use serde::{Deserialize, Serialize};
 use tracing::Instrument;
 
-use super::http::ApiResponse;
+use super::http::{ApiResponse, JsonBody};
 use super::routes_sessions::capacity_response;
 use crate::config::DeploymentMode;
 use crate::db::{
@@ -502,7 +502,7 @@ const MESSAGE_ROLES: [&str; 3] = ["user", "assistant", "system"];
 async fn create_conversation(
     State(state): State<ConversationState>,
     headers: HeaderMap,
-    Json(request): Json<CreateConversationRequest>,
+    JsonBody(request): JsonBody<CreateConversationRequest>,
 ) -> Response {
     if header_session(&headers).is_some_and(|h| h != request.session_id) {
         return error_with(
@@ -573,7 +573,7 @@ async fn update_conversation(
     State(state): State<ConversationState>,
     CallerSession(caller): CallerSession,
     Path(id): Path<String>,
-    Json(request): Json<UpdateConversationRequest>,
+    JsonBody(request): JsonBody<UpdateConversationRequest>,
 ) -> Response {
     let pm = &state.session_manager;
     if let Err(e) = pm.authorize_conversation(&caller, &id).await {
@@ -619,7 +619,7 @@ async fn archive_conversation(
     State(state): State<ConversationState>,
     CallerSession(caller): CallerSession,
     Path(id): Path<String>,
-    Json(request): Json<ArchiveConversationRequest>,
+    JsonBody(request): JsonBody<ArchiveConversationRequest>,
 ) -> Response {
     let pm = &state.session_manager;
     if let Err(e) = pm.authorize_conversation(&caller, &id).await {
@@ -656,7 +656,7 @@ async fn add_message(
     State(state): State<ConversationState>,
     CallerSession(caller): CallerSession,
     Path(id): Path<String>,
-    Json(request): Json<AddMessageRequest>,
+    JsonBody(request): JsonBody<AddMessageRequest>,
 ) -> Response {
     let pm = &state.session_manager;
     if let Err(e) = pm.authorize_conversation(&caller, &id).await {
@@ -717,7 +717,7 @@ async fn update_settings(
     State(state): State<ConversationState>,
     headers: HeaderMap,
     Path(session_id): Path<String>,
-    Json(request): Json<UpdateSettingsRequest>,
+    JsonBody(request): JsonBody<UpdateSettingsRequest>,
 ) -> Response {
     if let Some(mismatch) = path_session_mismatch(&headers, &session_id) {
         return mismatch;
