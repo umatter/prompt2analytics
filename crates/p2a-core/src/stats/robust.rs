@@ -910,8 +910,6 @@ pub(crate) fn bw_nrd0(x: &[f64]) -> EconResult<f64> {
     Ok(0.9 * lo * nf.powf(-0.2))
 }
 
-/// R's density kernels at distance `t` with bandwidth `bw` (the kernel's standard deviation),
-/// including the 1/bw scaling. The compact kernels are zero at |t| >= a, R's half-width.
 /// The kernel ordinates of [`density_binned`] at kords = seq(0, 2 * span, length 2m), mirrored
 /// above m (R's `kords[(m + 2):(2m)] <- -kords[m:2]`). Every kernel is even, so the ordinates
 /// above m are those below it in reverse order and are copied rather than evaluated again.
@@ -932,6 +930,8 @@ fn density_kernel_ordinates(
     Ok(k)
 }
 
+/// R's density kernels at distance `t` with bandwidth `bw` (the kernel's standard deviation),
+/// including the 1/bw scaling. The compact kernels are zero at |t| >= a, R's half-width.
 fn kernel_function(t: f64, bw: f64, kernel: DensityKernel) -> f64 {
     use std::f64::consts::PI;
     let ax = t.abs();
