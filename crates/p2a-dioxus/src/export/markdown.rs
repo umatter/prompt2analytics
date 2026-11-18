@@ -72,8 +72,12 @@ fn format_message(msg: &ChatMessage, options: &MarkdownExportOptions) -> String 
     // Tool calls in collapsible sections
     if options.include_tool_calls && !msg.tool_calls.is_empty() {
         for tc in &msg.tool_calls {
-            // Exports hold finished messages only, so every call has ended.
-            let status_indicator = crate::components::tool_status_label(tc.success, true);
+            // The transcript's rule (components/message.rs): a call of a
+            // streaming message without an outcome or a result still runs.
+            // export_to_markdown leaves a streaming answer out, so there
+            // every call has ended.
+            let finished = tc.is_finished() || !msg.is_streaming;
+            let status_indicator = crate::components::tool_status_label(tc.success, finished);
 
             output.push_str(&format!(
                 "<details>\n<summary>Tool: <code>{}</code> ({})</summary>\n\n",
@@ -222,6 +226,24 @@ mod tests {
             is_expanded: false,
         });
         msg
+    }
+
+    /// A call of a streaming message without an outcome reads as running,
+    /// as in the transcript. The export itself leaves a streaming answer out.
+    #[test]
+    fn a_running_call_of_a_streaming_answer_is_running() {
+        let opts = MarkdownExportOptions::default();
+        let mut msg = with_call(None);
+        msg.is_streaming = true;
+        msg.tool_calls[0].result = None;
+        let out = format_message(&msg, &opts);
+        assert!(out.contains("(running)"), "{out}");
+        assert!(!out.contains("(status unknown)"), "{out}");
+        let out = export_to_markdown(None, &[msg.clone()], &opts);
+        assert!(!out.contains("regression_ols"), "{out}");
+        msg.tool_calls[0].success = Some(false);
+        let out = format_message(&msg, &opts);
+        assert!(out.contains("(failed)"), "{out}");
     }
 
     #[test]

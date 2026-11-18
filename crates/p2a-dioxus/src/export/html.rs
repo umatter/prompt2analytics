@@ -90,14 +90,18 @@ fn format_message_html(msg: &ChatMessage, options: &HtmlExportOptions) -> String
     let mut tool_calls_html = String::new();
     if options.include_tool_calls && !msg.tool_calls.is_empty() {
         for tc in &msg.tool_calls {
-            let status_class = match tc.success {
-                Some(true) => "success",
-                Some(false) => "error",
-                None => "unknown",
+            // The transcript's rule (components/message.rs): a call of a
+            // streaming message without an outcome or a result still runs.
+            // export_to_html leaves a streaming answer out, so there every
+            // call has ended.
+            let finished = tc.is_finished() || !msg.is_streaming;
+            let status_class = match (tc.success, finished) {
+                (Some(true), _) => "success",
+                (Some(false), _) => "error",
+                (None, true) => "unknown",
+                (None, false) => "running",
             };
-
-            // Exports hold finished messages only, so every call has ended.
-            let status_text = crate::components::tool_status_label(tc.success, true);
+            let status_text = crate::components::tool_status_label(tc.success, finished);
 
             let args_json = serde_json::to_string_pretty(&tc.arguments)
                 .unwrap_or_else(|_| tc.arguments.to_string());
@@ -318,6 +322,11 @@ const CSS_LIGHT: &str = r#"
             color: var(--text-secondary);
         }
 
+        .tool-call.running .status {
+            color: var(--text-secondary);
+            font-style: italic;
+        }
+
         .interrupted {
             color: var(--text-secondary);
             font-style: italic;
@@ -498,6 +507,11 @@ const CSS_DARK: &str = r#"
             color: var(--text-secondary);
         }
 
+        .tool-call.running .status {
+            color: var(--text-secondary);
+            font-style: italic;
+        }
+
         .interrupted {
             color: var(--text-secondary);
             font-style: italic;
@@ -627,6 +641,26 @@ mod tests {
             is_expanded: false,
         });
         msg
+    }
+
+    /// A call of a streaming message without an outcome reads as running,
+    /// as in the transcript; one that ended shows its outcome. The export
+    /// itself leaves a streaming answer out.
+    #[test]
+    fn a_running_call_of_a_streaming_answer_is_running() {
+        let opts = HtmlExportOptions::default();
+        let mut msg = with_call(None);
+        msg.is_streaming = true;
+        msg.tool_calls[0].result = None;
+        let out = format_message_html(&msg, &opts);
+        assert!(out.contains(r#"class="tool-call running""#), "{out}");
+        assert!(out.contains("(running)"), "{out}");
+        assert!(!out.contains("(status unknown)"), "{out}");
+        let out = export_to_html(None, &[msg.clone()], &opts);
+        assert!(!out.contains("regression_ols"), "{out}");
+        msg.tool_calls[0].success = Some(true);
+        let out = format_message_html(&msg, &opts);
+        assert!(out.contains(r#"class="tool-call success""#) && out.contains("(completed)"));
     }
 
     #[test]
