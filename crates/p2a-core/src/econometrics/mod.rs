@@ -323,8 +323,8 @@ pub use spatial::{
     run_sac_dataset, run_sar, run_sar_dataset, run_sem, run_sem_dataset,
 };
 pub use staggered_did::{
-    AggregatedEffect, AttEstimationMethod, ComparisonGroup, GroupTimeATT,
-    PreTrendTest, StaggeredDidConfig, StaggeredDidResult, run_staggered_did,
+    AggregatedEffect, AttEstimationMethod, ComparisonGroup, GroupTimeATT, PreTrendTest,
+    StaggeredDidConfig, StaggeredDidResult, run_staggered_did,
 };
 pub use survival::{
     AftConfig, AftDistribution, AftResult, CompetingRisksResult, CoxConfig, CoxResult, CoxSeType,

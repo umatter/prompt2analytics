@@ -1480,8 +1480,7 @@ mod tests {
                 let m = e.to_string();
                 // The text of our own refusal, not the quoted R error in its advice.
                 assert!(
-                    m.contains("spans give a smoothing kernel")
-                        && m.contains("-point series"),
+                    m.contains("spans give a smoothing kernel") && m.contains("-point series"),
                     "{m}"
                 );
             }

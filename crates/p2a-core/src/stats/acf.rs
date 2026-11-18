@@ -849,8 +849,12 @@ mod tests {
     #[test]
     fn ccf_default_lag_follows_r() {
         // R: ccf(x, y)$lag runs over -16..16 for n = 100, as lag.max = floor(10 log10(n / 2)).
-        let x: Vec<f64> = (0..100).map(|i| (i as f64 * 0.7).sin() + 0.01 * i as f64).collect();
-        let y: Vec<f64> = (0..100).map(|i| (i as f64 * 0.5).cos() - 0.02 * i as f64).collect();
+        let x: Vec<f64> = (0..100)
+            .map(|i| (i as f64 * 0.7).sin() + 0.01 * i as f64)
+            .collect();
+        let y: Vec<f64> = (0..100)
+            .map(|i| (i as f64 * 0.5).cos() - 0.02 * i as f64)
+            .collect();
         let r = ccf(&x, &y, None, CcfType::Correlation).unwrap();
         assert_eq!(r.lags.first(), Some(&-16));
         assert_eq!(r.lags.last(), Some(&16));

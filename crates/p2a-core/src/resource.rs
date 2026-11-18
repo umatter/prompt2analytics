@@ -369,7 +369,9 @@ mod tests {
         let kib = with_alloc_ceiling(Some(1024), || check_alloc::<f64>(1024, "grid"));
         let kib = kib.unwrap_err().to_string();
         assert!(
-            kib.contains("would need 8.00 KiB, above this server's per-allocation limit of 1.00 KiB"),
+            kib.contains(
+                "would need 8.00 KiB, above this server's per-allocation limit of 1.00 KiB"
+            ),
             "{kib}"
         );
         // 1.5 MiB of f64 against a 1 MiB ceiling.

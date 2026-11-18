@@ -960,7 +960,15 @@ mod tests {
             .iter()
             .find(|w| w.code == "PARALLEL_TRENDS_UNTESTABLE")
             .unwrap();
-        assert!(!note.message.contains("two time periods"), "{}", note.message);
-        assert!(note.message.contains("post-period indicator"), "{}", note.message);
+        assert!(
+            !note.message.contains("two time periods"),
+            "{}",
+            note.message
+        );
+        assert!(
+            note.message.contains("post-period indicator"),
+            "{}",
+            note.message
+        );
     }
 }
