@@ -631,7 +631,7 @@ Named budgets:
 | `join_output_rows` | predicted output rows of a join | 2,000,000 | none |
 | `onehot_levels` | levels a one-hot encoding expands | 500 | none |
 | `pivot_columns` | output columns of `munge_pivot`: the index columns plus one per distinct value of `on`, counted before the pivot | 10,000 | none |
-| `pivot_cells` | output cells of `munge_pivot`: rows (distinct combinations of `index`) × columns, counted before the pivot; also at least the rows of the long table, and at least half the index and `on` values it holds (rows × (index columns + 1)) | 1,000,000 | none |
+| `pivot_cells` | output cells of `munge_pivot`: rows (distinct combinations of `index`) × columns, counted before the pivot; also at least the rows of the long table, and at least half the index and `on` values it holds (rows × (index columns + 1)) | 700,000 | none |
 | `str_split_parts` | parts `str_split` produces | 100 | none |
 | `str_pad_width` | target width of string padding (no current tool reads it) | 10,000 | none |
 | `generated_cells` | cells `generate_random_data` produces | 10,000,000 | none |
@@ -757,13 +757,14 @@ groups every row of the long table by its index and `on` values, then fills one
 buffer with every output cell and builds the wide table's columns from it, so a
 pivot's peak memory grows with the rows it reads and the index and `on` values
 they hold as well as with the cells it makes. A pivot reads at most as many rows
-as it makes cells and at most twice as many of those values, so the costliest
+as it makes cells and at most twice `pivot_cells` of those values, so the costliest
 pivot of a given size is a dense one with one index column, a row for each pair
 of index value and `on` value. In a fresh process, a dense pivot of about
 1,000,000 cells raised the peak RSS above the loaded long table by 150 to
 200 MiB for numeric values and by 195 to 260 MiB for string values (of 6 to
 45 bytes), whether the wide table was 1,000 × 1,000, 100 × 10,000 or
-9,900 × 101. A process that has already freed large buffers, as a long-running
+9,900 × 101 (rows × columns, the index column counted among the columns, as the
+cell budget counts it). A process that has already freed large buffers, as a long-running
 server has, keeps more of a pivot's memory resident, because glibc's malloc
 raises its mmap threshold as it frees them: there the 1,000 × 1,000 pivot peaked
 up to 252 MiB with integer index values and up to 351 MiB with 45-byte strings
@@ -772,7 +773,7 @@ values as `pivot_cells` allows peaked lower in the same state: 87 to 191 MiB
 with integer index columns, 169 to 290 MiB with string index columns of 20 or
 45 bytes. A sparse pivot, with far fewer rows than cells, costs about 25 bytes
 per cell for numbers and 65 bytes for strings, plus about 870 bytes per output
-column. At the hosted `pivot_cells` of 1,000,000 one pivot therefore peaks at
+column. At 1,000,000 cells one pivot therefore peaks at
 most about 350 MiB above what the session holds when its index and values are at
 most about 45 bytes, so a session within its 200 MiB quota stays under the
 700 MiB soft limit of a 1 GB machine (with other sessions' datasets near the
@@ -795,24 +796,27 @@ twice the cap in index and `on` values, or when its index makes too many rows;
 and `on` when the distinct `on` values alone make more columns than the cap
 allows cells (`index` when the index columns alone do).
 
-The demo's `deploy/fly.toml` lowers `pivot_cells` to 700,000
-(`P2A_LIMIT_OVERRIDES=pivot_cells=700000`), because on its 1 GB machine a pivot
-peaking up to 350 MiB above the session's data, on top of other sessions'
-datasets near the 500 MiB total, comes close to the machine's memory, and the
-soft limit only gates admission. With the server pinned to one CPU, as on that
-machine, dense pivots of one index column and 1,000 `on` values that fill each
-budget were measured in a fresh process and then a second time in the same
-process, on a dev build (`opt-level = 1`; each measurement taken twice, agreeing
-within 2 MiB). At 700,000 cells they raised the peak RSS by 84 and 55 MiB for
-numeric values and by 134 and 88 MiB for 45-byte string index and values,
-against 131 and 122 MiB and 175 and 150 MiB at 1,000,000: 0.45 to 0.77 times as
-much. Scaled the same way, the worst case of
-about 350 MiB above would fall to about 270 MiB; that case was not re-measured.
-Without the pin, on a 12-thread CPU, the same pivots took more memory (the
-fresh-process ones at 1,000,000 cells 170 and 207 MiB, within the release-build
-ranges above) and the ratio was 0.79 to 0.94, presumably because polars'
-per-thread buffers do not shrink with the budget, so on a machine with more CPUs
-lowering `pivot_cells` buys less.
+The hosted `pivot_cells` is 700,000 rather than 1,000,000, because on the
+demo's 1 GB machine a pivot peaking up to 350 MiB above the session's data, on
+top of other sessions' datasets near the 500 MiB total, comes close to the
+machine's memory, and the soft limit only gates admission. With the server
+pinned to one CPU, as on that machine, dense pivots of one index column and
+1,000 `on` values that fill each budget were measured on a dev build
+(`opt-level = 1`), first in a fresh process and then a second time in the same
+process. Each figure is the increase of the peak RSS over the RSS just before
+that call, and a repeat of a whole run agreed within 2 MiB. The second call
+reads lower because its baseline already holds the first call's wide result
+and the heap glibc kept after the first pivot. At 700,000 cells the peak rose
+by 84 MiB (fresh) and 55 MiB (second call) for numeric values and by 134 MiB
+(fresh) and 88 MiB (second call) for 45-byte string index and values; at
+1,000,000 cells by 131 and 122 MiB (numeric, fresh and second call) and by 175
+and 150 MiB (strings, fresh and second call): 0.45 to 0.77 times as much.
+Scaled the same way, the worst case of about 350 MiB above falls to about
+270 MiB; that case was not re-measured. Without the pin, on a 12-thread CPU,
+the same pivots took more memory (the fresh-process ones at 1,000,000 cells 170
+and 207 MiB, within the release-build ranges above) and the ratio was 0.79 to
+0.94, presumably because polars' per-thread buffers do not shrink with the
+budget, so on a machine with more CPUs lowering `pivot_cells` buys less.
 
 ## Must-do checklist
 
@@ -928,7 +932,8 @@ lowering `pivot_cells` buys less.
    server restarts. On top of that comes one leftover temporary file (at most
    `export_bytes`) for each write a stop interrupted: at most one for each call
    running at the stop, so at most `P2A_TOOL_CONCURRENCY` per stop (default one
-   per vCPU; one per session in the hosted profile). Each stays until a sweep
+   per CPU in every profile; the one-per-session limit of the hosted profile is
+   `P2A_SESSION_CONCURRENCY`). Each stays until a sweep
    of its folder or the removal of its directory takes it. The kept directories
    go as their sessions come back and end, or when the store's sweep deletes
    the rows of those that do not, about one session TTL (plus one sweep
@@ -1165,9 +1170,9 @@ Nothing here runs automatically except the two workflows named in steps 0 and
 `deploy/fly.toml` is configured for the open-but-hardened posture: it pins an
 explicit image tag and sets open mode (`P2A_ALLOW_UNAUTHENTICATED=1`),
 `P2A_LIMITS=hosted`, `P2A_DATA_ROOT=/data`, the CORS origin, the LLM host
-allowlist and a restart-on-failure policy. It also lowers `pivot_cells` to
-700,000 (see the pivot calibration note under
-[`P2A_LIMIT_OVERRIDES` keys](#p2a_limit_overrides-keys)) and pins
+allowlist and a restart-on-failure policy. It runs the hosted `pivot_cells` of
+700,000, sized for its 1 GB machine (see the pivot calibration note under
+[`P2A_LIMIT_OVERRIDES` keys](#p2a_limit_overrides-keys)), and pins
 `P2A_TOOL_CONCURRENCY=1`: the default, one call per vCPU, is 1 on its
 shared-cpu-1x machine as well, but above 1 one call's parallel work in p2a-core
 shares the process's thread pool with the other admitted calls and can hold
