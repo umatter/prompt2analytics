@@ -13,20 +13,17 @@ pub struct MessageProps {
 }
 
 /// Whether a message must be redrawn: its text, streaming and interrupted
-/// state, its plot count, and each tool call's id, outcome and result size.
+/// state, its plot count, and its tool calls (a call added, ended or
+/// replaced bumps `tool_rev`).
 impl PartialEq for ChatMessage {
     fn eq(&self, other: &Self) -> bool {
         self.id == other.id
             && self.is_streaming == other.is_streaming
             && self.interrupted == other.interrupted
+            && self.tool_rev == other.tool_rev
             && self.images.len() == other.images.len()
             && self.tool_calls.len() == other.tool_calls.len()
             && self.content == other.content
-            && self.tool_calls.iter().zip(&other.tool_calls).all(|(a, b)| {
-                a.id == b.id
-                    && a.success == b.success
-                    && a.result.as_ref().map(String::len) == b.result.as_ref().map(String::len)
-            })
     }
 }
 
@@ -176,32 +173,115 @@ pub fn Message(props: MessageProps) -> Element {
 
 #[cfg(test)]
 mod tests {
+    use crate::state::ChatState;
+
+    /// The card of a call that ended or failed is redrawn although the text
+    /// and the number of calls are unchanged.
+    #[test]
+    fn a_tool_call_status_change_redraws_the_message() {
+        let mut chat = ChatState::new();
+        chat.add_user_message("fit");
+        chat.add_streaming_message();
+        chat.append_content("Fitting.");
+        chat.set_active_tool(
+            "regression_ols".into(),
+            serde_json::json!({"dataset": "sales"}),
+        );
+        let running = chat.messages[1].clone();
+        assert_eq!(running, chat.messages[1].clone());
+        chat.clear_active_tool(Some("Error: no column".into()), Some("error"));
+        assert_ne!(running, chat.messages[1], "failed");
+
+        // Calls loaded from the store replace the streamed ones.
+        let before = chat.messages[1].clone();
+        let calls = chat.messages[1].tool_calls.clone();
+        chat.messages[1].set_tool_calls(calls);
+        assert_ne!(before, chat.messages[1], "replaced");
+
+        let mut interrupted = chat.messages[1].clone();
+        let shown = interrupted.clone();
+        interrupted.interrupted = true;
+        assert_ne!(shown, interrupted);
+    }
+}
+
+#[cfg(test)]
+mod timing {
     use super::*;
     use crate::state::ToolCallInfo;
+    use std::time::Instant;
 
-    fn with_call(success: Option<bool>, result: Option<&str>) -> ChatMessage {
-        let mut m = ChatMessage::assistant_streaming();
-        m.id = "m1".into();
-        m.content = "Fitted.".into();
-        m.tool_calls.push(ToolCallInfo {
-            id: "call_1".into(),
-            name: "regression_ols".into(),
-            arguments: serde_json::json!({"dataset": "sales"}),
-            result: result.map(str::to_string),
-            success,
-            is_expanded: false,
-        });
-        m
+    /// The props comparison before the per-call fields.
+    fn base_eq(a: &ChatMessage, b: &ChatMessage) -> bool {
+        a.id == b.id
+            && a.content == b.content
+            && a.is_streaming == b.is_streaming
+            && a.images.len() == b.images.len()
+            && a.tool_calls.len() == b.tool_calls.len()
+    }
+
+    fn median(mut v: Vec<f64>) -> f64 {
+        v.sort_by(f64::total_cmp);
+        v[v.len() / 2]
+    }
+
+    /// 3 warm-ups, then 31 interleaved runs; medians in ms.
+    fn time_pair(mut base: impl FnMut() -> usize, mut head: impl FnMut() -> usize) -> (f64, f64) {
+        for _ in 0..3 {
+            std::hint::black_box(base());
+            std::hint::black_box(head());
+        }
+        let (mut b, mut h) = (Vec::new(), Vec::new());
+        for _ in 0..31 {
+            let t = Instant::now();
+            std::hint::black_box(base());
+            b.push(t.elapsed().as_secs_f64() * 1e3);
+            let t = Instant::now();
+            std::hint::black_box(head());
+            h.push(t.elapsed().as_secs_f64() * 1e3);
+        }
+        (median(b), median(h))
+    }
+
+    fn transcript(n: usize) -> Vec<ChatMessage> {
+        (0..n)
+            .map(|i| {
+                if i % 2 == 0 {
+                    ChatMessage::user(&format!("question {i}: regress price on sqft"))
+                } else {
+                    let mut m = ChatMessage::assistant_streaming();
+                    m.is_streaming = false;
+                    m.content = format!("Answer {i}: ").repeat(40);
+                    for k in 0..2 {
+                        m.tool_calls.push(ToolCallInfo {
+                            id: format!("call_{i}_{k}"),
+                            name: "regression_ols".into(),
+                            arguments: serde_json::json!({"dataset": "sales"}),
+                            result: Some("OLS results".repeat(20)),
+                            success: Some(true),
+                            is_expanded: false,
+                        });
+                    }
+                    m
+                }
+            })
+            .collect()
     }
 
     #[test]
-    fn a_tool_call_status_change_redraws_the_message() {
-        let running = with_call(None, None);
-        assert_eq!(running, with_call(None, None));
-        assert_ne!(running, with_call(Some(false), None), "failed");
-        assert_ne!(running, with_call(None, Some("OLS results")), "result came");
-        let mut interrupted = running.clone();
-        interrupted.interrupted = true;
-        assert_ne!(running, interrupted);
+    #[ignore = "benchmark; times the message props comparison against the base"]
+    fn time_props_comparison() {
+        for n in [100, 1_000, 10_000] {
+            let a = transcript(n);
+            let b = a.clone();
+            let (mb, mh) = time_pair(
+                || a.iter().zip(&b).filter(|(x, y)| base_eq(x, y)).count(),
+                || a.iter().zip(&b).filter(|(x, y)| x == y).count(),
+            );
+            println!(
+                "TIMING props comparison {n} messages: base {mb:.4} ms, head {mh:.4} ms, head/base {:.3}",
+                mh / mb
+            );
+        }
     }
 }

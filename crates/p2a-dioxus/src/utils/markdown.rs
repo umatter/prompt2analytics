@@ -1012,3 +1012,76 @@ mod render_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod timing {
+    use super::*;
+    use std::time::Instant;
+
+    /// extract_text before the math arms.
+    fn base_extract_text(events: &[Event]) -> String {
+        let mut text = String::new();
+        for event in events {
+            match event {
+                Event::Text(t) => text.push_str(t),
+                Event::Code(c) => text.push_str(c),
+                Event::SoftBreak | Event::HardBreak => text.push('\n'),
+                _ => {}
+            }
+        }
+        text
+    }
+
+    fn median(mut v: Vec<f64>) -> f64 {
+        v.sort_by(f64::total_cmp);
+        v[v.len() / 2]
+    }
+
+    /// 3 warm-ups, then 31 interleaved runs; medians in ms.
+    fn time_pair(mut base: impl FnMut() -> usize, mut head: impl FnMut() -> usize) -> (f64, f64) {
+        for _ in 0..3 {
+            std::hint::black_box(base());
+            std::hint::black_box(head());
+        }
+        let (mut b, mut h) = (Vec::new(), Vec::new());
+        for _ in 0..31 {
+            let t = Instant::now();
+            std::hint::black_box(base());
+            b.push(t.elapsed().as_secs_f64() * 1e3);
+            let t = Instant::now();
+            std::hint::black_box(head());
+            h.push(t.elapsed().as_secs_f64() * 1e3);
+        }
+        (median(b), median(h))
+    }
+
+    /// Mixed markdown of about `bytes` bytes: headings, a table, code, math, images with alt.
+    fn document(bytes: usize) -> String {
+        let block = "## Results\n\nThe fit is *good*: $\\hat\\beta = 0.48$ and\n\n$$R^2 = 0.71$$\n\n\
+                     | Variable | Estimate |\n|---|---:|\n| sqft | 0.4812 |\n\n\
+                     ```r\nlm(y ~ x)\n```\n\n![a $x$ plot](data:image/png;base64,iVBORw0KGgo=)\n\n";
+        block.repeat(bytes / block.len() + 1)
+    }
+
+    #[test]
+    #[ignore = "benchmark; times render_markdown and the image-alt text extraction against the base"]
+    fn time_render_markdown() {
+        for bytes in [1_000, 10_000, 100_000] {
+            let md = document(bytes);
+            let events: Vec<Event> = Parser::new_ext(&md, markdown_options()).collect();
+            let (mb, mh) = time_pair(
+                || base_extract_text(&events).len(),
+                || extract_text(&events).len(),
+            );
+            println!(
+                "TIMING extract_text over all events {bytes} B: base {mb:.4} ms, head {mh:.4} ms, head/base {:.3}",
+                mh / mb
+            );
+            let (r1, r2) = time_pair(
+                || render_markdown(&md).map_or(0, |_| 1),
+                || render_markdown(&md).map_or(0, |_| 1),
+            );
+            println!("TIMING render_markdown {bytes} B: {r1:.4} ms / {r2:.4} ms (head, twice)");
+        }
+    }
+}

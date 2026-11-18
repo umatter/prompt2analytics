@@ -22,6 +22,10 @@ pub struct ChatMessage {
     /// Whether the answer ended before it was finished (stopped, a stream
     /// that closed or went silent, a session that ended)
     pub interrupted: bool,
+    /// Bumped whenever `tool_calls` change (a call added, ended or
+    /// replaced), so the props comparison sees the change in constant time.
+    /// Write the calls through `set_tool_calls` or the ChatState methods.
+    pub(crate) tool_rev: u64,
     /// Message timestamp
     pub timestamp: DateTime<Utc>,
 }
@@ -37,6 +41,7 @@ impl ChatMessage {
             images: Vec::new(),
             is_streaming: false,
             interrupted: false,
+            tool_rev: 0,
             timestamp: Utc::now(),
         }
     }
@@ -51,6 +56,7 @@ impl ChatMessage {
             images: Vec::new(),
             is_streaming: true,
             interrupted: false,
+            tool_rev: 0,
             timestamp: Utc::now(),
         }
     }
@@ -71,6 +77,7 @@ impl ChatMessage {
             images: Vec::new(),
             is_streaming: false,
             interrupted: false,
+            tool_rev: 0,
             timestamp: Utc::now(),
         }
     }
@@ -90,6 +97,7 @@ impl ChatMessage {
             images: Vec::new(),
             is_streaming: false,
             interrupted: false,
+            tool_rev: 0,
             timestamp,
         }
     }
@@ -100,13 +108,14 @@ impl ChatMessage {
         tool_calls: &[PersistedToolCall],
     ) -> Self {
         let mut chat_msg = Self::from_conversation_message(msg);
-        chat_msg.tool_calls = tool_calls.iter().map(ToolCallInfo::from).collect();
+        chat_msg.set_tool_calls(tool_calls.iter().map(ToolCallInfo::from).collect());
         chat_msg
     }
 
     /// Set tool calls on this message
     pub fn set_tool_calls(&mut self, tool_calls: Vec<ToolCallInfo>) {
         self.tool_calls = tool_calls;
+        self.tool_rev += 1;
     }
 }
 
@@ -446,9 +455,9 @@ impl ChatState {
                             tc.success = Some(!result.is_error);
                         }
                     }
-                    last.tool_calls = final_calls;
+                    last.set_tool_calls(final_calls);
                 } else {
-                    last.tool_calls = new_calls;
+                    last.set_tool_calls(new_calls);
                 }
             }
         }
@@ -569,6 +578,7 @@ impl ChatState {
             && last.is_streaming
         {
             index = Some(last.tool_calls.len());
+            last.tool_rev += 1;
             last.tool_calls.push(ToolCallInfo {
                 id: uuid::Uuid::new_v4().to_string(),
                 name: name.clone(),
@@ -608,6 +618,7 @@ impl ChatState {
         if let Some(tc) = target.and_then(|i| last.tool_calls.get_mut(i)) {
             tc.success = tool_outcome(status);
             tc.result = result;
+            last.tool_rev += 1;
         }
     }
 
@@ -1546,6 +1557,70 @@ mod timing {
             let (mb, mh) = (median(b), median(h));
             println!(
                 "TIMING tool pairs {pairs}: base {mb:.4} ms, head {mh:.4} ms, head/base {:.3}",
+                mh / mb
+            );
+        }
+    }
+
+    /// 3 warm-ups, then 31 interleaved runs; medians in ms.
+    fn time_pair(mut base: impl FnMut() -> usize, mut head: impl FnMut() -> usize) -> (f64, f64) {
+        for _ in 0..3 {
+            std::hint::black_box(base());
+            std::hint::black_box(head());
+        }
+        let (mut b, mut h) = (Vec::new(), Vec::new());
+        for _ in 0..31 {
+            let t = Instant::now();
+            std::hint::black_box(base());
+            b.push(t.elapsed().as_secs_f64() * 1e3);
+            let t = Instant::now();
+            std::hint::black_box(head());
+            h.push(t.elapsed().as_secs_f64() * 1e3);
+        }
+        (median(b), median(h))
+    }
+
+    fn stored_rows(n: usize) -> Vec<ConversationMessage> {
+        (0..n)
+            .map(|i| ConversationMessage {
+                id: format!("m{i}"),
+                conversation_id: "a".into(),
+                role: if i % 2 == 0 { "user" } else { "assistant" }.into(),
+                content: format!("message {i} ").repeat(20),
+                created_at: "2026-11-18T10:00:00Z".into(),
+                token_count: None,
+                model: None,
+            })
+            .collect()
+    }
+
+    #[test]
+    #[ignore = "benchmark; times a switch away and back: base rebuild against the live cache"]
+    fn time_conversation_switch() {
+        for n in [100, 1_000, 10_000] {
+            let rows = stored_rows(n);
+            let mut base = ChatState::new();
+            base.messages = rows
+                .iter()
+                .map(ChatMessage::from_conversation_message)
+                .collect();
+            let mut head = base.clone();
+            let (mb, mh) = time_pair(
+                || {
+                    // base: clear and rebuild from the stored rows
+                    base.clear_messages();
+                    base.messages
+                        .extend(rows.iter().map(ChatMessage::from_conversation_message));
+                    base.messages.len()
+                },
+                || {
+                    head.stash_live("a");
+                    head.restore_live("a");
+                    head.messages.len()
+                },
+            );
+            println!(
+                "TIMING switch away and back {n} messages: base {mb:.4} ms, head {mh:.4} ms, head/base {:.3}",
                 mh / mb
             );
         }

@@ -235,7 +235,9 @@ pub fn ChatPanel() -> Element {
                             };
                             for msg in messages.into_iter().flatten() {
                                 if let Some(tcs) = tool_calls_by_message.get(&msg.id) {
-                                    msg.tool_calls = tcs.iter().map(ToolCallInfo::from).collect();
+                                    msg.set_tool_calls(
+                                        tcs.iter().map(ToolCallInfo::from).collect(),
+                                    );
                                 }
                             }
                         }

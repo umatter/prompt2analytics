@@ -296,3 +296,74 @@ mod tests {
         assert!(next_at_bottom(false, 700.0, 960.0, 1500, 500));
     }
 }
+
+#[cfg(test)]
+mod timing {
+    use super::*;
+    use std::time::Instant;
+
+    fn median(mut v: Vec<f64>) -> f64 {
+        v.sort_by(f64::total_cmp);
+        v[v.len() / 2]
+    }
+
+    /// 3 warm-ups, then 31 interleaved runs; medians in ms.
+    fn time_pair(mut base: impl FnMut() -> usize, mut head: impl FnMut() -> usize) -> (f64, f64) {
+        for _ in 0..3 {
+            std::hint::black_box(base());
+            std::hint::black_box(head());
+        }
+        let (mut b, mut h) = (Vec::new(), Vec::new());
+        for _ in 0..31 {
+            let t = Instant::now();
+            std::hint::black_box(base());
+            b.push(t.elapsed().as_secs_f64() * 1e3);
+            let t = Instant::now();
+            std::hint::black_box(head());
+            h.push(t.elapsed().as_secs_f64() * 1e3);
+        }
+        (median(b), median(h))
+    }
+
+    fn fresh() -> ChatState {
+        let mut s = ChatState::new();
+        s.add_user_message("q");
+        s.add_streaming_message();
+        s
+    }
+
+    #[test]
+    #[ignore = "benchmark; times per-chunk streaming work with the scroll key against the base"]
+    fn time_streaming_chunks() {
+        let chunk = "x".repeat(100);
+        for n in [100, 1_000, 10_000] {
+            let (mb, mh) = time_pair(
+                || {
+                    let mut s = fresh();
+                    for _ in 0..n {
+                        s.append_content(&chunk);
+                    }
+                    s.messages.len()
+                },
+                || {
+                    let mut s = fresh();
+                    let mut prev = None;
+                    let mut scrolls = 0;
+                    for _ in 0..n {
+                        s.append_content(&chunk);
+                        let key = ScrollKey::of(&s.messages);
+                        if autoscroll(prev, key, true).is_some() {
+                            scrolls += 1;
+                        }
+                        prev = Some(key);
+                    }
+                    s.messages.len() + scrolls
+                },
+            );
+            println!(
+                "TIMING streaming {n} chunks: base {mb:.4} ms, head {mh:.4} ms, head/base {:.3}",
+                mh / mb
+            );
+        }
+    }
+}
