@@ -2617,7 +2617,7 @@ mod tests {
                 t.starts_with(&format!(
                     "`{tool}` with {settings} on 5000 rows could hold up to "
                 )) && t.contains("(ensemble_bytes: ")
-                    && t.contains("limit of 256.00 MB")
+                    && t.contains("limit of 256.00 MiB")
                     && t.contains("Use a sample of at most "),
                 "{t}"
             );
@@ -3396,6 +3396,26 @@ mod tests {
             "note",
         ] {
             assert_eq!(a[key], b[key], "{key}");
+        }
+    }
+
+    #[tokio::test]
+    async fn cubist_neighbors_above_nine_are_refused_by_the_core() {
+        let s = server().await;
+        for n in [10, 150] {
+            let r = s
+                .ml_cubist(req(json!({"dataset": "ml", "features": ["x1", "x2"],
+                                      "target": "yi_f", "neighbors": n, "seed": 1})))
+                .await
+                .unwrap();
+            assert_eq!(r.is_error, Some(true), "{}", text_of(&r));
+            assert!(
+                text_of(&r).contains(&format!(
+                    "neighbors must be 0 to 9 (the limit of R's Cubist), got {n}"
+                )),
+                "{}",
+                text_of(&r)
+            );
         }
     }
 

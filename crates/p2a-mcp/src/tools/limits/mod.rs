@@ -39,8 +39,8 @@
 //! - [`Limits::check_arima_fit`] and [`Limits::check_arima_series`] let the ARIMA handlers
 //!   bound a fit's cost before it starts: they refuse one whose work exceeds
 //!   [`Limits::arima_fit_work`], and one whose series holds a nonzero value below
-//!   [`ARIMA_MIN_MAGNITUDE`], small enough that the fit's arithmetic on it can become subnormal
-//!   and much slower. The fit itself checks the call's budget every iteration and every few
+//!   [`ARIMA_MIN_MAGNITUDE`], a floor with a wide margin above the values whose differences,
+//!   products and squares in the fit would be subnormal and much slower to compute. The fit itself checks the call's budget every iteration and every few
 //!   thousand rows of a pass, so the deadline stops it as well; the check up front refuses a fit
 //!   whose work could not fit the deadline instead of starting it.
 //!
@@ -212,7 +212,7 @@ families! {
     /// [`Family::PowerSampleSize`], p2a-core's F quantile does bounded work at any group count,
     /// so the cap is kept as defense in depth, not as a cost bound, and can be raised with
     /// `P2A_LIMIT_OVERRIDES`. It is 100, as is the hosted [`Limits::max_groups`] budget of
-    /// groups compared pairwise: a cap of 10 refused legitimate designs with a few dozen groups.
+    /// groups compared pairwise, so designs with a few dozen groups are admitted.
     DesignGroups => "design_groups", 100;
     /// Missing-value markers a dataset is read with (`na_strings`), held to a few short markers.
     NaMarkers => "na_markers", 32;
@@ -282,9 +282,9 @@ const PROBIT_IMPACT_ROWS_HOSTED: u64 = 1_500;
 /// Hosted [`Limits::ensemble_bytes`]: 256 MiB, the hosted per-allocation ceiling
 /// (`P2A_MAX_ALLOC_MB`), so that one tree-ensemble fit grows the process by about as much as one
 /// allocation may, which the 700 MiB memory admission leaves room for on the 1 GiB machine.
-/// With four covariates it admits the defaults of `ml_causal_forest` on up to about 316,000 rows
-/// and those of `ml_bart_causal` on up to about 220,000 rows (both reach the 60 s deadline well
-/// before that), and 1.5 times each default setting on 18,000 and 162,000 rows.
+/// With four covariates it admits the defaults of `ml_causal_forest` on up to about 123,000 rows
+/// and those of `ml_bart_causal` on up to about 218,000 rows (both reach the 60 s deadline well
+/// before that), and 1.5 times each default setting on 34,000 and 161,000 rows.
 ///
 /// The bound counts every buffer a fit holds at once, and the fit allocates each at its exact
 /// length; only the allocator's own overhead and the dataset come on top. On a release build, a
@@ -1122,31 +1122,44 @@ fn below_min_tolerance(f: Option<f64>, min: f64) -> bool {
     }
 }
 
+/// What a magnitude refusal refuses: a scalar parameter ([`Rule::Max`]) or an element of an
+/// array ([`Rule::ArrayElemMax`]).
+#[derive(Clone, Copy)]
+enum Magnitude {
+    Value,
+    Element,
+}
+
 /// The refusal of the number `n` at `path`, which exceeds `cap` by magnitude: the wording of
-/// [`Rule::Max`] and [`Rule::ArrayElemMax`]. `subject` sits between the parameter and the verb:
-/// `"= {n}"` for a scalar, `"contains {n}, which"` for an element of an array. `plural` words
-/// the advice for the array's values.
+/// [`Rule::Max`] and [`Rule::ArrayElemMax`]. Between the parameter and the verb sits `"= {n}"`
+/// for a scalar and `"contains {n}, which"` for an element of an array, whose advice speaks of
+/// the array's values.
 fn magnitude_refusal(
     path: &str,
-    subject: &str,
     n: &serde_json::Number,
     cap: u64,
     key: &str,
     tool_echo: &str,
-    plural: bool,
+    kind: Magnitude,
 ) -> String {
+    let subject = match kind {
+        Magnitude::Value => format!("= {n}"),
+        Magnitude::Element => format!("contains {n}, which"),
+    };
     // The cap bounds the magnitude, so "smaller" would point a negative value the wrong way.
     if n.to_string().starts_with('-') {
-        let values = if plural { "values" } else { "a value" };
+        let values = match kind {
+            Magnitude::Element => "values",
+            Magnitude::Value => "a value",
+        };
         format!(
             "Parameter `{path}` {subject} is outside this server's limit of ±{cap} ({key}) for \
              `{tool_echo}`. Use {values} of smaller magnitude."
         )
     } else {
-        let values = if plural {
-            "smaller values"
-        } else {
-            "a smaller value"
+        let values = match kind {
+            Magnitude::Element => "smaller values",
+            Magnitude::Value => "a smaller value",
         };
         format!(
             "Parameter `{path}` {subject} exceeds this server's limit of {cap} ({key}) for \
@@ -1372,8 +1385,7 @@ impl Limits {
             }
         }
         let fit_rows = (bound(lo) <= limit && lo > 0).then_some(lo);
-        let bytes =
-            |b: u64| p2a_core::memory::format_bytes(usize::try_from(b).unwrap_or(usize::MAX));
+        let bytes = crate::session::fmt_bytes;
         let settings = settings();
         let EnsembleChange { tiers, parameters } = change();
         let tier = tiers.iter().find(|t| t.cheapest <= limit);
@@ -1679,10 +1691,11 @@ impl Limits {
     /// Arguments of another shape, an empty index and a column `df` lacks (an index column, `on`
     /// or the values column) pass, so that serde or the core refuses them as usual. A column
     /// whose distinct values cannot be counted is refused, so that the check fails closed. The
-    /// refusal names `on` for the column budget. For the cell budget it names the dataset field
-    /// when `df` alone has too many rows, `index` when the index columns make too many values to
-    /// group or, counted, too many rows, and `on` when its distinct values alone make too many
-    /// columns for one row (`index` when the index columns alone do).
+    /// refusal names `on` for the column budget (`index` when the index columns alone fill it).
+    /// For the cell budget it names the dataset field when `df` alone has too many rows, `index`
+    /// when the index columns make too many values to group or, counted, too many rows, and `on`
+    /// when its distinct values alone make too many columns for one row (`index` when the index
+    /// columns alone do).
     ///
     /// On the governed paths (the HTTP route, the LLM tool loop and websocket) this runs on the
     /// governor's blocking thread, within the call's slot and deadline; over stdio it runs on the
@@ -1746,9 +1759,10 @@ impl Limits {
                          {index_columns} `index` values and its `on` value, {keys} values in all, \
                          which exceeds this server's limit of {keys_cap} values to group \
                          ({PIVOT_KEYS_PER_CELL} for each of its {cap} cells, pivot_cells). Name \
-                         fewer `index` columns (one that identifies each row is enough; join the \
-                         others back afterwards with munge_join), or pivot fewer rows, for \
-                         example after munge_filter or munge_sample."
+                         fewer `index` columns (one column that identifies each row of the wide \
+                         table, such as a unit id, is enough; join the others back afterwards \
+                         with munge_join), or pivot fewer rows, for example after munge_filter \
+                         or munge_sample."
                     ),
                     tool: tool.to_string(),
                     parameter: "index".to_string(),
@@ -1774,6 +1788,22 @@ impl Limits {
         if let Some(cap) = columns_cap
             && columns.n > cap
         {
+            // The index columns alone fill the budget: no `on` column can help.
+            if index_columns >= cap {
+                return Err(LimitViolation {
+                    message: format!(
+                        "Parameter `index` names {index_columns} columns, so `{tool}` would make \
+                         {columns} output columns (one more for each distinct value of the `on` \
+                         column `{on}`), which exceeds this server's limit of {cap} columns \
+                         (pivot_columns). Name fewer `index` columns."
+                    ),
+                    tool: tool.to_string(),
+                    parameter: "index".to_string(),
+                    requested: columns.to_string(),
+                    limit: cap.to_string(),
+                    override_key: "pivot_columns",
+                });
+            }
             return Err(LimitViolation {
                 message: format!(
                     "Parameter `on` names column `{on}`, which has {on_values} distinct values, \
@@ -1841,10 +1871,11 @@ impl Limits {
         if cells.n <= cap {
             return Ok(());
         }
-        let row_noun = if rows.n == 1 { "row" } else { "rows" };
+        // At least two rows: with one, the cells are the columns, which the exact count above
+        // kept within the cap.
         Err(LimitViolation {
             message: format!(
-                "`{tool}` would make {rows} {row_noun} (one per distinct combination of the \
+                "`{tool}` would make {rows} rows (one per distinct combination of the \
                  `index` columns {index_echo}) by {columns} columns (the `on` column `{on}` has \
                  {on_values} distinct values), {cells} cells, which exceeds this server's limit \
                  of {cap} cells (pivot_cells). Pivot fewer rows or fewer `on` values, for example \
@@ -1953,8 +1984,7 @@ impl Limits {
                     return Ok(());
                 }
                 let key = family.key();
-                let subject = format!("= {n}");
-                let message = magnitude_refusal(path, &subject, n, cap, key, tool_echo, false);
+                let message = magnitude_refusal(path, n, cap, key, tool_echo, Magnitude::Value);
                 violation(n.to_string(), cap.to_string(), key, message)
             }
             Rule::ArrayLen(family) | Rule::UniqueList(family) => {
@@ -2000,9 +2030,8 @@ impl Limits {
                 let key = family.key();
                 for n in items.iter().filter_map(Value::as_number) {
                     if number_exceeds(n, cap) {
-                        let subject = format!("contains {n}, which");
                         let message =
-                            magnitude_refusal(path, &subject, n, cap, key, tool_echo, true);
+                            magnitude_refusal(path, n, cap, key, tool_echo, Magnitude::Element);
                         return violation(n.to_string(), cap.to_string(), key, message);
                     }
                 }
@@ -2956,6 +2985,49 @@ mod tests {
         move |rows| c.memory_bound(rows, 4)
     }
 
+    /// The four row counts in the doc of [`ENSEMBLE_BYTES_HOSTED`], rounded to the nearest
+    /// 1,000 rows as the doc gives them: both tools' defaults and 1.5 times each default
+    /// setting, four covariates.
+    #[test]
+    fn ensemble_budget_figures_in_the_docs_hold() {
+        let largest = |bound: &dyn Fn(usize) -> u64| {
+            let (mut lo, mut hi) = (0usize, 100_000_000usize);
+            while lo < hi {
+                let mid = lo + (hi - lo).div_ceil(2);
+                if bound(mid) <= ENSEMBLE_BYTES_HOSTED {
+                    lo = mid;
+                } else {
+                    hi = mid - 1;
+                }
+            }
+            lo
+        };
+        let rows = [
+            largest(&forest_bound(2_000, 10)),
+            largest(&bart_bound(200, 4, 100)),
+            largest(&forest_bound(3_000, 15)),
+            largest(&bart_bound(300, 6, 150)),
+        ];
+        let rounded = rows.map(|r| (r + 500) / 1_000 * 1_000);
+        assert_eq!(rounded, [123_000, 218_000, 34_000, 161_000], "{rows:?}");
+    }
+
+    /// The positive-scalar form of the magnitude refusal, pinned byte for byte.
+    #[test]
+    fn magnitude_refusal_of_a_scalar_keeps_its_wording() {
+        let v = Limits::hosted()
+            .check_tool_arguments(
+                "timeseries_arma_to_ma",
+                &json!({"lag_max": 10_000_000_000u64}),
+            )
+            .unwrap_err();
+        assert_eq!(
+            v.message,
+            "Parameter `lag_max` = 10000000000 exceeds this server's limit of 1000 (lags) for \
+             `timeseries_arma_to_ma`. Use a smaller value."
+        );
+    }
+
     /// An [`EnsembleChange`] of one tier, `advice` with its `cheapest` bound, setting
     /// `parameters`.
     fn one_tier(advice: &str, parameters: &'static str, cheapest: u64) -> EnsembleChange {
@@ -3036,7 +3108,7 @@ mod tests {
             ) && v
                 .message
                 .contains("(ensemble_bytes: its trees and the other buffers")
-                && v.message.contains("limit of 256.00 MB")
+                && v.message.contains("limit of 256.00 MiB")
                 && v.message.ends_with(&format!(
                     "Use a sample of at most {fit} rows at these settings, for example with \
                      munge_sample, or lower n_trees or max_depth."
@@ -3072,7 +3144,7 @@ mod tests {
             .unwrap();
         assert!(
             v.message.ends_with(&format!(
-                "above this server's limit of 256.00 MB. No values of n_trees, max_depth or \
+                "above this server's limit of 256.00 MiB. No values of n_trees, max_depth or \
                  n_bootstrap bring it within this limit on 1500000 rows. Use a sample of at \
                  most {fit} rows at these settings, for example with munge_sample."
             )) && !v.message.contains("lower"),
@@ -3672,7 +3744,43 @@ mod tests {
         }
 
         #[test]
-        fn the_row_noun_follows_the_count() {
+        fn index_columns_that_fill_the_column_budget_are_named() {
+            // Two rows with one `key` value: 3 index columns and 1 `on` column, 4 in all.
+            let df = df!(
+                "a" => [1i64, 2], "b" => [5i64, 7], "c" => [3i64, 4], "key" => ["k", "k"],
+                "val" => [0.7, 1.3]
+            )
+            .unwrap();
+            assert_eq!(pivoted(&df, &["a", "b", "c"]), (2, 4));
+            let v = with("pivot_columns=3")
+                .check_pivot(rule(), &args(&["a", "b", "c"]), &df)
+                .unwrap_err();
+            assert_eq!(
+                (
+                    v.tool.as_str(),
+                    v.parameter.as_str(),
+                    v.requested.as_str(),
+                    v.limit.as_str(),
+                    v.override_key
+                ),
+                ("munge_pivot", "index", "at least 4", "3", "pivot_columns")
+            );
+            assert_eq!(
+                v.message,
+                "Parameter `index` names 3 columns, so `munge_pivot` would make at least 4 \
+                 output columns (one more for each distinct value of the `on` column `key`), \
+                 which exceeds this server's limit of 3 columns (pivot_columns). Name fewer \
+                 `index` columns."
+            );
+            assert!(
+                with("pivot_columns=4")
+                    .check_pivot(rule(), &args(&["a", "b", "c"]), &df)
+                    .is_ok()
+            );
+        }
+
+        #[test]
+        fn a_cell_refusal_counts_the_wide_rows() {
             // Two rows by 5 columns, 10 cells, refused at 9.
             let df = long(2, 4);
             assert_eq!(pivoted(&df, &["idx"]), (2, 5));
@@ -3733,9 +3841,9 @@ mod tests {
                 "The dataset has 5 rows, and `munge_pivot` groups each row by its 9 `index` \
                  values and its `on` value, 50 values in all, which exceeds this server's limit \
                  of 40 values to group (2 for each of its 20 cells, pivot_cells). Name fewer \
-                 `index` columns (one that identifies each row is enough; join the others back \
-                 afterwards with munge_join), or pivot fewer rows, for example after munge_filter \
-                 or munge_sample."
+                 `index` columns (one column that identifies each row of the wide table, such as \
+                 a unit id, is enough; join the others back afterwards with munge_join), or pivot \
+                 fewer rows, for example after munge_filter or munge_sample."
             );
             // A long table repeating one pair, which the pivot refuses after grouping all of
             // its values, is refused the same way.

@@ -480,8 +480,8 @@ mod tests {
             unbounded(&with_scalar, &["a", "s", "b"]),
             groups(&df, &["a", "b"])
         );
-        // A count over several columns stops at the first column whose combinations reach the
-        // bound: `a` alone has 4 values, so the pairs with `c` never need counting.
+        // A bound that an earlier column already reaches gives the same lower bound: `a` alone
+        // has 4 values.
         assert_eq!(groups(&df, &["a"]), 4);
         assert_eq!(count(&df, &["a", "c"], 4).unwrap(), Count::at_least(4));
         assert_eq!(count(&df, &["a", "c"], 3).unwrap(), Count::at_least(3));

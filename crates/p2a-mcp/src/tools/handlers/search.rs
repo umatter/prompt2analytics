@@ -272,10 +272,11 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<ToolInfoRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let tool_name = request.tool_name.to_lowercase();
+        // tool names are ASCII (a registry test checks it)
+        let wanted = request.tool_name.trim();
         let tool = registry()
             .iter()
-            .find(|t| t.name.to_lowercase() == tool_name);
+            .find(|t| t.name.eq_ignore_ascii_case(wanted));
 
         match tool {
             Some(t) => {
@@ -436,5 +437,33 @@ mod tests {
             assert!(t.contains(&format!("**{c}** ({n} tools)")), "{c}");
         }
         assert!(t.contains(&format!("Total: {} tools", registry().len())));
+    }
+
+    #[tokio::test]
+    async fn tool_info_ignores_case_and_surrounding_whitespace() {
+        let server = AnalyticsServer::new();
+        let r = server
+            .tool_info(Parameters(ToolInfoRequest {
+                tool_name: " REGRESSION_ols ".into(),
+            }))
+            .await
+            .unwrap();
+        assert_ne!(r.is_error, Some(true));
+        assert!(
+            text(&r).starts_with("Tool: regression_ols\n"),
+            "{}",
+            text(&r)
+        );
+        let r = server
+            .tool_info(Parameters(ToolInfoRequest {
+                tool_name: "no_such_tool".into(),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(r.is_error, Some(true));
+        assert_eq!(
+            text(&r),
+            "Tool 'no_such_tool' not found. Use search_tools to find available tools."
+        );
     }
 }

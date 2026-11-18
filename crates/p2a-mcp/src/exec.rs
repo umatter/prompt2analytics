@@ -11,8 +11,10 @@
 //! 2. a per-session and a global permit, within one bounded queue wait;
 //! 3. execution on tokio's blocking pool inside the session's directory scope
 //!    (`path_jail::enter_session_scope`; with session directories on, file
-//!    tools are refused outside one), so the async runtime keeps serving
-//!    `/health`, SSE keep-alives and other visitors;
+//!    tools are refused outside one) and, in open public mode, with the
+//!    process memory left out of `server_stats` ([`ExecConfig::redact_health`]),
+//!    so the async runtime keeps serving `/health`, SSE keep-alives and other
+//!    visitors;
 //! 4. a per-call [`Budget`] installed for p2a-core's cooperative
 //!    [`resource::checkpoint`]s, cancelled at the deadline and when the
 //!    future driving the call is dropped, as it is when the client goes
@@ -50,6 +52,17 @@
 //! Work that does not check its budget is not stopped by the cancellation:
 //! it runs to its end (and may still change the session), and no one
 //! receives its result.
+//!
+//! Calls share p2a-core's process-wide rayon thread pool. With more than one
+//! global permit (`--tool-concurrency`), one call's parallel work (a forest's
+//! trees, a sandwich estimator's meat) can occupy every rayon thread while
+//! another admitted call waits for them inside its own deadline: the second
+//! call runs slower, and may reach its deadline (504), with permits free and
+//! no 429 or 503 to say why. The hosted profile runs one call at a time
+//! (`P2A_TOOL_CONCURRENCY=1` in `deploy/fly.toml`), where this cannot happen;
+//! the server logs a warning at start-up when tool concurrency is above 1.
+//! Isolating each call's parallel work is left until a deployment runs more
+//! than one call at a time.
 //!
 //! The permits, the in-flight registry entry and the session's active-call
 //! count are moved into the blocking closure, so they are released when the
@@ -2709,71 +2722,6 @@ mod session_state_quota_tests {
         assert_eq!(m.total_data_bytes().await, ba + bb + 6_722);
     }
 
-    /// A dataset that leaves the session through a governed call other
-    /// than a rollback loses its profiler entry at the call's quota check:
-    /// pre-fix only a rollback pruned the profiler, so the entry of a
-    /// dataset a replacing import cleared stayed for the life of the
-    /// session.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_replacing_import_untracks_the_cleared_datasets() {
-        let dir = tempfile::Builder::new()
-            .prefix(".p2a-wp02-")
-            .tempdir_in(crate::path_jail::allowed_data_root().unwrap())
-            .unwrap();
-        let csv = dir.path().join("d.csv");
-        let rows: String = (0..20)
-            .map(|i| format!("{},{}\n", i as f64 * 0.5 + 0.13, (i % 7) as f64 * 1.1 - 0.4))
-            .collect();
-        std::fs::write(&csv, format!("x,y\n{rows}")).unwrap();
-        let csv = csv.to_str().unwrap().to_string();
-        let saved = dir.path().join("keep.json").to_str().unwrap().to_string();
-
-        let m = manager();
-        let s = m
-            .get_session(&m.create_session(None).await.unwrap())
-            .await
-            .unwrap();
-        let g = ToolGovernor::new(
-            ExecConfig {
-                session_data_bytes: Some(1 << 30),
-                ..Default::default()
-            },
-            Arc::clone(&m),
-        );
-        let ok = |r: Result<ToolResult, ToolCallError>| {
-            let r = r.unwrap();
-            assert!(r.success, "{}", text(&r));
-        };
-        let load = |name: &str| serde_json::json!({"path": csv, "name": name});
-        ok(run(&g, &s, "load_dataset", load("keep")).await);
-        ok(run(
-            &g,
-            &s,
-            "export_session",
-            serde_json::json!({"file_path": saved}),
-        )
-        .await);
-        ok(run(&g, &s, "load_dataset", load("a")).await);
-        {
-            let profiler = s.memory_profiler.read().await;
-            assert!(profiler.dataset_memory("a").is_some());
-            assert!(profiler.dataset_memory("keep").is_some());
-        }
-        ok(run(
-            &g,
-            &s,
-            "import_session",
-            serde_json::json!({"file_path": saved, "merge": false}),
-        )
-        .await);
-        let held: Vec<String> = s.datasets.read().await.keys().cloned().collect();
-        assert_eq!(held, ["keep"]);
-        let profiler = s.memory_profiler.read().await;
-        assert_eq!(profiler.dataset_memory("a"), None);
-        assert!(profiler.dataset_memory("keep").is_some());
-        assert_eq!(profiler.dataset_count(), 1);
-    }
-
     /// A folder under the data root that the load and export tools accept.
     fn data_dir() -> tempfile::TempDir {
         tempfile::Builder::new()
@@ -2811,6 +2759,54 @@ mod session_state_quota_tests {
     fn succeeded(r: Result<ToolResult, ToolCallError>) {
         let r = r.unwrap();
         assert!(r.success, "{}", text(&r));
+    }
+
+    /// A dataset that leaves the session through a governed call other
+    /// than a rollback loses its profiler entry at the call's quota check:
+    /// pre-fix only a rollback pruned the profiler, so the entry of a
+    /// dataset a replacing import cleared stayed for the life of the
+    /// session.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_replacing_import_untracks_the_cleared_datasets() {
+        let dir = data_dir();
+        let csv = csv_in(&dir, "d.csv", 20);
+        let saved = dir.path().join("keep.json").to_str().unwrap().to_string();
+
+        let m = manager();
+        let s = new_session(&m).await;
+        let g = per_session_governor(&m, 1 << 30);
+        let load = |name: &str| serde_json::json!({"path": csv, "name": name});
+        succeeded(run(&g, &s, "load_dataset", load("keep")).await);
+        succeeded(
+            run(
+                &g,
+                &s,
+                "export_session",
+                serde_json::json!({"file_path": saved}),
+            )
+            .await,
+        );
+        succeeded(run(&g, &s, "load_dataset", load("a")).await);
+        {
+            let profiler = s.memory_profiler.read().await;
+            assert!(profiler.dataset_memory("a").is_some());
+            assert!(profiler.dataset_memory("keep").is_some());
+        }
+        succeeded(
+            run(
+                &g,
+                &s,
+                "import_session",
+                serde_json::json!({"file_path": saved, "merge": false}),
+            )
+            .await,
+        );
+        let held: Vec<String> = s.datasets.read().await.keys().cloned().collect();
+        assert_eq!(held, ["keep"]);
+        let profiler = s.memory_profiler.read().await;
+        assert_eq!(profiler.dataset_memory("a"), None);
+        assert!(profiler.dataset_memory("keep").is_some());
+        assert_eq!(profiler.dataset_count(), 1);
     }
 
     fn refused(r: Result<ToolResult, ToolCallError>) {
@@ -2882,13 +2878,21 @@ mod session_state_quota_tests {
 
     /// A refused call that loads nothing leaves the profiler as it was, its
     /// history included: the rollback re-tracks only a dataset the call
-    /// replaced.
+    /// replaced. The profiler's entry for `sp` is of another dataset, so
+    /// its estimate differs from the session's own: only the check that the
+    /// dataset is the same keeps the rollback from re-tracking it.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_refused_call_that_loads_nothing_adds_no_history_rows() {
         let m = manager();
         let s = session_in(&m, "sp", spatial_fixture()).await;
-        let ds = s.datasets.read().await["sp"].clone();
-        s.memory_profiler.write().await.track_dataset("sp", &ds);
+        let other = p2a_core::data::Dataset::new(
+            p2a_core::polars::prelude::df!("v" => [0.31, 1.74, 2.26]).unwrap(),
+        );
+        assert_ne!(
+            p2a_core::estimate_dataset_memory(&other),
+            p2a_core::estimate_dataset_memory(&s.datasets.read().await["sp"])
+        );
+        s.memory_profiler.write().await.track_dataset("sp", &other);
         let base = s.refresh_data_bytes().await;
         let rows = s.memory_profiler.read().await.history().len();
         let estimate = s.memory_profiler.read().await.dataset_memory("sp");

@@ -228,17 +228,14 @@ impl Session {
         }
     }
 
-    /// One charge over the session's three maps. Each map is read-locked in
-    /// turn and its lock dropped before the next is taken, so this never
-    /// holds two of them at once (a handler may hold the datasets and then
-    /// take the weights).
+    /// One charge over the session's three maps ([`state_maps_charge`]).
     async fn state_charge(&self) -> DataCharge {
-        let mut charge = {
-            let datasets = self.datasets.read().await;
-            datasets_charge(datasets.iter().map(|(name, d)| (name.as_str(), d)))
-        };
-        self.charge_other_state(&mut charge).await;
-        charge
+        state_maps_charge(
+            &self.datasets,
+            &self.cleaning_sessions,
+            &self.spatial_weights,
+        )
+        .await
     }
 
     /// Add the session's cleaning sessions and spatial weights to `charge`,
@@ -412,13 +409,27 @@ pub(crate) async fn state_maps_bytes(
     cleaning_sessions: &RwLock<HashMap<String, Arc<CleaningSession>>>,
     spatial_weights: &RwLock<HashMap<String, SpatialWeights>>,
 ) -> u64 {
+    state_maps_charge(datasets, cleaning_sessions, spatial_weights)
+        .await
+        .bytes
+}
+
+/// The quota charge of a session's three maps: datasets, cleaning sessions
+/// and spatial weights. Each map is read-locked in turn and its lock dropped
+/// before the next is taken, so this never holds two of them at once (a
+/// handler may hold the datasets and then take the weights).
+async fn state_maps_charge(
+    datasets: &RwLock<HashMap<String, Dataset>>,
+    cleaning_sessions: &RwLock<HashMap<String, Arc<CleaningSession>>>,
+    spatial_weights: &RwLock<HashMap<String, SpatialWeights>>,
+) -> DataCharge {
     let mut charge = {
         let datasets = datasets.read().await;
         datasets_charge(datasets.iter().map(|(name, d)| (name.as_str(), d)))
     };
     charge.add_cleaning_sessions(&*cleaning_sessions.read().await);
     charge.add_spatial_weights(&*spatial_weights.read().await);
-    charge.bytes
+    charge
 }
 
 /// Keeps a session's active-call count raised while it lives.
@@ -467,7 +478,7 @@ const COLUMN_OVERHEAD_BYTES: u64 = 1536;
 const NAME_BYTE_COPIES: u64 = 4;
 /// Bytes of one String or Binary view (polars' `View`): the least a value
 /// takes, which the check before a file is decoded counts.
-pub const VIEW_BYTES: u64 = 16;
+pub(crate) const VIEW_BYTES: u64 = 16;
 /// Bytes charged per String or Binary value: its view and the allocation
 /// slack measured around it.
 pub(crate) const VIEW_CHARGE_BYTES: u64 = 18;
@@ -584,7 +595,7 @@ impl DataCharge {
 
 /// The charge for the structure of a dataset whose columns are named
 /// `columns`: the per-dataset and per-column overhead and the column names.
-pub fn structure_bytes<'a>(columns: impl IntoIterator<Item = &'a str>) -> u64 {
+pub(crate) fn structure_bytes<'a>(columns: impl IntoIterator<Item = &'a str>) -> u64 {
     columns
         .into_iter()
         .fold(DATASET_OVERHEAD_BYTES, |bytes, name| {
@@ -802,7 +813,9 @@ pub fn datasets_bytes(map: &HashMap<String, Dataset>) -> u64 {
 /// dataset): each name, and each frame's values (String and Binary views
 /// and Categorical and Enum labels included) and structure (see
 /// [`structure_bytes`]).
-pub fn datasets_bytes_of<'a>(entries: impl IntoIterator<Item = (&'a str, &'a Dataset)>) -> u64 {
+pub(crate) fn datasets_bytes_of<'a>(
+    entries: impl IntoIterator<Item = (&'a str, &'a Dataset)>,
+) -> u64 {
     datasets_charge(entries).bytes
 }
 
@@ -1387,7 +1400,7 @@ pub fn quota_refusal(message: String) -> rmcp::ErrorData {
 /// themselves are checked after the call, on what it built; a file whose
 /// decoded size alone passes them would allocate all of it first.
 #[derive(Debug)]
-pub struct DatasetAdmission {
+pub(crate) struct DatasetAdmission {
     per_session: Option<u64>,
     total: Option<u64>,
     session: Arc<Session>,
@@ -1449,7 +1462,7 @@ impl Drop for AdmissionGuard {
 }
 
 /// Whether a governed call's dataset quotas are installed on this thread.
-pub fn dataset_admission_active() -> bool {
+pub(crate) fn dataset_admission_active() -> bool {
     ADMISSION.with(|a| a.borrow().is_some())
 }
 
@@ -1463,18 +1476,18 @@ pub fn dataset_admission_active() -> bool {
 /// ends, so files decoding at once in different sessions cannot together
 /// pass it. Without installed quotas (stdio, limits off) it admits
 /// everything.
-pub async fn admit_dataset(name: &str, at_least: u64) -> Result<(), String> {
+pub(crate) async fn admit_dataset(name: &str, at_least: u64) -> Result<(), String> {
     admit_charge(name, at_least).await.map_err(|refused| {
         if refused.per_session {
             format!(
-                "Loading this file takes at least {} of memory, so {}. Nothing was loaded; load \
+                "Loading this file takes an estimated {} of memory, so {}. Nothing was loaded; load \
                  a smaller file or start a new session.",
                 fmt_bytes(refused.added),
                 refused.outcome()
             )
         } else {
             format!(
-                "Loading this file takes at least {} of memory, and {}. Nothing was loaded; try \
+                "Loading this file takes an estimated {} of memory, and {}. Nothing was loaded; try \
                  again later or load a smaller file.",
                 fmt_bytes(refused.added),
                 refused.outcome()
@@ -2782,6 +2795,42 @@ mod tests {
             ["w4"]
         );
         assert_eq!(s.data_bytes(), b);
+    }
+
+    /// The quota charge of a session's state is one computation: the
+    /// session's own figure, the one for its three maps held elsewhere, and
+    /// the charge itself agree, and move together.
+    #[tokio::test]
+    async fn state_maps_bytes_is_the_quota_charge() {
+        let s = test_fixtures::session_with("sp", test_fixtures::spatial_fixture()).await;
+        let cl = test_fixtures::cleaning_fixture();
+        s.datasets.write().await.insert("cl".into(), cl.clone());
+        // The checkpoint shares the dataset's columns, mappings included.
+        s.cleaning_sessions
+            .write()
+            .await
+            .insert("c1".into(), Arc::new(CleaningSession::new(cl, "cl")));
+        s.spatial_weights
+            .write()
+            .await
+            .insert("w4".into(), knn_weights(4));
+        let figures = || async {
+            (
+                session_state_bytes(&s).await,
+                state_maps_bytes(&s.datasets, &s.cleaning_sessions, &s.spatial_weights).await,
+                s.state_charge().await.bytes,
+            )
+        };
+        let (a, b, c) = figures().await;
+        assert!(a > 0);
+        assert_eq!((a, b), (c, c));
+        s.spatial_weights
+            .write()
+            .await
+            .insert("w20".into(), knn_weights(20));
+        let (a2, b2, c2) = figures().await;
+        assert_eq!((a2, b2), (c2, c2));
+        assert_eq!(a2 - a, 22_080 + 3);
     }
 
     /// A snapshot shares each cleaning session instead of copying its

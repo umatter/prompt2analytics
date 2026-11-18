@@ -450,7 +450,11 @@ pub fn category_row(
     &'static [&'static str],
     Option<&'static str>,
 )> {
-    CATEGORY_TABLE.iter().find(|row| row.0 == name)
+    // CATEGORY_TABLE is sorted by name (a registry test checks it)
+    CATEGORY_TABLE
+        .binary_search_by(|row| row.0.cmp(name))
+        .ok()
+        .map(|i| &CATEGORY_TABLE[i])
 }
 
 /// Canonical lowercase name of a category, accepted by [`parse_category`] ("timeseries",
@@ -517,12 +521,11 @@ pub fn get_registry() -> Vec<ToolInfo> {
     registry().to_vec()
 }
 
-/// Get tools by category
-pub fn tools_by_category(category: ToolCategory) -> Vec<ToolInfo> {
+/// Get tools by category (borrowed from [`registry`]).
+pub fn tools_by_category(category: ToolCategory) -> Vec<&'static ToolInfo> {
     registry()
         .iter()
         .filter(|t| t.category == category)
-        .cloned()
         .collect()
 }
 
@@ -540,8 +543,8 @@ pub fn tool_count() -> usize {
     registry().len()
 }
 
-/// Search tools by keyword in name or description
-pub fn search_tools(query: &str) -> Vec<ToolInfo> {
+/// Search tools by keyword in name or description (borrowed from [`registry`]).
+pub fn search_tools(query: &str) -> Vec<&'static ToolInfo> {
     let query_lower = query.to_lowercase();
     registry()
         .iter()
@@ -549,15 +552,14 @@ pub fn search_tools(query: &str) -> Vec<ToolInfo> {
             t.name.to_lowercase().contains(&query_lower)
                 || t.description.to_lowercase().contains(&query_lower)
         })
-        .cloned()
         .collect()
 }
 
 /// Search result with relevance score
 #[derive(Debug, Clone, Serialize)]
 pub struct ToolSearchResult {
-    /// The matched tool
-    pub tool: ToolInfo,
+    /// The matched tool (its [`registry`] entry)
+    pub tool: &'static ToolInfo,
     /// Relevance score (higher is better)
     pub score: f32,
     /// Keywords that matched
@@ -662,7 +664,7 @@ pub fn search_tools_scored(
             matched_keywords.sort();
             matched_keywords.dedup();
             results.push(ToolSearchResult {
-                tool: tool.clone(),
+                tool,
                 score,
                 matched_keywords,
             });
@@ -873,11 +875,11 @@ mod tests {
     fn test_search_ranking_is_deterministic() {
         let a: Vec<_> = search_tools_scored("test", None, 25)
             .into_iter()
-            .map(|r| (r.tool.name, r.score))
+            .map(|r| (r.tool.name.as_str(), r.score))
             .collect();
         let b: Vec<_> = search_tools_scored("test", None, 25)
             .into_iter()
-            .map(|r| (r.tool.name, r.score))
+            .map(|r| (r.tool.name.as_str(), r.score))
             .collect();
         assert_eq!(a, b);
         assert!(
@@ -941,5 +943,42 @@ mod tests {
         for c in ToolCategory::all() {
             assert_eq!(parse_category(category_name(*c)), Some(*c), "{c:?}");
         }
+    }
+
+    /// The registry entry named `name`.
+    fn entry(name: &str) -> &'static ToolInfo {
+        registry().iter().find(|t| t.name == name).unwrap()
+    }
+
+    #[test]
+    fn search_results_borrow_the_registry() {
+        let scored = search_tools_scored("panel fixed effects", None, 25);
+        assert!(!scored.is_empty());
+        for r in &scored {
+            assert!(std::ptr::eq(r.tool, entry(&r.tool.name)), "{}", r.tool.name);
+        }
+        let found = search_tools("regression");
+        assert!(!found.is_empty());
+        for t in &found {
+            assert!(std::ptr::eq(*t, entry(&t.name)), "{}", t.name);
+        }
+        let panel = tools_by_category(ToolCategory::Panel);
+        assert!(!panel.is_empty());
+        for t in &panel {
+            assert!(std::ptr::eq(*t, entry(&t.name)), "{}", t.name);
+        }
+    }
+
+    #[test]
+    fn category_row_finds_every_row_and_nothing_else() {
+        for row in CATEGORY_TABLE {
+            let got = category_row(row.0).unwrap_or_else(|| panic!("no row for {}", row.0));
+            assert!(std::ptr::eq(got, row), "{}", row.0);
+        }
+        for name in ["", "zzz", "Regression_OLS", "regression_ols "] {
+            assert!(category_row(name).is_none(), "{name:?}");
+        }
+        // tool_info matches names ASCII case-insensitively
+        assert!(registry().iter().all(|t| t.name.is_ascii()));
     }
 }
