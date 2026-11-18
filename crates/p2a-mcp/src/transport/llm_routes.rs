@@ -362,11 +362,12 @@ impl ToolCallStore {
         }
     }
 
-    /// The session's datasets before a call, for [`Self::sync_datasets`] after it; `None` when the
-    /// store does not track the session's datasets.
+    /// The session's datasets before a call of `name`, for [`Self::sync_datasets`] after it; `None`
+    /// when the store does not track the session's datasets.
     async fn dataset_snapshot(
         &self,
         session: &Arc<crate::session::Session>,
+        name: &str,
     ) -> Option<(
         Arc<crate::session::Session>,
         super::dataset_sync::DatasetSnapshot,
@@ -376,7 +377,7 @@ impl ToolCallStore {
         }
         Some((
             session.clone(),
-            super::dataset_sync::DatasetSnapshot::of(session).await,
+            super::dataset_sync::DatasetSnapshot::of(session, name).await,
         ))
     }
 
@@ -760,7 +761,7 @@ impl ToolExecutor for SessionToolExecutor {
         #[cfg(feature = "db")]
         let metadata_arguments = self.store.metadata_arguments(name, &arguments);
         #[cfg(feature = "db")]
-        let dataset_snapshot = self.store.dataset_snapshot(&session).await;
+        let dataset_snapshot = self.store.dataset_snapshot(&session, name).await;
         tracing::info!(tool = %name, "Executing tool");
         let start = std::time::Instant::now();
         let result = self
@@ -965,18 +966,6 @@ fn tool_end_preview(text: &str) -> String {
     } else {
         text.to_string()
     }
-}
-
-/// The size of a dataset's source file for its stored metadata, read only
-/// through the path jail inside the session's scope: `None` for a path
-/// outside the data root or a file that cannot be read. Synchronous, so the
-/// scope is never held across an `.await`.
-#[cfg_attr(not(feature = "db"), allow(dead_code))]
-fn jailed_file_size(session_id: &str, path: &str) -> Option<i64> {
-    let _scope = crate::path_jail::enter_session_scope(session_id);
-    let checked = crate::path_jail::validate_data_path(path).ok()?;
-    let len = std::fs::metadata(checked).ok()?.len();
-    Some(i64::try_from(len).unwrap_or(i64::MAX))
 }
 
 /// Human-readable provider name for UI status messages. OpenRouter is
@@ -1593,23 +1582,10 @@ impl StreamingToolExecutor {
         self
     }
 
-    /// Store the dataset metadata of a successful `tool_name` call
-    /// (`load_dataset`, `upload_dataset` or `create_dataset`) in session
-    /// `session_id`: the dataset's name, dimensions and column names, read
-    /// from the call's `result_text`, and its source, read from the
-    /// `path` and `filename` fields of `arguments`, and the `na_strings` of a
-    /// `load_dataset` call, which a reload reads the file with. The work is linear in
-    /// `result_text`, so the tool route and the LLM tool loop both run it
-    /// on the blocking pool
-    /// (`routes_tools::capture_dataset_metadata_off_runtime`).
-    ///
-    /// At info level a capture logs a fixed set of events with counts; the
-    /// result text (its first 2,000 bytes), the column lines and the column
-    /// names are at debug (the first line and the Dimensions line stay at
-    /// info), and column lines without a dtype are one warning with their
-    /// count. A save that fails is logged and nothing else happens: a
-    /// refusal by the session's `session_db_bytes` budget (`QuotaExceeded`)
-    /// at warn, any other failure at error.
+    /// Store the dataset metadata of a successful dataset loader call in
+    /// session `session_id`, read from its `result_text` and `arguments`
+    /// (`dataset_sync::capture_loader_metadata`, which the tool
+    /// route calls too).
     #[cfg(feature = "db")]
     pub async fn capture_dataset_metadata_static(
         db: Arc<crate::db::DbConnection>,
@@ -1618,308 +1594,14 @@ impl StreamingToolExecutor {
         arguments: &serde_json::Value,
         result_text: &str,
     ) {
-        use std::path::PathBuf;
-
-        #[cfg(test)]
-        super::routes_tools::capture_threads::record(session_id);
-
-        // Entry point: the tool, the session and the result's length.
-        tracing::info!(
-            tool = tool_name,
-            session = session_id,
-            result_len = result_text.len(),
-            "[METADATA_CAPTURE] Starting metadata capture"
-        );
-
-        // The result text, cut at 2,000 bytes.
-        tracing::debug!(
-            result_text = %truncate_str(result_text, 2_000),
-            result_len = result_text.len(),
-            "[METADATA_CAPTURE] Full result text"
-        );
-
-        // Parse result to extract dataset info
-        // Format: "Successfully loaded dataset 'name'\n\nDimensions: X rows x Y columns\n\nColumns:..."
-        let first_line = result_text.lines().next();
-        tracing::debug!(
-            first_line = ?first_line,
-            "[METADATA_CAPTURE] First line of result"
-        );
-
-        let dataset_name = first_line.and_then(|line| {
-            let start = line.find('\'');
-            let end = line.rfind('\'');
-            tracing::debug!(
-                line = %line,
-                start_quote_pos = ?start,
-                end_quote_pos = ?end,
-                "[METADATA_CAPTURE] Parsing dataset name from first line"
-            );
-            match (start, end) {
-                (Some(s), Some(e)) if s < e => {
-                    let name = line[s + 1..e].to_string();
-                    tracing::info!(
-                        extracted_name = %name,
-                        "[METADATA_CAPTURE] Extracted dataset name"
-                    );
-                    Some(name)
-                }
-                _ => {
-                    tracing::warn!("[METADATA_CAPTURE] Could not extract dataset name - quote positions invalid");
-                    None
-                }
-            }
-        });
-
-        // Find dimensions line
-        let dimensions_line = result_text
-            .lines()
-            .find(|line| line.trim().starts_with("Dimensions:"));
-        tracing::info!(
-            dimensions_line = ?dimensions_line,
-            "[METADATA_CAPTURE] Found dimensions line"
-        );
-
-        let dimensions = dimensions_line.and_then(|line| {
-            // "Dimensions: X rows x Y columns"
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            tracing::debug!(
-                parts = ?parts,
-                parts_len = parts.len(),
-                "[METADATA_CAPTURE] Dimensions line parts"
-            );
-            if parts.len() >= 5 {
-                let rows = parts[1].parse::<i32>().ok();
-                let cols = parts[4].parse::<i32>().ok();
-                tracing::info!(
-                    rows = ?rows,
-                    cols = ?cols,
-                    "[METADATA_CAPTURE] Parsed dimensions"
-                );
-                match (rows, cols) {
-                    (Some(r), Some(c)) => Some((r, c)),
-                    _ => {
-                        tracing::warn!("[METADATA_CAPTURE] Could not parse row/col numbers");
-                        None
-                    }
-                }
-            } else {
-                tracing::warn!(
-                    parts_len = parts.len(),
-                    "[METADATA_CAPTURE] Dimensions line has insufficient parts (need >= 5)"
-                );
-                None
-            }
-        });
-
-        // Extract column names from "Columns:" section
-        let columns_start = result_text.find("Columns:");
-        tracing::info!(
-            columns_start_pos = ?columns_start,
-            "[METADATA_CAPTURE] Looking for 'Columns:' section"
-        );
-
-        let column_names: Vec<String> = if let Some(start) = columns_start {
-            let columns_section = &result_text[start..];
-            tracing::info!(
-                total_lines_in_section = columns_section.lines().count(),
-                "[METADATA_CAPTURE] Lines in Columns section"
-            );
-            tracing::debug!(
-                first_5_lines = ?columns_section.lines().take(5).collect::<Vec<_>>(),
-                "[METADATA_CAPTURE] First lines of the Columns section"
-            );
-
-            // Column lines with no '(' before their dtype, logged once.
-            let mut unparsed_lines = 0usize;
-            let parsed_columns: Vec<String> = columns_section
-                .lines()
-                .skip(1) // Skip "Columns:" line
-                .enumerate()
-                .filter_map(|(idx, line)| {
-                    let trimmed_line = line.trim();
-                    let starts_with_dash = trimmed_line.starts_with('-');
-
-                    if !starts_with_dash {
-                        if !trimmed_line.is_empty() {
-                            tracing::debug!(
-                                line_idx = idx,
-                                line = %line,
-                                trimmed = %trimmed_line,
-                                "[METADATA_CAPTURE] Skipping line (doesn't start with '-')"
-                            );
-                        }
-                        return None;
-                    }
-
-                    // "  - column_name (dtype): X nulls (Y%)"
-                    let after_dash = trimmed_line.trim_start_matches('-').trim();
-                    let paren_pos = after_dash.find('(');
-
-                    tracing::debug!(
-                        line_idx = idx,
-                        original_line = %line,
-                        after_dash = %after_dash,
-                        paren_pos = ?paren_pos,
-                        "[METADATA_CAPTURE] Parsing column line"
-                    );
-
-                    match paren_pos {
-                        Some(pos) => {
-                            let col_name = after_dash[..pos].trim().to_string();
-                            tracing::debug!(
-                                extracted_column = %col_name,
-                                "[METADATA_CAPTURE] Extracted column name"
-                            );
-                            Some(col_name)
-                        }
-                        None => {
-                            unparsed_lines += 1;
-                            tracing::debug!(
-                                line = %line,
-                                "[METADATA_CAPTURE] Column line has no '(' - cannot extract name"
-                            );
-                            None
-                        }
-                    }
-                })
-                .collect();
-            if unparsed_lines > 0 {
-                tracing::warn!(
-                    unparsed_lines,
-                    "[METADATA_CAPTURE] Column line has no '(' - cannot extract name"
-                );
-            }
-
-            tracing::info!(
-                num_columns_parsed = parsed_columns.len(),
-                "[METADATA_CAPTURE] Finished parsing columns"
-            );
-            tracing::debug!(
-                columns = ?parsed_columns,
-                "[METADATA_CAPTURE] Parsed column names"
-            );
-            parsed_columns
-        } else {
-            tracing::warn!("[METADATA_CAPTURE] No 'Columns:' section found in result");
-            Vec::new()
-        };
-
-        // The file the dataset was loaded from, which a reload loads again.
-        // Only load_dataset reads a `path`; upload_dataset and create_dataset
-        // ignore one a caller adds, so it is not their source.
-        let source_path = arguments
-            .get("path")
-            .filter(|_| tool_name == "load_dataset")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-
-        let file_size_bytes = source_path
-            .as_deref()
-            .and_then(|p| jailed_file_size(session_id, p));
-
-        // The missing-value markers load_dataset read the file with, which a reload
-        // reads it with again (the call succeeded, so they passed the request limits).
-        let na_strings: Option<Vec<String>> = arguments
-            .get("na_strings")
-            .filter(|_| tool_name == "load_dataset")
-            .and_then(|v| v.as_array())
-            .map(|a| {
-                a.iter()
-                    .filter_map(|v| v.as_str().map(str::to_string))
-                    .collect()
-            });
-
-        // Determine source type
-        let source_type = if tool_name == "upload_dataset" {
-            arguments
-                .get("filename")
-                .and_then(|v| v.as_str())
-                .map(PathBuf::from)
-                .and_then(|p| p.extension().map(|e| e.to_string_lossy().to_string()))
-                .unwrap_or_else(|| "unknown".to_string())
-        } else if tool_name == "create_dataset" {
-            "inline_csv".to_string()
-        } else {
-            source_path
-                .as_ref()
-                .map(PathBuf::from)
-                .and_then(|p| p.extension().map(|e| e.to_string_lossy().to_string()))
-                .unwrap_or_else(|| "unknown".to_string())
-        };
-
-        tracing::info!(
-            dataset_name = ?dataset_name,
-            dimensions = ?dimensions,
-            num_columns = column_names.len(),
-            source_type = %source_type,
-            source_path = ?source_path,
-            "[METADATA_CAPTURE] Final parsed metadata summary"
-        );
-
-        // Build and save metadata
-        match (dataset_name.as_ref(), dimensions.as_ref()) {
-            (Some(name), Some((rows, cols))) => {
-                let mut meta = crate::db::DatasetMeta::new(
-                    session_id.to_string(),
-                    name.clone(),
-                    source_type,
-                    *rows,
-                    *cols,
-                    column_names,
-                );
-                meta.source_path = source_path;
-                meta.file_size_bytes = file_size_bytes;
-                meta.na_strings = na_strings;
-
-                tracing::info!(
-                    meta_id = %meta.id_string(),
-                    meta_session_id = %meta.session_id,
-                    meta_name = %meta.name,
-                    meta_source_type = %meta.source_type,
-                    meta_row_count = meta.row_count,
-                    meta_column_count = meta.column_count,
-                    meta_column_names_len = meta.column_names.len(),
-                    "[METADATA_CAPTURE] DatasetMeta object before save"
-                );
-
-                match db.save_dataset_meta(&meta).await {
-                    Ok(saved_meta) => {
-                        tracing::info!(
-                            dataset = %name,
-                            session_id = %session_id,
-                            saved_id = %saved_meta.id_string(),
-                            saved_column_names_len = saved_meta.column_names.len(),
-                            "[METADATA_CAPTURE] Successfully saved dataset metadata"
-                        );
-                    }
-                    // The session's budget is full: an expected refusal.
-                    Err(e @ crate::db::DbError::QuotaExceeded(_)) => {
-                        tracing::warn!(
-                            dataset = %name,
-                            session_id = %session_id,
-                            error = %e,
-                            "[METADATA_CAPTURE] Failed to save dataset metadata"
-                        );
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            dataset = %name,
-                            session_id = %session_id,
-                            error = %e,
-                            "[METADATA_CAPTURE] Failed to save dataset metadata"
-                        );
-                    }
-                }
-            }
-            _ => {
-                tracing::warn!(
-                    dataset_name = ?dataset_name,
-                    dimensions = ?dimensions,
-                    "[METADATA_CAPTURE] Could not parse dataset info from result - missing name or dimensions"
-                );
-            }
-        }
+        super::dataset_sync::capture_loader_metadata(
+            db,
+            session_id,
+            tool_name,
+            arguments,
+            result_text,
+        )
+        .await;
     }
 }
 
@@ -1949,7 +1631,7 @@ impl ToolExecutor for StreamingToolExecutor {
         #[cfg(feature = "db")]
         let metadata_arguments = self.store.metadata_arguments(name, &arguments);
         #[cfg(feature = "db")]
-        let dataset_snapshot = self.store.dataset_snapshot(&session).await;
+        let dataset_snapshot = self.store.dataset_snapshot(&session, name).await;
 
         tracing::info!(tool = %name, "Executing tool");
         let start = std::time::Instant::now();
@@ -3253,14 +2935,6 @@ mod chat_tests {
         let s = tool_end_preview(&format!("a{}", "é".repeat(1500)));
         assert!(s.len() <= 2_003 && s.ends_with("..."));
         assert_eq!(tool_end_preview("short"), "short");
-    }
-
-    #[test]
-    fn metadata_file_size_goes_through_the_jail() {
-        assert_eq!(
-            jailed_file_size("00000000-0000-4000-8000-000000000000", "/etc/passwd"),
-            None
-        );
     }
 
     #[test]

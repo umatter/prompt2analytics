@@ -66,6 +66,56 @@ pub struct Session {
     data_bytes: AtomicU64,
     /// The shared-mapping part of `data_bytes`, cached with it.
     shared_labels: StdMutex<SharedLabels>,
+    /// The session's dataset-loader calls whose rows the store writes, for
+    /// the dataset sync after each call (`transport::dataset_sync`).
+    #[cfg(feature = "db")]
+    pub(crate) loader_calls: Arc<LoaderCalls>,
+}
+
+/// The dataset-loader calls of one session (`load_dataset`,
+/// `upload_dataset`, `create_dataset`) that the conversation store writes a
+/// dataset row for: how many have started and how many are running. The
+/// dataset sync after another call reads them to tell whether a loader ran
+/// while that call did (`transport::dataset_sync`).
+#[cfg(feature = "db")]
+#[derive(Debug, Default)]
+pub(crate) struct LoaderCalls {
+    started: AtomicU64,
+    running: AtomicUsize,
+}
+
+#[cfg(feature = "db")]
+impl LoaderCalls {
+    /// Count a loader call as started, and as running until the returned
+    /// guard is dropped; also returns the number started, this one
+    /// included.
+    pub(crate) fn start(self: &Arc<Self>) -> (LoaderCall, u64) {
+        self.running.fetch_add(1, Ordering::SeqCst);
+        let started = self.started.fetch_add(1, Ordering::SeqCst) + 1;
+        (LoaderCall(Arc::clone(self)), started)
+    }
+
+    /// The number of loader calls started so far.
+    pub(crate) fn started(&self) -> u64 {
+        self.started.load(Ordering::SeqCst)
+    }
+
+    /// The number of loader calls running now.
+    pub(crate) fn running(&self) -> usize {
+        self.running.load(Ordering::SeqCst)
+    }
+}
+
+/// One running loader call ([`LoaderCalls::start`]); dropping it ends it.
+#[cfg(feature = "db")]
+#[derive(Debug)]
+pub(crate) struct LoaderCall(Arc<LoaderCalls>);
+
+#[cfg(feature = "db")]
+impl Drop for LoaderCall {
+    fn drop(&mut self) {
+        self.0.running.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 impl fmt::Debug for Session {
@@ -96,6 +146,8 @@ impl Session {
             active_calls: AtomicUsize::new(0),
             data_bytes: AtomicU64::new(0),
             shared_labels: StdMutex::new(SharedLabels::default()),
+            #[cfg(feature = "db")]
+            loader_calls: Arc::default(),
         }
     }
 

@@ -139,6 +139,28 @@ fn stored_meta(meta: &DatasetMeta) -> DatasetMeta {
     }
 }
 
+/// Whether two reads of one dataset metadata row found the same row (both
+/// none, or every field equal).
+fn same_row(a: Option<&DatasetMeta>, b: Option<&DatasetMeta>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => {
+            a.id_string() == b.id_string()
+                && a.session_id == b.session_id
+                && a.name == b.name
+                && a.source_path == b.source_path
+                && a.source_type == b.source_type
+                && a.row_count == b.row_count
+                && a.column_count == b.column_count
+                && a.column_names == b.column_names
+                && a.loaded_at == b.loaded_at
+                && a.file_size_bytes == b.file_size_bytes
+                && a.na_strings == b.na_strings
+        }
+        _ => false,
+    }
+}
+
 impl DbConnection {
     // ==================== Dataset Meta Operations ====================
 
@@ -175,16 +197,53 @@ impl DbConnection {
 
         let db = self.clone();
         let turn = db.dataset_meta_turn(&stored.session_id).await;
-        run_to_end(turn, async move { db.save_stored_meta(stored).await }).await
+        run_to_end(turn, async move {
+            db.save_stored_meta(stored, None)
+                .await?
+                .ok_or_else(|| DbError::Query("Failed to save dataset meta".to_string()))
+        })
+        .await
+    }
+
+    /// [`save_dataset_meta`](Self::save_dataset_meta), but only while the
+    /// session's row under `meta`'s name is still `expected` (`None`: no
+    /// row), as the caller read it: the row is read again in the same turn
+    /// as the write, and `Ok(None)` means another write changed it since,
+    /// so nothing was written.
+    pub(crate) async fn save_dataset_meta_unless_changed(
+        &self,
+        meta: &DatasetMeta,
+        expected: Option<&DatasetMeta>,
+    ) -> Result<Option<DatasetMeta>, DbError> {
+        let stored = stored_meta(meta);
+        let expected = Some(expected.cloned());
+        let db = self.clone();
+        let turn = db.dataset_meta_turn(&stored.session_id).await;
+        run_to_end(
+            turn,
+            async move { db.save_stored_meta(stored, expected).await },
+        )
+        .await
     }
 
     /// [`save_dataset_meta`](Self::save_dataset_meta) of the row `stored`
     /// (its names already cut), in its session's dataset metadata turn.
-    async fn save_stored_meta(&self, mut stored: DatasetMeta) -> Result<DatasetMeta, DbError> {
+    /// With `expected` (`Some(None)`: no row) nothing is written, and the
+    /// answer is `None`, when the stored row is not that.
+    async fn save_stored_meta(
+        &self,
+        mut stored: DatasetMeta,
+        expected: Option<Option<DatasetMeta>>,
+    ) -> Result<Option<DatasetMeta>, DbError> {
         // Check if a dataset with the same name exists in this session
         let existing = self
             .get_dataset_meta(&stored.session_id, &stored.name)
             .await?;
+        if let Some(expected) = &expected
+            && !same_row(existing.as_ref(), expected.as_ref())
+        {
+            return Ok(None);
+        }
 
         // Under a budget a session keeps a bounded number of rows; a row
         // that replaces one under its name adds none.
@@ -263,7 +322,7 @@ impl DbConnection {
             created.ok_or_else(|| DbError::Query("Failed to create dataset meta".to_string()))?
         };
         self.release_session_bytes(&session_id, freed);
-        Ok(saved)
+        Ok(Some(saved))
     }
 
     /// Get all datasets for a session
@@ -376,6 +435,39 @@ impl DbConnection {
             let deleted: Vec<DatasetMetaText> = result.take(0)?;
             db.release_session_bytes(&session_id, dataset_meta_text_bytes(&deleted));
             Ok(())
+        })
+        .await
+    }
+
+    /// [`delete_dataset_meta`](Self::delete_dataset_meta) of `expected`'s
+    /// row, but only while the session's row under its name is still
+    /// `expected`, read again in the same turn as the delete: `Ok(false)`
+    /// means another write changed it since, so nothing was deleted.
+    pub(crate) async fn delete_dataset_meta_unless_changed(
+        &self,
+        expected: &DatasetMeta,
+    ) -> Result<bool, DbError> {
+        let db = self.clone();
+        let expected = expected.clone();
+        let session_id = expected.session_id.clone();
+        let turn = db.dataset_meta_turn(&session_id).await;
+        run_to_end(turn, async move {
+            let current = db.get_dataset_meta(&session_id, &expected.name).await?;
+            if !same_row(current.as_ref(), Some(&expected)) {
+                return Ok(false);
+            }
+            let mut result = db
+                .db()
+                .query(
+                    "DELETE FROM dataset_meta WHERE session_id = $session_id AND name = $name \
+                     RETURN BEFORE",
+                )
+                .bind(("session_id", session_id.clone()))
+                .bind(("name", expected.name.clone()))
+                .await?;
+            let deleted: Vec<DatasetMetaText> = result.take(0)?;
+            db.release_session_bytes(&session_id, dataset_meta_text_bytes(&deleted));
+            Ok(true)
         })
         .await
     }

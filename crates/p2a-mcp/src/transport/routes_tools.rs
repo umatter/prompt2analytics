@@ -24,10 +24,10 @@ pub struct CallToolRequest {
 }
 
 /// Tools whose successful result the conversation store reads dataset
-/// metadata from (with the `db` and `llm` features and an open store). The
-/// tool route and the LLM tool loop (`llm_routes`) both read this list, so a
-/// loader added here is captured on both.
-#[cfg(all(feature = "db", feature = "llm"))]
+/// metadata from (with the `db` feature and an open store). The tool route
+/// and the LLM tool loop (`llm_routes`) both read this list, so a loader
+/// added here is captured on both.
+#[cfg(feature = "db")]
 pub(super) const METADATA_TOOLS: [&str; 3] = ["load_dataset", "upload_dataset", "create_dataset"];
 
 /// Store the dataset metadata of a successful `tool` call in `session_id`,
@@ -51,7 +51,7 @@ pub(super) const METADATA_TOOLS: [&str; 3] = ["load_dataset", "upload_dataset", 
 /// which the dataset listing and the reload after a restart read. Once
 /// spawned the capture runs to the end, also when the client goes away. A
 /// capture that fails is logged; the call's answer is left as it is.
-#[cfg(all(feature = "db", feature = "llm"))]
+#[cfg(feature = "db")]
 pub(super) async fn capture_dataset_metadata_off_runtime(
     db: std::sync::Arc<crate::db::DbConnection>,
     session_id: String,
@@ -62,15 +62,13 @@ pub(super) async fn capture_dataset_metadata_off_runtime(
     let handle = tokio::runtime::Handle::current();
     let (log_session, log_tool) = (session_id.clone(), tool.clone());
     let joined = tokio::task::spawn_blocking(move || {
-        handle.block_on(
-            super::llm_routes::StreamingToolExecutor::capture_dataset_metadata_static(
-                db,
-                &session_id,
-                &tool,
-                &arguments,
-                &result_text,
-            ),
-        );
+        handle.block_on(super::dataset_sync::capture_loader_metadata(
+            db,
+            &session_id,
+            &tool,
+            &arguments,
+            &result_text,
+        ));
     })
     .await;
     if let Err(e) = joined {
@@ -84,10 +82,10 @@ pub(super) async fn capture_dataset_metadata_off_runtime(
 }
 
 /// The thread each session's dataset-metadata capture ran on, recorded where
-/// the capture starts (`capture_dataset_metadata_static`), for the tests of
+/// the capture starts (`dataset_sync::capture_loader_metadata`), for the tests of
 /// the tool route and of the LLM tool loop that check that it is not a
 /// runtime worker.
-#[cfg(all(test, feature = "db", feature = "llm"))]
+#[cfg(all(test, feature = "db"))]
 pub(super) mod capture_threads {
     use std::sync::Mutex;
     use std::thread::ThreadId;
@@ -117,7 +115,7 @@ pub(super) mod capture_threads {
 /// `na_strings`, copied without the rest of the call's payload. A missing
 /// field becomes null, which the capture reads as absent. The LLM tool loop
 /// (`llm_routes`) keeps the same copy for its own capture.
-#[cfg(any(test, all(feature = "db", feature = "llm")))]
+#[cfg(any(test, feature = "db"))]
 pub(super) fn capture_fields(arguments: &serde_json::Value) -> serde_json::Value {
     serde_json::json!({
         "path": arguments.get("path"),
@@ -153,7 +151,7 @@ pub(crate) async fn call_tool(
     // only reader after it, so only a call it will capture keeps a copy, and
     // only of the fields it reads (a create_dataset csv_content or an
     // upload_dataset content can be the whole request body).
-    #[cfg(all(feature = "db", feature = "llm"))]
+    #[cfg(feature = "db")]
     let capture_arguments = (state.persistent_manager.is_some()
         && METADATA_TOOLS.contains(&name.as_str()))
     .then(|| capture_fields(&arguments));
@@ -164,7 +162,7 @@ pub(crate) async fn call_tool(
     let sync_before = match &state.persistent_manager {
         Some(_) => Some((
             session.clone(),
-            super::dataset_sync::DatasetSnapshot::of(&session).await,
+            super::dataset_sync::DatasetSnapshot::of(&session, &name).await,
         )),
         None => None,
     };
@@ -182,12 +180,11 @@ pub(crate) async fn call_tool(
 
     // Whether the call's own rows were written from its result text.
     #[cfg(feature = "db")]
-    #[allow(unused_mut)]
     let mut loader = false;
     if let Ok(result) = &tool_result {
         // Capture dataset metadata for load_dataset, upload_dataset and
         // create_dataset, with the same parser as the LLM tool loop.
-        #[cfg(all(feature = "db", feature = "llm"))]
+        #[cfg(feature = "db")]
         if result.success
             && let (Some(arguments), Some(persistent_manager)) =
                 (capture_arguments, &state.persistent_manager)
@@ -217,7 +214,7 @@ pub(crate) async fn call_tool(
             )
             .await;
         }
-        #[cfg(not(all(feature = "db", feature = "llm")))]
+        #[cfg(not(feature = "db"))]
         let _ = result;
     }
 
@@ -274,7 +271,7 @@ mod tests {
     /// The dataset-metadata capture after a call runs on the blocking pool
     /// and needs no permit of its own: the call answers once its row is
     /// stored, whatever other work holds the governor's permits.
-    #[cfg(all(feature = "db", feature = "llm"))]
+    #[cfg(feature = "db")]
     mod metadata_capture {
         use std::sync::Arc;
         use std::sync::mpsc;
@@ -472,6 +469,10 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(rows.len(), 1);
+            // The loader's row, in every build with the store (`db` with or
+            // without `llm`), not a row the sync made for a tool's dataset.
+            assert_eq!(rows[0].source_type, "inline_csv");
+            assert!(!rows[0].made_in_session());
         }
 
         /// A session's metadata rows stay within its `session_db_bytes`
