@@ -63,6 +63,7 @@ returns <- function(packages) function(ctx) {
 case("zz_no_packages", "harness", "no packages", returns(NULL))
 case("zz_empty_package", "harness", "an empty package name", returns(""))
 case("zz_na_package", "harness", "an NA package name", returns(NA_character_))
+case("zz_duplicate_package", "harness", "a package named twice", returns(c("jsonlite", "jsonlite")))
 case("zz_with_packages", "harness", "packages given", returns("jsonlite"))
 case("demo_var_case", "stats", "Demo variance, base R only", function(ctx) {
   d <- ctx$dataset("datasets/d.csv")
@@ -188,7 +189,7 @@ class TestRunCase(unittest.TestCase):
             )
             self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
             results = dict(line.split(": ", 1) for line in p.stdout.splitlines() if ": " in line)
-            for bad in ("zz_no_packages", "zz_empty_package", "zz_na_package"):
+            for bad in ("zz_no_packages", "zz_empty_package", "zz_na_package", "zz_duplicate_package"):
                 self.assertTrue(
                     results.get(bad, "").startswith(
                         f"case {bad}: packages must be a character vector of R package names"
