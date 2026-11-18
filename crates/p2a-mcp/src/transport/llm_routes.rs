@@ -1472,8 +1472,6 @@ pub struct ImageData {
     pub mime_type: String,
 }
 
-/// Streaming tool executor that sends progress events. Tool calls run
-/// through the governor, like [`SessionToolExecutor`].
 /// The events of one streamed chat, shared by the provider's text callback, the tool executor and
 /// the route. A text delta that does not fit in the full channel is held and sent with the next
 /// one, and any held text is sent before the next other event, so no text is lost and text stays
@@ -1506,6 +1504,25 @@ impl ChatEvents {
         }
     }
 
+    /// An error event from the synchronous stream callback, sent after any held text so it
+    /// does not overtake it. Without room in the channel, the text and the error are dropped
+    /// (the route's own error or end event follows when the stream returns).
+    pub(crate) fn error(&self, event: ProgressEvent) {
+        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        if !pending.is_empty() {
+            let text = std::mem::take(&mut *pending);
+            if let Err(tokio::sync::mpsc::error::TrySendError::Full(ProgressEvent::Content {
+                text,
+            })) = self.tx.try_send(ProgressEvent::Content { text })
+            {
+                // Keep the text ahead of anything sent later; the error cannot pass it.
+                *pending = text;
+                return;
+            }
+        }
+        let _ = self.tx.try_send(event);
+    }
+
     /// Send `event` after any held text; an error when the receiver is gone.
     pub(crate) async fn send(
         &self,
@@ -1519,6 +1536,8 @@ impl ChatEvents {
     }
 }
 
+/// Streaming tool executor that sends progress events. Tool calls run
+/// through the governor, like [`SessionToolExecutor`].
 pub struct StreamingToolExecutor {
     governor: Arc<ToolGovernor>,
     server: Arc<crate::server::AnalyticsServer>,
@@ -2135,7 +2154,6 @@ async fn run_chat_stream(
 
     // Create streaming callback that forwards content chunks
     let callback_events = events.clone();
-    let tx_for_callback = tx.clone();
     let stream_callback: Box<dyn Fn(StreamChunk) + Send + Sync> = Box::new(move |chunk| {
         match chunk {
             StreamChunk::Text { content } => {
@@ -2146,7 +2164,8 @@ async fn run_chat_stream(
                 // Done is handled separately after chat_stream returns
             }
             StreamChunk::Error { message } => {
-                let _ = tx_for_callback.try_send(ProgressEvent::Error {
+                // After any held text, so the error does not overtake it.
+                callback_events.error(ProgressEvent::Error {
                     error: message,
                     code: Some("upstream_error"),
                 });
@@ -2409,7 +2428,9 @@ mod disconnect_tests {
         // spawned, so that call cannot take it first. Should run_blocking
         // return without running the closure, the sender is dropped and
         // this fails at once instead of hanging.
-        held_rx.await.expect("the permit holder never started");
+        if held_rx.await.is_err() {
+            panic!("the permit holder never started: {:?}", holder.await);
+        }
 
         let (tx, rx) = tokio::sync::mpsc::channel::<ProgressEvent>(100);
         let executor = StreamingToolExecutor::new(
@@ -2432,7 +2453,10 @@ mod disconnect_tests {
             run_chat_task(&tx, chat, Some(task_db), &task_placeholder).await;
         });
 
-        // Wait (bounded) until the governed call's row is Running.
+        // The Running row is written inside the chat future, between
+        // ToolStart and the governor's permit wait, with no hook to signal
+        // it, so this polls the store. The bound guards against a hang on an
+        // in-memory write; it is not a timing assertion.
         let running = |calls: &[crate::db::ToolCall]| {
             calls
                 .iter()
@@ -2448,6 +2472,7 @@ mod disconnect_tests {
 
         // The client goes away mid-tool.
         drop(rx);
+        // Only a hang guard, should run_chat_task fail to end.
         tokio::time::timeout(Duration::from_secs(30), task)
             .await
             .expect("the chat task ends once the client is gone")
@@ -2650,6 +2675,33 @@ mod chat_tests {
             matches!(last, Some(ProgressEvent::Status { ref message }) if message == "end"),
             "{last:?}"
         );
+    }
+
+    /// A stream error from the callback never overtakes held text: with the channel full it
+    /// waits behind the text, and once there is room both arrive, text first.
+    #[tokio::test]
+    async fn a_stream_error_follows_the_held_text() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let events = ChatEvents::new(tx);
+        events.text("first ");
+        events.text("held");
+        let error = || ProgressEvent::Error {
+            error: "upstream".into(),
+            code: Some("upstream_error"),
+        };
+        // Full: the error is not sent ahead of the held text.
+        events.error(error());
+        assert!(
+            matches!(rx.recv().await, Some(ProgressEvent::Content { ref text }) if text == "first ")
+        );
+        assert!(rx.try_recv().is_err());
+        // Room: the held text, then the error.
+        events.error(error());
+        assert!(
+            matches!(rx.recv().await, Some(ProgressEvent::Content { ref text }) if text == "held")
+        );
+        events.error(error());
+        assert!(matches!(rx.recv().await, Some(ProgressEvent::Error { .. })));
     }
 
     /// An admitting governor and a chat on one live session.
