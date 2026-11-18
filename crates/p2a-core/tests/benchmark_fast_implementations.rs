@@ -106,8 +106,8 @@ fn benchmark_roc_auc_implementations() {
         );
     }
 
-    println!("\nNote: Fast implementation uses O(n log n) Mann-Whitney U statistic");
-    println!("      Original uses O(n × thresholds) threshold-based approach");
+    println!("\nNote: both are one sort, O(n log n), with the Mann-Whitney AUC;");
+    println!("      roc_auc also builds the ROC curve and Youden's optimum");
 }
 
 #[test]
