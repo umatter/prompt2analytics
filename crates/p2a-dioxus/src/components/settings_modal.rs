@@ -6,7 +6,10 @@ use dioxus::prelude::*;
 use crate::api::ApiClient;
 use crate::app::apply_theme;
 use crate::state::settings::{KeySource, Provider, Settings, Theme};
-use crate::state::{SessionState, ensure_session};
+use crate::state::{
+    ConversationState, SESSION_ENDED_TEXT, SessionState, ensure_session, on_session_lost,
+    session_lost_text,
+};
 
 /// Where the API key lives, phrased for the platform the app runs on.
 ///
@@ -109,6 +112,7 @@ pub struct SettingsModalProps {
 pub fn SettingsModal(props: SettingsModalProps) -> Element {
     let mut settings = use_context::<Signal<Settings>>();
     let session_state = use_context::<Signal<SessionState>>();
+    let conversation_state = use_context::<Signal<ConversationState>>();
 
     // Local state for editing
     let mut local_theme = use_signal(|| settings.read().theme);
@@ -392,6 +396,11 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
                             .set(Some(res.error.unwrap_or_else(|| "Load failed".to_string())));
                         load_status.set(None);
                     }
+                }
+                Err(e) if session_lost_text(&e) => {
+                    on_session_lost(session, conversation_state, &session_id);
+                    load_error.set(Some(SESSION_ENDED_TEXT.to_string()));
+                    load_status.set(None);
                 }
                 Err(e) => {
                     let shown = if use_upload {

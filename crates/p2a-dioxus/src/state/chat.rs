@@ -206,6 +206,9 @@ pub struct ChatState {
     pub history_index: i32,
     /// Currently active tool call (being processed)
     pub active_tool: Option<ActiveToolCall>,
+    /// The prompt Retry sends when the transcript was cleared (the session
+    /// ended); kept by `clear_messages`.
+    pub retry_prompt: Option<String>,
 }
 
 impl Default for ChatState {
@@ -226,7 +229,13 @@ impl ChatState {
             prompt_history: Vec::new(),
             history_index: -1,
             active_tool: None,
+            retry_prompt: None,
         }
+    }
+
+    /// Take the prompt Retry should send after the transcript was cleared.
+    pub fn take_retry_prompt(&mut self) -> Option<String> {
+        self.retry_prompt.take()
     }
 
     /// Add a user message
@@ -325,6 +334,21 @@ impl ChatState {
     pub fn start_processing(&mut self) {
         self.is_processing = true;
         self.error = None;
+    }
+
+    /// End the trailing streaming message without a Done: its partial text
+    /// is kept and it stops streaming; an empty one shows `note` instead.
+    /// Calls still running keep an unknown outcome.
+    pub fn end_interrupted(&mut self, note: &str) {
+        if let Some(last) = self.messages.last_mut()
+            && last.is_streaming
+        {
+            last.is_streaming = false;
+            if last.content.is_empty() {
+                last.content = note.to_string();
+            }
+        }
+        self.active_tool = None;
     }
 
     /// Stop processing
@@ -837,6 +861,19 @@ mod tests {
             },
         );
         assert_eq!(chat.messages.last().unwrap().tool_calls[0].success, None);
+    }
+
+    #[test]
+    fn retry_prompt_survives_clear() {
+        let mut chat = ChatState::new();
+        chat.retry_prompt = Some("regress price on sqft".into());
+        chat.clear_messages();
+        assert_eq!(chat.retry_prompt.as_deref(), Some("regress price on sqft"));
+        assert_eq!(
+            chat.take_retry_prompt().as_deref(),
+            Some("regress price on sqft")
+        );
+        assert_eq!(chat.retry_prompt, None);
     }
 
     /// A result over 2,000 bytes is cut on a char boundary in the history.

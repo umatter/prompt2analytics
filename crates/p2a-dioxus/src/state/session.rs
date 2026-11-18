@@ -225,8 +225,154 @@ pub async fn ensure_session(mut session: Signal<SessionState>) -> Result<String,
         .await?;
     if session.read().session_id.as_deref() != Some(id.as_str()) {
         session.write().set_session_id(id.clone());
+        remember_session(&id);
     }
     Ok(id)
+}
+
+/// What the app says when its session ended.
+pub const SESSION_ENDED_TEXT: &str = "Your session ended (it was idle too long, or the server restarted). Its datasets and conversations are gone; load your data again. Retry sends your last message in a new session.";
+
+/// Whether a server error means the session is gone: the codes
+/// `session_expired` and `session_not_found`, `not_found` for a session
+/// (the stream route also answers an unknown conversation with
+/// `not_found`), and, from servers that send no code, the texts "Session
+/// not found" / "Session expired".
+pub fn session_lost(code: Option<&str>, message: &str) -> bool {
+    let names_session =
+        message.contains("Session not found") || message.contains("Session expired");
+    match code {
+        Some("session_expired" | "session_not_found") => true,
+        Some("not_found") | None => names_session,
+        Some(_) => false,
+    }
+}
+
+/// [`session_lost`] for the error string a REST call returns
+/// (`<message> (<code>)`, the `error_text` format).
+pub fn session_lost_text(err: &str) -> bool {
+    let split = err
+        .strip_suffix(')')
+        .and_then(|rest| rest.rsplit_once(" ("))
+        .filter(|(_, code)| {
+            !code.is_empty() && code.chars().all(|c| c.is_ascii_lowercase() || c == '_')
+        });
+    match split {
+        Some((message, code)) => session_lost(Some(code), message),
+        None => session_lost(None, err),
+    }
+}
+
+/// Storage key of the native app's session id.
+const SESSION_KEY: &str = "p2a-session";
+
+/// Whether this build keeps its session id across restarts (desktop and
+/// mobile; the web build never stores it).
+const KEEPS_SESSION: bool = cfg!(any(feature = "desktop", feature = "mobile"));
+
+/// Store `id` as the session to restore at the next start, when `native`.
+pub fn remember_session_in<S: crate::platform::StorageBackend>(
+    storage: &S,
+    native: bool,
+    id: &str,
+) {
+    if native && let Err(e) = storage.set(SESSION_KEY, &id) {
+        tracing::warn!("Cannot store the session id: {}", e);
+    }
+}
+
+/// The stored session id, if any.
+pub fn stored_session_in<S: crate::platform::StorageBackend>(storage: &S) -> Option<String> {
+    storage
+        .get::<String>(SESSION_KEY)
+        .ok()
+        .filter(|id| !id.is_empty())
+}
+
+/// Remove the stored session id.
+pub fn forget_stored_session_in<S: crate::platform::StorageBackend>(storage: &S) {
+    if storage.contains_key(SESSION_KEY)
+        && let Err(e) = storage.remove(SESSION_KEY)
+    {
+        tracing::warn!("Cannot remove the stored session id: {}", e);
+    }
+}
+
+fn remember_session(id: &str) {
+    if KEEPS_SESSION {
+        remember_session_in(&crate::platform::create_storage(), true, id);
+    }
+}
+
+fn forget_stored_session() {
+    if KEEPS_SESSION {
+        forget_stored_session_in(&crate::platform::create_storage());
+    }
+}
+
+/// Native start: restore the stored session through the gate (a send or
+/// `+` during the restore waits for it instead of creating a second
+/// session). The server adopts a stored session within its lifetime; a
+/// refused one is forgotten and a new session is created. Without a stored
+/// id nothing happens: the first use creates the session.
+pub async fn restore_session(mut session: Signal<SessionState>) {
+    if !KEEPS_SESSION {
+        return;
+    }
+    let Some(stored) = stored_session_in(&crate::platform::create_storage()) else {
+        return;
+    };
+    let gate = session.read().gate.clone();
+    let restored = gate
+        .ensure(|| async move {
+            let client = api();
+            match client.get_session(&stored).await {
+                Ok(_) => {
+                    tracing::info!("Session restored: {}", stored);
+                    crate::api::set_current_session_id(Some(stored.clone()));
+                    Ok(stored)
+                }
+                Err(e) => {
+                    tracing::info!("Stored session not restored ({e}); creating a new one");
+                    forget_stored_session();
+                    client.create_session().await
+                }
+            }
+        })
+        .await;
+    match restored {
+        Ok(id) => {
+            remember_session(&id);
+            if session.read().session_id.as_deref() != Some(id.as_str()) {
+                session.write().set_session_id(id);
+            }
+        }
+        Err(e) => tracing::warn!("No session at start: {}", e),
+    }
+}
+
+/// The session `old_id` ended: forget it everywhere (the gate, the state,
+/// the session header, the stored id), drop its datasets and reset the
+/// conversations, so the next use creates a new session.
+pub fn on_session_lost(
+    mut session: Signal<SessionState>,
+    mut conv: Signal<super::ConversationState>,
+    old_id: &str,
+) {
+    let gate = session.read().gate.clone();
+    gate.forget(old_id);
+    let is_current = session.read().session_id.as_deref() == Some(old_id);
+    if is_current {
+        let mut s = session.write();
+        s.session_id = None;
+        s.is_initialized = false;
+        s.clear_datasets();
+        s.trigger_datasets_refresh();
+        drop(s);
+        crate::api::set_current_session_id(None);
+        forget_stored_session();
+        conv.write().reset();
+    }
 }
 
 #[cfg(test)]
@@ -237,6 +383,100 @@ mod tests {
     use futures::task::LocalSpawnExt;
     use std::cell::{Cell, RefCell};
     use std::rc::Rc;
+
+    #[test]
+    fn session_lost_recognises_the_servers_answers() {
+        assert!(session_lost(Some("session_expired"), "Session expired"));
+        assert!(session_lost(Some("session_not_found"), "Session not found"));
+        assert!(session_lost(Some("not_found"), "Session not found"));
+        // The stream route answers an unknown conversation with not_found too.
+        assert!(!session_lost(Some("not_found"), "Conversation not found"));
+        // Older servers send no code.
+        assert!(session_lost(None, "Session expired"));
+        assert!(session_lost(None, "Session not found: 3f2a"));
+        assert!(!session_lost(
+            Some("capacity"),
+            "Maximum number of sessions reached"
+        ));
+        assert!(!session_lost(None, "HTTP error: 404"));
+    }
+
+    #[test]
+    fn session_lost_text_reads_the_rest_error_string() {
+        use crate::api::error_text;
+        assert!(session_lost_text(&error_text(
+            "Session expired",
+            Some("session_expired")
+        )));
+        assert!(session_lost_text(&error_text(
+            "Session not found",
+            Some("not_found")
+        )));
+        assert!(!session_lost_text(&error_text(
+            "Conversation not found",
+            Some("not_found")
+        )));
+        assert!(!session_lost_text(&error_text(
+            "Maximum number of sessions reached",
+            Some("capacity")
+        )));
+        assert!(!session_lost_text("HTTP error: 404"));
+        assert!(session_lost_text("Session expired"));
+    }
+
+    /// Storage held in memory, standing in for the native config directory.
+    #[derive(Default)]
+    struct MemoryStorage(RefCell<std::collections::HashMap<String, String>>);
+
+    impl crate::platform::StorageBackend for MemoryStorage {
+        fn get<T: serde::de::DeserializeOwned>(
+            &self,
+            key: &str,
+        ) -> Result<T, crate::platform::StorageError> {
+            let map = self.0.borrow();
+            let raw = map
+                .get(key)
+                .ok_or_else(|| crate::platform::StorageError(format!("no {key}")))?;
+            serde_json::from_str(raw).map_err(|e| crate::platform::StorageError(e.to_string()))
+        }
+
+        fn set<T: serde::Serialize>(
+            &self,
+            key: &str,
+            value: &T,
+        ) -> Result<(), crate::platform::StorageError> {
+            let raw = serde_json::to_string(value)
+                .map_err(|e| crate::platform::StorageError(e.to_string()))?;
+            self.0.borrow_mut().insert(key.to_string(), raw);
+            Ok(())
+        }
+
+        fn remove(&self, key: &str) -> Result<(), crate::platform::StorageError> {
+            self.0.borrow_mut().remove(key);
+            Ok(())
+        }
+
+        fn contains_key(&self, key: &str) -> bool {
+            self.0.borrow().contains_key(key)
+        }
+    }
+
+    #[test]
+    fn stored_session_round_trip() {
+        let storage = MemoryStorage::default();
+        assert_eq!(stored_session_in(&storage), None);
+        remember_session_in(&storage, true, "s-1");
+        assert!(storage.0.borrow().contains_key("p2a-session"));
+        assert_eq!(stored_session_in(&storage).as_deref(), Some("s-1"));
+        forget_stored_session_in(&storage);
+        assert_eq!(stored_session_in(&storage), None);
+
+        // The web build never stores the id.
+        let web = MemoryStorage::default();
+        remember_session_in(&web, false, "s-1");
+        assert!(web.0.borrow().is_empty());
+        assert_eq!(stored_session_in(&web), None);
+    }
 
     #[test]
     fn gate_runs_one_creation_for_concurrent_callers() {

@@ -7,8 +7,32 @@ use crate::app::apply_theme;
 use crate::components::{ChatInput, ExportMenu, MessageList, P2aWordmark, SettingsModal};
 use crate::state::settings::Theme;
 use crate::state::{
-    ChatMessage, ChatState, ConversationState, SessionState, Settings, ToolCallInfo, ensure_session,
+    ChatMessage, ChatState, ConversationState, SESSION_ENDED_TEXT, SessionState, Settings,
+    ToolCallInfo, ensure_session, on_session_lost, session_lost, session_lost_text,
 };
+
+/// The session `old_id` ended during a send of `prompt`: the turn is ended,
+/// the transcript and the conversations are reset (the sync tracking first,
+/// so the sync effect keeps the banner), and Retry will send `prompt` in a
+/// new session.
+fn recover_lost_session(
+    mut chat: Signal<ChatState>,
+    conv: Signal<ConversationState>,
+    session: Signal<SessionState>,
+    mut synced_conv_id: Signal<Option<String>>,
+    mut synced_messages_len: Signal<usize>,
+    old_id: &str,
+    prompt: &str,
+) {
+    chat.write().end_interrupted("");
+    synced_conv_id.set(None);
+    synced_messages_len.set(0);
+    on_session_lost(session, conv, old_id);
+    let mut c = chat.write();
+    c.clear_messages();
+    c.retry_prompt = Some(prompt.to_string());
+    c.set_error(Some(SESSION_ENDED_TEXT.to_string()));
+}
 
 /// Chat panel component - main chat interface
 #[component]
@@ -242,10 +266,18 @@ pub fn ChatPanel() -> Element {
                 }
             };
 
-            // Ensure we have a conversation
+            // Ensure we have a conversation of this session (one of an ended
+            // session is not posted to).
             let conversation_id = {
                 let conv_state = conv.read();
-                if let Some(id) = conv_state.current_conversation_id.clone() {
+                let of_other_session = conv_state
+                    .get_current_conversation()
+                    .is_some_and(|c| c.session_id != session_id);
+                if let Some(id) = conv_state
+                    .current_conversation_id
+                    .clone()
+                    .filter(|_| !of_other_session)
+                {
                     tracing::debug!("[ChatPanel] Using existing conversation: {}", id);
                     id
                 } else {
@@ -263,6 +295,19 @@ pub fn ChatPanel() -> Element {
                             conv.write().add_conversation(new_conv);
                             conv.write().set_current_conversation(Some(id.clone()));
                             id
+                        }
+                        Err(e) if session_lost_text(&e) => {
+                            recover_lost_session(
+                                chat,
+                                conv,
+                                session,
+                                synced_conv_id,
+                                synced_messages_len,
+                                &session_id,
+                                &message,
+                            );
+                            chat.write().stop_processing();
+                            return;
                         }
                         Err(e) => {
                             tracing::warn!("[ChatPanel] Failed to create conversation: {}", e);
@@ -333,6 +378,9 @@ pub fn ChatPanel() -> Element {
             // URL on native, the compiled-in one on web.
             let backend_url = api().base_url().to_string();
 
+            // Set when the server says the session is gone.
+            let mut session_ended = false;
+
             // Stream the response
             let result = stream_chat(
                 &backend_url,
@@ -396,8 +444,14 @@ pub fn ChatPanel() -> Element {
                             }
                         }
                         StreamEvent::Error { error, code } => {
-                            chat.write()
-                                .set_error(Some(crate::api::error_text(&error, code.as_deref())));
+                            if session_lost(code.as_deref(), &error) {
+                                session_ended = true;
+                            } else {
+                                chat.write().set_error(Some(crate::api::error_text(
+                                    &error,
+                                    code.as_deref(),
+                                )));
+                            }
                         }
                     }
                 },
@@ -407,7 +461,25 @@ pub fn ChatPanel() -> Element {
             tracing::debug!("[ChatPanel] stream_chat returned: {:?}", result.is_ok());
             if let Err(e) = result {
                 tracing::error!("[ChatPanel] Stream error: {}", e);
-                chat.write().set_error(Some(e.to_string()));
+                if session_lost_text(&e.to_string()) {
+                    session_ended = true;
+                } else {
+                    chat.write().set_error(Some(e.to_string()));
+                }
+            }
+
+            if session_ended {
+                recover_lost_session(
+                    chat,
+                    conv,
+                    session,
+                    synced_conv_id,
+                    synced_messages_len,
+                    &session_id,
+                    &message,
+                );
+                chat.write().stop_processing();
+                return;
             }
 
             chat.write().stop_processing();
@@ -491,13 +563,16 @@ pub fn ChatPanel() -> Element {
     let handle_retry = {
         let mut handle_send = handle_send;
         move |_| {
-            // Find the last user message
+            // The last user message, or, after the session ended and the
+            // transcript was cleared, the prompt that was being sent.
             let last_user_msg = chat_state
                 .read()
                 .messages
                 .iter()
                 .rfind(|m| m.role == "user")
                 .map(|m| m.content.clone());
+            let retry_prompt = chat_state.write().take_retry_prompt();
+            let last_user_msg = last_user_msg.or(retry_prompt);
 
             if let Some(msg) = last_user_msg {
                 // Clear the error first

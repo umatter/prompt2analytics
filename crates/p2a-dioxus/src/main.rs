@@ -42,6 +42,10 @@ fn init_logging() {
     }
 }
 
+/// How long the embedded server keeps an idle session: 30 days.
+#[cfg(any(feature = "desktop", feature = "mobile"))]
+const DESKTOP_SESSION_TTL_MINUTES: u64 = 30 * 24 * 60;
+
 /// Start the embedded backend server on native platforms.
 ///
 /// Returns the server handle, which must be kept alive for the duration of
@@ -68,10 +72,14 @@ fn start_embedded_backend() -> Result<p2a_mcp::EmbeddedServer, String> {
         tracing::warn!("Could not determine user data directory, using in-memory database");
     }
 
-    // Configure the embedded server: a free loopback port chosen by the OS.
+    // Configure the embedded server: a free loopback port chosen by the OS,
+    // and sessions that live 30 days from their last use, so the app's
+    // conversations survive restarts and idle hours (its session id is kept
+    // in the config directory, state::session).
     let mut config = EmbeddedServerConfig::default()
         .with_port(0)
-        .with_host("127.0.0.1");
+        .with_host("127.0.0.1")
+        .with_session_ttl_minutes(DESKTOP_SESSION_TTL_MINUTES);
 
     // Set database path if available
     if let Some(path) = db_path {

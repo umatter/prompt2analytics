@@ -7,7 +7,24 @@ use dioxus::prelude::*;
 
 use crate::api::Conversation;
 use crate::components::P2aIconMinimal;
-use crate::state::{ChatState, ConversationState, SessionState, ensure_session};
+use crate::state::{
+    ChatState, ConversationState, SESSION_ENDED_TEXT, SessionState, ensure_session,
+    on_session_lost, session_lost_text,
+};
+
+/// Show a failed conversation call in the sidebar; when it says the session
+/// ended, the session is forgotten and the conversations reset first.
+fn report_error(session: Signal<SessionState>, mut conv: Signal<ConversationState>, e: String) {
+    if session_lost_text(&e) {
+        let old = session.read().session_id.clone();
+        if let Some(old) = old {
+            on_session_lost(session, conv, &old);
+        }
+        conv.write().set_error(Some(SESSION_ENDED_TEXT.to_string()));
+    } else {
+        conv.write().set_error(Some(e));
+    }
+}
 
 /// Conversation sidebar component
 #[component]
@@ -38,9 +55,7 @@ pub fn ConversationSidebar() -> Element {
                         conv_state.write().set_conversations(conversations);
                         conv_state.write().set_loading(false);
                     }
-                    Err(e) => {
-                        conv_state.write().set_error(Some(e));
-                    }
+                    Err(e) => report_error(session_state, conv_state, e),
                 }
             });
         }
@@ -60,7 +75,7 @@ pub fn ConversationSidebar() -> Element {
             let session_id = match ensure_session(session_state).await {
                 Ok(id) => id,
                 Err(e) => {
-                    conv.write().set_error(Some(e));
+                    report_error(session_state, conv, e);
                     return;
                 }
             };
@@ -76,7 +91,7 @@ pub fn ConversationSidebar() -> Element {
                     conv.write().set_operating(false);
                 }
                 Err(e) => {
-                    conv.write().set_error(Some(e));
+                    report_error(session_state, conv, e);
                     conv.write().set_operating(false);
                 }
             }
@@ -105,6 +120,7 @@ pub fn ConversationSidebar() -> Element {
                 }
                 Err(e) => {
                     tracing::error!("Failed to load messages: {}", e);
+                    report_error(session_state, conv, e);
                 }
             }
         });
@@ -135,6 +151,7 @@ pub fn ConversationSidebar() -> Element {
                     }
                     Err(e) => {
                         tracing::error!("Failed to rename: {}", e);
+                        report_error(session_state, conv, e);
                     }
                 }
                 ed_id.set(None);
@@ -205,6 +222,7 @@ pub fn ConversationSidebar() -> Element {
                                         "[ConversationSidebar] Failed to load messages for auto-selected conversation: {}",
                                         e
                                     );
+                                    report_error(session_state, conv, e);
                                 }
                             }
                         }
@@ -212,7 +230,7 @@ pub fn ConversationSidebar() -> Element {
                         conv.write().set_operating(false);
                     }
                     Err(e) => {
-                        conv.write().set_error(Some(e));
+                        report_error(session_state, conv, e);
                         conv.write().set_operating(false);
                     }
                 }
@@ -232,6 +250,7 @@ pub fn ConversationSidebar() -> Element {
                 }
                 Err(e) => {
                     tracing::error!("Failed to toggle archive: {}", e);
+                    report_error(session_state, conv, e);
                 }
             }
         });

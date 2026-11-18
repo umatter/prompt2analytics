@@ -87,7 +87,12 @@ pub fn App() -> Element {
     use_context_provider(|| sidebar_visible);
 
     // No session is created at mount: the first send, data load or new
-    // conversation creates it (state::ensure_session).
+    // conversation creates it (state::ensure_session). The native app
+    // restores the session it used last, through the same gate.
+    #[cfg(any(feature = "desktop", feature = "mobile"))]
+    use_effect(move || {
+        spawn(crate::state::restore_session(session_state));
+    });
 
     // Apply theme on mount and whenever settings change
     use_effect(move || {

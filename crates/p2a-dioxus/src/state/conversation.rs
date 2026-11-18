@@ -306,4 +306,9 @@ impl ConversationState {
     pub fn clear_cached_messages(&mut self) {
         self.current_messages.clear();
     }
+
+    /// Forget every conversation (their session ended).
+    pub fn reset(&mut self) {
+        *self = Self::new();
+    }
 }
