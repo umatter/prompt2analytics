@@ -518,9 +518,13 @@ async fn handle_client_message(
                 Ok(session) => session,
                 Err(e) => {
                     state.session = None;
+                    // The sweep removes an expired session without a trace, so a
+                    // swept session answers as a deleted one does.
                     let code = match e {
                         SessionError::Expired => "session_expired",
-                        _ => "session_not_found",
+                        SessionError::NotFound | SessionError::MaxSessionsReached => {
+                            "session_not_found"
+                        }
                     };
                     tx.send(ServerMessage::Error {
                         id,
@@ -786,6 +790,71 @@ mod tests {
                 assert_eq!(code.as_deref(), Some("session_not_found"));
             }
             other => panic!("expected a coded error, got {other:?}"),
+        }
+    }
+
+    /// The two codes of a lost session: the call's own lookup that finds the
+    /// session past its TTL answers `session_expired`; once the expiry sweep has
+    /// removed it, the server cannot tell it from a deleted one and answers
+    /// `session_not_found`.
+    #[tokio::test]
+    async fn an_expired_session_and_a_swept_one_answer_their_codes() {
+        use crate::config::SessionConfig;
+        use crate::exec::ExecConfig;
+
+        for swept in [false, true] {
+            let sessions = Arc::new(SessionManager::new(SessionConfig {
+                ttl_minutes: 60,
+                max_sessions: 10,
+                evict_idle_minutes: None,
+            }));
+            let session_id = sessions.create_session(None).await.unwrap();
+            let governor = Arc::new(ToolGovernor::new(ExecConfig::default(), sessions.clone()));
+            let mut state =
+                WsState::new(Arc::new(AnalyticsServer::new()), sessions.clone(), governor);
+            let (tx, mut rx) = mpsc::channel(8);
+            handle_client_message(
+                &mut state,
+                ClientMessage::Auth {
+                    session_id: session_id.clone(),
+                },
+                &tx,
+            )
+            .await
+            .unwrap();
+            assert!(matches!(
+                rx.recv().await,
+                Some(ServerMessage::AuthResult { success: true, .. })
+            ));
+            let session = sessions.get_session(&session_id).await.unwrap();
+            *session.last_accessed.write().await =
+                chrono::Utc::now() - chrono::Duration::minutes(61);
+            drop(session);
+            if swept {
+                assert_eq!(sessions.cleanup_expired().await, 1);
+            }
+            handle_client_message(
+                &mut state,
+                ClientMessage::Tool {
+                    id: "t1".into(),
+                    name: "list_datasets".into(),
+                    args: serde_json::json!({}),
+                },
+                &tx,
+            )
+            .await
+            .unwrap();
+            let want = if swept {
+                "session_not_found"
+            } else {
+                "session_expired"
+            };
+            match rx.recv().await {
+                Some(ServerMessage::Error { code, .. }) => {
+                    assert_eq!(code.as_deref(), Some(want), "swept: {swept}");
+                }
+                other => panic!("expected a coded error, got {other:?}"),
+            }
         }
     }
 
