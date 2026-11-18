@@ -37,7 +37,7 @@ estimated memory of the session's datasets (`p2a_core::memory::estimate_dataset_
 sizes of polars' buffers, text bytes included, plus 16 bytes per text or binary value) is counted when the session file's datasets are reloaded and
 whenever a command stores a dataset (a dataset replaced under the same name is counted once).
 When the total exceeds the limit, one line goes to stderr, at most once per invocation:
-`Warning: estimated dataset memory 1.07 MB exceeds the limit of 1.00 MB (--max-memory 1)`.
+`Warning: estimated dataset memory 1.07 MiB exceeds the limit of 1.00 MiB (--max-memory 1)`.
 Nothing is refused. Without `--session` no dataset is kept, and a non-zero value prints
 `Warning: --max-memory has no effect without --session (no datasets are kept)`.
 
@@ -75,7 +75,7 @@ spectral-analysis --test tier3`):
 | `test_validate_cli_stl_s_window` | `ts_utils_t4` | `--s-window periodic` and `13`: first ten seasonal, trend and remainder values of `stl(s.window = ...)`; an even span is refused | absolute 1e-5 sd(y) (stlrs computes in f32), as the core STL tests |
 | `test_validate_cli_ts_spectrum_detrend_flag` | `ts_ar_yw_aic` | `--detrend false` equals `run_spectrum` in process and differs from the default | exact |
 | `test_cli_script_export_comments_flag` | none | `--comments false` drops only the per-command comment lines | exact |
-| `test_cli_max_memory_warns_once` | none | one warning per invocation, values 1.07 and 2.14 MB, none without a limit or under it | exact |
+| `test_cli_max_memory_warns_once` | none | one warning per invocation, values 1.07 and 2.14 MiB, none without a limit or under it | exact |
 | `test_cli_max_memory_without_session` | none | the no-session note | exact |
 | `test_tier3_cli_helpers` | none | the tier3 table helpers | `Tol::printed(6)` |
 

@@ -56,20 +56,21 @@ pub fn estimate_dataset_memory(dataset: &Dataset) -> usize {
         .saturating_add(views.saturating_mul(VIEW_BYTES))
 }
 
-/// Format bytes as a human-readable string.
+/// Format bytes as a human-readable string in binary units: `B`, `KiB`, `MiB` or `GiB`
+/// (powers of 1024), with two decimals above 1 KiB (`"1.50 MiB"`).
 pub fn format_bytes(bytes: usize) -> String {
-    const KB: usize = 1024;
-    const MB: usize = KB * 1024;
-    const GB: usize = MB * 1024;
+    const KIB: usize = 1024;
+    const MIB: usize = KIB * 1024;
+    const GIB: usize = MIB * 1024;
 
-    if bytes >= GB {
-        format!("{:.2} GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.2} MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.2} KB", bytes as f64 / KB as f64)
+    if bytes >= GIB {
+        format!("{:.2} GiB", bytes as f64 / GIB as f64)
+    } else if bytes >= MIB {
+        format!("{:.2} MiB", bytes as f64 / MIB as f64)
+    } else if bytes >= KIB {
+        format!("{:.2} KiB", bytes as f64 / KIB as f64)
     } else {
-        format!("{} bytes", bytes)
+        format!("{} B", bytes)
     }
 }
 
@@ -126,7 +127,7 @@ impl MemoryTracker {
         !self.limit_exceeded()
     }
 
-    /// "estimated dataset memory 1.43 MB exceeds the limit of 1.00 MB" the first time usage
+    /// "estimated dataset memory 1.43 MiB exceeds the limit of 1.00 MiB" the first time usage
     /// exceeds the limit since creation, [`reset`](Self::reset), or usage last fell back to the
     /// limit; `None` otherwise and with no limit.
     pub fn take_warning(&mut self) -> Option<String> {
@@ -603,10 +604,12 @@ mod tests {
 
     #[test]
     fn test_format_bytes() {
-        assert_eq!(format_bytes(500), "500 bytes");
-        assert_eq!(format_bytes(2048), "2.00 KB");
-        assert_eq!(format_bytes(5 * 1024 * 1024), "5.00 MB");
-        assert_eq!(format_bytes(2 * 1024 * 1024 * 1024), "2.00 GB");
+        // The values are 1024-based, so the labels are the binary units.
+        assert_eq!(format_bytes(500), "500 B");
+        assert_eq!(format_bytes(2048), "2.00 KiB");
+        assert_eq!(format_bytes(1_572_864), "1.50 MiB");
+        assert_eq!(format_bytes(5 * 1024 * 1024), "5.00 MiB");
+        assert_eq!(format_bytes(2 * 1024 * 1024 * 1024), "2.00 GiB");
     }
 
     #[test]
@@ -699,7 +702,7 @@ mod tests {
         assert!(!t.add_bytes(1_500_000));
         assert_eq!(
             t.take_warning().as_deref(),
-            Some("estimated dataset memory 1.43 MB exceeds the limit of 1.00 MB")
+            Some("estimated dataset memory 1.43 MiB exceeds the limit of 1.00 MiB")
         );
         assert_eq!(t.take_warning(), None);
         t.add_bytes(1);
@@ -709,7 +712,7 @@ mod tests {
         t.add_bytes(600_000); // 1,100,001 bytes: a new crossing
         assert_eq!(
             t.take_warning().as_deref(),
-            Some("estimated dataset memory 1.05 MB exceeds the limit of 1.00 MB")
+            Some("estimated dataset memory 1.05 MiB exceeds the limit of 1.00 MiB")
         );
         let mut u = MemoryTracker::unlimited();
         u.add_bytes(usize::MAX);

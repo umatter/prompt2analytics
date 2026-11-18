@@ -365,6 +365,16 @@ mod tests {
         let refused = with_alloc_ceiling(Some(1024), || check_alloc::<f64>(1000, "grid"));
         let refused = refused.unwrap_err();
         assert!(refused.to_string().ends_with(GENERIC_REMEDY), "{refused}");
+        // 8 KiB against a 1 KiB ceiling, in the binary units the values have.
+        let kib = with_alloc_ceiling(Some(1024), || check_alloc::<f64>(1024, "grid"));
+        let kib = kib.unwrap_err().to_string();
+        assert!(
+            kib.contains("would need 8.00 KiB, above this server's per-allocation limit of 1.00 KiB"),
+            "{kib}"
+        );
+        // 1.5 MiB of f64 against a 1 MiB ceiling.
+        let big = with_alloc_ceiling(Some(1 << 20), || check_alloc::<f64>(3 << 16, "grid"));
+        assert!(big.unwrap_err().to_string().contains("1.50 MiB"));
         assert!(only_remedy(with_remedy(refused, remedy)).contains("grid"));
         only_remedy(with_remedy(reserve_failed("grid", 10, 8), remedy));
         // An overflow keeps its text and gains the remedy.

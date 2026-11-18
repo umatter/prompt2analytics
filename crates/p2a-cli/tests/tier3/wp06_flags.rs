@@ -505,21 +505,21 @@ fn test_cli_max_memory_warns_once() {
     let csv = csv.to_str().unwrap();
     let line = |mb: &str| {
         format!(
-            "Warning: estimated dataset memory {mb} exceeds the limit of 1.00 MB (--max-memory 1)"
+            "Warning: estimated dataset memory {mb} exceeds the limit of 1.00 MiB (--max-memory 1)"
         )
     };
     assert_eq!(
         memory_warnings(&s.run(&["--max-memory", "1", "data", "load", csv, "--name", "big"])),
-        [line("1.07 MB")]
+        [line("1.07 MiB")]
     );
     // the reloaded dataset already exceeds the limit; storing a second one does not warn again
     assert_eq!(
         memory_warnings(&s.run(&["--max-memory", "1", "data", "load", csv, "--name", "big2"])),
-        [line("1.07 MB")]
+        [line("1.07 MiB")]
     );
     assert_eq!(
         memory_warnings(&s.run(&["--max-memory", "1", "data", "list"])),
-        [line("2.14 MB")]
+        [line("2.14 MiB")]
     );
     assert!(
         memory_warnings(&s.run(&["data", "list"])).is_empty(),

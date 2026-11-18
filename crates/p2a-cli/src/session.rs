@@ -941,7 +941,7 @@ mod memory_limit_tests {
         m.count_bytes("a".into(), bytes);
         assert_eq!(
             m.memory_warning().as_deref(),
-            Some("estimated dataset memory 1.07 MB exceeds the limit of 1.00 MB (--max-memory 1)")
+            Some("estimated dataset memory 1.07 MiB exceeds the limit of 1.00 MiB (--max-memory 1)")
         );
         m.count_bytes("a".into(), bytes); // replaced, not added
         assert_eq!(m.memory.borrow().tracker.current_usage(), 1_120_000);
