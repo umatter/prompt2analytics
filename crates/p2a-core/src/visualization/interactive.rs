@@ -7,7 +7,9 @@
 //!
 //! Rows with a missing x or y value (null, or NaN in a float column) are left out and counted in
 //! [`InteractivePlotResult::missing`]; infinite values cannot be drawn and are left out too, but
-//! they are not missing values. A `Date` or `Datetime` x is written as ISO text. Groups follow
+//! they are not missing values; a chart with no row left to draw is refused
+//! ([`VisualizationError::InvalidData`]), as the static charts refuse it. A `Date` or
+//! `Datetime` x is written as ISO text. Groups follow
 //! R's `factor()` order (numbers numerically, text in C-locale order), with a missing label
 //! shown as the group "NA", last (ggplot2's convention).
 
@@ -344,34 +346,47 @@ fn points(
         plotted.push((name, cells.as_slice()));
     }
     let missing = missing_summary(&plotted, n);
+    let mut y = y;
     let mut xs: Vec<Vec<Datum>> = vec![Vec::new(); names.len()];
     let mut ys: Vec<Vec<Datum>> = vec![Vec::new(); names.len()];
     let mut n_points = 0;
     let mut n_infinite = 0;
-    for i in 0..n {
+    // The cells are moved into the traces, not cloned: a date is text.
+    for (i, x_cell) in x.into_iter().enumerate() {
         if i % (1 << 16) == 0 {
             resource::checkpoint().map_err(invalid)?;
         }
-        let y_cell = y.as_ref().map(|y| &y[i]);
-        if matches!(x[i], Cell::Missing) || matches!(y_cell, Some(Cell::Missing)) {
+        let y_cell = y
+            .as_mut()
+            .map(|y| std::mem::replace(&mut y[i], Cell::Missing));
+        if matches!(x_cell, Cell::Missing) || matches!(y_cell, Some(Cell::Missing)) {
             continue;
         }
-        if matches!(x[i], Cell::Infinite) || matches!(y_cell, Some(Cell::Infinite)) {
+        if matches!(x_cell, Cell::Infinite) || matches!(y_cell, Some(Cell::Infinite)) {
             n_infinite += 1;
             continue;
         }
-        let Cell::Value(xv) = &x[i] else { continue };
+        let Cell::Value(xv) = x_cell else { continue };
         let yv = match y_cell {
             Some(Cell::Value(v)) => Some(v),
             Some(_) => continue,
             None => None,
         };
         let t = trace_of[i];
-        xs[t].push(xv.clone());
+        xs[t].push(xv);
         if let Some(v) = yv {
-            ys[t].push(v.clone());
+            ys[t].push(v);
         }
         n_points += 1;
+    }
+    if n_points == 0 {
+        let columns = match y_col {
+            Some(y_name) => format!("`{x_col}` and `{y_name}`"),
+            None => format!("`{x_col}`"),
+        };
+        return Err(VisualizationError::InvalidData(format!(
+            "no rows to plot: every row of {columns} is missing or infinite ({n} rows)"
+        )));
     }
     Ok((
         Points {
@@ -812,5 +827,28 @@ mod tests {
         assert_eq!(x, &json!(["1970-01-01", "2024-01-01", "2024-01-02"]));
         assert!(l.missing.is_empty());
         assert!(l.warnings.is_empty());
+    }
+
+    /// As the static charts, a chart with no row to draw is refused, not an empty figure.
+    #[test]
+    fn test_interactive_refuses_a_chart_without_rows() {
+        let df = df!(
+            "x" => [None::<f64>, Some(2.0), Some(3.0)],
+            "y" => [Some(1.5), None, Some(f64::INFINITY)]
+        )
+        .unwrap();
+        let cfg = InteractiveConfig::default;
+        for r in [
+            scatter_interactive(&df, "x", "y", None, cfg()),
+            line_interactive(&df, "x", "y", cfg()),
+            histogram_interactive(&df.slice(1, 2), "y", None, cfg()),
+        ] {
+            match r {
+                Err(VisualizationError::InvalidData(m)) => {
+                    assert!(m.contains("no rows to plot"), "{m}")
+                }
+                other => panic!("expected a refusal, got {:?}", other.map(|r| r.n_points)),
+            }
+        }
     }
 }
