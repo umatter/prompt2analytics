@@ -2133,4 +2133,110 @@ mod tests {
             .vector("ci90_at_df", &ci90, CI_TOL)
             .finish();
     }
+
+    /// Median of 31 interleaved timings of `old` and `new` after 3 warm-ups, each sample
+    /// `reps` calls; returns (old ns per call, new ns per call).
+    fn interleaved_medians(
+        reps: usize,
+        mut old: impl FnMut(),
+        mut new: impl FnMut(),
+    ) -> (f64, f64) {
+        for _ in 0..3 {
+            old();
+            new();
+        }
+        let (mut t_old, mut t_new) = (Vec::new(), Vec::new());
+        for _ in 0..31 {
+            let s = std::time::Instant::now();
+            for _ in 0..reps {
+                old();
+            }
+            t_old.push(s.elapsed().as_nanos() as f64 / reps as f64);
+            let s = std::time::Instant::now();
+            for _ in 0..reps {
+                new();
+            }
+            t_new.push(s.elapsed().as_nanos() as f64 / reps as f64);
+        }
+        t_old.sort_by(f64::total_cmp);
+        t_new.sort_by(f64::total_cmp);
+        (t_old[15], t_new[15])
+    }
+
+    /// The AR spectrum grid before the finiteness check, verbatim.
+    fn ar_spectrum_grid_before(
+        ar_coefs: &[f64],
+        innovation_var: f64,
+        n_pts: usize,
+    ) -> EconResult<(Vec<f64>, Vec<f64>)> {
+        let mut freq = try_with_capacity(n_pts, "the AR spectrum frequency grid")?;
+        let mut spec = try_with_capacity(n_pts, "the AR spectrum frequency grid")?;
+
+        // Each point costs O(p), and p can be as large as n / 2.
+        let stride = checkpoint_stride(ar_coefs.len());
+        for j in 0..n_pts {
+            if j % stride == 0 {
+                checkpoint()?;
+            }
+            let f = if n_pts > 1 {
+                0.5 * j as f64 / (n_pts - 1) as f64
+            } else {
+                0.0
+            };
+            freq.push(f);
+
+            // Compute |1 - Σ φ_k exp(-2πi f k)|²
+            let mut re = 1.0;
+            let mut im = 0.0;
+
+            for (k, &phi) in ar_coefs.iter().enumerate() {
+                let angle = 2.0 * PI * f * (k + 1) as f64;
+                re -= phi * angle.cos();
+                im += phi * angle.sin();
+            }
+
+            let denom = re * re + im * im;
+            let s = if denom > 1e-15 {
+                innovation_var / denom
+            } else {
+                innovation_var
+            };
+            spec.push(s);
+        }
+
+        Ok((freq, spec))
+    }
+
+    /// The AR spectrum grid with its finiteness check against the grid before it, at 100,
+    /// 1,000 and 10,000 grid points of an AR(8). Times only; run with
+    /// `taskset -c 2 cargo test --release ... -- --ignored --nocapture benchmark_wp37`.
+    #[test]
+    #[ignore = "benchmark; run with --release -- --ignored --nocapture"]
+    fn benchmark_wp37_spectrum_ar_grid() {
+        let phi = [0.41, -0.23, 0.12, 0.07, -0.05, 0.031, -0.017, 0.009];
+        println!("spectrum_ar grid, AR(8): n_pts | before ns | after ns | after/before");
+        for n_pts in [100usize, 1_000, 10_000] {
+            assert_eq!(
+                ar_spectrum_grid(&phi, 1.3, n_pts).unwrap(),
+                ar_spectrum_grid_before(&phi, 1.3, n_pts).unwrap()
+            );
+            let reps = (200_000 / n_pts).max(5);
+            let (old, new) = interleaved_medians(
+                reps,
+                || {
+                    std::hint::black_box(ar_spectrum_grid_before(
+                        std::hint::black_box(&phi),
+                        1.3,
+                        n_pts,
+                    ))
+                    .unwrap();
+                },
+                || {
+                    std::hint::black_box(ar_spectrum_grid(std::hint::black_box(&phi), 1.3, n_pts))
+                        .unwrap();
+                },
+            );
+            println!("{n_pts} | {old:.0} | {new:.0} | {:.3}", new / old);
+        }
+    }
 }
