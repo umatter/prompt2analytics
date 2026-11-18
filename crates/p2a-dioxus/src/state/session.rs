@@ -216,13 +216,7 @@ pub async fn ensure_session(mut session: Signal<SessionState>) -> Result<String,
         return Ok(id);
     }
     let gate = session.read().gate.clone();
-    let id = gate
-        .ensure(|| async {
-            let id = api().create_session().await?;
-            tracing::info!("Session created: {}", id);
-            Ok(id)
-        })
-        .await?;
+    let id = gate.ensure(restore_or_create).await?;
     if session.read().session_id.as_deref() != Some(id.as_str()) {
         session.write().set_session_id(id.clone());
         remember_session(&id);
@@ -310,44 +304,74 @@ fn forget_stored_session() {
     }
 }
 
-/// Native start: restore the stored session through the gate (a send or
-/// `+` during the restore waits for it instead of creating a second
-/// session). The server adopts a stored session within its lifetime; a
-/// refused one is forgotten and a new session is created. Without a stored
-/// id nothing happens: the first use creates the session.
-pub async fn restore_session(mut session: Signal<SessionState>) {
-    if !KEEPS_SESSION {
-        return;
+/// What follows a failed restore of the stored session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RestoreRefusal {
+    /// The server says the session is gone: forget the stored id and create
+    /// a new session.
+    CreateNew,
+    /// Any other failure (a server error, a capacity refusal, a timeout):
+    /// keep the stored id, so the next use tries it again.
+    KeepAndRetry,
+}
+
+/// What a failed restore with error `err` does next: only a session the
+/// server says is gone is replaced; a transient failure must not cut the
+/// link to the stored session's conversations.
+pub(crate) fn restore_refusal(err: &str) -> RestoreRefusal {
+    if session_lost_text(err) {
+        RestoreRefusal::CreateNew
+    } else {
+        RestoreRefusal::KeepAndRetry
     }
-    let Some(stored) = stored_session_in(&crate::platform::create_storage()) else {
-        return;
+}
+
+/// The session to use when none is known: the stored one while the server
+/// still has it (native builds), else a new one. A stored session the
+/// server could not be asked about is kept and the error returned.
+async fn restore_or_create() -> Result<String, String> {
+    let client = api();
+    let stored = if KEEPS_SESSION {
+        stored_session_in(&crate::platform::create_storage())
+    } else {
+        None
     };
-    let gate = session.read().gate.clone();
-    let restored = gate
-        .ensure(|| async move {
-            let client = api();
-            match client.get_session(&stored).await {
-                Ok(_) => {
-                    tracing::info!("Session restored: {}", stored);
-                    crate::api::set_current_session_id(Some(stored.clone()));
-                    Ok(stored)
-                }
-                Err(e) => {
+    if let Some(stored) = stored {
+        match client.get_session(&stored).await {
+            Ok(_) => {
+                tracing::info!("Session restored: {}", stored);
+                crate::api::set_current_session_id(Some(stored.clone()));
+                return Ok(stored);
+            }
+            Err(e) => match restore_refusal(&e) {
+                RestoreRefusal::CreateNew => {
                     tracing::info!("Stored session not restored ({e}); creating a new one");
                     forget_stored_session();
-                    client.create_session().await
                 }
-            }
-        })
-        .await;
-    match restored {
-        Ok(id) => {
-            remember_session(&id);
-            if session.read().session_id.as_deref() != Some(id.as_str()) {
-                session.write().set_session_id(id);
-            }
+                RestoreRefusal::KeepAndRetry => {
+                    tracing::warn!("Stored session not reached ({e}); kept for the next try");
+                    return Err(e);
+                }
+            },
         }
-        Err(e) => tracing::warn!("No session at start: {}", e),
+    }
+    let id = client.create_session().await?;
+    tracing::info!("Session created: {}", id);
+    Ok(id)
+}
+
+/// Native start: restore the stored session through the gate (a send or
+/// `+` during the restore waits for it instead of creating a second
+/// session). The server adopts a stored session within its lifetime; one
+/// it says is gone is forgotten and a new session is created; any other
+/// failure keeps the stored id and the next use tries again. Without a
+/// stored id nothing happens: the first use creates the session.
+pub async fn restore_session(session: Signal<SessionState>) {
+    if !KEEPS_SESSION || stored_session_in(&crate::platform::create_storage()).is_none() {
+        return;
+    }
+    if let Err(e) = ensure_session(session).await {
+        tracing::warn!("No session at start: {}", e);
     }
 }
 
@@ -372,6 +396,66 @@ pub fn on_session_lost(
         crate::api::set_current_session_id(None);
         forget_stored_session();
         conv.write().reset();
+    }
+}
+
+/// Show a failed conversation call in the sidebar. When it says the session
+/// ended, the session is forgotten and the conversations and their live
+/// transcripts are reset first, so the next use creates a new session.
+pub(crate) fn report_conversation_error(
+    session: Signal<SessionState>,
+    mut conv: Signal<super::ConversationState>,
+    mut chat: Signal<super::ChatState>,
+    e: String,
+) {
+    if session_lost_text(&e) {
+        let old = session.read().session_id.clone();
+        if let Some(old) = old {
+            on_session_lost(session, conv, &old);
+            // The session's conversations went with it.
+            chat.write().clear_live();
+        }
+        conv.write().set_error(Some(SESSION_ENDED_TEXT.to_string()));
+    } else {
+        conv.write().set_error(Some(e));
+    }
+}
+
+/// Create a conversation and make it current (the sidebar's "+" and
+/// Ctrl+N; the caller has checked `switch_blocked`). A conversation created
+/// while a send started meanwhile is listed, not made current. Failures go
+/// through [`report_conversation_error`].
+pub(crate) async fn start_new_conversation(
+    session: Signal<SessionState>,
+    mut conv: Signal<super::ConversationState>,
+    chat: Signal<super::ChatState>,
+) {
+    conv.write().set_operating(true);
+    let session_id = match ensure_session(session).await {
+        Ok(id) => id,
+        Err(e) => {
+            report_conversation_error(session, conv, chat, e);
+            return;
+        }
+    };
+    match api()
+        .create_conversation(&session_id, "New Conversation")
+        .await
+    {
+        Ok(conversation) => {
+            tracing::info!("Created conversation: {}", conversation.id);
+            let id = conversation.id.clone();
+            let mut c = conv.write();
+            c.add_conversation(conversation);
+            if !chat.read().is_busy() {
+                c.set_current_conversation(Some(id));
+            }
+            c.set_operating(false);
+        }
+        Err(e) => {
+            tracing::warn!("Failed to create conversation: {}", e);
+            report_conversation_error(session, conv, chat, e);
+        }
     }
 }
 
@@ -574,5 +658,94 @@ mod tests {
         // A second failure of the dead session must not drop its replacement.
         gate.forget("old");
         assert_eq!(gate.current().as_deref(), Some("new"));
+    }
+
+    #[test]
+    fn only_a_session_the_server_says_is_gone_is_replaced_at_restore() {
+        use crate::api::error_text;
+        for gone in [
+            error_text("Session expired", Some("session_expired")),
+            error_text("Session not found", Some("session_not_found")),
+            error_text("Session not found", Some("not_found")),
+        ] {
+            assert_eq!(restore_refusal(&gone), RestoreRefusal::CreateNew, "{gone}");
+        }
+        for transient in [
+            error_text("Internal server error", Some("internal")),
+            error_text("Maximum number of sessions reached", Some("capacity")),
+            "HTTP error: 503".to_string(),
+            "Request timed out".to_string(),
+        ] {
+            assert_eq!(
+                restore_refusal(&transient),
+                RestoreRefusal::KeepAndRetry,
+                "{transient}"
+            );
+        }
+    }
+
+    fn conversation(id: &str) -> crate::api::Conversation {
+        crate::api::Conversation {
+            id: id.into(),
+            session_id: "s1".into(),
+            title: "Analysis".into(),
+            created_at: "2026-11-18T10:00:00Z".into(),
+            updated_at: "2026-11-18T10:00:00Z".into(),
+            is_archived: false,
+            message_count: 1,
+            last_message_preview: None,
+        }
+    }
+
+    /// Runs `f` with the signals of a session `s1` with one conversation
+    /// `c1`, left with a live transcript.
+    fn with_session_signals(
+        f: impl FnOnce(
+            Signal<SessionState>,
+            Signal<super::super::ConversationState>,
+            Signal<super::super::ChatState>,
+        ),
+    ) {
+        let mut dom = VirtualDom::new(|| rsx! {});
+        dom.rebuild_in_place();
+        dom.in_scope(ScopeId::ROOT, || {
+            let mut state = SessionState::new();
+            state.set_session_id("s1".into());
+            let session = Signal::new(state);
+            let mut conv_state = super::super::ConversationState::new();
+            conv_state.add_conversation(conversation("c1"));
+            let conv = Signal::new(conv_state);
+            let mut chat_state = super::super::ChatState::new();
+            chat_state.add_user_message("q");
+            chat_state.stash_live("c1");
+            let chat = Signal::new(chat_state);
+            f(session, conv, chat);
+        });
+    }
+
+    #[test]
+    fn a_conversation_error_saying_the_session_ended_forgets_it() {
+        with_session_signals(|session, conv, chat| {
+            let e = crate::api::error_text("Session expired", Some("session_expired"));
+            report_conversation_error(session, conv, chat, e);
+            assert_eq!(session.read().session_id, None);
+            assert!(conv.read().conversations.is_empty());
+            assert_eq!(conv.read().error.as_deref(), Some(SESSION_ENDED_TEXT));
+            assert!(!conv.read().is_operating);
+            assert!(!chat.read().has_live("c1"), "the live transcripts went too");
+        });
+    }
+
+    #[test]
+    fn another_conversation_error_keeps_the_session() {
+        with_session_signals(|session, mut conv, chat| {
+            conv.write().set_operating(true);
+            report_conversation_error(session, conv, chat, "HTTP error: 503".into());
+            assert_eq!(session.read().session_id.as_deref(), Some("s1"));
+            assert_eq!(conv.read().conversations.len(), 1);
+            assert_eq!(conv.read().error.as_deref(), Some("HTTP error: 503"));
+            assert!(!conv.read().is_operating);
+            assert!(chat.read().has_live("c1"));
+        });
     }
 }
