@@ -628,8 +628,14 @@ pub fn ChatPanel() -> Element {
                 return;
             }
             // The prompt to ask again; an interrupted or empty answer and its
-            // prompt are taken out, so the new turn replaces them.
-            let retry = chat_state.write().take_retry_turn();
+            // prompt are taken out, so the new turn replaces them. Without a
+            // configured provider handle_send only says so (and opens the
+            // settings), so nothing is taken out then.
+            let retry = if settings.read().validation_error().is_some() {
+                Some(String::new())
+            } else {
+                chat_state.write().take_retry_turn()
+            };
             if let Some(msg) = retry {
                 chat_state.write().set_error(None);
                 handle_send(msg);
