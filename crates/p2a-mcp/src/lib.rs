@@ -43,6 +43,9 @@ pub struct EmbeddedServerConfig {
     pub cors_permissive: bool,
     /// Database path for persistence (default: None = in-memory or auto-detect)
     pub db_path: Option<String>,
+    /// Minutes a session may stay idle before it expires, with its
+    /// conversations (default: 60)
+    pub session_ttl_minutes: u64,
 }
 
 impl Default for EmbeddedServerConfig {
@@ -52,6 +55,7 @@ impl Default for EmbeddedServerConfig {
             host: "127.0.0.1".to_string(),
             cors_permissive: false,
             db_path: None,
+            session_ttl_minutes: 60,
         }
     }
 }
@@ -73,6 +77,55 @@ impl EmbeddedServerConfig {
     pub fn with_db_path(mut self, path: impl Into<String>) -> Self {
         self.db_path = Some(path.into());
         self
+    }
+
+    /// Set the session lifetime: minutes a session may stay idle before it
+    /// expires and its conversations are deleted
+    pub fn with_session_ttl_minutes(mut self, minutes: u64) -> Self {
+        self.session_ttl_minutes = minutes;
+        self
+    }
+}
+
+/// The server configuration the embedded server runs with, at `addr`.
+#[cfg(feature = "http")]
+fn embedded_server_config(
+    config: &EmbeddedServerConfig,
+    addr: std::net::SocketAddr,
+) -> ServerConfig {
+    ServerConfig {
+        transport: TransportType::Http,
+        http: HttpConfig {
+            addr,
+            cors_permissive: config.cors_permissive,
+            cors_origins: vec![],
+            // The embedded server is intended for local (loopback) desktop use
+            // with no shared token. `bind` applies the same guard as the
+            // binary, so a non-loopback host is refused.
+            access_token: None,
+            allow_unauthenticated: false,
+            expose_enumeration: false,
+            enable_ws: false,
+            session_dirs: config::SessionDirsSetting::Auto,
+            #[cfg(feature = "db")]
+            db_path: config.db_path.clone(),
+        },
+        session: SessionConfig {
+            ttl_minutes: config.session_ttl_minutes,
+            max_sessions: 100,
+            evict_idle_minutes: None,
+        },
+        #[cfg(feature = "auth")]
+        auth: config::AuthConfig {
+            enabled: false,
+            jwt_secret: None,
+        },
+        audit: config::AuditConfig {
+            enabled: false,
+            path: String::new(),
+        },
+        exec: config::ExecSettings::default(),
+        limits: config::LimitsSettings::default(),
     }
 }
 
@@ -147,41 +200,7 @@ pub async fn start_embedded_server(
         );
     }
 
-    // Build server config
-    let server_config = ServerConfig {
-        transport: TransportType::Http,
-        http: HttpConfig {
-            addr,
-            cors_permissive: config.cors_permissive,
-            cors_origins: vec![],
-            // The embedded server is intended for local (loopback) desktop use
-            // with no shared token. `bind` below applies the same guard as the
-            // binary, so a non-loopback host is refused here.
-            access_token: None,
-            allow_unauthenticated: false,
-            expose_enumeration: false,
-            enable_ws: false,
-            session_dirs: config::SessionDirsSetting::Auto,
-            #[cfg(feature = "db")]
-            db_path: config.db_path.clone(),
-        },
-        session: SessionConfig {
-            ttl_minutes: 60,
-            max_sessions: 100,
-            evict_idle_minutes: None,
-        },
-        #[cfg(feature = "auth")]
-        auth: config::AuthConfig {
-            enabled: false,
-            jwt_secret: None,
-        },
-        audit: config::AuditConfig {
-            enabled: false,
-            path: String::new(),
-        },
-        exec: config::ExecSettings::default(),
-        limits: config::LimitsSettings::default(),
-    };
+    let server_config = embedded_server_config(&config, addr);
 
     // Bind first, so the guard's refusal or a bind error returns to the caller.
     let listener = transport::http::bind(&server_config).await?;
@@ -223,4 +242,21 @@ pub fn init_embedded_logging() {
         )
         .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
         .try_init();
+}
+
+#[cfg(all(test, feature = "http"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn embedded_config_carries_the_session_lifetime() {
+        let addr = "127.0.0.1:0".parse().unwrap();
+        let default = embedded_server_config(&EmbeddedServerConfig::default(), addr);
+        assert_eq!(default.session.ttl_minutes, 60);
+        let thirty_days = EmbeddedServerConfig::default().with_session_ttl_minutes(30 * 24 * 60);
+        assert_eq!(thirty_days.session_ttl_minutes, 43_200);
+        let server = embedded_server_config(&thirty_days, addr);
+        assert_eq!(server.session.ttl_minutes, 43_200);
+        assert_eq!(server.http.addr, addr);
+    }
 }
