@@ -265,19 +265,26 @@ fn melt_value_type(df: &DataFrame, value_vars: &[&str]) -> MungeResult<DataType>
         }
     }
     let selected = df.select(distinct.iter().copied())?;
-    let dtypes = selected.dtypes();
+    let all_dtypes = selected.dtypes();
+    let dtypes = &all_dtypes;
     let refuse = |why: &str| {
         let list: Vec<String> = distinct
             .iter()
-            .zip(&dtypes)
+            .zip(&all_dtypes)
             .map(|(name, dt)| format!("'{name}' ({dt})"))
             .collect();
         MungeError::ReshapeError(format!(
-            "cannot melt {} into one value column: {why}; cast them to one type first with \
-             munge_cast",
+            "cannot melt {} into one value column: {why}; cast them to one type first",
             list.join(", ")
         ))
     };
+    // An all-missing (Null) column takes any type, as an all-NA logical column in tidyr: the checks
+    // look at the other columns. A selection of Null columns only stays Null.
+    let typed: Vec<DataType> = dtypes.iter().filter(|dt| !dt.is_null()).cloned().collect();
+    if typed.is_empty() {
+        return Ok(DataType::Null);
+    }
+    let dtypes = typed;
     // Dates and datetimes are points in time and combine. The polars supertype would also take a
     // duration with a date, and read the duration's count as a date.
     let temporal_family = |dt: &DataType| match dt {
@@ -292,8 +299,7 @@ fn melt_value_type(df: &DataFrame, value_vars: &[&str]) -> MungeResult<DataType>
             .any(|dt| temporal_family(dt) != temporal_family(&dtypes[0]))
     {
         return Err(refuse(
-            "dates, durations, times and other columns do not combine (R's tidyr::pivot_longer \
-             refuses a date with anything but a datetime too)",
+            "dates, durations, times and other columns do not combine",
         ));
     }
     let common = match selected.get_supertype() {
@@ -307,9 +313,7 @@ fn melt_value_type(df: &DataFrame, value_vars: &[&str]) -> MungeResult<DataType>
         )
     };
     if matches!(common, DataType::String) && !dtypes.iter().all(is_label) {
-        return Err(refuse(
-            "text and non-text columns do not combine (R's tidyr::pivot_longer refuses them too)",
-        ));
+        return Err(refuse("text and non-text columns do not combine"));
     }
     if matches!(common, DataType::Categorical(..) | DataType::Enum(..))
         && dtypes.iter().any(|dt| dt != &dtypes[0])
@@ -352,6 +356,18 @@ pub fn transpose(dataset: &Dataset, header_name: &str) -> MungeResult<Dataset> {
 
     if df.height() == 0 || df.width() == 0 {
         return Err(MungeError::EmptyDataset);
+    }
+
+    // The transposed columns are column_0, column_1, ...: a header of one of those names would
+    // replace that column.
+    if let Some(i) = header_name
+        .strip_prefix("column_")
+        .and_then(|d| d.parse::<usize>().ok())
+        .filter(|i| *i < df.height() && header_name == format!("column_{i}"))
+    {
+        return Err(MungeError::InvalidExpression(format!(
+            "header_name 'column_{i}' is the name of a transposed column; choose another"
+        )));
     }
 
     // Get column names (will become first column of result)
@@ -468,15 +484,13 @@ pub fn stack(
         }
     }
 
-    // Get non-stacked columns
-    let all_cols: std::collections::HashSet<_> = df
-        .get_columns()
-        .iter()
-        .map(|c| c.name().to_string())
+    // Get non-stacked columns, in the frame's order
+    let id_vars_refs: Vec<&str> = df
+        .get_column_names()
+        .into_iter()
+        .map(|s| s.as_str())
+        .filter(|s| !columns.contains(s))
         .collect();
-    let stack_cols: std::collections::HashSet<_> = columns.iter().map(|s| s.to_string()).collect();
-    let id_vars: Vec<String> = all_cols.difference(&stack_cols).cloned().collect();
-    let id_vars_refs: Vec<&str> = id_vars.iter().map(|s| s.as_str()).collect();
 
     // Use melt to stack
     melt(dataset, &id_vars_refs, columns, source_name, stacked_name)
@@ -858,7 +872,9 @@ mod tests {
         );
         let e = err_text(melt(&ds, &["id"], &["a", "s"], "var", "val"));
         assert!(
-            e.contains("'a' (i64)") && e.contains("'s' (str)") && e.contains("munge_cast"),
+            e.contains("'a' (i64)")
+                && e.contains("'s' (str)")
+                && e.contains("cast them to one type first"),
             "{e}"
         );
         // vctrs refuses a date with a number too; a polars supertype would give day counts
@@ -873,7 +889,10 @@ mod tests {
             .unwrap(),
         );
         let e = err_text(melt(&dated, &["id"], &["d", "a"], "var", "val"));
-        assert!(e.contains("'d' (date)") && e.contains("munge_cast"), "{e}");
+        assert!(
+            e.contains("'d' (date)") && e.contains("cast them to one type first"),
+            "{e}"
+        );
         // a duration's count is not a date, whatever the polars supertype says; nor a time of day
         let date = || {
             Int32Chunked::from_slice("d".into(), &[18262, 18263])
@@ -908,7 +927,10 @@ mod tests {
             ["d", "clock"],
         ] {
             let e = err_text(melt(&frame, &["id"], &pair, "var", "val"));
-            assert!(e.contains(pair[0]) && e.contains("munge_cast"), "{e}");
+            assert!(
+                e.contains(pair[0]) && e.contains("cast them to one type first"),
+                "{e}"
+            );
         }
     }
 
@@ -931,5 +953,67 @@ mod tests {
         assert!(matches!(val.dtype(), DataType::Datetime(..)), "{val:?}");
         assert_eq!(val.len(), 4);
         assert_eq!(val.null_count(), 0);
+    }
+
+    #[test]
+    fn transpose_refuses_a_header_name_it_would_overwrite() {
+        let ds = Dataset::new(df!("a" => [1.5, 2.5], "b" => [3.5, 4.5]).unwrap());
+        match transpose(&ds, "column_0") {
+            Err(MungeError::InvalidExpression(m)) => {
+                assert!(
+                    m.contains("column_0") && m.contains("choose another"),
+                    "{m}"
+                )
+            }
+            other => panic!("{:?}", other.err()),
+        }
+        let out = transpose(&ds, "name").unwrap();
+        assert_eq!(
+            out.df().get_column_names_str(),
+            ["name", "column_0", "column_1"]
+        );
+    }
+
+    #[test]
+    fn melt_takes_all_missing_columns() {
+        // tidyr::pivot_longer(data.frame(id, n = c(NA, NA), s = c("a", "b")), c(n, s)) gives a
+        // character value column: NA, "a", NA, "b"
+        let id = Column::new("id".into(), [1i64, 2]);
+        let n = Column::full_null("n".into(), 2, &DataType::Null);
+        let s = Column::new("s".into(), ["a", "b"]);
+        let ds = Dataset::new(DataFrame::new(vec![id.clone(), n.clone(), s]).unwrap());
+        let out = melt(&ds, &["id"], &["n", "s"], "variable", "value").unwrap();
+        let out = out
+            .df()
+            .sort(
+                ["id"],
+                SortMultipleOptions::default().with_maintain_order(true),
+            )
+            .unwrap();
+        let v = out.column("value").unwrap();
+        assert_eq!(v.dtype(), &DataType::String);
+        let cells: Vec<Option<&str>> = v.str().unwrap().into_iter().collect();
+        assert_eq!(cells, [None, Some("a"), None, Some("b")]);
+        // with a date, the value column is a date
+        let d = Column::new("d".into(), [19_000i32, 19_001])
+            .cast(&DataType::Date)
+            .unwrap();
+        let ds = Dataset::new(DataFrame::new(vec![id, n, d]).unwrap());
+        let out = melt(&ds, &["id"], &["n", "d"], "variable", "value").unwrap();
+        assert_eq!(out.df().column("value").unwrap().dtype(), &DataType::Date);
+    }
+
+    #[test]
+    fn stack_keeps_the_frame_column_order() {
+        let ds = Dataset::new(
+            df!("z" => [1i64, 2], "a" => ["p", "q"], "m" => [0.5, 1.5], "q1" => [1.25, 2.25], "q2" => [3.25, 4.25])
+                .unwrap(),
+        );
+        let first = stack(&ds, &["q1", "q2"], "value", "quarter").unwrap();
+        assert_eq!(&first.df().get_column_names_str()[..3], ["z", "a", "m"]);
+        for _ in 0..20 {
+            let again = stack(&ds, &["q1", "q2"], "value", "quarter").unwrap();
+            assert!(again.df().equals_missing(first.df()));
+        }
     }
 }

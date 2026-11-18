@@ -9,7 +9,6 @@ use rmcp::{
     tool, tool_router,
 };
 use std::collections::HashMap;
-use std::hash::{BuildHasher, RandomState};
 
 use crate::server::AnalyticsServer;
 use crate::tools::common::parse_choice_value;
@@ -32,30 +31,33 @@ use p2a_core::{
             JoinType,
             MungeError,
             MutateExpr,
+            OneHotOutcome,
+            // Feature engineering
+            ShiftOptions,
             aggregate::value_counts_with,
             bin_with,
-            clean::{FillStrategyKind, ReplaceOptions, fill_na_with, replace_with},
+            clean::{FillStrategyKind, ReplaceOptions, fill_na_by, fill_na_with, replace_with},
             concat,
             deduplicate,
-            diff,
+            diff_with,
             drop_columns,
             // Clean operations
             drop_na,
             estimate_join_shape,
             // Transform operations
             filter,
+            fresh_seed,
             // Aggregate operations
             group_by,
             // Join operations
             join,
-            // Feature engineering
-            lag,
-            lead,
+            lag_with,
+            lead_with,
             melt,
             mutate,
             normalize,
-            one_hot_encode,
-            pct_change,
+            one_hot_encode_with,
+            pct_change_with,
             // Reshape operations
             pivot,
             regex_count,
@@ -221,65 +223,44 @@ impl AnalyticsServer {
             let df = dataset.df();
             let result = match operation {
                 BatchOperation::Describe => {
-                    // Get summary statistics
-                    let columns: Vec<String> = if let Some(ref cols) = request.columns {
-                        cols.clone()
-                    } else {
-                        // Get all numeric columns
-                        df.get_columns()
-                            .iter()
-                            .filter(|c| c.dtype().is_primitive_numeric())
-                            .map(|c| c.name().to_string())
-                            .collect()
+                    // Summary statistics of the requested columns, or of every numeric one
+                    let columns: Vec<String> = match request.columns {
+                        Some(ref cols) => cols.clone(),
+                        None => numeric_column_names(df),
                     };
 
                     let mut stats_output = format!("Dataset: {}\n", ds_name);
                     stats_output.push_str(&format!("{:-<60}\n", ""));
 
                     for col_name in &columns {
-                        if let Ok(col) = df.column(col_name) {
-                            if let Ok(casted) = col.cast(&DataType::Float64) {
-                                if let Ok(arr) = casted.f64() {
-                                    let values: Vec<f64> = arr.into_iter().flatten().collect();
-                                    if !values.is_empty() {
-                                        let n = values.len();
-                                        let sum: f64 = values.iter().sum();
-                                        let mean = sum / n as f64;
-                                        let variance: f64 =
-                                            values.iter().map(|v| (v - mean).powi(2)).sum::<f64>()
-                                                / (n - 1).max(1) as f64;
-                                        let std_dev = variance.sqrt();
-                                        let min =
-                                            values.iter().copied().fold(f64::INFINITY, f64::min);
-                                        let max = values
-                                            .iter()
-                                            .copied()
-                                            .fold(f64::NEG_INFINITY, f64::max);
-
-                                        stats_output.push_str(&format!(
-                                            "  {}: n={}, mean={:.4}, std={:.4}, min={:.4}, max={:.4}\n",
-                                            col_name, n, mean, std_dev, min, max
-                                        ));
-
-                                        if let Some(ref mut combined) = combined_stats {
-                                            combined.push((
-                                                format!("{}:{}", ds_name, col_name),
-                                                vec![n as f64, mean, std_dev, min, max],
-                                            ));
-                                        }
-                                    }
+                        match column_summary(dataset, col_name) {
+                            Ok(st) => {
+                                stats_output.push_str(&format!(
+                                    "  {}: n={}, mean={:.4}, std={:.4}, min={:.4}, max={:.4}\n",
+                                    col_name, st.n, st.mean, st.sd, st.min, st.max
+                                ));
+                                if let Some(ref mut combined) = combined_stats {
+                                    combined.push((
+                                        format!("{}:{}", ds_name, col_name),
+                                        vec![st.n as f64, st.mean, st.sd, st.min, st.max],
+                                    ));
                                 }
+                            }
+                            Err(e) => {
+                                stats_output.push_str(&format!("  {}: {}\n", col_name, e));
                             }
                         }
                     }
                     stats_output
                 }
                 BatchOperation::Correlation => {
-                    // Get correlation matrix
-                    match correlation_matrix(dataset) {
-                        Ok(corr) => {
-                            format!("Dataset: {}\n{:?}", ds_name, corr)
-                        }
+                    // Correlations of the requested columns, or of every numeric one
+                    let columns: Vec<String> = match request.columns {
+                        Some(ref cols) => cols.clone(),
+                        None => numeric_column_names(df),
+                    };
+                    match correlation_of(dataset, &columns) {
+                        Ok(corr) => format!("Dataset: {}\n{}", ds_name, corr.to_string_table()),
                         Err(e) => format!("Dataset '{}': Error - {}", ds_name, e),
                     }
                 }
@@ -360,7 +341,7 @@ impl AnalyticsServer {
 
     /// Compare the same columns across multiple datasets.
     #[tool(
-        description = "Compare statistics for specific columns across multiple datasets. Useful for comparing distributions, means, and correlations between different datasets (e.g., treatment vs control, before vs after)."
+        description = "Compare statistics for specific columns across multiple datasets. Useful for comparing distributions, means, and correlations between different datasets (e.g., treatment vs control, before vs after). Missing values (null or NaN) are skipped; differences are of the first two datasets (second minus first)."
     )]
     pub async fn compare_datasets(
         &self,
@@ -392,8 +373,8 @@ impl AnalyticsServer {
         output.push_str(&format!("Columns: {:?}\n", request.columns));
         output.push_str(&format!("Comparison type: {}\n\n", comparison_type));
 
-        // Collect statistics for each dataset and column
-        let mut all_stats: HashMap<String, HashMap<String, (usize, f64, f64, f64, f64)>> =
+        // Collect statistics for each dataset and column (an error names why a column has none)
+        let mut all_stats: HashMap<String, HashMap<String, Result<ColumnSummary, String>>> =
             HashMap::new();
 
         for ds_name in &request.datasets {
@@ -405,33 +386,17 @@ impl AnalyticsServer {
                 }
             };
 
-            let df = dataset.df();
-            let mut ds_stats: HashMap<String, (usize, f64, f64, f64, f64)> = HashMap::new();
-
-            for col_name in &request.columns {
-                if let Ok(col) = df.column(col_name) {
-                    if let Ok(casted) = col.cast(&DataType::Float64) {
-                        if let Ok(arr) = casted.f64() {
-                            let values: Vec<f64> = arr.into_iter().flatten().collect();
-                            if !values.is_empty() {
-                                let n = values.len();
-                                let sum: f64 = values.iter().sum();
-                                let mean = sum / n as f64;
-                                let variance: f64 =
-                                    values.iter().map(|v| (v - mean).powi(2)).sum::<f64>()
-                                        / (n - 1).max(1) as f64;
-                                let std_dev = variance.sqrt();
-                                let min = values.iter().copied().fold(f64::INFINITY, f64::min);
-                                let max = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-                                ds_stats.insert(col_name.clone(), (n, mean, std_dev, min, max));
-                            }
-                        }
-                    }
-                }
-            }
-
+            let ds_stats = request
+                .columns
+                .iter()
+                .map(|c| (c.clone(), column_summary(dataset, c)))
+                .collect();
             all_stats.insert(ds_name.clone(), ds_stats);
         }
+
+        let summary_of = |ds: &str, col: &str| -> Option<&ColumnSummary> {
+            all_stats.get(ds)?.get(col)?.as_ref().ok()
+        };
 
         match comparison {
             Comparison::Summary => {
@@ -445,18 +410,15 @@ impl AnalyticsServer {
                     output.push_str(&format!("{}\n", "-".repeat(80)));
 
                     for ds_name in &request.datasets {
-                        if let Some(ds_stats) = all_stats.get(ds_name) {
-                            if let Some((n, mean, std, min, max)) = ds_stats.get(col_name) {
-                                output.push_str(&format!(
-                                    "{:<20} {:>10} {:>12.4} {:>12.4} {:>12.4} {:>12.4}\n",
-                                    ds_name, n, mean, std, min, max
-                                ));
-                            } else {
-                                output.push_str(&format!(
-                                    "{:<20} Column not found or not numeric\n",
-                                    ds_name
-                                ));
+                        match all_stats.get(ds_name).and_then(|s| s.get(col_name)) {
+                            Some(Ok(st)) => output.push_str(&format!(
+                                "{:<20} {:>10} {:>12.4} {:>12.4} {:>12.4} {:>12.4}\n",
+                                ds_name, st.n, st.mean, st.sd, st.min, st.max
+                            )),
+                            Some(Err(e)) => {
+                                output.push_str(&format!("{:<20} {}\n", ds_name, e));
                             }
+                            None => {}
                         }
                     }
 
@@ -464,13 +426,12 @@ impl AnalyticsServer {
                     if request.datasets.len() >= 2 {
                         let ds1 = &request.datasets[0];
                         let ds2 = &request.datasets[1];
-                        if let (Some(stats1), Some(stats2)) = (
-                            all_stats.get(ds1).and_then(|s| s.get(col_name)),
-                            all_stats.get(ds2).and_then(|s| s.get(col_name)),
-                        ) {
-                            let mean_diff = stats2.1 - stats1.1;
-                            let pct_diff = if stats1.1.abs() > 1e-10 {
-                                (mean_diff / stats1.1) * 100.0
+                        if let (Some(stats1), Some(stats2)) =
+                            (summary_of(ds1, col_name), summary_of(ds2, col_name))
+                        {
+                            let mean_diff = stats2.mean - stats1.mean;
+                            let pct_diff = if stats1.mean.abs() > 1e-10 {
+                                (mean_diff / stats1.mean) * 100.0
                             } else {
                                 f64::NAN
                             };
@@ -492,19 +453,21 @@ impl AnalyticsServer {
                     ));
 
                     for ds_name in &request.datasets {
-                        if let Some(ds_stats) = all_stats.get(ds_name) {
-                            if let Some((n, mean, std, min, max)) = ds_stats.get(col_name) {
-                                let range = max - min;
-                                let cv = if mean.abs() > 1e-10 {
-                                    std / mean.abs()
+                        match all_stats.get(ds_name).and_then(|s| s.get(col_name)) {
+                            Some(Ok(st)) => {
+                                let range = st.max - st.min;
+                                let cv = if st.mean.abs() > 1e-10 {
+                                    st.sd / st.mean.abs()
                                 } else {
                                     f64::NAN
                                 };
                                 output.push_str(&format!(
                                     "{}: n={}, range={:.4}, CV={:.4}\n",
-                                    ds_name, n, range, cv
+                                    ds_name, st.n, range, cv
                                 ));
                             }
+                            Some(Err(e)) => output.push_str(&format!("{}: {}\n", ds_name, e)),
+                            None => {}
                         }
                     }
                 }
@@ -514,17 +477,35 @@ impl AnalyticsServer {
                 if request.columns.len() < 2 {
                     output.push_str("Correlation comparison requires at least 2 columns\n");
                 } else {
+                    let mut matrices = Vec::with_capacity(request.datasets.len());
                     for ds_name in &request.datasets {
-                        if let Some(dataset) = datasets.get(ds_name) {
-                            match correlation_matrix(dataset) {
-                                Ok(corr) => {
-                                    output.push_str(&format!("\n{}\n{:?}\n", ds_name, corr));
-                                }
-                                Err(e) => {
-                                    output.push_str(&format!("\n{}: Error - {}\n", ds_name, e));
-                                }
+                        let Some(dataset) = datasets.get(ds_name) else {
+                            matrices.push(None);
+                            continue;
+                        };
+                        match correlation_of(dataset, &request.columns) {
+                            Ok(corr) => {
+                                output.push_str(&format!(
+                                    "\n{}\n{}",
+                                    ds_name,
+                                    corr.to_string_table()
+                                ));
+                                matrices.push(Some(corr));
+                            }
+                            Err(e) => {
+                                output.push_str(&format!("\n{}: Error - {}\n", ds_name, e));
+                                matrices.push(None);
                             }
                         }
+                    }
+                    // The difference of the first two datasets, cell by cell
+                    if let [Some(c1), Some(c2), ..] = matrices.as_slice() {
+                        output.push_str(&format!(
+                            "\nDifference ({} - {})\n{}",
+                            request.datasets[1],
+                            request.datasets[0],
+                            correlation_difference(c1, c2)
+                        ));
                     }
                 }
             }
@@ -563,11 +544,15 @@ impl AnalyticsServer {
 
         drop(datasets);
         let mut datasets = self.datasets.write().await;
+        let replaced = saved_note(&datasets, &result_name, Some(request.dataset.as_str()));
         datasets.insert(result_name.clone(), result);
 
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "Filtered dataset saved as '{}' ({} rows, {} columns)",
-            result_name, n_rows, n_cols
+        Ok(CallToolResult::success(vec![Content::text(with_note(
+            format!(
+                "Filtered dataset saved as '{}' ({} rows, {} columns)",
+                result_name, n_rows, n_cols
+            ),
+            &replaced,
         ))]))
     }
 
@@ -608,11 +593,15 @@ impl AnalyticsServer {
 
         drop(datasets);
         let mut datasets = self.datasets.write().await;
+        let replaced = saved_note(&datasets, &result_name, Some(request.dataset.as_str()));
         datasets.insert(result_name.clone(), result);
 
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "Selected {} columns, saved as '{}' ({} rows)",
-            n_cols, result_name, n_rows
+        Ok(CallToolResult::success(vec![Content::text(with_note(
+            format!(
+                "Selected {} columns, saved as '{}' ({} rows)",
+                n_cols, result_name, n_rows
+            ),
+            &replaced,
         ))]))
     }
 
@@ -653,14 +642,18 @@ impl AnalyticsServer {
 
         drop(datasets);
         let mut datasets = self.datasets.write().await;
+        let replaced = saved_note(&datasets, &result_name, Some(request.dataset.as_str()));
         datasets.insert(result_name.clone(), result);
 
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "Dropped {} columns, saved as '{}' ({} rows, {} columns remaining)",
-            request.columns.len(),
-            result_name,
-            n_rows,
-            n_cols
+        Ok(CallToolResult::success(vec![Content::text(with_note(
+            format!(
+                "Dropped {} columns, saved as '{}' ({} rows, {} columns remaining)",
+                request.columns.len(),
+                result_name,
+                n_rows,
+                n_cols
+            ),
+            &replaced,
         ))]))
     }
 
@@ -710,12 +703,16 @@ impl AnalyticsServer {
 
         drop(datasets);
         let mut datasets = self.datasets.write().await;
+        let replaced = saved_note(&datasets, &result_name, Some(request.dataset.as_str()));
         datasets.insert(result_name.clone(), result);
 
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "Renamed {} columns, saved as '{}'",
-            renames.len(),
-            result_name
+        Ok(CallToolResult::success(vec![Content::text(with_note(
+            format!(
+                "Renamed {} columns, saved as '{}'",
+                renames.len(),
+                result_name
+            ),
+            &replaced,
         ))]))
     }
 
@@ -758,24 +755,28 @@ impl AnalyticsServer {
 
         drop(datasets);
         let mut datasets = self.datasets.write().await;
+        let replaced = saved_note(&datasets, &result_name, Some(request.dataset.as_str()));
         datasets.insert(result_name.clone(), result);
 
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "Sorted by {:?} ({}), saved as '{}' ({} rows)",
-            request.by,
-            if descending {
-                "descending"
-            } else {
-                "ascending"
-            },
-            result_name,
-            n_rows
+        Ok(CallToolResult::success(vec![Content::text(with_note(
+            format!(
+                "Sorted by {:?} ({}), saved as '{}' ({} rows)",
+                request.by,
+                if descending {
+                    "descending"
+                } else {
+                    "ascending"
+                },
+                result_name,
+                n_rows
+            ),
+            &replaced,
         ))]))
     }
 
     /// Join two datasets on key columns.
     #[tool(
-        description = "Join two datasets on key columns. Supports 'left', 'right', 'inner', and 'full' join types."
+        description = "Join two datasets on key columns. Supports 'left', 'right', 'inner', and 'full' join types. A full join has one column per key; missing keys match each other, as in dplyr and base::merge."
     )]
     pub async fn munge_join(
         &self,
@@ -899,17 +900,21 @@ impl AnalyticsServer {
         let n_cols = result.ncols();
 
         let mut datasets = self.datasets.write().await;
+        let replaced = saved_note(&datasets, &result_name, None);
         datasets.insert(result_name.clone(), result);
 
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "{} join completed, saved as '{}' ({} rows, {} columns)",
-            join_type_name, result_name, n_rows, n_cols
+        Ok(CallToolResult::success(vec![Content::text(with_note(
+            format!(
+                "{} join completed, saved as '{}' ({} rows, {} columns)",
+                join_type_name, result_name, n_rows, n_cols
+            ),
+            &replaced,
         ))]))
     }
 
     /// Concatenate multiple datasets vertically.
     #[tool(
-        description = "Concatenate (row-bind) multiple datasets vertically. All datasets must have the same columns."
+        description = "Concatenate (row-bind) multiple datasets vertically, as dplyr::bind_rows: the result has every column of any dataset, missing in the rows of a dataset that lacks it; integer and float columns of one name combine as float; text and numbers do not."
     )]
     pub async fn munge_concat(
         &self,
@@ -974,20 +979,24 @@ impl AnalyticsServer {
         let n_cols = result.ncols();
 
         let mut datasets = self.datasets.write().await;
+        let replaced = saved_note(&datasets, &result_name, None);
         datasets.insert(result_name.clone(), result);
 
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "Concatenated {} datasets, saved as '{}' ({} rows, {} columns)",
-            request.datasets.len(),
-            result_name,
-            n_rows,
-            n_cols
+        Ok(CallToolResult::success(vec![Content::text(with_note(
+            format!(
+                "Concatenated {} datasets, saved as '{}' ({} rows, {} columns)",
+                request.datasets.len(),
+                result_name,
+                n_rows,
+                n_cols
+            ),
+            &replaced,
         ))]))
     }
 
     /// Group by columns and compute aggregations.
     #[tool(
-        description = "Group a dataset by columns and compute aggregations. Supported functions: 'count', 'sum', 'mean', 'median', 'min', 'max', 'std', 'var', 'first', 'last'."
+        description = "Group a dataset by columns and compute aggregations: one row per group, sorted by the group columns, missing values last (as dplyr::summarise). Supported functions: 'count', 'sum', 'mean', 'median', 'min', 'max', 'std', 'var', 'first', 'last'."
     )]
     pub async fn munge_group_by(
         &self,
@@ -1081,15 +1090,19 @@ impl AnalyticsServer {
         let n_cols = result.ncols();
 
         let mut datasets = self.datasets.write().await;
+        let replaced = saved_note(&datasets, &result_name, Some(request.dataset.as_str()));
         datasets.insert(result_name.clone(), result);
 
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "Grouped by {:?} with {} aggregations, saved as '{}' ({} groups, {} columns)",
-            request.by,
-            agg_specs.len(),
-            result_name,
-            n_rows,
-            n_cols
+        Ok(CallToolResult::success(vec![Content::text(with_note(
+            format!(
+                "Grouped by {:?} with {} aggregations, saved as '{}' ({} groups, {} columns)",
+                request.by,
+                agg_specs.len(),
+                result_name,
+                n_rows,
+                n_cols
+            ),
+            &replaced,
         ))]))
     }
 
@@ -1110,12 +1123,6 @@ impl AnalyticsServer {
         };
         let normalize = request.normalize.unwrap_or(false);
         let measure = if normalize { "proportion" } else { "count" };
-        if request.column == measure {
-            return Ok(CallToolResult::error(vec![Content::text(format!(
-                "Value counts failed: the result names its column '{measure}', which is the name \
-                 of the counted column; rename it first (munge_rename)"
-            ))]));
-        }
 
         let result = match value_counts_with(&dataset, &request.column, normalize) {
             Ok(ds) => ds,
@@ -1161,20 +1168,12 @@ impl AnalyticsServer {
                     continue;
                 };
                 let label = cell_label(&value, quoted);
-                if normalize {
-                    let p = tally.extract::<f64>().unwrap_or(f64::NAN);
-                    output.push_str(&format!(
-                        "  {label}: {} ({:.1}%)\n",
-                        format_significant(p),
-                        100.0 * p
-                    ));
-                } else {
-                    output.push_str(&format!("  {label}: {}\n", tally.str_value()));
-                }
+                output.push_str(&tally_line(&label, &tally, normalize));
             }
         }
 
         let mut datasets = self.datasets.write().await;
+        let replaced = saved_note(&datasets, &result_name, Some(request.dataset.as_str()));
         datasets.insert(result_name.clone(), result);
 
         output.push_str(&format!(
@@ -1182,7 +1181,9 @@ impl AnalyticsServer {
             result_name, request.column
         ));
 
-        Ok(CallToolResult::success(vec![Content::text(output)]))
+        Ok(CallToolResult::success(vec![Content::text(with_note(
+            output, &replaced,
+        ))]))
     }
 
     /// Pivot a dataset from long to wide format.
@@ -1228,11 +1229,15 @@ impl AnalyticsServer {
 
         drop(datasets);
         let mut datasets = self.datasets.write().await;
+        let replaced = saved_note(&datasets, &result_name, Some(request.dataset.as_str()));
         datasets.insert(result_name.clone(), result);
 
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "Pivoted to wide format, saved as '{}' ({} rows, {} columns)",
-            result_name, n_rows, n_cols
+        Ok(CallToolResult::success(vec![Content::text(with_note(
+            format!(
+                "Pivoted to wide format, saved as '{}' ({} rows, {} columns)",
+                result_name, n_rows, n_cols
+            ),
+            &replaced,
         ))]))
     }
 
@@ -1308,11 +1313,15 @@ impl AnalyticsServer {
         let n_cols = result.ncols();
 
         let mut datasets = self.datasets.write().await;
+        let replaced = saved_note(&datasets, &result_name, Some(request.dataset.as_str()));
         datasets.insert(result_name.clone(), result);
 
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "Melted to long format, saved as '{}' ({} rows, {} columns)",
-            result_name, n_rows, n_cols
+        Ok(CallToolResult::success(vec![Content::text(with_note(
+            format!(
+                "Melted to long format, saved as '{}' ({} rows, {} columns)",
+                result_name, n_rows, n_cols
+            ),
+            &replaced,
         ))]))
     }
 
@@ -1364,17 +1373,21 @@ impl AnalyticsServer {
 
         drop(datasets);
         let mut datasets = self.datasets.write().await;
+        let replaced = saved_note(&datasets, &result_name, Some(request.dataset.as_str()));
         datasets.insert(result_name.clone(), result);
 
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "Dropped {} rows with null values, saved as '{}' ({} rows remaining)",
-            dropped, result_name, n_rows
+        Ok(CallToolResult::success(vec![Content::text(with_note(
+            format!(
+                "Dropped {} rows with null values, saved as '{}' ({} rows remaining)",
+                dropped, result_name, n_rows
+            ),
+            &replaced,
         ))]))
     }
 
     /// Fill missing values using a strategy.
     #[tool(
-        description = "Fill missing values (null, and NaN in float columns). strategy: 'mean' or 'median' of the observed values (numeric columns; integer columns become float), 'mode' (the most frequent observed value; ties go to the first value in sorted order, as R's names(which.max(table(x)))), 'forward'/'backward' (the last or next observed value, as tidyr::fill), 'zero' (0, FALSE or an empty string), or 'constant' with the fill value in 'value' (kept as given and read in the column's type). Keywords are case-insensitive. Without 'columns' every column is filled, and a column whose type cannot take the strategy or the constant is skipped and listed. A column without observed values is an error for mean, median and mode."
+        description = "Fill missing values (null, and NaN in float columns). strategy: 'mean' or 'median' of the observed values (numeric columns; integer columns become float), 'mode' (the most frequent observed value; ties go to the first value in sorted order, as R's names(which.max(table(x)))), 'forward'/'backward' (the last or next observed value, as tidyr::fill), 'zero' (0, FALSE or an empty string), or 'constant' with the fill value in 'value' (kept as given and read in the column's type). Keywords are case-insensitive. Without 'columns' every column is filled, and a column whose type cannot take the strategy or the constant is skipped and listed. A column without observed values is an error for mean, median and mode. With 'group_by', a forward or backward fill stays within each group, in row order (tidyr::fill on a grouped frame); the other strategies do not take 'group_by'."
     )]
     pub async fn munge_fill_na(
         &self,
@@ -1405,6 +1418,14 @@ impl AnalyticsServer {
             Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
         };
 
+        let group_by: Vec<&str> = request
+            .group_by
+            .iter()
+            .flatten()
+            .map(String::as_str)
+            .collect();
+        let grouped = !group_by.is_empty();
+
         let result_name = request
             .result_name
             .clone()
@@ -1413,7 +1434,7 @@ impl AnalyticsServer {
         // A constant written into every null of a String column, or a mean
         // that widens a column to Float64, can make the result far larger.
         let bounded = if bound::active() {
-            match bound::fill_na(dataset.df(), columns.as_deref(), &strategy) {
+            match bound::fill_na(dataset.df(), columns.as_deref(), &strategy, grouped) {
                 Ok(bounded) => bounded,
                 Err(e) => {
                     return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -1455,18 +1476,27 @@ impl AnalyticsServer {
                         ),
                     }
                 },
-                &[
-                    "fill fewer columns",
-                    "use a shorter constant",
-                    "filter the rows first",
-                ],
+                if matches!(strategy, FillStrategy::Constant(_)) {
+                    &[
+                        "fill fewer columns",
+                        "use a shorter constant",
+                        "filter the rows first",
+                    ]
+                } else {
+                    &["fill fewer columns", "filter the rows first"]
+                },
             )
             .await?;
         }
 
         // With no columns named, a column the strategy or the constant does not fit is left as it
         // is; the summary names it, so the caller learns which columns were not filled.
-        let outcome = match fill_na_with(&dataset, columns.as_deref(), &strategy) {
+        let filled = if grouped {
+            fill_na_by(&dataset, columns.as_deref(), &strategy, &group_by)
+        } else {
+            fill_na_with(&dataset, columns.as_deref(), &strategy)
+        };
+        let outcome = match filled {
             Ok(outcome) => outcome,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -1478,16 +1508,18 @@ impl AnalyticsServer {
         let summary = outcome.summary();
 
         let mut datasets = self.datasets.write().await;
+        let replaced = saved_note(&datasets, &result_name, Some(request.dataset.as_str()));
         datasets.insert(result_name.clone(), outcome.dataset);
 
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "{summary}\nSaved as '{result_name}'."
+        Ok(CallToolResult::success(vec![Content::text(with_note(
+            format!("{summary}\nSaved as '{result_name}'."),
+            &replaced,
         ))]))
     }
 
     /// Remove duplicate rows.
     #[tool(
-        description = "Remove duplicate rows from a dataset. Specify which duplicate to keep: 'first', 'last', or 'none'."
+        description = "Remove duplicate rows from a dataset; the rows kept keep their order (as dplyr::distinct). Specify which duplicate to keep: 'first', 'last', or 'none'."
     )]
     pub async fn munge_deduplicate(
         &self,
@@ -1530,11 +1562,15 @@ impl AnalyticsServer {
 
         drop(datasets);
         let mut datasets = self.datasets.write().await;
+        let replaced = saved_note(&datasets, &result_name, Some(request.dataset.as_str()));
         datasets.insert(result_name.clone(), result);
 
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "Removed {} duplicate rows, saved as '{}' ({} rows remaining)",
-            removed, result_name, n_rows
+        Ok(CallToolResult::success(vec![Content::text(with_note(
+            format!(
+                "Removed {} duplicate rows, saved as '{}' ({} rows remaining)",
+                removed, result_name, n_rows
+            ),
+            &replaced,
         ))]))
     }
 
@@ -1579,6 +1615,7 @@ impl AnalyticsServer {
 
         drop(datasets);
         let mut datasets = self.datasets.write().await;
+        let replaced = saved_note(&datasets, &result_name, Some(request.dataset.as_str()));
         datasets.insert(result_name.clone(), result);
 
         let cols_desc = request
@@ -1587,9 +1624,12 @@ impl AnalyticsServer {
             .map(|c| c.join(", "))
             .unwrap_or_else(|| "all string columns".to_string());
 
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "Trimmed whitespace from {}, saved as '{}'",
-            cols_desc, result_name
+        Ok(CallToolResult::success(vec![Content::text(with_note(
+            format!(
+                "Trimmed whitespace from {}, saved as '{}'",
+                cols_desc, result_name
+            ),
+            &replaced,
         ))]))
     }
 
@@ -1650,11 +1690,15 @@ impl AnalyticsServer {
         };
 
         let mut datasets = self.datasets.write().await;
+        let replaced = saved_note(&datasets, &result_name, Some(request.dataset.as_str()));
         datasets.insert(result_name.clone(), result);
 
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "Converted '{}' to lowercase, saved as '{}'",
-            request.column, result_name
+        Ok(CallToolResult::success(vec![Content::text(with_note(
+            format!(
+                "Converted '{}' to lowercase, saved as '{}'",
+                request.column, result_name
+            ),
+            &replaced,
         ))]))
     }
 
@@ -1715,11 +1759,15 @@ impl AnalyticsServer {
         };
 
         let mut datasets = self.datasets.write().await;
+        let replaced = saved_note(&datasets, &result_name, Some(request.dataset.as_str()));
         datasets.insert(result_name.clone(), result);
 
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "Converted '{}' to uppercase, saved as '{}'",
-            request.column, result_name
+        Ok(CallToolResult::success(vec![Content::text(with_note(
+            format!(
+                "Converted '{}' to uppercase, saved as '{}'",
+                request.column, result_name
+            ),
+            &replaced,
         ))]))
     }
 
@@ -1802,10 +1850,12 @@ impl AnalyticsServer {
         let summary = outcome.summary();
 
         let mut datasets = self.datasets.write().await;
+        let replaced = saved_note(&datasets, &result_name, Some(request.dataset.as_str()));
         datasets.insert(result_name.clone(), outcome.dataset);
 
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "{summary}\nSaved as '{result_name}'."
+        Ok(CallToolResult::success(vec![Content::text(with_note(
+            format!("{summary}\nSaved as '{result_name}'."),
+            &replaced,
         ))]))
     }
 
@@ -1866,7 +1916,7 @@ impl AnalyticsServer {
                 },
                 &[
                     "use a shorter replacement or fewer group references",
-                    "a pattern that matches less",
+                    "use a pattern that matches less",
                 ],
             )
             .await?;
@@ -1888,11 +1938,15 @@ impl AnalyticsServer {
         };
 
         let mut datasets = self.datasets.write().await;
+        let replaced = saved_note(&datasets, &result_name, Some(request.dataset.as_str()));
         datasets.insert(result_name.clone(), result);
 
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "Replaced pattern '{}' in '{}', saved as '{}'",
-            request.pattern, request.column, result_name
+        Ok(CallToolResult::success(vec![Content::text(with_note(
+            format!(
+                "Replaced pattern '{}' in '{}', saved as '{}'",
+                request.pattern, request.column, result_name
+            ),
+            &replaced,
         ))]))
     }
 
@@ -1940,11 +1994,15 @@ impl AnalyticsServer {
 
         drop(datasets);
         let mut datasets = self.datasets.write().await;
+        let replaced = saved_note(&datasets, &result_name, Some(request.dataset.as_str()));
         datasets.insert(result_name.clone(), result);
 
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "Extracted pattern '{}' from '{}' into '{}', saved as '{}'",
-            request.pattern, request.column, request.new_column, result_name
+        Ok(CallToolResult::success(vec![Content::text(with_note(
+            format!(
+                "Extracted pattern '{}' from '{}' into '{}', saved as '{}'",
+                request.pattern, request.column, request.new_column, result_name
+            ),
+            &replaced,
         ))]))
     }
 
@@ -1989,11 +2047,15 @@ impl AnalyticsServer {
 
         drop(datasets);
         let mut datasets = self.datasets.write().await;
+        let replaced = saved_note(&datasets, &result_name, Some(request.dataset.as_str()));
         datasets.insert(result_name.clone(), result);
 
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "Counted pattern '{}' matches from '{}' into '{}', saved as '{}'",
-            request.pattern, request.column, request.new_column, result_name
+        Ok(CallToolResult::success(vec![Content::text(with_note(
+            format!(
+                "Counted pattern '{}' matches from '{}' into '{}', saved as '{}'",
+                request.pattern, request.column, request.new_column, result_name
+            ),
+            &replaced,
         ))]))
     }
 
@@ -2085,11 +2147,15 @@ impl AnalyticsServer {
         };
 
         let mut datasets = self.datasets.write().await;
+        let replaced = saved_note(&datasets, &result_name, Some(request.dataset.as_str()));
         datasets.insert(result_name.clone(), result);
 
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "Split '{}' by '{}' into columns with prefix '{}', saved as '{}'",
-            request.column, request.pattern, request.prefix, result_name
+        Ok(CallToolResult::success(vec![Content::text(with_note(
+            format!(
+                "Split '{}' by '{}' into columns with prefix '{}', saved as '{}'",
+                request.column, request.pattern, request.prefix, result_name
+            ),
+            &replaced,
         ))]))
     }
 
@@ -2164,13 +2230,17 @@ impl AnalyticsServer {
         };
 
         let mut datasets = self.datasets.write().await;
+        let replaced = saved_note(&datasets, &result_name, Some(request.dataset.as_str()));
         datasets.insert(result_name.clone(), result);
 
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "Concatenated {} columns into '{}', saved as '{}'",
-            request.columns.len(),
-            request.new_column,
-            result_name
+        Ok(CallToolResult::success(vec![Content::text(with_note(
+            format!(
+                "Concatenated {} columns into '{}', saved as '{}'",
+                request.columns.len(),
+                request.new_column,
+                result_name
+            ),
+            &replaced,
         ))]))
     }
 
@@ -2210,11 +2280,15 @@ impl AnalyticsServer {
 
         drop(datasets);
         let mut datasets = self.datasets.write().await;
+        let replaced = saved_note(&datasets, &result_name, Some(request.dataset.as_str()));
         datasets.insert(result_name.clone(), result);
 
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "Created length column '{}' from '{}', saved as '{}'",
-            request.new_column, request.column, result_name
+        Ok(CallToolResult::success(vec![Content::text(with_note(
+            format!(
+                "Created length column '{}' from '{}', saved as '{}'",
+                request.new_column, request.column, result_name
+            ),
+            &replaced,
         ))]))
     }
 
@@ -2254,6 +2328,7 @@ impl AnalyticsServer {
 
         drop(datasets);
         let mut datasets = self.datasets.write().await;
+        let replaced = saved_note(&datasets, &result_name, Some(request.dataset.as_str()));
         datasets.insert(result_name.clone(), result);
 
         let length_desc = request
@@ -2261,15 +2336,18 @@ impl AnalyticsServer {
             .map(|l| format!(", length {}", l))
             .unwrap_or_else(|| " to end".to_string());
 
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "Extracted substring from '{}' (start: {}{}), saved as '{}'",
-            request.column, request.start, length_desc, result_name
+        Ok(CallToolResult::success(vec![Content::text(with_note(
+            format!(
+                "Extracted substring from '{}' (start: {}{}), saved as '{}'",
+                request.column, request.start, length_desc, result_name
+            ),
+            &replaced,
         ))]))
     }
 
     /// Create lag or lead columns for time series data.
     #[tool(
-        description = "Create lag or lead columns for time series or panel data. Lag shifts values forward (past values), lead shifts values backward (future values)."
+        description = "Create a lag or lead column for time series or panel data: a lag takes the value k periods back, a lead the value k periods ahead. Without 'direction' the sign of periods decides (positive: lag, negative: lead). With direction 'lead', the absolute value of periods is used; direction 'lag' with a negative periods is an error. The shift is by row position within the 'group_by' groups, in row order (dplyr::lag), unless 'time' names an integer time column: then the lag of period t is the value of period t - k of the same group, missing when that period is not in the data (plm::lag), and rows keep their order."
     )]
     pub async fn munge_lag_lead(
         &self,
@@ -2287,22 +2365,43 @@ impl AnalyticsServer {
             }
         };
 
-        let periods = request.periods.unsigned_abs() as usize;
+        let direction = match (request.direction.as_deref(), request.periods < 0) {
+            (None, false) => "lag",
+            (None, true) => "lead",
+            (Some("lag"), true) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "periods is negative ({}) but direction is 'lag'; give a positive periods for \
+                     a lag, or direction 'lead'",
+                    request.periods
+                ))]));
+            }
+            (Some(d @ ("lag" | "lead")), _) => d,
+            (Some(other), _) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Unknown direction: '{}'. Use 'lag' or 'lead'.",
+                    other
+                ))]));
+            }
+        };
+        let Ok(periods) = usize::try_from(request.periods.unsigned_abs()) else {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "periods {} is out of range",
+                request.periods
+            ))]));
+        };
         let group_by_cols: Option<Vec<&str>> = request
             .group_by
             .as_ref()
             .map(|v| v.iter().map(|s| s.as_str()).collect());
+        let opts = ShiftOptions {
+            group_by: group_by_cols.as_deref(),
+            time: request.time.as_deref(),
+        };
 
-        let direction = request.direction.as_deref().unwrap_or("lag");
-        let result = match direction {
-            "lag" => lag(dataset, &request.column, periods, group_by_cols.as_deref()),
-            "lead" => lead(dataset, &request.column, periods, group_by_cols.as_deref()),
-            _ => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Unknown direction: '{}'. Use 'lag' or 'lead'.",
-                    direction
-                ))]));
-            }
+        let result = if direction == "lag" {
+            lag_with(dataset, &request.column, periods, &opts)
+        } else {
+            lead_with(dataset, &request.column, periods, &opts)
         };
 
         let result = match result {
@@ -2322,11 +2421,12 @@ impl AnalyticsServer {
 
         drop(datasets);
         let mut datasets = self.datasets.write().await;
+        let replaced = saved_note(&datasets, &result_name, Some(request.dataset.as_str()));
         datasets.insert(result_name.clone(), result);
 
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "Created '{}' column, saved as '{}'",
-            new_col, result_name
+        Ok(CallToolResult::success(vec![Content::text(with_note(
+            format!("Created '{}' column, saved as '{}'", new_col, result_name),
+            &replaced,
         ))]))
     }
 
@@ -2407,13 +2507,17 @@ impl AnalyticsServer {
         };
 
         let mut datasets = self.datasets.write().await;
+        let replaced = saved_note(&datasets, &result_name, Some(request.dataset.as_str()));
         datasets.insert(result_name.clone(), result);
 
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "Applied {} to {} columns, saved as '{}'",
-            method,
-            request.columns.len(),
-            result_name
+        Ok(CallToolResult::success(vec![Content::text(with_note(
+            format!(
+                "Applied {} to {} columns, saved as '{}'",
+                method,
+                request.columns.len(),
+                result_name
+            ),
+            &replaced,
         ))]))
     }
 
@@ -2489,7 +2593,10 @@ impl AnalyticsServer {
                 Some(labels) => labels.iter().map(|l| l.len()).max().unwrap_or(0),
                 None => format!("bin_{}", n_bins.saturating_sub(1)).len(),
             };
-            if let Some(bytes) = bound::bin(dataset.df(), &request.column, longest) {
+            // No bins (one custom edge): the core reports it, not the quota.
+            if n_bins > 0
+                && let Some(bytes) = bound::bin(dataset.df(), &request.column, longest)
+            {
                 let rows = dataset.nrows();
                 let (cause, advice): (String, &[&str]) = if labels.is_some() {
                     (
@@ -2546,14 +2653,17 @@ impl AnalyticsServer {
         );
 
         let mut datasets = self.datasets.write().await;
+        let replaced = saved_note(&datasets, &result_name, Some(request.dataset.as_str()));
         datasets.insert(result_name.clone(), outcome.dataset);
 
-        Ok(CallToolResult::success(vec![Content::text(text)]))
+        Ok(CallToolResult::success(vec![Content::text(with_note(
+            text, &replaced,
+        ))]))
     }
 
     /// One-hot encode a categorical column.
     #[tool(
-        description = "One-hot encode a categorical column, creating binary indicator columns for each category. Use drop_first=true to avoid multicollinearity in regression."
+        description = "One-hot encode a categorical column, creating a 0/1 indicator column {column}_{level} for each level, in R's factor order (numbers ascending, text by bytes, FALSE before TRUE, dates in order), as model.matrix. A missing value gets no indicator of its own: its row is missing in every indicator. Use drop_first=true to drop the first level (a treatment contrast) and avoid multicollinearity in regression."
     )]
     pub async fn munge_one_hot_encode(
         &self,
@@ -2572,14 +2682,15 @@ impl AnalyticsServer {
             }
         };
 
-        // With an onehot_levels budget, count the distinct values (a null is a
-        // level, as in one_hot_encode) before encoding.
+        // With an onehot_levels budget, count the distinct values before any
+        // label is built (a null is no level; a NaN may count as one, which
+        // only over-counts).
         let limits = limits::current();
         if limits.onehot_levels.is_some()
             && let Ok(column) = dataset.df().column(&request.column)
         {
             let levels = match column.n_unique() {
-                Ok(levels) => levels,
+                Ok(levels) => levels.saturating_sub(usize::from(column.null_count() > 0)),
                 Err(e) => {
                     return Ok(CallToolResult::error(vec![Content::text(format!(
                         "One-hot encode failed: {}",
@@ -2634,8 +2745,8 @@ impl AnalyticsServer {
             }
         }
 
-        let result = match one_hot_encode(&dataset, &request.column, drop_first) {
-            Ok(ds) => ds,
+        let outcome = match one_hot_encode_with(&dataset, &request.column, drop_first) {
+            Ok(outcome) => outcome,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
                     "One-hot encode failed: {}",
@@ -2644,20 +2755,21 @@ impl AnalyticsServer {
             }
         };
 
-        let n_cols = result.ncols();
+        let n_cols = outcome.dataset.ncols();
+        let text = one_hot_reply(&request.column, &outcome, &result_name, n_cols);
 
         let mut datasets = self.datasets.write().await;
-        datasets.insert(result_name.clone(), result);
+        let replaced = saved_note(&datasets, &result_name, Some(request.dataset.as_str()));
+        datasets.insert(result_name.clone(), outcome.dataset);
 
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "One-hot encoded '{}' (drop_first={}), saved as '{}' ({} total columns)",
-            request.column, drop_first, result_name, n_cols
+        Ok(CallToolResult::success(vec![Content::text(with_note(
+            text, &replaced,
         ))]))
     }
 
     /// Compute differences or percent changes.
     #[tool(
-        description = "Compute differences or percent changes for a column. Useful for time series and panel data analysis."
+        description = "Compute differences (x - lag(x, k)) or percent changes ((x - lag(x, k)) / lag(x, k), as a fraction) of a column; integer columns give float percent changes. periods is at least 1. The lag is by row position within the 'group_by' groups, in row order, unless 'time' names an integer time column: then it is period t - k of the same group, missing when that period is not in the data (plm), and rows keep their order."
     )]
     pub async fn munge_diff(
         &self,
@@ -2677,8 +2789,21 @@ impl AnalyticsServer {
             }
         };
 
-        let periods = request.periods.unwrap_or(1) as usize;
+        let periods = match request.periods.unwrap_or(1) {
+            p if p >= 1 => p as usize,
+            p => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "periods must be at least 1, got {p}"
+                ))]));
+            }
+        };
         let diff_type = request.diff_type.as_deref().unwrap_or("diff");
+        if !matches!(diff_type, "diff" | "pct_change") {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "Unknown diff type: '{}'. Use 'diff' or 'pct_change'.",
+                diff_type
+            ))]));
+        }
         let result_name = request
             .result_name
             .clone()
@@ -2687,7 +2812,6 @@ impl AnalyticsServer {
 
         // The new column can be wider than the one it is computed from.
         if bound::active()
-            && matches!(diff_type, "diff" | "pct_change")
             && let Some(bytes) = bound::diff(dataset.df(), &request.column, &new_col)
         {
             bound::admit(
@@ -2700,15 +2824,18 @@ impl AnalyticsServer {
             .await?;
         }
 
-        let result = match diff_type {
-            "diff" => diff(&dataset, &request.column, periods),
-            "pct_change" => pct_change(&dataset, &request.column, periods),
-            _ => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Unknown diff type: '{}'. Use 'diff' or 'pct_change'.",
-                    diff_type
-                ))]));
-            }
+        let group_by_cols: Option<Vec<&str>> = request
+            .group_by
+            .as_ref()
+            .map(|v| v.iter().map(|s| s.as_str()).collect());
+        let opts = ShiftOptions {
+            group_by: group_by_cols.as_deref(),
+            time: request.time.as_deref(),
+        };
+        let result = if diff_type == "diff" {
+            diff_with(&dataset, &request.column, periods, &opts)
+        } else {
+            pct_change_with(&dataset, &request.column, periods, &opts)
         };
 
         let result = match result {
@@ -2722,11 +2849,12 @@ impl AnalyticsServer {
         };
 
         let mut datasets = self.datasets.write().await;
+        let replaced = saved_note(&datasets, &result_name, Some(request.dataset.as_str()));
         datasets.insert(result_name.clone(), result);
 
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "Created '{}' column, saved as '{}'",
-            new_col, result_name
+        Ok(CallToolResult::success(vec![Content::text(with_note(
+            format!("Created '{}' column, saved as '{}'", new_col, result_name),
+            &replaced,
         ))]))
     }
 
@@ -2753,7 +2881,8 @@ impl AnalyticsServer {
         };
 
         let replace = request.replace.unwrap_or(false);
-        let seed = request.seed;
+        // Without a seed, a fresh one: the rows drawn for the bound are the sample's.
+        let seed = request.seed.unwrap_or_else(fresh_seed);
         let result_name = request
             .result_name
             .clone()
@@ -2774,7 +2903,12 @@ impl AnalyticsServer {
                 // What a String column takes depends on the rows drawn: draw
                 // them once the rest of the result fits (its views alone take
                 // more than the row indices), then count their text.
-                let rows = request.n as u64;
+                // A dataset without rows gives no rows, whatever `n`.
+                let rows = if dataset.nrows() == 0 {
+                    0
+                } else {
+                    request.n as u64
+                };
                 let without_text = bound::sample_without_text(df, rows);
                 bound::refuse_unless_part_fits(
                     "munge_sample",
@@ -2785,8 +2919,6 @@ impl AnalyticsServer {
                     advice,
                 )
                 .await?;
-                // Without a seed, any seed: the rows drawn are the sample's.
-                let seed = seed.unwrap_or_else(|| RandomState::new().hash_one(rows));
                 let picked = match sample_rows(dataset.nrows(), request.n, true, seed) {
                     Ok(picked) => picked,
                     Err(e) => {
@@ -2807,7 +2939,11 @@ impl AnalyticsServer {
                 drawn = Some(picked);
             } else {
                 let (rows, indices) = if replace {
-                    let rows = request.n as u64;
+                    let rows = if dataset.nrows() == 0 {
+                        0
+                    } else {
+                        request.n as u64
+                    };
                     (rows, rows.saturating_mul(bound::ROW_INDEX_BYTES))
                 } else {
                     (request.n.min(dataset.nrows()) as u64, 0)
@@ -2821,7 +2957,9 @@ impl AnalyticsServer {
 
         let result = match drawn {
             Some(picked) => take_rows(&dataset, &picked),
-            None => sample(&dataset, Some(request.n), None, replace, seed),
+            // Nothing to draw from: the empty dataset, with or without replacement.
+            None if replace && dataset.nrows() == 0 => Ok(dataset.clone()),
+            None => sample(&dataset, Some(request.n), None, replace, Some(seed)),
         };
         let result = match result {
             Ok(ds) => ds,
@@ -2836,11 +2974,15 @@ impl AnalyticsServer {
         let n_rows = result.nrows();
 
         let mut datasets = self.datasets.write().await;
+        let replaced = saved_note(&datasets, &result_name, Some(request.dataset.as_str()));
         datasets.insert(result_name.clone(), result);
 
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "Sampled {} rows (replace={}), saved as '{}'",
-            n_rows, replace, result_name
+        Ok(CallToolResult::success(vec![Content::text(with_note(
+            format!(
+                "Sampled {} rows (replace={}), saved as '{}'",
+                n_rows, replace, result_name
+            ),
+            &replaced,
         ))]))
     }
 
@@ -2949,11 +3091,15 @@ impl AnalyticsServer {
         };
 
         let mut datasets = self.datasets.write().await;
+        let replaced = saved_note(&datasets, &result_name, Some(request.dataset.as_str()));
         datasets.insert(result_name.clone(), result);
 
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "Created column '{}', saved as '{}'",
-            request.new_column, result_name
+        Ok(CallToolResult::success(vec![Content::text(with_note(
+            format!(
+                "Created column '{}', saved as '{}'",
+                request.new_column, result_name
+            ),
+            &replaced,
         ))]))
     }
 
@@ -3069,6 +3215,7 @@ impl AnalyticsServer {
             .collect();
 
         let mut datasets = self.datasets.write().await;
+        let replaced = saved_note(&datasets, &result_name, Some(request.dataset.as_str()));
         datasets.insert(result_name.clone(), result);
 
         let mut text = format!(
@@ -3080,8 +3227,51 @@ impl AnalyticsServer {
             text.push_str(&format!("\nWarning: {note}"));
         }
 
-        Ok(CallToolResult::success(vec![Content::text(text)]))
+        Ok(CallToolResult::success(vec![Content::text(with_note(
+            text, &replaced,
+        ))]))
     }
+}
+
+/// The reply of `munge_one_hot_encode`: the dummy columns (the first 20 when there are more), the
+/// dropped level and, when the column has missing values, what their rows hold.
+fn one_hot_reply(
+    column: &str,
+    outcome: &OneHotOutcome,
+    result_name: &str,
+    n_cols: usize,
+) -> String {
+    const SHOWN: usize = 20;
+    let mut names: Vec<String> = outcome
+        .columns
+        .iter()
+        .take(SHOWN)
+        .map(|c| p2a_text::ellipsize(c, 60).into_owned())
+        .collect();
+    if outcome.columns.len() > SHOWN {
+        names.push(format!("... ({} in all)", outcome.columns.len()));
+    }
+    let list = if names.is_empty() {
+        "no columns".to_string()
+    } else {
+        names.join(", ")
+    };
+    let mut text = format!("One-hot encoded '{column}' into {list}");
+    if let Some(level) = &outcome.dropped {
+        text.push_str(&format!(
+            " (dropped level: {})",
+            p2a_text::ellipsize(level, 60)
+        ));
+    }
+    text.push_str(&format!(
+        ", saved as '{result_name}' ({n_cols} total columns)"
+    ));
+    if outcome.n_missing > 0 {
+        text.push_str(&format!(
+            "; rows with a missing {column} are missing in every dummy"
+        ));
+    }
+    text
 }
 
 /// The bin count of the `uniform` and `quantile` strategies: `bins[0]`, which
@@ -3100,6 +3290,129 @@ fn bin_count(bins: &[f64], strategy: &str) -> Result<usize, String> {
     }
     // `as u64` saturates above u64::MAX; the budget and the core refuse such counts.
     usize::try_from(v as u64).map_err(|_| invalid())
+}
+
+/// " (replaced the existing dataset 'name')" when `result_name` names a dataset other than the
+/// `source` the tool read, so a call that overwrites says so; "" otherwise. Read under the write
+/// lock, just before the insert.
+fn saved_note(
+    datasets: &HashMap<String, Dataset>,
+    result_name: &str,
+    source: Option<&str>,
+) -> String {
+    if source != Some(result_name) && datasets.contains_key(result_name) {
+        format!(" (replaced the existing dataset '{result_name}')")
+    } else {
+        String::new()
+    }
+}
+
+/// The tool's reply with the [`saved_note`] after its first line.
+fn with_note(text: impl Into<String>, note: &str) -> String {
+    let text = text.into();
+    if note.is_empty() {
+        return text;
+    }
+    match text.find('\n') {
+        Some(i) => format!("{}{note}{}", &text[..i], &text[i..]),
+        None => format!("{text}{note}"),
+    }
+}
+
+/// Present-value summary statistics of one column.
+struct ColumnSummary {
+    n: usize,
+    mean: f64,
+    sd: f64,
+    min: f64,
+    max: f64,
+}
+
+/// The summary of the numeric column `column`, missing values (null or NaN) skipped; an error
+/// text for a column that is absent, not numeric, holds an infinite value or has no present value.
+fn column_summary(dataset: &Dataset, column: &str) -> Result<ColumnSummary, String> {
+    let (values, _) = crate::tools::common::numeric_column(
+        dataset,
+        column,
+        p2a_core::data::columns::NaPolicy::Omit,
+    )?;
+    let n = values.len();
+    if n == 0 {
+        return Err("no present values".to_string());
+    }
+    let mean = values.iter().sum::<f64>() / n as f64;
+    let variance = values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (n - 1).max(1) as f64;
+    Ok(ColumnSummary {
+        n,
+        mean,
+        sd: variance.sqrt(),
+        min: values.iter().copied().fold(f64::INFINITY, f64::min),
+        max: values.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+    })
+}
+
+/// The names of the numeric columns of `df`.
+fn numeric_column_names(df: &p2a_core::polars::prelude::DataFrame) -> Vec<String> {
+    df.get_columns()
+        .iter()
+        .filter(|c| c.dtype().is_primitive_numeric())
+        .map(|c| c.name().to_string())
+        .collect()
+}
+
+/// The correlation matrix of `columns` of `dataset` (a missing column is an error).
+fn correlation_of(
+    dataset: &Dataset,
+    columns: &[String],
+) -> Result<p2a_core::stats::CorrelationMatrix, String> {
+    let names: Vec<&str> = columns.iter().map(String::as_str).collect();
+    let sub = p2a_core::data::munging::select(dataset, &names).map_err(|e| e.to_string())?;
+    correlation_matrix(&sub).map_err(|e| e.to_string())
+}
+
+/// `second - first`, cell by cell over the columns both matrices hold, NaN printed as NA.
+fn correlation_difference(
+    first: &p2a_core::stats::CorrelationMatrix,
+    second: &p2a_core::stats::CorrelationMatrix,
+) -> String {
+    let shared: Vec<(usize, usize, &str)> = first
+        .columns
+        .iter()
+        .enumerate()
+        .filter_map(|(i, c)| {
+            let j = second.columns.iter().position(|d| d == c)?;
+            Some((i, j, c.as_str()))
+        })
+        .collect();
+    let mut out = format!("{:>12}", "");
+    for (_, _, c) in &shared {
+        out.push_str(&format!("{:>12}", p2a_text::ellipsize(c, 10)));
+    }
+    out.push('\n');
+    for (i1, j1, c) in &shared {
+        out.push_str(&format!("{:>12}", p2a_text::ellipsize(c, 10)));
+        for (i2, j2, _) in &shared {
+            let d = second.matrix[*j1][*j2] - first.matrix[*i1][*i2];
+            if d.is_nan() {
+                out.push_str(&format!("{:>12}", "NA"));
+            } else {
+                out.push_str(&format!("{:>12.4}", d));
+            }
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// One printed row of a value-count table: the count, or the proportion with its percentage; a
+/// tally that is not a number prints as its text.
+fn tally_line(label: &str, tally: &p2a_core::polars::prelude::AnyValue, normalize: bool) -> String {
+    match tally.extract::<f64>() {
+        Some(p) if normalize => {
+            format!("  {label}: {} ({:.1}%)\n", format_significant(p), 100.0 * p)
+        }
+        _ => format!("  {label}: {}\n", tally.str_value()),
+    }
 }
 
 /// A join the core refused, as an in-band tool error that says "Join failed:"
@@ -3136,10 +3449,10 @@ mod tests {
     use crate::config::SessionConfig;
     use crate::session::{DATASET_QUOTA_EXCEEDED, DatasetAdmission, Session, SessionManager};
     use crate::tools::limits::{self, Limits};
-    use p2a_core::data::munging::bin;
     use p2a_core::data::munging::{
         JoinShape, JoinType, MungeResult, cast_columns, concat, fill_na, replace,
     };
+    use p2a_core::data::munging::{bin, diff, one_hot_encode, pct_change};
     use p2a_core::polars::prelude::*;
     use rmcp::model::RawContent;
     use std::sync::Arc;
@@ -3181,6 +3494,162 @@ mod tests {
         (0..n)
             .map(|i| (i as f64 * 0.73).sin() * 5.0 + i as f64 * 0.1)
             .collect()
+    }
+
+    fn comparison_frames() -> Vec<(&'static str, DataFrame)> {
+        let n = 12;
+        let a = noise(n);
+        let b: Vec<f64> = a
+            .iter()
+            .enumerate()
+            .map(|(i, v)| v * 0.5 + (i % 3) as f64)
+            .collect();
+        let c: Vec<f64> = (0..n).map(|i| ((i * 7) % 5) as f64 + 0.25).collect();
+        let b2: Vec<f64> = a
+            .iter()
+            .enumerate()
+            .map(|(i, v)| -v + (i % 4) as f64)
+            .collect();
+        vec![
+            (
+                "d1",
+                df!("a" => a.clone(), "b" => b, "c" => c.clone()).unwrap(),
+            ),
+            ("d2", df!("a" => a, "b" => b2, "c" => c).unwrap()),
+        ]
+    }
+
+    #[test]
+    fn compare_datasets_correlates_the_requested_columns_as_tables() {
+        let server = server_with(comparison_frames());
+        let r = run(
+            Limits::off(),
+            server.compare_datasets(Parameters(CompareDatasetRequest {
+                datasets: vec!["d1".into(), "d2".into()],
+                columns: vec!["a".into(), "b".into()],
+                comparison_type: Some("correlation".into()),
+            })),
+        );
+        let t = text(&r);
+        assert!(r.is_error != Some(true), "{t}");
+        assert!(!t.contains("CorrelationMatrix {"), "{t}");
+        assert!(t.contains("Difference (d2 - d1)"), "{t}");
+        // two 2 x 2 tables and the difference: no column c anywhere in the tables
+        let table_lines: Vec<&str> = t
+            .lines()
+            .filter(|l| l.trim_start().starts_with('c'))
+            .collect();
+        assert!(table_lines.is_empty(), "{t}");
+        let header = format!("{:>12}{:>12}{:>12}", "", "a", "b");
+        assert_eq!(t.matches(&header).count(), 3, "{t}");
+    }
+
+    #[test]
+    fn batch_correlation_uses_the_requested_or_every_numeric_column() {
+        let server = server_with(comparison_frames());
+        let call = |columns: Option<Vec<String>>| {
+            let r = run(
+                Limits::off(),
+                server.batch_process(Parameters(BatchProcessRequest {
+                    datasets: vec!["d1".into()],
+                    operation: "correlation".into(),
+                    columns,
+                    combine_results: None,
+                })),
+            );
+            text(&r)
+        };
+        let t = call(Some(vec!["a".into(), "c".into()]));
+        assert!(
+            t.contains(&format!("{:>12}{:>12}{:>12}", "", "a", "c")),
+            "{t}"
+        );
+        assert!(!t.contains("CorrelationMatrix {"), "{t}");
+        let t = call(None);
+        assert!(
+            t.contains(&format!("{:>12}{:>12}{:>12}{:>12}", "", "a", "b", "c")),
+            "{t}"
+        );
+    }
+
+    #[test]
+    fn summaries_skip_nan_and_name_a_column_that_is_not_numeric() {
+        let df = df!(
+            "x" => [Some(1.0), Some(f64::NAN), None, Some(3.0)],
+            "s" => ["p", "q", "r", "s"]
+        )
+        .unwrap();
+        let server = server_with(vec![("d1", df.clone()), ("d2", df)]);
+        let r = run(
+            Limits::off(),
+            server.compare_datasets(Parameters(CompareDatasetRequest {
+                datasets: vec!["d1".into(), "d2".into()],
+                columns: vec!["x".into(), "s".into()],
+                comparison_type: None,
+            })),
+        );
+        let t = text(&r);
+        // n = 2 present values, mean 2 (finite)
+        let row = format!("{:<20} {:>10} {:>12.4}", "d1", 2, 2.0);
+        assert!(t.contains(&row), "{t}");
+        assert!(!t.contains("NaN"), "{t}");
+        let s_section = &t[t.find("Column: s").unwrap()..];
+        assert!(s_section.contains("non-numeric"), "{t}");
+        let r = run(
+            Limits::off(),
+            server.batch_process(Parameters(BatchProcessRequest {
+                datasets: vec!["d1".into()],
+                operation: "describe".into(),
+                columns: Some(vec!["x".into(), "s".into()]),
+                combine_results: None,
+            })),
+        );
+        let t = text(&r);
+        assert!(t.contains("  x: n=2, mean=2.0000"), "{t}");
+        assert!(t.contains("  s: "), "{t}");
+    }
+
+    /// TOOL-39: every `result_name` says what happens without it: the source is overwritten, or
+    /// a fixed default name is used and a dataset of that name replaced.
+    #[test]
+    fn result_names_say_what_they_overwrite() {
+        let tools = AnalyticsServer::munging_router().list_all();
+        let mut seen = 0;
+        for tool in &tools {
+            let Some(field) = tool
+                .input_schema
+                .get("properties")
+                .and_then(|p| p.get("result_name"))
+            else {
+                continue;
+            };
+            seen += 1;
+            let text = field.to_string();
+            assert!(
+                text.contains("If not provided, overwrites the source dataset")
+                    || (text.contains("Default '")
+                        && text.contains("a dataset of that name is replaced")),
+                "{}: {text}",
+                tool.name
+            );
+        }
+        assert!(seen >= 30, "{seen} result_name fields");
+        let names = |s: &str| {
+            let mut m = HashMap::new();
+            m.insert(s.to_string(), Dataset::new(df!("x" => [1.5]).unwrap()));
+            m
+        };
+        let d = names("concatenated");
+        assert_eq!(
+            saved_note(&d, "concatenated", None),
+            " (replaced the existing dataset 'concatenated')"
+        );
+        assert_eq!(saved_note(&d, "concatenated", Some("concatenated")), "");
+        assert_eq!(saved_note(&d, "fresh", None), "");
+        assert_eq!(
+            with_note("Saved as 'c'\nmore", " (x)"),
+            "Saved as 'c' (x)\nmore"
+        );
     }
 
     #[test]
@@ -3742,6 +4211,7 @@ mod tests {
             columns: Some(vec!["s".into()]),
             strategy: "constant".into(),
             value: Some(value.into()),
+            group_by: None,
             result_name: Some(result.into()),
         };
         // 1,800 nulls filled with 1,000 bytes each: about 1.8 MB.
@@ -4054,6 +4524,7 @@ mod tests {
             periods: Some(1),
             diff_type: Some(diff_type.into()),
             group_by: None,
+            time: None,
             result_name: Some(result.into()),
         };
         // In a new dataset: 320 kB of values and 320 kB more.
@@ -4220,6 +4691,7 @@ mod tests {
                 columns: None,
                 strategy: "constant".into(),
                 value: Some("none".into()),
+                group_by: None,
                 result_name: Some("f".into()),
             })),
         );
@@ -4261,6 +4733,7 @@ mod tests {
                         columns: Some(vec!["s".into()]),
                         strategy: strategy.into(),
                         value: None,
+                        group_by: None,
                         result_name: Some(strategy.into()),
                     })),
                 )
@@ -4275,6 +4748,84 @@ mod tests {
                 "{strategy}"
             );
         }
+    }
+
+    #[test]
+    fn munging_refusals_give_advice_that_applies() {
+        let s: Vec<Option<&str>> = (0..2_000)
+            .map(|i| (i % 10 == 0).then_some("kept"))
+            .collect();
+        let qs = QuotaSession::new(vec![
+            ("d", df!("s" => s, "x" => noise(2_000)).unwrap()),
+            ("e", df!("x" => Vec::<f64>::new()).unwrap()),
+        ]);
+        let fill = |strategy: &str, value: Option<&str>| FillNaRequest {
+            dataset: "d".into(),
+            columns: Some(vec!["s".into()]),
+            strategy: strategy.into(),
+            value: value.map(Into::into),
+            group_by: None,
+            result_name: Some("f".into()),
+        };
+        // a forward fill has no constant to shorten; a constant fill has
+        let forward = refused_before_building(qs.call(
+            Some(qs.held() + 1),
+            qs.server.munge_fill_na(Parameters(fill("forward", None))),
+        ));
+        assert!(!forward.contains("shorter constant"), "{forward}");
+        let constant = refused_before_building(
+            qs.call(
+                Some(qs.held() + 1),
+                qs.server
+                    .munge_fill_na(Parameters(fill("constant", Some(&"z".repeat(100))))),
+            ),
+        );
+        assert!(constant.contains("use a shorter constant"), "{constant}");
+        // the regex advice is an instruction too
+        let regex = refused_before_building(qs.call(
+            Some(qs.held() + 1),
+            qs.server.str_regex_replace(Parameters(RegexReplaceRequest {
+                dataset: "d".into(),
+                column: "s".into(),
+                pattern: "k".into(),
+                replacement: "y".repeat(1_000),
+                result_name: Some("r".into()),
+            })),
+        ));
+        assert!(regex.contains("use a pattern that matches less"), "{regex}");
+        // one custom edge is the core's error, not a quota refusal
+        let one_edge = qs
+            .call(
+                Some(qs.held() + 1),
+                qs.server.munge_bin(Parameters(BinColumnRequest {
+                    dataset: "d".into(),
+                    column: "x".into(),
+                    strategy: "custom".into(),
+                    bins: vec![0.5],
+                    labels: None,
+                    right: None,
+                    include_lowest: None,
+                    result_name: Some("b".into()),
+                })),
+            )
+            .unwrap_or_else(|e| panic!("refused: {}", e.message));
+        assert_eq!(one_edge.is_error, Some(true));
+        assert!(text(&one_edge).contains("two edges"), "{}", text(&one_edge));
+        // a bootstrap of an empty dataset draws nothing, whatever `n`
+        let empty = qs
+            .call(
+                Some(qs.held() + (64 << 10)),
+                qs.server.munge_sample(Parameters(SampleDatasetRequest {
+                    dataset: "e".into(),
+                    n: 1_000_000,
+                    replace: Some(true),
+                    seed: None,
+                    result_name: Some("es".into()),
+                })),
+            )
+            .unwrap_or_else(|e| panic!("refused: {}", e.message));
+        assert_ne!(empty.is_error, Some(true), "{}", text(&empty));
+        assert_eq!(qs.frame("es").height(), 0);
     }
 
     #[test]
@@ -4627,6 +5178,16 @@ mod tests {
     #[test]
     fn value_count_labels_quote_text_and_name_missing() {
         // DATA-65: values printed as values, not polars' Debug form
+        assert_eq!(
+            tally_line("'a'", &AnyValue::Float64(0.25), true),
+            "  'a': 0.25 (25.0%)\n"
+        );
+        assert_eq!(tally_line("'a'", &AnyValue::UInt32(3), false), "  'a': 3\n");
+        // a tally that is not a number prints as its text, not as NaN
+        assert_eq!(
+            tally_line("'a'", &AnyValue::String("n/a"), true),
+            "  'a': n/a\n"
+        );
         assert_eq!(cell_label(&AnyValue::Null, false), "NA (missing)");
         assert_eq!(cell_label(&AnyValue::String("N/A"), true), "'N/A'");
         assert_eq!(cell_label(&AnyValue::Int64(2), false), "2");
@@ -4752,7 +5313,7 @@ mod tests {
                 }
                 covers(
                     &format!("munge_fill_na {strategy:?} {columns:?}"),
-                    bound::fill_na(&df, columns, &strategy).unwrap(),
+                    bound::fill_na(&df, columns, &strategy, false).unwrap(),
                     built,
                 );
             }
@@ -4768,7 +5329,7 @@ mod tests {
         moded.with_column(m.into_column()).unwrap();
         covers(
             "munge_fill_na mode of long text",
-            bound::fill_na(&moded, Some(&["m"]), &FillStrategy::Mode).unwrap(),
+            bound::fill_na(&moded, Some(&["m"]), &FillStrategy::Mode, false).unwrap(),
             fill_na(
                 &Dataset::new(moded.clone()),
                 Some(&["m"]),
@@ -4796,7 +5357,7 @@ mod tests {
             }
             covers(
                 &format!("munge_fill_na of sparse text {strategy:?}"),
-                bound::fill_na(&sparse, columns, &strategy).unwrap(),
+                bound::fill_na(&sparse, columns, &strategy, false).unwrap(),
                 built,
             );
         }
@@ -4842,6 +5403,18 @@ mod tests {
             "munge_concat",
             Some(bound::concat(&[&df, other.df(), extra.df(), &df])),
             concat(&[&ds, &other, &extra, &ds]),
+        );
+        // A null-free String column bound with a frame that lacks it gains nulls, and so a
+        // validity bitmap.
+        let texts: Vec<String> = (0..9)
+            .map(|i| format!("a text value {i} stored out of line"))
+            .collect();
+        let s_only = Dataset::new(df!("k" => vec![1i64; 9], "s" => texts).unwrap());
+        let no_s = Dataset::new(df!("k" => vec![2i64; 9]).unwrap());
+        covers(
+            "munge_concat text gains nulls",
+            Some(bound::concat(&[s_only.df(), no_s.df()])),
+            concat(&[&s_only, &no_s]),
         );
         covers(
             "munge_melt",

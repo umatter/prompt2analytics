@@ -1,0 +1,36 @@
+{
+  "schema": 1,
+  "id": "data_munging_combine_t4",
+  "area": "data/munging",
+  "method": "Joins with NA keys and coalesced full-join keys (dplyr), bind_rows type union, distinct and summarise row order",
+  "reference": "dplyr::full_join / inner_join / anti_join / semi_join (na_matches = 'na'), base::merge(all = TRUE); dplyr::bind_rows; dplyr::distinct(.keep_all = TRUE); !duplicated(fromLast = TRUE); dplyr::summarise(group_by(g))",
+  "call": "full_join(L, R, by = 'k'); bind_rows(A, B); distinct(o, key, .keep_all = TRUE); summarise(group_by(o, g), n = n(), s = sum(v)); rows of the joins ordered by k (NA last)",
+  "dataset": "validation/datasets/generated/munging_order.csv",
+  "datasets": ["validation/datasets/generated/munging_join_na.csv", "validation/datasets/generated/munging_bind.csv", "validation/datasets/generated/munging_order.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "dplyr": "1.2.1"
+  },
+  "values": {
+    "full_k": [1, 2, 3, 4, null, null],
+    "full_a": [10.5, 20.25, null, 40.75, 30.125, 30.125],
+    "full_b": [null, 200.5, 300.25, null, 400.125, 500.75],
+    "inner_k": [2, null, null],
+    "inner_a": [20.25, 30.125, 30.125],
+    "inner_b": [200.5, 400.125, 500.75],
+    "anti_k": [1, 4],
+    "semi_k": [2, null],
+    "semi_a": [20.25, 30.125],
+    "bind_x": [1, 2, 1.5, 2.5],
+    "bind_Income": [100.5, 200.25, null, null],
+    "bind_income": [null, null, 300.5, 400.75],
+    "distinct_key": [5, 3, 1, 4, 2, 6],
+    "distinct_id": [1, 2, 4, 5, 7, 9],
+    "keep_last_key": [5, 4, 3, 2, 1, 6],
+    "keep_last_id": [3, 5, 6, 7, 8, 9],
+    "keep_none_key": [4, 2, 6],
+    "summarise_g": [1, 2, 3, null],
+    "summarise_n": [2, 3, 2, 2],
+    "summarise_s": [10, 15.5, 14, 10]
+  }
+}

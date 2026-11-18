@@ -15,8 +15,8 @@
 #  * column-wise count of non-missing values, mean, sd, min, max with na.rm = TRUE (describe);
 #  * dplyr::filter on integer and double columns with NA (a row whose condition is NA is dropped);
 #  * dplyr joins with suffix = c("", "_right") (dplyr:::add_suffixes appends the suffix until the
-#    name is unique) for chained joins whose names collide; full_join(keep = TRUE) because p2a's full
-#    join keeps both key columns (DATA-43, Tier 4). Strings are carried in the `names` of named values.
+#    name is unique) for chained joins whose names collide; full_join with its keys coalesced into one
+#    column (dplyr's default). Strings are carried in the `names` of named values.
 # Calls go through the namespace: case files share one R session, and an attached dplyr would mask
 # stats::lag for the plm formulas of the case files sourced after this one.
 
@@ -214,7 +214,7 @@ case("data_munging_join_suffix", "data/munging",
   out <- list(
     a = dplyr::left_join(AB, C, by = "k", suffix = sfx),
     b = dplyr::left_join(A, AB, by = "k", suffix = sfx),
-    c = dplyr::full_join(AB, AB, by = "k", suffix = sfx, keep = TRUE),
+    c = dplyr::full_join(AB, AB, by = "k", suffix = sfx),
     d = dplyr::right_join(AB, C, by = "k", suffix = sfx),
     e = dplyr::inner_join(AB, C, by = "k", suffix = sfx),
     f = dplyr::cross_join(AB, C, suffix = sfx),
@@ -228,7 +228,7 @@ case("data_munging_join_suffix", "data/munging",
     for (nm in names(o)) values[[paste0(s, "__", nm)]] <- vec(o[[nm]])
   }
   list(values = values,
-       reference = "dplyr::left_join / full_join(keep = TRUE) / right_join / inner_join / cross_join, suffix = c('', '_right'); dplyr:::add_suffixes",
+       reference = "dplyr::left_join / full_join / right_join / inner_join / cross_join, suffix = c('', '_right'); dplyr:::add_suffixes",
        call = "left_join(AB, C, by = 'k', suffix = c('', '_right')) and the other joins; rows ordered by the keys",
        packages = c("dplyr"))
 })

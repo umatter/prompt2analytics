@@ -198,12 +198,14 @@ impl FillOutcome {
     }
 }
 
-/// Drop rows containing null values.
+/// Drop rows containing missing values: null, or NaN in a float column (R's `is.na`, as
+/// `tidyr::drop_na`).
 ///
 /// # Arguments
 /// * `dataset` - Source dataset
-/// * `columns` - Columns to check for nulls (None = all columns)
-/// * `how` - "any" (drop if any null) or "all" (drop only if all specified columns are null)
+/// * `columns` - Columns to check for missing values (None = all columns)
+/// * `how` - "any" (drop if any is missing) or "all" (drop only if all specified columns are
+///   missing); any other value is an error, whatever the number of columns
 ///
 /// # Example
 /// ```ignore
@@ -234,25 +236,34 @@ pub fn drop_na(dataset: &Dataset, columns: Option<&[&str]>, how: &str) -> MungeR
             .collect(),
     };
 
-    // Build null mask
+    let any = match how.to_lowercase().as_str() {
+        "any" => true,
+        "all" => false,
+        _ => {
+            return Err(MungeError::InvalidExpression(format!(
+                "Invalid 'how' parameter: {}. Use 'any' or 'all'",
+                how
+            )));
+        }
+    };
+
+    // Build the missing-value mask (null, or NaN in a float column)
     let mut null_mask: Option<BooleanChunked> = None;
 
     for col_name in &cols_to_check {
         let col = df.column(col_name)?;
-        let is_null = col.is_null();
+        // A float column without NaN (the raw scan is cheap; NaN in a null slot only sends it
+        // to the exact mask) needs the null mask alone.
+        let is_missing = if col.dtype().is_float() && has_nan(col)? {
+            col.is_null() | nan_mask(col)?
+        } else {
+            col.is_null()
+        };
 
         null_mask = Some(match null_mask {
-            None => is_null,
-            Some(existing) => match how.to_lowercase().as_str() {
-                "any" => existing | is_null,
-                "all" => existing & is_null,
-                _ => {
-                    return Err(MungeError::InvalidExpression(format!(
-                        "Invalid 'how' parameter: {}. Use 'any' or 'all'",
-                        how
-                    )));
-                }
-            },
+            None => is_missing,
+            Some(existing) if any => existing | is_missing,
+            Some(existing) => existing & is_missing,
         });
     }
 
@@ -264,6 +275,45 @@ pub fn drop_na(dataset: &Dataset, columns: Option<&[&str]>, how: &str) -> MungeR
 
     let filtered = df.filter(&keep_mask)?;
     Ok(Dataset::new(filtered))
+}
+
+/// Whether a Float64 or Float32 column holds a NaN value, null slots included (a value under
+/// a null is never read as data, so a NaN there only costs the exact mask). Other types: false.
+fn has_nan(col: &Column) -> MungeResult<bool> {
+    Ok(match col.dtype() {
+        // In blocks without early exit inside one, so the scan vectorises.
+        DataType::Float64 => {
+            // na-ok: a scan of the raw values for NaN, not an extraction
+            let ca = col.f64()?;
+            ca.downcast_iter().any(|a| {
+                a.values()
+                    .chunks(64)
+                    .any(|b| b.iter().fold(false, |nan, v| nan | v.is_nan()))
+            })
+        }
+        DataType::Float32 => {
+            let ca = col.f32()?;
+            ca.downcast_iter().any(|a| {
+                a.values()
+                    .chunks(64)
+                    .any(|b| b.iter().fold(false, |nan, v| nan | v.is_nan()))
+            })
+        }
+        _ => false,
+    })
+}
+
+/// The NaN cells of a float column (false where the cell is null): NaN is the one value
+/// that is not `<= inf`. polars' comparison kernel builds this mask faster than its
+/// `is_nan`.
+fn nan_mask(col: &Column) -> MungeResult<BooleanChunked> {
+    let below_inf = match col.dtype() {
+        // na-ok: a comparison mask, not an extraction; nulls compare as not NaN
+        DataType::Float64 => col.f64()?.lt_eq(f64::INFINITY),
+        DataType::Float32 => col.f32()?.lt_eq(f32::INFINITY),
+        _ => return Ok(BooleanChunked::full(col.name().clone(), false, col.len())),
+    };
+    Ok(!below_inf.fill_null_with_values(true)?)
 }
 
 /// Fill missing values in specified columns.
@@ -319,7 +369,50 @@ pub fn fill_na_with(
     columns: Option<&[&str]>,
     strategy: &FillStrategy,
 ) -> MungeResult<FillOutcome> {
+    fill_na_grouped(dataset, columns, strategy, &[])
+}
+
+/// [`fill_na_with`] within groups: a forward or backward fill takes each missing cell's value
+/// from the last (next) observed value of its own group, in data order, as `tidyr::fill` on a
+/// grouped frame. With no columns named, the group columns themselves are not filled. An empty
+/// `group_by` is [`fill_na_with`].
+///
+/// # Errors
+///
+/// As [`fill_na_with`]; [`MungeError::ColumnNotFound`] for a group column that does not exist;
+/// [`MungeError::InvalidExpression`] for a strategy other than forward and backward with groups.
+pub fn fill_na_by(
+    dataset: &Dataset,
+    columns: Option<&[&str]>,
+    strategy: &FillStrategy,
+    group_by: &[&str],
+) -> MungeResult<FillOutcome> {
+    if !group_by.is_empty() && !matches!(strategy, FillStrategy::Forward | FillStrategy::Backward) {
+        return Err(MungeError::InvalidExpression(format!(
+            "group_by applies to forward and backward fills, not '{}'",
+            strategy.kind()
+        )));
+    }
+    for g in group_by {
+        if dataset.df().column(g).is_err() {
+            return Err(MungeError::ColumnNotFound(g.to_string()));
+        }
+    }
+    fill_na_grouped(dataset, columns, strategy, group_by)
+}
+
+fn fill_na_grouped(
+    dataset: &Dataset,
+    columns: Option<&[&str]>,
+    strategy: &FillStrategy,
+    group_by: &[&str],
+) -> MungeResult<FillOutcome> {
     let df = dataset.df();
+    // The groups as the data has them, whatever the loop below fills.
+    let groups: Vec<Column> = group_by
+        .iter()
+        .map(|g| df.column(g).cloned())
+        .collect::<PolarsResult<_>>()?;
 
     let cols_to_fill: Vec<String> = match columns {
         Some(cols) => {
@@ -333,6 +426,7 @@ pub fn fill_na_with(
         None => df
             .get_column_names()
             .iter()
+            .filter(|s| !group_by.contains(&s.as_str()))
             .map(|s| s.to_string())
             .collect(),
     };
@@ -369,11 +463,11 @@ pub fn fill_na_with(
                 }
             }
             FillStrategy::Forward => ColumnFill::Filled {
-                column: fill_forward(col)?,
+                column: fill_within(col, true, &groups)?,
                 value: None,
             },
             FillStrategy::Backward => ColumnFill::Filled {
-                column: fill_backward(col)?,
+                column: fill_within(col, false, &groups)?,
                 value: None,
             },
             FillStrategy::Zero => fill_zero(col)?,
@@ -456,12 +550,16 @@ fn fill_constant(col: &Column, text: &str) -> MungeResult<ColumnFill> {
         DataType::UInt64 => integer!(u64, u64),
         DataType::UInt128 => integer!(u128, u128),
         DataType::Float64 => {
-            let v = parsed_or_inapplicable!(parse_float(column, dtype, text));
+            let v =
+                parsed_or_inapplicable!(not_nan(column, text, parse_float(column, dtype, text)));
             // na-ok: dtype matched by the arm; fill_na mapped NaN to null
             col.f64()?.fill_null_with_values(v)?.into_column()
         }
         DataType::Float32 => {
-            let v = parsed_or_inapplicable!(parse_f32(column, dtype, text));
+            let v = parsed_or_inapplicable!(
+                not_nan(column, text, parse_f32(column, dtype, text).map(f64::from))
+                    .map(|v| v as f32)
+            );
             // na-ok: dtype matched by the arm; fill_na mapped NaN to null
             col.f32()?.fill_null_with_values(v)?.into_column()
         }
@@ -502,6 +600,18 @@ fn fill_constant(col: &Column, text: &str) -> MungeResult<ColumnFill> {
         column: filled,
         value: Some(text.to_string()),
     })
+}
+
+/// A fill value that is NaN is refused: NaN is a missing value, so it would fill nothing.
+fn not_nan(column: &str, text: &str, parsed: MungeResult<f64>) -> MungeResult<f64> {
+    match parsed {
+        Ok(v) if v.is_nan() => Err(invalid_value(
+            column,
+            text,
+            "NaN is a missing value; fill with a number".to_string(),
+        )),
+        other => other,
+    }
 }
 
 fn fill_text(ca: &StringChunked, value: &str) -> StringChunked {
@@ -555,6 +665,13 @@ fn fill_mode(df: &DataFrame, name: &str, col: &Column) -> MungeResult<ColumnFill
             found: dtype.to_string(),
         }));
     }
+    if col.null_count() == 0 {
+        // Nothing to fill: no mode is computed.
+        return Ok(ColumnFill::Filled {
+            column: col.clone(),
+            value: None,
+        });
+    }
     let stopped = |e: crate::errors::EconError| MungeError::FeatureError(e.to_string());
     let Some(label) = crate::data::columns::factor_mode(df, name).map_err(stopped)? else {
         return Err(invalid_value(
@@ -564,6 +681,11 @@ fn fill_mode(df: &DataFrame, name: &str, col: &Column) -> MungeResult<ColumnFill
              drop the column or fill it with a constant"
                 .to_string(),
         ));
+    };
+    // A Float32 value is labelled as the f32 it is (0.1, not 0.10000000149011612).
+    let label = match (dtype, label.parse::<f64>()) {
+        (DataType::Float32, Ok(v)) => (v as f32).to_string(),
+        _ => label,
     };
     // The label parses back exactly: decimal integers, shortest round-trip floats, TRUE/FALSE, ISO
     // dates, text and category labels.
@@ -629,17 +751,40 @@ fn fill_with_statistic(
     Ok((filled.with_name(col.name().clone()).into_column(), value))
 }
 
-fn fill_forward(col: &Column) -> MungeResult<Column> {
-    let filled = col.fill_null(FillNullStrategy::Forward(None))?;
-    Ok(filled)
-}
-
-fn fill_backward(col: &Column) -> MungeResult<Column> {
-    let filled = col.fill_null(FillNullStrategy::Backward(None))?;
-    Ok(filled)
+/// `col` (NaN already null) with each null set to the last observed value before it (`forward`)
+/// or the first after it, within the groups `groups` form (columns of `col`'s length), in data
+/// order: `tidyr::fill`. No groups is one group.
+pub(crate) fn fill_within(col: &Column, forward: bool, groups: &[Column]) -> MungeResult<Column> {
+    let strategy = if forward {
+        FillNullStrategy::Forward(None)
+    } else {
+        FillNullStrategy::Backward(None)
+    };
+    if groups.is_empty() || col.null_count() == 0 {
+        return Ok(col.fill_null(strategy)?);
+    }
+    const VALUES: &str = "__p2a_fill_values";
+    let mut frame: Vec<Column> = Vec::with_capacity(groups.len() + 1);
+    let mut keys: Vec<Expr> = Vec::with_capacity(groups.len());
+    for (i, g) in groups.iter().enumerate() {
+        let name = format!("__p2a_fill_group{i}");
+        keys.push(polars::prelude::col(name.as_str()));
+        frame.push(g.clone().with_name(name.into()));
+    }
+    frame.push(col.clone().with_name(VALUES.into()));
+    let filled = DataFrame::new(frame)?
+        .lazy()
+        .select([polars::prelude::col(VALUES)
+            .fill_null_with_strategy(strategy)
+            .over(keys)])
+        .collect()?;
+    Ok(filled.column(VALUES)?.clone().with_name(col.name().clone()))
 }
 
 /// Remove duplicate rows.
+///
+/// The rows kept keep their order in the data, as `dplyr::distinct` (keep first) and
+/// `x[!duplicated(x, fromLast = TRUE), ]` (keep last), on every call.
 ///
 /// # Arguments
 /// * `dataset` - Source dataset
@@ -678,7 +823,7 @@ pub fn deduplicate(dataset: &Dataset, subset: Option<&[&str]>, keep: &str) -> Mu
 
     let subset_cols: Option<Vec<String>> =
         subset.map(|cols| cols.iter().map(|&s| s.to_string()).collect());
-    let unique_df = df.unique::<String, &str>(subset_cols.as_deref(), keep_strategy, None)?;
+    let unique_df = df.unique_stable(subset_cols.as_deref(), keep_strategy, None)?;
 
     Ok(Dataset::new(unique_df))
 }
@@ -983,19 +1128,31 @@ fn count_lost_values(source: &Column, casted: &Column, report: &mut CastReport) 
     }
     let source = source.as_materialized_series();
     let casted = casted.as_materialized_series();
-    let floats = source.dtype().is_float();
-    for row in 0..source.len() {
-        cast_checkpoint(row)?;
-        let before = source.get(row)?;
-        if before.is_null() || !casted.get(row)?.is_null() {
-            continue;
+    // Lost: missing after the cast, present before (NaN was missing already).
+    let mut lost = casted.is_null() & source.is_not_null();
+    if source.dtype().is_float() {
+        // na-ok: NaN mask, not extraction
+        lost = lost & !source.is_nan()?.fill_null_with_values(false)?;
+    }
+    cast_checkpoint(0)?;
+    let n_lost = lost.sum().unwrap_or(0) as usize;
+    report.n_failed += n_lost;
+    // The first three distinct lost inputs, in row order.
+    for (row, is_lost) in lost.iter().enumerate() {
+        if report.examples.len() == 3 {
+            break;
         }
-        let text = match before.extract::<f64>() {
-            Some(x) if floats && x.is_nan() => continue, // NaN was missing already
-            Some(x) if floats => x.to_string(),
-            _ => before.to_string(),
-        };
-        report.failed(|| text);
+        cast_checkpoint(row)?;
+        if is_lost == Some(true) {
+            let before = source.get(row)?;
+            let text = match before.extract::<f64>() {
+                Some(x) if source.dtype().is_float() => x.to_string(),
+                _ => before.to_string(),
+            };
+            if !report.examples.contains(&text) {
+                report.examples.push(text);
+            }
+        }
     }
     Ok(())
 }
@@ -1025,7 +1182,8 @@ pub fn parse_cast_dtype(dtype: &str) -> MungeResult<DataType> {
 
 /// Clip numeric values to a range (R's `pmin(pmax(x, min), max)`).
 ///
-/// Nulls stay null and NaN stays NaN; the result is Float64.
+/// Nulls stay null and NaN stays NaN; the result is Float64 (integer columns come back as
+/// Float64).
 ///
 /// # Arguments
 /// * `dataset` - Source dataset
@@ -1135,8 +1293,10 @@ fn invalid_value(column: &str, value: &str, reason: String) -> MungeError {
     }
 }
 
-/// An integer literal for a column of type `dtype`: decimal digits, or a finite integral number
-/// such as "1e3" (as R's `as.integer`).
+/// An integer literal for a column of type `dtype`: decimal digits, or an integral number below
+/// 2^53 written as a float ("1e3", "12.0"), which a double holds exactly. R's `as.integer`
+/// truncates "1.5"; this refuses it. A float literal of 2^53 or more is refused (write it as an
+/// integer): a double cannot tell 2^53 + 1 from 2^53.
 fn parse_int<T>(column: &str, dtype: &DataType, text: &str) -> MungeResult<T>
 where
     T: TryFrom<i128> + std::str::FromStr,
@@ -1145,12 +1305,21 @@ where
     if let Ok(v) = t.parse::<T>() {
         return Ok(v);
     }
-    // 2^127 as f64: below it the conversion to i128 is exact for an integral value.
-    const I128_BOUND: f64 = 170_141_183_460_469_231_731_687_303_715_884_105_728.0;
+    // 2^53: below it every integer is a double, so an integral float literal is exact.
+    const EXACT_BOUND: f64 = 9_007_199_254_740_992.0;
+    let float = t.parse::<f64>().ok();
+    if t.parse::<i128>().is_err()
+        && float.is_some_and(|v| v.is_finite() && v.fract() == 0.0 && v.abs() >= EXACT_BOUND)
+    {
+        return Err(invalid_value(
+            column,
+            text,
+            "not exactly representable as a float; write it as an integer".to_string(),
+        ));
+    }
     let wide = t.parse::<i128>().ok().or_else(|| {
-        t.parse::<f64>()
-            .ok()
-            .filter(|v| v.is_finite() && v.fract() == 0.0 && v.abs() < I128_BOUND)
+        float
+            .filter(|v| v.is_finite() && v.fract() == 0.0)
             .map(|v| v as i128)
     });
     let out_of_range = || format!("out of range for the column type {dtype}");
@@ -1194,7 +1363,7 @@ fn parse_f32(column: &str, dtype: &DataType, text: &str) -> MungeResult<f32> {
 }
 
 /// A logical literal, as R's `as.logical`.
-fn parse_bool(column: &str, text: &str) -> MungeResult<bool> {
+pub(super) fn parse_bool(column: &str, text: &str) -> MungeResult<bool> {
     match text.trim() {
         "TRUE" | "true" | "T" | "True" => Ok(true),
         "FALSE" | "false" | "F" | "False" => Ok(false),
@@ -1243,6 +1412,7 @@ fn parse_old<T>(
 }
 
 /// The cells of `ca` with every match of `is_match` set to `new`, and the number of matches.
+/// Without a match, `ca` itself (its buffers shared, nothing rebuilt).
 fn replace_values<T>(
     ca: &ChunkedArray<T>,
     is_match: impl Fn(T::Native) -> bool,
@@ -1251,6 +1421,9 @@ fn replace_values<T>(
 where
     T: PolarsNumericType,
 {
+    if !ca.iter().flatten().any(&is_match) {
+        return (ca.clone(), 0);
+    }
     let mut n = 0usize;
     let replaced: ChunkedArray<T> = ca
         .iter()
@@ -1265,9 +1438,9 @@ where
     (replaced.with_name(ca.name().clone()), n)
 }
 
-// DATA-69 (Tier 4): the match keeps its absolute-epsilon rule.
+/// Exact equality, as R's `x == old` (so `-0` matches `0`, and `Inf` matches `Inf`).
 fn float_matches(v: f64, old: f64) -> bool {
-    (v - old).abs() < f64::EPSILON
+    v == old
 }
 
 /// The column with every cell equal to `old` replaced by `new` (`None`: missing), with its name and
@@ -1288,7 +1461,7 @@ fn replace_column(col: &Column, old: &str, new: Option<&str>) -> MungeResult<(Co
         }};
     }
 
-    Ok(match dtype {
+    let (out, n) = match dtype {
         DataType::Int8 => integer!(i8, i8),
         DataType::Int16 => integer!(i16, i16),
         DataType::Int32 => integer!(i32, i32),
@@ -1316,6 +1489,9 @@ fn replace_column(col: &Column, old: &str, new: Option<&str>) -> MungeResult<(Co
         DataType::Boolean => {
             let old_v = parse_old(column, old, |t| parse_bool(column, t))?;
             let new_v = new.map(|t| parse_bool(column, t)).transpose()?;
+            if !col.bool()?.iter().flatten().any(|v| v == old_v) {
+                return Ok((col.clone(), 0));
+            }
             let mut n = 0usize;
             let replaced: BooleanChunked = col
                 .bool()?
@@ -1340,7 +1516,19 @@ fn replace_column(col: &Column, old: &str, new: Option<&str>) -> MungeResult<(Co
             let (days, n) = replace_values(col.date()?.physical(), |v| v == old_v, new_v);
             (days.into_date().into_column(), n)
         }
-        DataType::Categorical(..) | DataType::Enum(..) => {
+        DataType::Categorical(_, mapping) | DataType::Enum(_, mapping) => {
+            // A label the column's mapping does not know, or whose code no row holds: nothing
+            // changes. The codes are compared as integers, without rebuilding the text.
+            let held = match mapping.get_cat(old) {
+                None => false,
+                Some(code) => {
+                    let codes = col.to_physical_repr().cast(&DataType::UInt32)?;
+                    codes.u32()?.iter().any(|c| c == Some(code))
+                }
+            };
+            if !held {
+                return Ok((col.clone(), 0));
+            }
             let text = col.cast(&DataType::String)?;
             let (ca, n) = replace_text(text.str()?, old, new);
             let back = ca
@@ -1361,16 +1549,25 @@ fn replace_column(col: &Column, old: &str, new: Option<&str>) -> MungeResult<(Co
             return Err(MungeError::TypeMismatch {
                 column: column.to_string(),
                 expected: "a string, categorical, boolean, integer, float or date column (cast \
-                           it first with munge_cast)"
+                           it to one of these first)"
                     .to_string(),
                 found: other.to_string(),
             });
         }
-    })
+    };
+    if n == 0 {
+        // Nothing matched: the column as it is, its buffers shared.
+        return Ok((col.clone(), 0));
+    }
+    Ok((out, n))
 }
 
 /// The cells of `ca` with every exact match of `old` replaced by `new`, and the number of matches.
+/// Without a match, `ca` itself (its buffers shared, nothing rebuilt).
 fn replace_text(ca: &StringChunked, old: &str, new: Option<&str>) -> (StringChunked, usize) {
+    if !ca.iter().flatten().any(|v| v == old) {
+        return (ca.clone(), 0);
+    }
     let mut n = 0usize;
     let replaced: StringChunked = ca
         .iter()
@@ -2354,6 +2551,129 @@ mod tests {
     }
 
     #[test]
+    fn test_drop_na_nan_mask_every_float_value() {
+        // NaN is missing; inf, -inf and numbers are not; Float32 as Float64; a column
+        // without NaN takes the null mask alone
+        let ds = Dataset::new(
+            DataFrame::new(vec![
+                Column::new(
+                    "a".into(),
+                    [
+                        Some(f64::INFINITY),
+                        Some(f64::NEG_INFINITY),
+                        Some(f64::NAN),
+                        None,
+                        Some(1.5),
+                        Some(-0.0),
+                    ],
+                ),
+                Column::new(
+                    "b".into(),
+                    [
+                        Some(f32::NEG_INFINITY),
+                        Some(2.5f32),
+                        Some(1.0),
+                        Some(3.0),
+                        Some(f32::NAN),
+                        Some(f32::INFINITY),
+                    ],
+                ),
+                Column::new(
+                    "c".into(),
+                    [
+                        Some(1.0f64),
+                        Some(2.0),
+                        Some(3.0),
+                        Some(4.0),
+                        Some(5.0),
+                        None,
+                    ],
+                ),
+            ])
+            .unwrap(),
+        );
+        let ids = |cols: Option<&[&str]>, how: &str| -> Vec<Option<f64>> {
+            drop_na(&ds, cols, how)
+                .unwrap()
+                .df()
+                .column("c")
+                .unwrap()
+                .f64()
+                .unwrap()
+                .into_iter()
+                .collect()
+        };
+        assert_eq!(
+            ids(Some(&["a"]), "any"),
+            [Some(1.0), Some(2.0), Some(5.0), None]
+        );
+        assert_eq!(
+            ids(Some(&["b"]), "any"),
+            [Some(1.0), Some(2.0), Some(3.0), Some(4.0), None]
+        );
+        assert_eq!(ids(None, "any"), [Some(1.0), Some(2.0)]);
+        assert_eq!(
+            ids(Some(&["a", "b"]), "all"),
+            [Some(1.0), Some(2.0), Some(3.0), Some(4.0), Some(5.0), None]
+        );
+        assert_eq!(
+            ids(Some(&["c"]), "any"),
+            [Some(1.0), Some(2.0), Some(3.0), Some(4.0), Some(5.0)]
+        );
+        let a = ds.df().column("a").unwrap();
+        assert!(has_nan(a).unwrap());
+        assert!(!has_nan(ds.df().column("c").unwrap()).unwrap());
+        let mask: Vec<Option<bool>> = nan_mask(a).unwrap().into_iter().collect();
+        assert_eq!(
+            mask,
+            [
+                Some(false),
+                Some(false),
+                Some(true),
+                Some(false),
+                Some(false),
+                Some(false)
+            ]
+        );
+    }
+
+    #[test]
+    fn test_replace_categorical_uses_the_codes() {
+        // a label of the global categories that this column does not hold changes nothing;
+        // one it holds is replaced
+        let cat = DataType::from_categories(Categories::global());
+        let other = Column::new("o".into(), ["only elsewhere"])
+            .cast(&cat)
+            .unwrap();
+        assert_eq!(other.len(), 1);
+        let ds = Dataset::new(
+            DataFrame::new(vec![
+                Column::new("c".into(), [Some("a"), None, Some("b"), Some("a")])
+                    .cast(&cat)
+                    .unwrap(),
+            ])
+            .unwrap(),
+        );
+        let opts = ReplaceOptions::default();
+        let none = replace_with(&ds, "c", "only elsewhere", Some("z"), &opts).unwrap();
+        assert_eq!(none.n_replaced, 0);
+        assert!(none.dataset.df().equals_missing(ds.df()));
+        let absent = replace_with(&ds, "c", "never seen anywhere", Some("z"), &opts).unwrap();
+        assert_eq!(absent.n_replaced, 0);
+        let some = replace_with(&ds, "c", "a", Some("z"), &opts).unwrap();
+        assert_eq!(some.n_replaced, 2);
+        assert_eq!(
+            text_cells(&some.dataset, "c"),
+            [
+                Some("z".to_string()),
+                None,
+                Some("b".to_string()),
+                Some("z".to_string())
+            ]
+        );
+    }
+
+    #[test]
     fn test_drop_na_specific_columns() {
         let ds = test_dataset_with_nulls();
         let clean = drop_na(&ds, Some(&["age"]), "any").unwrap();
@@ -3265,6 +3585,91 @@ mod tests {
     }
 
     #[test]
+    fn test_integer_literals_above_two_to_the_53() {
+        // 2^53 + 1 as a float literal rounds to 2^53, so it is refused; as digits it is exact.
+        let ds = Dataset::new(df!("k" => [9_007_199_254_740_993i64, 1000, 7]).unwrap());
+        let opts = ReplaceOptions::default();
+        match replace_with(&ds, "k", "9007199254740993.0", Some("1"), &opts) {
+            Err(MungeError::InvalidValue { reason, .. }) => {
+                assert!(reason.contains("write it as an integer"), "{reason}")
+            }
+            other => panic!("{:?}", other.map(|o| o.n_replaced)),
+        }
+        let exact = replace_with(&ds, "k", "9007199254740993", Some("1"), &opts).unwrap();
+        assert_eq!(exact.n_replaced, 1);
+        let cells: Vec<Option<i64>> = exact
+            .dataset
+            .df()
+            .column("k")
+            .unwrap()
+            .i64()
+            .unwrap()
+            .into_iter()
+            .collect();
+        assert_eq!(cells, [Some(1), Some(1000), Some(7)]);
+        // An integral float literal below 2^53 still reads as the integer.
+        assert_eq!(
+            replace_with(&ds, "k", "1e3", Some("2"), &opts)
+                .unwrap()
+                .n_replaced,
+            1
+        );
+        let gaps = Dataset::new(df!("k" => [Some(4i64), None]).unwrap());
+        let filled =
+            fill_na_with(&gaps, Some(&["k"]), &FillStrategy::Constant("1e3".into())).unwrap();
+        assert_eq!(
+            filled
+                .dataset
+                .df()
+                .column("k")
+                .unwrap()
+                .i64()
+                .unwrap()
+                .get(1),
+            Some(1000)
+        );
+    }
+
+    #[test]
+    fn test_fill_constant_nan_is_refused_on_float_columns() {
+        let ds = Dataset::new(
+            DataFrame::new(vec![
+                Column::new("f64".into(), [Some(1.5f64), None]),
+                Column::new("f32".into(), [Some(1.5f32), None]),
+            ])
+            .unwrap(),
+        );
+        for column in ["f64", "f32"] {
+            for nan in ["NaN", "nan"] {
+                match fill_na_with(&ds, Some(&[column]), &FillStrategy::Constant(nan.into())) {
+                    Err(MungeError::InvalidValue { reason, .. }) => {
+                        assert!(reason.contains("NaN is a missing value"), "{reason}")
+                    }
+                    other => panic!("{column} {nan}: {:?}", other.map(|o| o.filled)),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_fill_mode_float32_label_and_complete_columns() {
+        // A Float32 mode is labelled as the f32 it is.
+        let ds = Dataset::new(df!("x" => [Some(0.1f32), Some(0.1), None]).unwrap());
+        let o = fill_na_with(&ds, None, &FillStrategy::Mode).unwrap();
+        assert_eq!(o.fill_values, [("x".to_string(), "0.1".to_string())]);
+        assert!(o.summary().contains("with 0.1)"), "{}", o.summary());
+        // A column without missing cells is returned untouched and its mode is never computed:
+        // the mode of these Int128 values (beyond Int64) would be an error.
+        let wide = Dataset::new(
+            DataFrame::new(vec![Column::new("w".into(), [i128::MAX, i128::MAX - 3, 5])]).unwrap(),
+        );
+        assert!(crate::data::columns::factor_mode(wide.df(), "w").is_err());
+        let o = fill_na_with(&wide, Some(&["w"]), &FillStrategy::Mode).unwrap();
+        assert_eq!(o.filled, [("w".to_string(), 0)]);
+        assert!(o.dataset.df().equals_missing(wide.df()));
+    }
+
+    #[test]
     fn test_validate_fill_mode() {
         use p2a_validation::{Check, Tol};
         // validation/r/cases/data_munging_t3.R, case data_munging_fill_mode:
@@ -3385,5 +3790,224 @@ mod tests {
             ))
             .contains("'age'")
         );
+    }
+
+    #[test]
+    fn test_validate_distinct_order() {
+        use p2a_validation::{Check, Tol};
+        // case data_munging_combine_t4: distinct(o, key, .keep_all = TRUE) and
+        // !duplicated(fromLast = TRUE) keep the rows in data order; the same on every call
+        let case = p2a_validation::Case::load("data_munging_combine_t4");
+        let o = Dataset::new(
+            crate::data::DataLoader::load_csv(p2a_validation::repo_path(
+                "validation/datasets/generated/munging_order.csv",
+            ))
+            .unwrap(),
+        );
+        let cells = |ds: &Dataset, c: &str| -> Vec<f64> {
+            ds.df()
+                .column(c)
+                .unwrap()
+                .cast(&DataType::Float64)
+                .unwrap()
+                .f64()
+                .unwrap()
+                .into_iter()
+                .map(|v| v.unwrap_or(f64::NAN))
+                .collect()
+        };
+        let first = deduplicate(&o, Some(&["key"]), "first").unwrap();
+        let last = deduplicate(&o, Some(&["key"]), "last").unwrap();
+        let none = deduplicate(&o, Some(&["key"]), "none").unwrap();
+        Check::new(&case)
+            .vector("distinct_key", &cells(&first, "key"), Tol::exact())
+            .vector("distinct_id", &cells(&first, "id"), Tol::exact())
+            .vector("keep_last_key", &cells(&last, "key"), Tol::exact())
+            .vector("keep_last_id", &cells(&last, "id"), Tol::exact())
+            .vector("keep_none_key", &cells(&none, "key"), Tol::exact())
+            .finish();
+        for _ in 0..20 {
+            for (keep, want) in [("first", &first), ("last", &last), ("none", &none)] {
+                let again = deduplicate(&o, Some(&["key"]), keep).unwrap();
+                assert!(again.df().equals_missing(want.df()), "{keep}");
+            }
+        }
+    }
+
+    #[test]
+    fn drop_na_treats_nan_as_missing_and_checks_how() {
+        let ds = Dataset::new(
+            df!("a" => [Some(1.0), Some(f64::NAN), None, Some(4.0)], "b" => ["p", "q", "r", "s"])
+                .unwrap(),
+        );
+        // tidyr::drop_na: NaN is NA
+        assert_eq!(drop_na(&ds, Some(&["a"]), "any").unwrap().nrows(), 2);
+        // `how` is checked whatever the number of columns
+        assert!(matches!(
+            drop_na(&ds, Some(&["a"]), "bogus"),
+            Err(MungeError::InvalidExpression(_))
+        ));
+        // how = "all": NaN in one column, null in the other drops the row
+        let two = Dataset::new(
+            df!("a" => [Some(f64::NAN), Some(1.5)], "c" => [None::<f64>, Some(2.5)]).unwrap(),
+        );
+        assert_eq!(drop_na(&two, None, "all").unwrap().nrows(), 1);
+    }
+
+    #[test]
+    fn a_replacement_without_matches_returns_the_column_as_it_is() {
+        let cat = Column::new("c".into(), ["a", "b", "a"])
+            .cast(&DataType::from_categories(Categories::global()))
+            .unwrap();
+        let ds = Dataset::new(
+            DataFrame::new(vec![
+                Column::new("x".into(), [1.5, 2.5, 3.5]),
+                Column::new("s".into(), ["p", "q", "r"]),
+                cat,
+            ])
+            .unwrap(),
+        );
+        // The address of the column's first data buffer (values, views or category codes).
+        let ptr = |c: &Column| -> usize {
+            let s = c.as_materialized_series().to_physical_repr().into_owned();
+            match s.dtype() {
+                DataType::Float64 => s
+                    .f64()
+                    .unwrap()
+                    .downcast_iter()
+                    .next()
+                    .unwrap()
+                    .values()
+                    .as_ptr() as usize,
+                DataType::String => s
+                    .str()
+                    .unwrap()
+                    .downcast_iter()
+                    .next()
+                    .unwrap()
+                    .views()
+                    .as_ptr() as usize,
+                DataType::UInt8 => s
+                    .u8()
+                    .unwrap()
+                    .downcast_iter()
+                    .next()
+                    .unwrap()
+                    .values()
+                    .as_ptr() as usize,
+                DataType::UInt16 => s
+                    .u16()
+                    .unwrap()
+                    .downcast_iter()
+                    .next()
+                    .unwrap()
+                    .values()
+                    .as_ptr() as usize,
+                DataType::UInt32 => s
+                    .u32()
+                    .unwrap()
+                    .downcast_iter()
+                    .next()
+                    .unwrap()
+                    .values()
+                    .as_ptr() as usize,
+                other => panic!("no buffer check for {other}"),
+            }
+        };
+        for (column, old) in [("x", "9"), ("s", "zz"), ("c", "zz")] {
+            let out = replace_with(&ds, column, old, Some("1"), &ReplaceOptions::default())
+                .unwrap_or_else(|e| panic!("{column}: {e}"));
+            assert_eq!(out.n_replaced, 0, "{column}");
+            let before = ds.df().column(column).unwrap();
+            let after = out.dataset.df().column(column).unwrap();
+            assert_eq!(after.dtype(), before.dtype(), "{column}");
+            assert_eq!(ptr(after), ptr(before), "{column}: rebuilt");
+        }
+    }
+
+    #[test]
+    fn replace_matches_floats_exactly() {
+        // R: c(1e-20, 0, -0, 3) == 0 is FALSE TRUE TRUE FALSE
+        let ds = Dataset::new(df!("x" => [1e-20, 0.0, -0.0, 3.0]).unwrap());
+        let out = replace_with(&ds, "x", "0", Some("-1"), &ReplaceOptions::default()).unwrap();
+        let cells: Vec<Option<f64>> = out
+            .dataset
+            .df()
+            .column("x")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .into_iter()
+            .collect();
+        assert_eq!(cells, [Some(1e-20), Some(-1.0), Some(-1.0), Some(3.0)]);
+        // inf matches inf, and is counted
+        let inf = Dataset::new(df!("x" => [f64::INFINITY, 1.5, f64::INFINITY]).unwrap());
+        let out = replace_with(&inf, "x", "inf", Some("0"), &ReplaceOptions::default()).unwrap();
+        assert_eq!(out.n_replaced, 2);
+        // Float32 0.1 matches a Float32 0.1 cell
+        let f32s = Dataset::new(df!("x" => [0.1f32, 0.2]).unwrap());
+        let out = replace_with(&f32s, "x", "0.1", Some("9"), &ReplaceOptions::default()).unwrap();
+        assert_eq!(out.n_replaced, 1);
+    }
+
+    #[test]
+    fn test_validate_fill_grouped_tidyr() {
+        use p2a_validation::{Check, Tol};
+        // case data_munging_panel_shift: tidyr::fill(group_by(d, firm), z, .direction = "down"/"up")
+        let (case, ds) = crate::test_support::load_case("data_munging_panel_shift");
+        let cells = |o: &FillOutcome| -> Vec<f64> {
+            o.dataset
+                .df()
+                .column("z")
+                .unwrap()
+                .f64()
+                .unwrap()
+                .into_iter()
+                .map(|v| v.unwrap_or(f64::NAN))
+                .collect()
+        };
+        let down = fill_na_by(&ds, Some(&["z"]), &FillStrategy::Forward, &["firm"]).unwrap();
+        let up = fill_na_by(&ds, Some(&["z"]), &FillStrategy::Backward, &["firm"]).unwrap();
+        Check::new(&case)
+            .vector("fill_down_z_by_firm", &cells(&down), Tol::exact())
+            .vector("fill_up_z_by_firm", &cells(&up), Tol::exact())
+            .finish();
+        assert_eq!(down.dataset.df().column("z").unwrap().null_count(), 2);
+        // a NaN cell is filled like NA
+        let mut df = ds.df().clone();
+        let z: Float64Chunked = df
+            .column("z")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .into_iter()
+            .map(|v| Some(v.unwrap_or(f64::NAN)))
+            .collect();
+        df.with_column(z.with_name("z".into()).into_column())
+            .unwrap();
+        let nan_down = fill_na_by(
+            &Dataset::new(df),
+            Some(&["z"]),
+            &FillStrategy::Forward,
+            &["firm"],
+        )
+        .unwrap();
+        // (Debug text: NaN prints alike, where NaN != NaN)
+        assert_eq!(
+            format!("{:?}", cells(&nan_down)),
+            format!("{:?}", cells(&down))
+        );
+        // other strategies do not take groups
+        assert!(matches!(
+            fill_na_by(&ds, Some(&["z"]), &FillStrategy::Mean, &["firm"]),
+            Err(MungeError::InvalidExpression(_))
+        ));
+        assert!(matches!(
+            fill_na_by(&ds, Some(&["z"]), &FillStrategy::Forward, &["nope"]),
+            Err(MungeError::ColumnNotFound(_))
+        ));
+        // without columns, the group column is not filled
+        let all = fill_na_by(&ds, None, &FillStrategy::Forward, &["firm"]).unwrap();
+        assert!(all.filled.iter().all(|(c, _)| c != "firm"));
     }
 }

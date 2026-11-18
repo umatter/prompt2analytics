@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "id": "data_munging_panel_shift",
+  "area": "data/munging",
+  "method": "Grouped diff/pct_change/fill (dplyr, tidyr) and time-indexed lag/lead/diff (plm) on integer panel data",
+  "reference": "dplyr::lag within group_by(firm); tidyr::fill(.direction = 'down'/'up') within group_by(firm); plm::lag, plm::lead, diff on pdata.frame(index = c('firm', 'year'))",
+  "call": "group_by(d, firm) %>% mutate(y - lag(y), (x - lag(x)) / lag(x)); fill(group_by(d, firm), z); plm::lag(pdata.frame(d, c('firm', 'year'))$y, k)",
+  "dataset": "validation/datasets/generated/munging_panel.csv",
+  "datasets": ["validation/datasets/generated/munging_panel.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "dplyr": "1.2.1",
+    "tidyr": "1.3.2",
+    "plm": "2.6.7"
+  },
+  "values": {
+    "grouped_diff1_y": [null, null, 7.7870999999999988, 2.2497000000000007, null, -0.14090000000000025, -3.3262999999999998, -2.4625000000000004, 3.7524999999999995, 2.3594000000000008, -2.1064000000000007],
+    "grouped_pct1_x": [null, null, -0.16666666666666666, -0.2857142857142857, null, 0.10000000000000001, 2, 0.59999999999999998, -0.33333333333333331, 0.36363636363636365, null],
+    "pct1_x": [null, 0.7142857142857143, -0.16666666666666666, -0.5, -0.40000000000000002, 2.6666666666666665, -0.18181818181818182, -0.1111111111111111, -0.25, 1.5, null],
+    "normalize_x": [0.33333333333333331, 0.75, 0.58333333333333337, 0.16666666666666666, 0, 0.66666666666666663, 0.5, 0.41666666666666669, 0.25, 1, null],
+    "fill_down_z_by_firm": [null, 2.5, 1.25, 4.75, null, 1.25, 3.5, 4.75, 6.125, 1.25, 0.5],
+    "fill_up_z_by_firm": [4.75, 2.5, 1.25, 4.75, 3.5, null, 3.5, 0.5, 6.125, null, 0.5],
+    "time_lag1_y": [15.9053, 9.9027999999999992, null, null, null, 10.043699999999999, null, 13.6556, 14.2834, 2.2566000000000002, 13.4428],
+    "time_lag2_y": [null, 10.043699999999999, null, null, null, null, 14.7096, 15.9053, null, 9.9027999999999992, 13.6556],
+    "time_lead1_y": [13.4428, 12.2622, 9.9027999999999992, 13.6556, 14.7096, 2.2566000000000002, null, 11.336399999999999, null, null, null],
+    "time_diff1_y": [-2.2497000000000007, -7.6461999999999986, null, null, null, -0.14090000000000025, null, -0.21279999999999966, 0.42619999999999969, 10.005599999999999, -2.1064000000000007],
+    "time_lag1_x": [5, 11, null, null, null, 10, null, 7, 3, 12, 8],
+    "time_pct1_x": [0.40000000000000002, 0.090909090909090912, null, null, null, 0.10000000000000001, null, 0.14285714285714285, 1, 0.25, null]
+  }
+}

@@ -16,9 +16,16 @@
 //!
 //! A right-hand column whose name is taken gets the suffix (default `_right`), again until the name
 //! is unique, as `dplyr`'s `add_suffixes`: `value` becomes `value_right_right` when the left side
-//! has `value_right`. The right keys take part although inner and left joins drop them. An empty
-//! suffix that leaves a name on both sides is an error. Full joins keep both key columns (DATA-43),
-//! the right one as `<key>_right`.
+//! has `value_right`. The right keys take part although inner, left and full joins drop them. An
+//! empty suffix that leaves a name on both sides is an error.
+//!
+//! # Keys
+//!
+//! A full join has one column per key, as `dplyr::full_join` and `base::merge(all = TRUE)`: a row
+//! of the right dataset only has its key there, not in a `<key>_right` column. Missing (null) keys
+//! match each other in every keyed join, as dplyr's default (`na_matches = "na"`) and
+//! `base::merge`; the row estimate the join limits rely on ([`estimate_join_shape`]) counts them
+//! the same way.
 //!
 //! # Example
 //!
@@ -56,7 +63,7 @@ use std::collections::HashSet;
 /// datasets and then adding or binding a column builds such a frame. A frame
 /// that is already aligned is not copied; a misaligned one is copied once,
 /// the copy polars itself makes of it in a keyed join.
-fn chunk_aligned(df: &DataFrame) -> Cow<'_, DataFrame> {
+pub(super) fn chunk_aligned(df: &DataFrame) -> Cow<'_, DataFrame> {
     if df.should_rechunk() {
         let mut df = df.clone();
         df.as_single_chunk_par();
@@ -163,6 +170,10 @@ pub struct JoinOptions {
 ///
 /// An empty key list is refused: polars panics when it joins on zero keys.
 /// Every refusal is a [`MungeError::JoinError`].
+///
+/// The CLI keeps a copy of these checks, in the same order, to word its own
+/// refusals (`join_key_refusal` in `p2a-cli/src/commands/munge.rs`): a check
+/// added or reordered here must be mirrored there.
 fn join_keys<'a>(
     left: &Dataset,
     right: &Dataset,
@@ -228,7 +239,7 @@ fn join_keys<'a>(
 /// group-bys and a join of the two count tables; the data are not joined).
 /// [`estimate_join_shape`] also says how often a row of each side repeats.
 ///
-/// Null keys never match, as in [`join`]. The count saturates at `u64::MAX`.
+/// Null keys match each other, as in [`join`]. The count saturates at `u64::MAX`.
 ///
 /// # Errors
 ///
@@ -261,9 +272,10 @@ pub struct JoinShape {
     /// The rows the join returns (what [`estimate_join_rows`] returns).
     pub rows: u64,
     /// The most times a row of the left dataset appears in the result: the
-    /// largest right row count of a key that matches, at least 1 when the
-    /// join keeps the unmatched left rows (left and full joins), and 1 for a
-    /// semi or anti join (0 when an inner or right join matches nothing).
+    /// largest right row count of a key that matches (0 when an inner or
+    /// right join matches nothing), at least 1 when the join keeps the
+    /// unmatched left rows (left and full joins), and 1 for a semi or anti
+    /// join.
     pub max_left_repeat: u64,
     /// The most times a row of the right dataset appears in the result: the
     /// largest left row count of a key that matches, at least 1 when the
@@ -286,7 +298,7 @@ pub struct JoinShape {
 /// use p2a_core::data::munging::{estimate_join_shape, JoinType};
 ///
 /// let shape = estimate_join_shape(&orders, &customers, &["customer_id"], None, JoinType::Left)?;
-/// // Each customer appears once per order: shape.max_right_repeat orders at most.
+/// // A customer row repeats once per matching order, at most `shape.max_right_repeat` times.
 /// ```
 pub fn estimate_join_shape(
     left: &Dataset,
@@ -314,13 +326,15 @@ pub fn estimate_join_shape(
     };
     let left_counts = key_counts(left, left_on, LEFT_N)?;
     let right_counts = key_counts(right, &right_keys, RIGHT_N)?;
-    // Null keys never match (the JoinArgs default), as in `join`.
+    // Null keys match each other, as in `join`: the group-bys count the null key as a group.
+    let mut args = JoinArgs::new(polars::prelude::JoinType::Inner);
+    args.nulls_equal = true;
     let matched = chunk_aligned(&left_counts)
         .join(
             &chunk_aligned(&right_counts),
             left_on.iter().copied(),
             right_keys.iter().copied(),
-            JoinArgs::new(polars::prelude::JoinType::Inner),
+            args,
             None,
         )
         .map_err(join_err)?;
@@ -384,6 +398,9 @@ pub fn estimate_join_shape(
 /// [`MungeError::JoinError`] naming both numbers. Without a ceiling this is
 /// exactly [`join`].
 ///
+/// A frame whose columns are chunked differently is copied into single chunks
+/// first (the copy polars itself would make of it in a keyed join).
+///
 /// # Errors
 ///
 /// As in [`join`], with the keys checked before any estimate or join runs.
@@ -426,13 +443,18 @@ pub fn join_with(
         suffix,
     )?;
 
-    // Perform the join, on frames whose columns are chunked alike.
+    // Perform the join, on frames whose columns are chunked alike: one key column per key
+    // (coalesced, also in a full join) and null keys that match, as dplyr.
+    let mut args = JoinArgs::new(join_type.to_polars())
+        .with_suffix(Some(suffix_str))
+        .with_coalesce(JoinCoalesce::CoalesceColumns);
+    args.nulls_equal = true;
     let result = chunk_aligned(left.df())
         .join(
             &chunk_aligned(renamed_right.as_ref().unwrap_or(right.df())),
             left_on_str.as_slice(),
             right_on_str.as_slice(),
-            JoinArgs::new(join_type.to_polars()).with_suffix(Some(suffix_str)),
+            args,
             None, // JoinTypeOptions
         )
         .map_err(|e| MungeError::JoinError(e.to_string()))?;
@@ -516,8 +538,9 @@ fn suffix_right(
         .into_iter()
         .filter(|n| !(join_type == JoinType::Right && left_on.contains(&n.as_str())))
         .collect();
-    // Inner and left joins drop the right keys.
-    let drops_right_keys = matches!(join_type, JoinType::Inner | JoinType::Left);
+    // Inner, left and full joins drop the right keys (a full join coalesces them into the left
+    // ones, as dplyr's join_cols).
+    let drops_right_keys = matches!(join_type, JoinType::Inner | JoinType::Left | JoinType::Full);
     if suffix.is_empty() {
         refuse_empty_suffix(
             right_names
@@ -528,7 +551,7 @@ fn suffix_right(
         )?;
     }
     let new_names = add_suffixes(&right_names, &kept_left, suffix)?;
-    // The usual join: only right keys that inner and left joins drop would change.
+    // The usual join: only right keys that inner, left and full joins drop would change.
     let unchanged = right_names
         .iter()
         .zip(&new_names)
@@ -571,7 +594,8 @@ fn refuse_duplicate_names(result: &DataFrame) -> MungeResult<()> {
 /// # Errors
 ///
 /// As in [`join`]; `on` is its `left_on`, so an empty `on`, or an `on` name
-/// missing from either dataset, is reported under `left_on`.
+/// missing from the left dataset, or from the right one when `right_on` is
+/// `None`, is reported under `left_on`.
 ///
 /// # Example
 ///
@@ -593,7 +617,8 @@ pub fn left_join(
 /// # Errors
 ///
 /// As in [`join`]; `on` is its `left_on`, so an empty `on`, or an `on` name
-/// missing from either dataset, is reported under `left_on`.
+/// missing from the left dataset, or from the right one when `right_on` is
+/// `None`, is reported under `left_on`.
 ///
 /// # Example
 ///
@@ -615,7 +640,8 @@ pub fn right_join(
 /// # Errors
 ///
 /// As in [`join`]; `on` is its `left_on`, so an empty `on`, or an `on` name
-/// missing from either dataset, is reported under `left_on`.
+/// missing from the left dataset, or from the right one when `right_on` is
+/// `None`, is reported under `left_on`.
 ///
 /// # Example
 ///
@@ -637,7 +663,8 @@ pub fn inner_join(
 /// # Errors
 ///
 /// As in [`join`]; `on` is its `left_on`, so an empty `on`, or an `on` name
-/// missing from either dataset, is reported under `left_on`.
+/// missing from the left dataset, or from the right one when `right_on` is
+/// `None`, is reported under `left_on`.
 ///
 /// # Example
 ///
@@ -659,7 +686,8 @@ pub fn full_join(
 /// # Errors
 ///
 /// As in [`join`]; `on` is its `left_on`, so an empty `on`, or an `on` name
-/// missing from either dataset, is reported under `left_on`.
+/// missing from the left dataset, or from the right one when `right_on` is
+/// `None`, is reported under `left_on`.
 ///
 /// # Example
 ///
@@ -681,7 +709,8 @@ pub fn anti_join(
 /// # Errors
 ///
 /// As in [`join`]; `on` is its `left_on`, so an empty `on`, or an `on` name
-/// missing from either dataset, is reported under `left_on`.
+/// missing from the left dataset, or from the right one when `right_on` is
+/// `None`, is reported under `left_on`.
 ///
 /// # Example
 ///
@@ -698,14 +727,23 @@ pub fn semi_join(
     join(left, right, on, right_on, JoinType::Semi, None)
 }
 
-/// Concatenate datasets vertically (stack rows).
+/// Concatenate datasets vertically (stack rows), as `dplyr::bind_rows`.
 ///
-/// All datasets must have the same columns. Missing columns are filled with nulls
-/// if `fill_null` is true.
+/// The result has the union of the datasets' columns, in order of first appearance; a column a
+/// dataset lacks is missing in its rows (so `Income` and `income` stay two columns). A column's
+/// type is the common type of its inputs: Boolean, integer and float columns of one name combine
+/// as the widest of them (an integer and a float column give a float column, as `vctrs`). Text,
+/// categorical, date, time and nested columns must have the same type in every dataset.
 ///
 /// # Arguments
 ///
 /// * `datasets` - Slice of datasets to concatenate
+///
+/// # Errors
+///
+/// [`MungeError::EmptyDataset`] for no datasets; [`MungeError::TypeMismatch`] naming the column
+/// and the two datasets whose types do not combine (text with numbers, say);
+/// [`MungeError::Polars`] when polars fails otherwise.
 ///
 /// # Example
 ///
@@ -723,14 +761,141 @@ pub fn concat(datasets: &[&Dataset]) -> MungeResult<Dataset> {
         return Ok(datasets[0].clone());
     }
 
-    // Get DataFrames
-    let dfs: Vec<DataFrame> = datasets.iter().map(|ds| ds.df().clone()).collect();
+    // Frames with one schema (the common case) bind as they are.
+    let first = datasets[0].df();
+    let same_schema = datasets[1..].iter().all(|ds| {
+        let df = ds.df();
+        df.width() == first.width()
+            && df
+                .get_columns()
+                .iter()
+                .zip(first.get_columns())
+                .all(|(a, b)| a.name() == b.name() && a.dtype() == b.dtype())
+    });
+    if same_schema {
+        let dfs: Vec<DataFrame> = datasets.iter().map(|ds| ds.df().clone()).collect();
+        return Ok(Dataset::new(polars::functions::concat_df_diagonal(&dfs)?));
+    }
+
+    let types = concat_types(datasets)?;
+
+    // Cast only the columns whose type differs from the common one.
+    let mut dfs: Vec<DataFrame> = Vec::with_capacity(datasets.len());
+    for ds in datasets {
+        crate::resource::checkpoint().map_err(|e| MungeError::JoinError(e.to_string()))?;
+        let mut df = ds.df().clone();
+        for (name, dtype) in &types {
+            if let Ok(c) = df.column(name)
+                && c.dtype() != dtype
+            {
+                let cast = c.cast(dtype)?;
+                df.with_column(cast)?;
+            }
+        }
+        dfs.push(df);
+    }
 
     // Use diagonal concat to handle missing columns (fills with nulls)
-    let result = polars::functions::concat_df_diagonal(&dfs)
-        .map_err(|e| MungeError::JoinError(format!("Concat failed: {}", e)))?;
+    let result = polars::functions::concat_df_diagonal(&dfs)?;
 
     Ok(Dataset::new(result))
+}
+
+/// The common type of two Boolean or numeric types, as `vctrs` combines logical, integer and
+/// double: Boolean below integers below floats; integers of one sign take the wider width, a
+/// signed and an unsigned one the signed type wide enough for both (Float64 past 64 bits); two
+/// floats Float64 unless both are Float32.
+fn numeric_supertype(a: &DataType, b: &DataType) -> Option<DataType> {
+    use DataType::*;
+    let bits = |t: &DataType| -> u32 {
+        match t {
+            Int8 | UInt8 => 8,
+            Int16 | UInt16 => 16,
+            Int32 | UInt32 => 32,
+            Int64 | UInt64 => 64,
+            _ => 128,
+        }
+    };
+    let signed = |n: u32| match n {
+        8 => Int8,
+        16 => Int16,
+        32 => Int32,
+        64 => Int64,
+        _ => Int128,
+    };
+    let unsigned = |n: u32| match n {
+        8 => UInt8,
+        16 => UInt16,
+        32 => UInt32,
+        64 => UInt64,
+        _ => UInt128,
+    };
+    Some(match (a, b) {
+        _ if a == b => a.clone(),
+        (Boolean, t) | (t, Boolean) => t.clone(),
+        (Float32, Float32) => Float32,
+        _ if a.is_float() || b.is_float() => Float64,
+        _ if a.is_signed_integer() && b.is_signed_integer() => signed(bits(a).max(bits(b))),
+        _ if a.is_unsigned_integer() && b.is_unsigned_integer() => unsigned(bits(a).max(bits(b))),
+        _ => {
+            // one signed, one unsigned
+            let (s, u) = if a.is_signed_integer() {
+                (a, b)
+            } else {
+                (b, a)
+            };
+            let need = bits(s).max(bits(u) * 2);
+            if need > 64 { Float64 } else { signed(need) }
+        }
+    })
+}
+
+/// The common type of each column of [`concat`]'s result, by name, in order of first appearance;
+/// a `TypeMismatch` for a column whose types do not combine.
+pub fn concat_types(datasets: &[&Dataset]) -> MungeResult<Vec<(String, DataType)>> {
+    let combines = |dt: &DataType| dt.is_bool() || dt.is_primitive_numeric();
+    // name -> (common type, the dataset (1-based) that set it)
+    let mut types: Vec<(String, DataType, usize)> = Vec::new();
+    // name -> its index in `types`, so a wide bind does not search the list per column
+    let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for (i, ds) in datasets.iter().enumerate() {
+        for c in ds.df().get_columns() {
+            let name = c.name().as_str();
+            let dtype = c.dtype();
+            match index.get(name).map(|&at| &mut types[at]) {
+                None => {
+                    index.insert(name.to_string(), types.len());
+                    types.push((name.to_string(), dtype.clone(), i + 1));
+                }
+                Some((_, common, from)) => {
+                    if common == dtype || dtype.is_null() {
+                        continue;
+                    }
+                    if common.is_null() {
+                        *common = dtype.clone();
+                        *from = i + 1;
+                        continue;
+                    }
+                    let widened = if combines(common) && combines(dtype) {
+                        numeric_supertype(common, dtype)
+                    } else {
+                        None
+                    };
+                    match widened {
+                        Some(t) => *common = t,
+                        None => {
+                            return Err(MungeError::TypeMismatch {
+                                column: name.to_string(),
+                                expected: format!("{common} (as in dataset {from})"),
+                                found: format!("{dtype} (dataset {})", i + 1),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(types.into_iter().map(|(n, t, _)| (n, t)).collect())
 }
 
 /// Concatenate datasets horizontally (add columns side by side).
@@ -805,7 +970,8 @@ pub fn cross_join(left: &Dataset, right: &Dataset, suffix: Option<&str>) -> Mung
 ///
 /// The result has `left.nrows() * right.nrows()` rows; a product that
 /// overflows is an error, and one above `opts.max_output_rows` is refused
-/// with [`MungeError::JoinError`] naming both numbers.
+/// with [`MungeError::JoinError`] naming both numbers. A frame whose columns
+/// are chunked differently is copied into single chunks first.
 pub fn cross_join_with(
     left: &Dataset,
     right: &Dataset,
@@ -862,6 +1028,7 @@ pub fn cross_join_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::data::munging::select;
     use polars::prelude::df;
 
     /// The error text of a call that must fail (`Dataset` is not `Debug`).
@@ -874,15 +1041,19 @@ mod tests {
 
     /// Assert that a call failed with a [`MungeError::JoinError`] and, when
     /// `want` is given, that its text (without the display prefix) is `want`.
-    fn expect_join_error(res: MungeResult<Dataset>, want: Option<&str>, what: &str) {
+    fn expect_join_error<T>(res: MungeResult<T>, want: Option<&str>, what: &str) {
+        let e = join_error_text(res, &what);
+        if let Some(want) = want {
+            assert_eq!(e, want, "{what}");
+        }
+    }
+
+    /// The text of the [`MungeError::JoinError`] a call must fail with.
+    fn join_error_text<T>(res: MungeResult<T>, what: &dyn std::fmt::Debug) -> String {
         match res {
-            Err(MungeError::JoinError(e)) => {
-                if let Some(want) = want {
-                    assert_eq!(e, want, "{what}");
-                }
-            }
-            Err(e) => panic!("{what}: expected a JoinError, got {e}"),
-            Ok(_) => panic!("{what}: expected a JoinError, got a dataset"),
+            Err(MungeError::JoinError(e)) => e,
+            Err(e) => panic!("{what:?}: expected a JoinError, got {e}"),
+            Ok(_) => panic!("{what:?}: expected a JoinError, got a result"),
         }
     }
 
@@ -898,13 +1069,14 @@ mod tests {
                 "rv" => [1.1, 2.3, 3.2, 4.4, 5.6, 6.5])
             .unwrap(),
         );
+        // The null keys match each other, as dplyr's default.
         for (jt, want) in [
-            (JoinType::Inner, 7u64),
+            (JoinType::Inner, 8u64),
             (JoinType::Left, 9),
             (JoinType::Right, 9),
-            (JoinType::Full, 11),
-            (JoinType::Semi, 3),
-            (JoinType::Anti, 2),
+            (JoinType::Full, 10),
+            (JoinType::Semi, 4),
+            (JoinType::Anti, 1),
         ] {
             assert_eq!(
                 estimate_join_rows(&l, &r, &["k"], None, jt).unwrap(),
@@ -971,13 +1143,14 @@ mod tests {
                 "rid" => [10i64, 11, 12, 13, 14, 15])
             .unwrap(),
         );
+        // The null keys match each other (one row each side).
         for (jt, rows, left, right) in [
-            (JoinType::Inner, 7u64, 3u64, 2u64),
+            (JoinType::Inner, 8u64, 3u64, 2u64),
             (JoinType::Left, 9, 3, 2),
             (JoinType::Right, 9, 3, 2),
-            (JoinType::Full, 11, 3, 2),
-            (JoinType::Semi, 3, 1, 0),
-            (JoinType::Anti, 2, 1, 0),
+            (JoinType::Full, 10, 3, 2),
+            (JoinType::Semi, 4, 1, 0),
+            (JoinType::Anti, 1, 1, 0),
         ] {
             let shape = estimate_join_shape(&l, &r, &["k"], None, jt).unwrap();
             assert_eq!(
@@ -1109,19 +1282,19 @@ mod tests {
                     &err_text(join_with(&l, &r, none, right_on, jt, None, &cap)),
                     "left_on",
                 );
-                match estimate_join_rows(&l, &r, none, right_on, jt) {
-                    Err(MungeError::JoinError(e)) => names_side(&e, "left_on"),
-                    other => panic!("{jt:?}: expected a JoinError, got {other:?}"),
-                }
+                names_side(
+                    &join_error_text(estimate_join_rows(&l, &r, none, right_on, jt), &jt),
+                    "left_on",
+                );
             }
             names_side(
                 &err_text(join(&l, &r, &["id"], Some(none), jt, None)),
                 "right_on",
             );
-            match estimate_join_rows(&l, &r, &["id"], Some(none), jt) {
-                Err(MungeError::JoinError(e)) => names_side(&e, "right_on"),
-                other => panic!("{jt:?}: expected a JoinError, got {other:?}"),
-            }
+            names_side(
+                &join_error_text(estimate_join_rows(&l, &r, &["id"], Some(none), jt), &jt),
+                "right_on",
+            );
         }
         // The named wrappers go through the same check.
         names_side(&err_text(left_join(&l, &r, none, None, None)), "left_on");
@@ -1262,10 +1435,11 @@ mod tests {
                     Some(want),
                     &what,
                 );
-                match estimate_join_rows(&l, &r, left_on, right_on, jt) {
-                    Err(MungeError::JoinError(e)) => assert_eq!(e, want, "{what}"),
-                    other => panic!("{what}: expected a JoinError, got {other:?}"),
-                }
+                expect_join_error(
+                    estimate_join_rows(&l, &r, left_on, right_on, jt),
+                    Some(want),
+                    &what,
+                );
             }
             // The displayed text carries the prefix once.
             assert_eq!(
@@ -1354,6 +1528,28 @@ mod tests {
         // Orders: 1(101), 2(102), 3(101), 4(103), 5(104)
         // Full join keeps all 5 orders
         assert_eq!(result.nrows(), 5);
+
+        // A customer without orders is a right-only row: its key is in the one key column.
+        let more = Dataset::new(
+            df!("customer_id" => [101, 102, 103, 105], "name" => ["Alice", "Bob", "Charlie", "Eve"])
+                .unwrap(),
+        );
+        let result = full_join(&orders, &more, &["customer_id"], None, None).unwrap();
+        assert_eq!(result.nrows(), 6);
+        assert!(result.df().column("customer_id_right").is_err());
+        let ids = result.df().column("customer_id").unwrap();
+        assert_eq!(ids.null_count(), 0);
+        let eve = result
+            .df()
+            .clone()
+            .lazy()
+            .filter(col("name").eq(lit("Eve")))
+            .collect()
+            .unwrap();
+        assert_eq!(
+            eve.column("customer_id").unwrap().get(0).unwrap(),
+            AnyValue::Int32(105)
+        );
     }
 
     #[test]
@@ -1554,7 +1750,7 @@ mod tests {
     /// one. `w` differs on every row, so a row gathered from the wrong place
     /// shows; (`id`, `slot`) is unique, for a pivot.
     fn differently_chunked() -> (Dataset, Dataset) {
-        use crate::data::munging::{MutateExpr, mutate, select};
+        use crate::data::munging::{MutateExpr, mutate};
         let n = 60;
         let part = |rows: std::ops::Range<i64>| {
             let k: Vec<i64> = rows.clone().map(|i| i % 7).collect();
@@ -1565,6 +1761,8 @@ mod tests {
             Dataset::new(df!("k" => k, "g" => g, "x" => x, "id" => id, "slot" => slot).unwrap())
         };
         let bound = concat(&[&part(0..n), &part(n..2 * n)]).unwrap();
+        // Longer than the 12 bytes polars keeps inline in a string view, so the gather reads a
+        // data buffer too.
         let z = mutate(
             &bound,
             "z",
@@ -1592,13 +1790,10 @@ mod tests {
         let (wide, narrow) = differently_chunked();
         // Row-bound columns, aligned with each other, next to a scalar
         // column (one value, materialised as one chunk).
-        let mut df = crate::data::munging::select(&wide, &["k", "g", "x"])
-            .unwrap()
-            .df()
-            .clone();
+        let mut df = select(&wide, &["k", "g", "x"]).unwrap().df().clone();
         assert!(!df.should_rechunk());
-        let rows = df.height();
-        df.with_column(Column::new_scalar("one".into(), Scalar::from(1i64), rows))
+        let height = df.height();
+        df.with_column(Column::new_scalar("one".into(), Scalar::from(1i64), height))
             .unwrap();
         let scalar = Dataset::new(df);
         let pairs = [
@@ -1890,5 +2085,173 @@ mod tests {
             }
         }
         check.finish();
+    }
+
+    /// Rows of `frame == which` of a case frame, with `cols` renamed (old, new).
+    fn case_frame(ds: &Dataset, which: &str, cols: &[(&str, &str)]) -> Dataset {
+        let exprs: Vec<Expr> = cols.iter().map(|(o, n)| col(*o).alias(*n)).collect();
+        Dataset::new(
+            ds.df()
+                .clone()
+                .lazy()
+                .filter(col("frame").eq(lit(which)))
+                .select(exprs)
+                .collect()
+                .unwrap(),
+        )
+    }
+
+    /// Cells of a column as f64 with R's NA as NaN (`Check` compares NaN equal to NaN).
+    fn r_cells(ds: &Dataset, c: &str) -> Vec<f64> {
+        ds.df()
+            .column(c)
+            .unwrap()
+            .cast(&DataType::Float64)
+            .unwrap()
+            .f64()
+            .unwrap()
+            .into_iter()
+            .map(|v| v.unwrap_or(f64::NAN))
+            .collect()
+    }
+
+    fn rows_sorted_by(ds: &Dataset, by: &[&str]) -> Dataset {
+        Dataset::new(
+            ds.df()
+                .sort(
+                    by.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+                    SortMultipleOptions::default()
+                        .with_nulls_last(true)
+                        .with_maintain_order(true),
+                )
+                .unwrap(),
+        )
+    }
+
+    #[test]
+    fn test_validate_join_na_keys_dplyr() {
+        use p2a_validation::{Check, Tol};
+        // case data_munging_combine_t4: dplyr joins with na_matches = "na" (NA matches NA, as
+        // base::merge) and a full join with one coalesced key column; rows ordered by k, a, b, NA last
+        let case = p2a_validation::Case::load("data_munging_combine_t4");
+        let ds = Dataset::new(
+            crate::data::DataLoader::load_csv(p2a_validation::repo_path(
+                "validation/datasets/generated/munging_join_na.csv",
+            ))
+            .unwrap(),
+        );
+        let l = case_frame(&ds, "L", &[("k", "k"), ("val", "a")]);
+        let r = case_frame(&ds, "R", &[("k", "k"), ("val", "b")]);
+        let full = rows_sorted_by(
+            &full_join(&l, &r, &["k"], None, None).unwrap(),
+            &["k", "a", "b"],
+        );
+        assert_eq!(
+            full.df().get_column_names_str(),
+            ["k", "a", "b"],
+            "one key column"
+        );
+        let inner = rows_sorted_by(
+            &inner_join(&l, &r, &["k"], None, None).unwrap(),
+            &["k", "a", "b"],
+        );
+        let anti = rows_sorted_by(&anti_join(&l, &r, &["k"], None).unwrap(), &["k", "a"]);
+        let semi = rows_sorted_by(&semi_join(&l, &r, &["k"], None).unwrap(), &["k", "a"]);
+        Check::new(&case)
+            .vector("full_k", &r_cells(&full, "k"), Tol::exact())
+            .vector("full_a", &r_cells(&full, "a"), Tol::exact())
+            .vector("full_b", &r_cells(&full, "b"), Tol::exact())
+            .vector("inner_k", &r_cells(&inner, "k"), Tol::exact())
+            .vector("inner_a", &r_cells(&inner, "a"), Tol::exact())
+            .vector("inner_b", &r_cells(&inner, "b"), Tol::exact())
+            .vector("anti_k", &r_cells(&anti, "k"), Tol::exact())
+            .vector("semi_k", &r_cells(&semi, "k"), Tol::exact())
+            .vector("semi_a", &r_cells(&semi, "a"), Tol::exact())
+            .finish();
+        // NA is a missing key, not a NaN
+        assert_eq!(full.df().column("k").unwrap().null_count(), 2);
+        // left and right joins: every left (right) row, NA keys matched
+        let left = join(&l, &r, &["k"], None, JoinType::Left, None).unwrap();
+        let right = join(&l, &r, &["k"], None, JoinType::Right, None).unwrap();
+        assert_eq!((left.nrows(), right.nrows()), (5, 4));
+        // the row estimate counts the same way
+        for jt in [
+            JoinType::Inner,
+            JoinType::Left,
+            JoinType::Right,
+            JoinType::Full,
+            JoinType::Semi,
+            JoinType::Anti,
+        ] {
+            assert_eq!(
+                estimate_join_rows(&l, &r, &["k"], None, jt).unwrap(),
+                join(&l, &r, &["k"], None, jt, None).unwrap().nrows() as u64,
+                "{jt:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn full_join_names_follow_dplyr_when_the_right_key_collides() {
+        // dplyr 1.2.1: full_join(x(k, v), y(k, k_right), by = "k", suffix = c("", "_right")) names
+        // k, v, k_right_right, as left_join does
+        let x = Dataset::new(df!("k" => [1i64, 2], "v" => [0.5, 1.5]).unwrap());
+        let y = Dataset::new(df!("k" => [2i64, 3], "k_right" => [7.25, 8.75]).unwrap());
+        for jt in [JoinType::Left, JoinType::Full] {
+            let out = join(&x, &y, &["k"], None, jt, Some("_right")).unwrap();
+            assert_eq!(
+                out.df().get_column_names_str(),
+                ["k", "v", "k_right_right"],
+                "{jt:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_concat_bind_rows() {
+        use p2a_validation::{Check, Tol};
+        // case data_munging_combine_t4: dplyr::bind_rows(A(x int), B(x double)) gives a double x and
+        // the union of the columns (Income and income differ)
+        let case = p2a_validation::Case::load("data_munging_combine_t4");
+        let b = Dataset::new(
+            crate::data::DataLoader::load_csv(p2a_validation::repo_path(
+                "validation/datasets/generated/munging_bind.csv",
+            ))
+            .unwrap(),
+        );
+        let a = case_frame(&b, "A", &[("id", "id"), ("xi", "x"), ("Income", "Income")]);
+        let bb = case_frame(&b, "B", &[("id", "id"), ("xd", "x"), ("income", "income")]);
+        assert_eq!(a.df().column("x").unwrap().dtype(), &DataType::Int64);
+        let out = concat(&[&a, &bb]).unwrap();
+        assert_eq!(
+            out.df().get_column_names_str(),
+            ["id", "x", "Income", "income"]
+        );
+        assert_eq!(out.df().column("x").unwrap().dtype(), &DataType::Float64);
+        Check::new(&case)
+            .vector("bind_x", &r_cells(&out, "x"), Tol::exact())
+            .vector("bind_Income", &r_cells(&out, "Income"), Tol::exact())
+            .vector("bind_income", &r_cells(&out, "income"), Tol::exact())
+            .finish();
+        // logical with integer gives integer (vctrs)
+        let lb = Dataset::new(df!("x" => [true, false]).unwrap());
+        let li = Dataset::new(df!("x" => [3i64, 4]).unwrap());
+        let out = concat(&[&lb, &li]).unwrap();
+        assert_eq!(out.df().column("x").unwrap().dtype(), &DataType::Int64);
+        // integer with text is a type error naming the column and both datasets
+        let lt = Dataset::new(df!("x" => ["a", "b"]).unwrap());
+        match concat(&[&li, &lb, &lt]) {
+            Err(MungeError::TypeMismatch {
+                column,
+                expected,
+                found,
+            }) => {
+                assert_eq!(column, "x");
+                assert!(expected.contains("dataset 1"), "{expected}");
+                assert!(found.contains("dataset 3"), "{found}");
+            }
+            other => panic!("{:?}", other.err()),
+        }
+        assert!(!err_text(concat(&[&li, &lt])).contains("Join failed"));
     }
 }
