@@ -28,9 +28,11 @@ The analytics engine itself (`p2a-core`) makes no network requests.
 | Session files | the path given with `--session` | records commands for reproducibility |
 | Datasets | in memory only | not persisted between runs (unless a session file is used) |
 | Output files | the paths you give | charts, exports, saved datasets |
-| Replay temp file | `.p2a_session_<uuid>.json` in the working directory | written by an exported script (`p2a script export`) and removed at the end of a successful run |
+| Replay directory | `p2a_replay.XXXXXX` under `$TMPDIR` (default `/tmp`) | made by an exported script (`p2a script export`) with `mktemp -d`; holds its session file and derived datasets; removed when the script exits, also on failure |
+| Session lock file | `<session file>.lock` beside the session file | empty; created at the first save and left in place |
+| Temporary write files | `.<file name>.<uuid>.tmp` beside a session file or exported script | renamed over the target; removed when the write fails |
 
-The CLI does not create files in hidden directories or system locations.
+The CLI does not create files in hidden directories or system locations, apart from the replay directory under `$TMPDIR`.
 
 ### MCP Server (`p2a-mcp`)
 
@@ -42,7 +44,7 @@ The CLI does not create files in hidden directories or system locations.
 | Temporary files of writes | `.<file name>.<uuid>.p2a-tmp` beside the target, mode 0600 | renamed over the target when the write ends; one left by a process that stopped mid-write is removed by the first sweep of its folder after nobody has written to it for ten minutes. A tool path that resolves through the data-root jail sweeps the root (or the session's directory) and the folder the path lies in or names, the first time in a process and then at most once every ten minutes |
 | Session database (feature `db`) | in-memory SurrealDB unless `P2A_DB_PATH` names a RocksDB directory | conversations, messages, tool calls, settings, dataset metadata; `P2A_DB_PATH` must lie outside `P2A_DATA_ROOT` for an authenticated or open public server |
 | Audit log | off by default; `p2a-audit.log` in the working directory, or `P2A_AUDIT_PATH` | mode 0600; rotates at `P2A_AUDIT_MAX_MB` (default 50, keeps 3 old files, `0` = never rotate). Keep it outside `P2A_DATA_ROOT` |
-| Server logs | stderr | filter `RUST_LOG`, default `p2a_mcp=info`; info-level lines include session ids |
+| Server logs | stderr | filter `RUST_LOG`, default `p2a_mcp=info,p2a_core=warn` (the embedded desktop server: `p2a_mcp=info,p2a_core=info`); info-level lines include session ids |
 
 ### Desktop app (`p2a-dioxus`, desktop build)
 

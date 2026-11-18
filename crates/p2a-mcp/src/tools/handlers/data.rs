@@ -2309,7 +2309,7 @@ impl AnalyticsServer {
 
     /// Preview the first rows of a dataset.
     #[tool(
-        description = "Preview the first n rows of a loaded dataset (default 5, at most 1000) as a plain text table of every column, with each column's type; cells longer than 40 characters are cut."
+        description = "Preview the first n rows of a loaded dataset (default 5, at most 1000) as a plain text table with each column's type. Every column is shown up to 100,000 cells (fewer under a lower table_cells limit); beyond that the preview shows fewer columns, then fewer rows, and notes the cut. Cells longer than 40 characters are cut."
     )]
     pub async fn head_dataset(
         &self,

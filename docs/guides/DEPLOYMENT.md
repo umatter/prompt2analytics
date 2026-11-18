@@ -458,6 +458,9 @@ not.
 - **Retries.** Only connect errors raised before the request was sent, HTTP 429
   and HTTP 5xx are retried, at most 3 attempts in total, honouring
   `Retry-After` up to 30 s. A timed-out completion is never sent again.
+- **Tool loop.** A model round runs at most 16 tool calls; the rest are
+  answered with an error result. A tool name may appear in at most 3 rounds of
+  one request.
 - **Upstream errors** reach the caller as `<provider> returned HTTP <status>;
   <hint>`, never with the provider's response body.
 - **Server keys.** `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` from the server's
@@ -549,7 +552,7 @@ profile. For the timeout, watchdog, memory, data, allocation and eviction knobs
 | `--session-evict-idle-minutes` | `P2A_SESSION_EVICT_IDLE_MINUTES` | never | 10 | eviction when the table is full |
 | `--auth-enabled` | `P2A_AUTH_ENABLED` | | | deprecated, no effect (feature `auth`) |
 | `--jwt-secret` | `P2A_JWT_SECRET` | | | deprecated, no effect (feature `auth`) |
-| env only | `P2A_MAX_HTTP_BODY_MB` | 32 | 32 | request bodies and websocket messages, MiB; must be a positive whole number; `0`, an invalid value or one too large to count in bytes means the default 32, with a warning in the log (there is no unlimited setting); in the hosted profile HTTP JSON bodies at most 2 MiB; websocket messages keep the cap ([HTTP surface](#http-surface)) |
+| env only | `P2A_MAX_HTTP_BODY_MB` | 32 | 32 | request bodies and websocket messages, MiB; must be a positive whole number (surrounding whitespace is ignored; empty means unset); `0`, an invalid or non-UTF-8 value or one too large to count in bytes means the default 32, with a warning in the log (there is no unlimited setting); in the hosted profile HTTP JSON bodies at most 2 MiB; websocket messages keep the cap ([HTTP surface](#http-surface)) |
 | env only | `P2A_DATA_ROOT` | working directory | same | must exist; resolved once, on first use |
 | env only | `P2A_LLM_ALLOWED_HOSTS` | none (any public host) | api.openai.com, api.anthropic.com, openrouter.ai | comma-separated bare hostnames |
 | env only | `P2A_AUDIT_MAX_MB` | 50 | 50 | audit log rotation size; `0` = never rotate; keeps 3 old files |
@@ -725,8 +728,8 @@ the least memory with the option does not fit the dataset and the least memory
 without it does; when the request asks for the propensity score, BART's refusal
 also offers `include_propensity = false` as one more way to lower the bound,
 while the forest's never does, since turning honesty off can raise it. With four
-covariates the budget admits both tools' defaults on a few hundred thousand
-rows. The bound counts every buffer the fit holds at once, and the fit allocates
+covariates the budget admits both tools' defaults on about 120,000 (causal
+forest) and 220,000 (BART) rows. The bound counts every buffer the fit holds at once, and the fit allocates
 each at its exact length (the recursion's index vectors are sized before they
 are filled), so what an admitted fit holds stays within the bound whatever the
 data. On a release build, a fit whose trees split a few rows off at every level,

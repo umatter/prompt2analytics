@@ -337,7 +337,9 @@ pub static PARAM_RULES: &[ParamRule] = {
             "head_dataset",
             "n",
             Exempt(
-                "rows returned are bounded by the dataset height; text output by response_bytes",
+                "rows bounded by the dataset height and HEAD_MAX_ROWS (1,000); shown cells by \
+                 HEAD_MAX_CELLS (100,000) or table_cells, each cut at HEAD_CELL_CHARS (40); text \
+                 by response_bytes",
             ),
         ),
         p("hypothesis_chisq_gof", "probs[]", Exempt(ARRAY_VALUE)),

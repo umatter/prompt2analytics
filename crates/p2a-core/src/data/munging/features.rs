@@ -1,7 +1,8 @@
 //! Feature engineering operations for data preparation.
 //!
 //! This module provides operations for creating new features from existing data,
-//! including lag/lead operations, rolling statistics, scaling, and encoding.
+//! including lag/lead operations, differences, cumulative sums, ranks, scaling, binning
+//! and encoding.
 //!
 //! # Operations
 //!

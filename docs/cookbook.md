@@ -418,7 +418,7 @@ When using prompt2analytics through an AI assistant, you can use natural languag
 
 1. **Always use sessions**: Sessions record all operations for reproducibility
 2. **Set random seeds**: Use `set_seed` before any stochastic operations
-3. **Export scripts**: Use `p2a script export session.json -o analysis.sh`
+3. **Export scripts**: Use `p2a script export session.json -o analysis.sh`. The script replays the commands that succeeded, in the directory they were recorded in; set `P2A_WORKDIR` to replay a copy elsewhere
 
 ### Performance
 

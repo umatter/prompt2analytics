@@ -134,7 +134,9 @@ pub struct HeadDatasetRequest {
     pub dataset: String,
 
     /// Number of rows to return (default: 5)
-    #[schemars(description = "Number of rows (default 5, at most 1000); every column is shown.")]
+    #[schemars(
+        description = "Number of rows (default 5, at most 1000). Every column is shown up to 100,000 cells; a wider preview shows fewer columns, then fewer rows, and says so."
+    )]
     pub n: Option<usize>,
 }
 

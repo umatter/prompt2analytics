@@ -88,6 +88,10 @@ Preview the first N rows of a dataset.
 /head_dataset dataset:mydata n:10
 ```
 
+Shows at most 1,000 rows, with each column's type; every column up to 100,000 cells (or the
+server's `table_cells` limit), beyond which fewer columns, then fewer rows, are shown with a note.
+Cells longer than 40 characters are cut.
+
 ---
 
 ## Data Quality & Cleaning
@@ -1571,7 +1575,7 @@ Run the same analysis across multiple datasets.
 /batch_process datasets:data1,data2,data3 operation:ols columns:outcome,treatment
 ```
 
-`operation` is `describe`, `correlation` or `ols` (the first column is the dependent variable).
+`operation` is `describe`, `correlation` (over the listed columns, or every numeric column without `columns`) or `ols` (the first column is the dependent variable).
 
 ### compare_datasets
 Compare columns across datasets.
@@ -1583,7 +1587,9 @@ Compare columns across datasets.
 **Comparison types:**
 - `summary`: Descriptive statistics
 - `distribution`: Distribution comparison
-- `correlation`: Correlation matrices
+- `correlation`: correlation matrices of the listed columns in each dataset, and their difference (second minus first)
+
+Missing values (null or NaN) are skipped; differences are of the first two datasets.
 
 ### export_session
 Save current session (loaded datasets) to JSON.
