@@ -460,7 +460,7 @@ fn test_cli_script_export_comments_flag() {
     };
     let commands = |sc: &str| {
         sc.lines()
-            .filter(|l| l.starts_with("p2a --session"))
+            .filter(|l| l.starts_with("\"$P2A\" --session"))
             .map(str::to_owned)
             .collect::<Vec<_>>()
     };

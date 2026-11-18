@@ -22,7 +22,7 @@ pub enum ScriptCommands {
         output: PathBuf,
 
         /// Write each recorded command line as a comment above it (true/false; default true).
-        /// The header and the cleanup comment are always written.
+        /// The header and the lines naming failed commands are always written
         #[arg(
             long,
             value_name = "BOOL",
@@ -33,6 +33,12 @@ pub enum ScriptCommands {
             value_parser = clap::builder::BoolishValueParser::new()
         )]
         comments: bool,
+
+        /// Replay the commands that failed when they were recorded too, each with `|| true`
+        /// so that a failure does not stop the script (by default they are only named in a
+        /// comment)
+        #[arg(long)]
+        include_failed: bool,
     },
 
     /// Show session history
@@ -41,7 +47,9 @@ pub enum ScriptCommands {
         session_file: PathBuf,
     },
 
-    /// Run a p2a script
+    /// Run a p2a script with bash; its output and exit status are the script's
+    ///
+    /// The script's `$P2A` is this p2a binary.
     Run {
         /// Script file to execute
         script_file: PathBuf,
@@ -54,7 +62,8 @@ pub fn execute(cmd: &ScriptCommands, format: &OutputFormat) -> anyhow::Result<()
             session_file,
             output,
             comments,
-        } => execute_export(session_file, output, *comments, format),
+            include_failed,
+        } => execute_export(session_file, output, *comments, *include_failed, format),
         ScriptCommands::History { session_file } => execute_history(session_file, format),
         ScriptCommands::Run { script_file } => execute_run(script_file, format),
     }
@@ -71,6 +80,7 @@ fn execute_export(
     session_file: &PathBuf,
     output: &PathBuf,
     comments: bool,
+    include_failed: bool,
     format: &OutputFormat,
 ) -> anyhow::Result<()> {
     // Load the session
@@ -82,12 +92,8 @@ fn execute_export(
         }
     };
 
-    // Generate the bash script, replaying into a temporary session file
-    let temp_session = format!(".p2a_session_{}.json", uuid::Uuid::new_v4());
-    let script = render_script(&session, comments, &temp_session);
-
-    // Write the script
-    std::fs::write(output, &script)?;
+    let script = render_script(&session, comments, include_failed);
+    crate::session::write_atomically(output, script.as_bytes())?;
 
     // Make executable on Unix
     #[cfg(unix)]
@@ -98,10 +104,20 @@ fn execute_export(
         std::fs::set_permissions(output, perms)?;
     }
 
+    let failed = session.commands.iter().filter(|r| !r.success).count();
+    let replayed = if include_failed {
+        session.commands.len()
+    } else {
+        session.commands.len() - failed
+    };
+    let skipped = if include_failed || failed == 0 {
+        String::new()
+    } else {
+        format!(" ({failed} failed commands not replayed)")
+    };
     print_message(
         &format!(
-            "Exported {} commands to: {}",
-            session.commands.len(),
+            "Exported {replayed} commands to: {}{skipped}",
             output.display()
         ),
         format,
@@ -110,37 +126,65 @@ fn execute_export(
     Ok(())
 }
 
-/// Render the bash script for `session`, replaying into `temp_session`.
+/// Render the bash script for `session`.
 ///
-/// When the session ran a command that produces a dataset (`munge *`, `data generate`),
-/// the replay's own session stores those datasets next to `$SESSION_FILE`
-/// (`session::sidecar_dir`), so the cleanup removes that directory too.
-fn render_script(session: &Session, comments: bool, temp_session: &str) -> String {
+/// The script replays into a session file in a fresh `mktemp -d` directory that an `EXIT`
+/// trap removes (with the derived datasets stored beside that session file), whether the
+/// replay succeeds or not. It changes into the directory the session was recorded in
+/// (`P2A_WORKDIR` overrides it) and into each command's own directory where that differs,
+/// and runs `$P2A` (default `p2a`). Commands that failed when recorded are named in a
+/// comment and not replayed, unless `include_failed`, which replays them with `|| true`.
+fn render_script(session: &Session, comments: bool, include_failed: bool) -> String {
     let mut script = String::new();
 
-    // Shebang and header
     script.push_str("#!/bin/bash\n");
     script.push_str("# p2a analytics script\n");
-
     if let Some(title) = &session.title {
         push_comment(&mut script, title);
     }
-
     script.push_str(&format!("# Generated: {}\n", session.updated_at));
     script.push_str(&format!(
         "# p2a version: {}\n",
         comment_text(&session.version)
     ));
+    script.push_str(
+        "# Replays the recorded commands in the directory they ran in. Set P2A_WORKDIR to replay\n\
+         # elsewhere and P2A to use another p2a binary.\n",
+    );
     script.push('\n');
     script.push_str("set -euo pipefail\n");
     script.push('\n');
 
-    // Create a temporary session file for the replay
-    script.push_str(&format!("SESSION_FILE=\"{}\"\n", temp_session));
+    let recorded = if session.working_dir.as_os_str().is_empty() {
+        ".".to_string()
+    } else {
+        script_quote(&session.working_dir.to_string_lossy())
+    };
+    script.push_str("P2A=\"${P2A:-p2a}\"\n");
+    script.push_str(&format!("P2A_RECORDED_DIR={recorded}\n"));
+    script.push_str("P2A_WORKDIR=\"${P2A_WORKDIR:-$P2A_RECORDED_DIR}\"\n");
+    script.push_str("P2A_REPLAY_DIR=\"$(mktemp -d \"${TMPDIR:-/tmp}/p2a_replay.XXXXXX\")\"\n");
+    script.push_str("trap 'rm -rf -- \"$P2A_REPLAY_DIR\"' EXIT\n");
+    script.push_str("SESSION_FILE=\"$P2A_REPLAY_DIR/session.json\"\n");
+    script.push_str("cd -- \"$P2A_WORKDIR\"\n");
     script.push('\n');
 
-    // Generate commands from the session
+    // the directory the replay is in, as a recorded path
+    let mut current = session.working_dir.clone();
     for record in &session.commands {
+        if !record.success && !include_failed {
+            script.push_str("# not replayed (failed when recorded): ");
+            script.push_str(&comment_text(&record.command_line));
+            script.push('\n');
+            continue;
+        }
+        if let Some(cwd) = record.cwd.as_ref().filter(|c| **c != current) {
+            script.push_str(&cd_line(cwd, &session.working_dir));
+            current = cwd.clone();
+        }
+        if !record.success {
+            script.push_str("# failed when recorded; a failure here does not stop the script\n");
+        }
         if comments {
             push_comment(&mut script, &record.command_line);
         }
@@ -153,32 +197,30 @@ fn render_script(session: &Session, comments: bool, temp_session: &str) -> Strin
         } else {
             reconstruct_command(record)
         };
-        script.push_str(&format!("p2a --session \"$SESSION_FILE\" {}\n", cmd));
+        let tail = if record.success { "" } else { " || true" };
+        script.push_str(&format!(
+            "\"$P2A\" --session \"$SESSION_FILE\" {cmd}{tail}\n"
+        ));
         script.push('\n');
     }
 
-    // Cleanup
-    script.push_str("# Cleanup temporary session file\n");
-    script.push_str("rm -f \"$SESSION_FILE\"\n");
-    if session.commands.iter().any(creates_derived_dataset) {
-        script.push_str("rm -rf -- \"$SESSION_FILE.datasets\"\n");
-    }
-    script.push('\n');
     script.push_str("echo \"Script completed successfully\"\n");
-
     script
 }
 
-/// Whether `record` produced a dataset that a session stores as a derived dataset:
-/// `munge *` and `data generate`. Reads the recorded argv, or the category and
-/// subcommand of a legacy record without one.
-fn creates_derived_dataset(record: &crate::session::CommandRecord) -> bool {
-    let (category, subcommand) = match record.argv.as_slice() {
-        [c, s, ..] => (c.as_str(), s.as_str()),
-        [] => (record.category.as_str(), record.subcommand.as_str()),
-        [c] => (c.as_str(), ""),
-    };
-    category == "munge" || (category == "data" && subcommand == "generate")
+/// The `cd` line into the recorded directory `cwd`: relative to `$P2A_WORKDIR` when it lies
+/// under the session's `working_dir`, else the absolute path.
+fn cd_line(cwd: &std::path::Path, working_dir: &std::path::Path) -> String {
+    if cwd == working_dir {
+        return "cd -- \"$P2A_WORKDIR\"\n".to_string();
+    }
+    match cwd.strip_prefix(working_dir) {
+        Ok(rel) if !working_dir.as_os_str().is_empty() => format!(
+            "cd -- \"$P2A_WORKDIR\"/{}\n",
+            script_quote(&rel.to_string_lossy())
+        ),
+        _ => format!("cd -- {}\n", script_quote(&cwd.to_string_lossy())),
+    }
 }
 
 /// Text for a `# ` comment line, with control characters shown as escapes
@@ -312,8 +354,15 @@ fn execute_history(session_file: &PathBuf, format: &OutputFormat) -> anyhow::Res
     Ok(())
 }
 
+/// Run `script_file` with bash: the script reads this process's stdin and writes to its
+/// stdout and stderr as it runs, and `$P2A` is this p2a binary. Text mode frames the
+/// script's output with `Running script:` and `Script completed successfully`; JSON mode
+/// adds nothing to stdout. A failed script ends this process with the script's exit code
+/// (128 + the signal number when a signal killed it), so `main` does not save a
+/// `--session` file afterwards, which is harmless: `script` commands are not recorded.
 fn execute_run(script_file: &PathBuf, format: &OutputFormat) -> anyhow::Result<()> {
-    use std::process::Command;
+    use std::io::Write as _;
+    use std::process::{Command, Stdio};
 
     if !script_file.exists() {
         print_error(
@@ -322,34 +371,49 @@ fn execute_run(script_file: &PathBuf, format: &OutputFormat) -> anyhow::Result<(
         );
         return Ok(());
     }
-
-    print_message(
-        &format!("Running script: {}", script_file.display()),
-        format,
-    );
-
-    let output = Command::new("bash").arg(script_file).output()?;
-
-    // Print stdout
-    if !output.stdout.is_empty() {
-        print!("{}", String::from_utf8_lossy(&output.stdout));
-    }
-
-    // Print stderr
-    if !output.stderr.is_empty() {
-        eprint!("{}", String::from_utf8_lossy(&output.stderr));
-    }
-
-    if output.status.success() {
-        print_message("Script completed successfully", format);
-    } else {
-        print_error(
-            &format!("Script failed with exit code: {:?}", output.status.code()),
+    let text = !matches!(format, OutputFormat::Json);
+    if text {
+        print_message(
+            &format!("Running script: {}", script_file.display()),
             format,
         );
     }
+    let _ = std::io::stdout().flush();
 
-    Ok(())
+    let status = Command::new("bash")
+        .arg("--")
+        .arg(script_file)
+        .env("P2A", std::env::current_exe()?)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()?;
+
+    if status.success() {
+        if text {
+            print_message("Script completed successfully", format);
+        }
+        return Ok(());
+    }
+    let code = exit_code(&status);
+    print_error(&format!("Script failed with exit code {code}"), format);
+    std::process::exit(code);
+}
+
+/// The exit code of a finished child: its own, or 128 + the signal number on Unix when a
+/// signal killed it (as a shell reports it); 1 when neither is known.
+fn exit_code(status: &std::process::ExitStatus) -> i32 {
+    if let Some(code) = status.code() {
+        return code;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(sig) = status.signal() {
+            return 128 + sig;
+        }
+    }
+    1
 }
 
 /// Reconstruct a CLI command from a CommandRecord
@@ -525,17 +589,20 @@ mod tests {
             argv: argv.iter().map(|s| s.to_string()).collect(),
             dataset_refs: vec![],
             output_files: vec![],
+            cwd: None,
             success: true,
             error: None,
             duration_ms: 0,
         }
     }
 
-    #[test]
-    fn render_script_removes_the_derived_dataset_directory() {
+    /// The fixture: title "Demo", working directory /work/proj, a load and a legacy record.
+    fn demo() -> Session {
         let mut s = Session::new();
+        s.title = Some("Demo".into());
         s.version = "0.1.3".into();
         s.updated_at = "2026-01-01T00:00:00Z".parse().unwrap();
+        s.working_dir = "/work/proj".into();
         s.commands.push(record(
             &["data", "load", "d.csv", "--name", "d"],
             "data load d.csv --name d",
@@ -543,6 +610,45 @@ mod tests {
             "load",
             serde_json::Value::Null,
         ));
+        s.commands.push(record(
+            &[],
+            "reg ols d -y y -x x1 x2",
+            "reg",
+            "ols",
+            serde_json::json!({"dataset": "d", "dep_var": "y", "indep_vars": ["x1", "x2"], "robust": "hc1"}),
+        ));
+        s
+    }
+
+    const HEADER: &str = "#!/bin/bash\n# p2a analytics script\n# Demo\n# Generated: 2026-01-01 00:00:00 UTC\n# p2a version: 0.1.3\n# Replays the recorded commands in the directory they ran in. Set P2A_WORKDIR to replay\n# elsewhere and P2A to use another p2a binary.\n\nset -euo pipefail\n\nP2A=\"${P2A:-p2a}\"\nP2A_RECORDED_DIR=/work/proj\nP2A_WORKDIR=\"${P2A_WORKDIR:-$P2A_RECORDED_DIR}\"\nP2A_REPLAY_DIR=\"$(mktemp -d \"${TMPDIR:-/tmp}/p2a_replay.XXXXXX\")\"\ntrap 'rm -rf -- \"$P2A_REPLAY_DIR\"' EXIT\nSESSION_FILE=\"$P2A_REPLAY_DIR/session.json\"\ncd -- \"$P2A_WORKDIR\"\n\n";
+
+    #[test]
+    fn render_script_ordinary_session_is_unchanged() {
+        assert_eq!(
+            render_script(&demo(), true, false),
+            format!(
+                "{HEADER}# data load d.csv --name d\n\"$P2A\" --session \"$SESSION_FILE\" data load d.csv --name d\n\n# reg ols d -y y -x x1 x2\n\"$P2A\" --session \"$SESSION_FILE\" reg ols d -y y -x x1 x2 --robust hc1\n\necho \"Script completed successfully\"\n"
+            )
+        );
+    }
+
+    /// `--comments false`: the same script without the per-command comment lines; the
+    /// header stays.
+    #[test]
+    fn render_script_without_comments_omits_command_lines() {
+        assert_eq!(
+            render_script(&demo(), false, false),
+            format!(
+                "{HEADER}\"$P2A\" --session \"$SESSION_FILE\" data load d.csv --name d\n\n\"$P2A\" --session \"$SESSION_FILE\" reg ols d -y y -x x1 x2 --robust hc1\n\necho \"Script completed successfully\"\n"
+            )
+        );
+    }
+
+    /// The replay session lives in a `mktemp -d` directory that an EXIT trap removes, its
+    /// derived datasets included; no cleanup lines at the end.
+    #[test]
+    fn render_script_removes_the_replay_directory_on_exit() {
+        let mut s = demo();
         s.commands.push(record(
             &["munge", "select", "d", "--columns", "x", "--name", "e"],
             "munge select d --columns x --name e",
@@ -550,87 +656,104 @@ mod tests {
             "select",
             serde_json::Value::Null,
         ));
-        let text = render_script(&s, false, ".p2a_session_test.json");
+        let text = render_script(&s, false, false);
         assert!(
-            text.ends_with(
-                "rm -f \"$SESSION_FILE\"\nrm -rf -- \"$SESSION_FILE.datasets\"\n\necho \"Script completed successfully\"\n"
+            text.contains(
+                "P2A_REPLAY_DIR=\"$(mktemp -d \"${TMPDIR:-/tmp}/p2a_replay.XXXXXX\")\"\ntrap 'rm -rf -- \"$P2A_REPLAY_DIR\"' EXIT\nSESSION_FILE=\"$P2A_REPLAY_DIR/session.json\"\n"
             ),
             "{text}"
         );
-        assert_eq!(
-            crate::session::sidecar_dir(std::path::Path::new(".p2a_session_test.json")),
-            std::path::PathBuf::from(".p2a_session_test.json.datasets")
+        assert!(
+            !text.contains("rm -f") && !text.contains(".datasets"),
+            "{text}"
         );
-        let generate = record(
-            &["data", "generate", "-d", "g", "-c", "[]"],
-            "data generate",
-            "data",
-            "generate",
-            serde_json::Value::Null,
-        );
-        let legacy = record(
-            &[],
-            "munge sort d",
-            "munge",
-            "sort",
-            serde_json::json!({"dataset": "d"}),
-        );
-        assert!(creates_derived_dataset(&generate) && creates_derived_dataset(&legacy));
-        assert!(!creates_derived_dataset(&s.commands[0]));
+        assert!(text.ends_with(
+            "\"$P2A\" --session \"$SESSION_FILE\" munge select d --columns x --name e\n\necho \"Script completed successfully\"\n"
+        ));
     }
 
     #[test]
-    fn render_script_ordinary_session_is_unchanged() {
-        let mut s = Session::new();
-        s.title = Some("Demo".into());
-        s.version = "0.1.3".into();
-        s.updated_at = "2026-01-01T00:00:00Z".parse().unwrap();
-        s.commands.push(record(
-            &["data", "load", "d.csv", "--name", "d"],
-            "data load d.csv --name d",
-            "data",
-            "load",
-            serde_json::Value::Null,
-        ));
-        s.commands.push(record(
-            &[],
-            "reg ols d -y y -x x1 x2",
+    fn render_script_skips_failed_records() {
+        let mut s = demo();
+        let mut bad = record(
+            &["reg", "ols", "d", "-y", "y", "-x", "valuee"],
+            "reg ols d -y y -x valuee",
             "reg",
             "ols",
-            serde_json::json!({"dataset": "d", "dep_var": "y", "indep_vars": ["x1", "x2"], "robust": "hc1"}),
-        ));
+            serde_json::Value::Null,
+        );
+        bad.success = false;
+        s.commands.insert(1, bad);
+        let load = "# data load d.csv --name d\n\"$P2A\" --session \"$SESSION_FILE\" data load d.csv --name d\n\n";
+        let ols = "# reg ols d -y y -x x1 x2\n\"$P2A\" --session \"$SESSION_FILE\" reg ols d -y y -x x1 x2 --robust hc1\n\necho \"Script completed successfully\"\n";
         assert_eq!(
-            render_script(&s, true, ".p2a_session_test.json"),
-            "#!/bin/bash\n# p2a analytics script\n# Demo\n# Generated: 2026-01-01 00:00:00 UTC\n# p2a version: 0.1.3\n\nset -euo pipefail\n\nSESSION_FILE=\".p2a_session_test.json\"\n\n# data load d.csv --name d\np2a --session \"$SESSION_FILE\" data load d.csv --name d\n\n# reg ols d -y y -x x1 x2\np2a --session \"$SESSION_FILE\" reg ols d -y y -x x1 x2 --robust hc1\n\n# Cleanup temporary session file\nrm -f \"$SESSION_FILE\"\n\necho \"Script completed successfully\"\n"
+            render_script(&s, true, false),
+            format!(
+                "{HEADER}{load}# not replayed (failed when recorded): reg ols d -y y -x valuee\n{ols}"
+            )
+        );
+        // the line naming the failed command stays without comments
+        assert!(
+            render_script(&s, false, false)
+                .contains("\n# not replayed (failed when recorded): reg ols d -y y -x valuee\n")
+        );
+        assert_eq!(
+            render_script(&s, true, true),
+            format!(
+                "{HEADER}{load}# failed when recorded; a failure here does not stop the script\n# reg ols d -y y -x valuee\n\"$P2A\" --session \"$SESSION_FILE\" reg ols d -y y -x valuee || true\n\n{ols}"
+            )
         );
     }
 
-    /// `--comments false`: the same script without the per-command comment lines; the
-    /// header and the cleanup comment stay.
     #[test]
-    fn render_script_without_comments_omits_command_lines() {
-        let mut s = Session::new();
-        s.title = Some("Demo".into());
-        s.version = "0.1.3".into();
-        s.updated_at = "2026-01-01T00:00:00Z".parse().unwrap();
-        s.commands.push(record(
-            &["data", "load", "d.csv", "--name", "d"],
-            "data load d.csv --name d",
-            "data",
-            "load",
-            serde_json::Value::Null,
-        ));
-        s.commands.push(record(
-            &[],
-            "reg ols d -y y -x x1 x2",
-            "reg",
-            "ols",
-            serde_json::json!({"dataset": "d", "dep_var": "y", "indep_vars": ["x1", "x2"], "robust": "hc1"}),
-        ));
+    fn render_script_changes_directory_per_record() {
+        let mut s = demo();
+        s.commands.truncate(1);
+        s.commands[0].cwd = Some("/work/proj".into());
+        for (dir, name) in [
+            ("/work/proj/sub", "a"),
+            ("/work/proj/sub", "b"),
+            ("/elsewhere", "c"),
+            ("/work/proj", "d"),
+            ("/work/proj/my dir", "e"),
+        ] {
+            let mut r = record(
+                &["data", "head", name],
+                &format!("data head {name}"),
+                "data",
+                "head",
+                serde_json::Value::Null,
+            );
+            r.cwd = Some(dir.into());
+            s.commands.push(r);
+        }
+        let text = render_script(&s, false, false);
+        let body = text.strip_prefix(HEADER).unwrap();
         assert_eq!(
-            render_script(&s, false, ".p2a_session_test.json"),
-            "#!/bin/bash\n# p2a analytics script\n# Demo\n# Generated: 2026-01-01 00:00:00 UTC\n# p2a version: 0.1.3\n\nset -euo pipefail\n\nSESSION_FILE=\".p2a_session_test.json\"\n\np2a --session \"$SESSION_FILE\" data load d.csv --name d\n\np2a --session \"$SESSION_FILE\" reg ols d -y y -x x1 x2 --robust hc1\n\n# Cleanup temporary session file\nrm -f \"$SESSION_FILE\"\n\necho \"Script completed successfully\"\n"
+            body,
+            "\"$P2A\" --session \"$SESSION_FILE\" data load d.csv --name d\n\n\
+             cd -- \"$P2A_WORKDIR\"/sub\n\"$P2A\" --session \"$SESSION_FILE\" data head a\n\n\
+             \"$P2A\" --session \"$SESSION_FILE\" data head b\n\n\
+             cd -- /elsewhere\n\"$P2A\" --session \"$SESSION_FILE\" data head c\n\n\
+             cd -- \"$P2A_WORKDIR\"\n\"$P2A\" --session \"$SESSION_FILE\" data head d\n\n\
+             cd -- \"$P2A_WORKDIR\"/'my dir'\n\"$P2A\" --session \"$SESSION_FILE\" data head e\n\n\
+             echo \"Script completed successfully\"\n"
         );
+    }
+
+    #[test]
+    fn render_script_quotes_a_crafted_working_dir() {
+        let mut s = demo();
+        s.working_dir = "x\ntouch injected".into();
+        let text = render_script(&s, true, false);
+        assert!(
+            text.contains("\nP2A_RECORDED_DIR=$'x\\ntouch injected'\n"),
+            "{text}"
+        );
+        s.working_dir = "a b;rm".into();
+        assert!(render_script(&s, true, false).contains("\nP2A_RECORDED_DIR='a b;rm'\n"));
+        s.working_dir = PathBuf::new();
+        assert!(render_script(&s, true, false).contains("\nP2A_RECORDED_DIR=.\n"));
     }
 
     #[test]

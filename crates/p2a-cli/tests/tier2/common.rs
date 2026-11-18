@@ -185,6 +185,8 @@ impl TempSession {
         Command::new("bash")
             .arg(script)
             .current_dir(self.dir())
+            .env_remove("P2A")
+            .env_remove("P2A_WORKDIR")
             .env("PATH", path)
             .output()
             .unwrap_or_else(|e| panic!("could not run bash {}: {e}", script.display()))

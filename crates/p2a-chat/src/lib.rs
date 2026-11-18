@@ -108,6 +108,9 @@ pub enum StreamEvent {
     },
     #[serde(rename = "tool_result")]
     ToolResult {
+        /// The tool that produced the images (absent from older servers)
+        #[serde(default)]
+        tool: Option<String>,
         #[serde(default)]
         images: Option<Vec<ImageData>>,
     },
@@ -172,10 +175,16 @@ pub struct ChatArgs {
     #[arg(long)]
     pub record: Option<PathBuf>,
 
-    /// Read prompts from a file instead of interactive input (one prompt per line,
-    /// or multi-line prompts separated by blank lines)
+    /// Read prompts from a file instead of interactive input: prompts are separated by
+    /// blank lines and keep their line breaks. Lines starting with # are comments; start a
+    /// prompt line with \# to send a #
     #[arg(long)]
     pub script: Option<PathBuf>,
+
+    /// With --script: send the remaining prompts after a failed one; the exit status is
+    /// still non-zero
+    #[arg(long)]
+    pub keep_going: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -192,17 +201,46 @@ impl Recorder {
         Ok(Self { file })
     }
 
-    fn write_banner(&mut self, base_url: &str, provider: &str, model: &str) -> anyhow::Result<()> {
-        writeln!(
-            self.file,
-            "$ p2a chat --provider {} --model {}",
-            provider, model
-        )?;
+    /// The banner: first the command that reproduces the run (values shell-quoted; the API
+    /// key and the access token are never written, a comment line says when they were
+    /// given), then the connection line.
+    fn write_banner(&mut self, args: &ChatArgs, base_url: &str) -> anyhow::Result<()> {
+        let mut cmd = format!(
+            "$ p2a chat --url {} --provider {} --model {}",
+            quote(&args.url),
+            quote(&args.provider),
+            quote(&args.model)
+        );
+        if let Some(b) = &args.base_url {
+            cmd.push_str(&format!(" --base-url {}", quote(b)));
+        }
+        if args.output_dir != std::path::Path::new(".") {
+            cmd.push_str(&format!(
+                " --output-dir {}",
+                quote(&args.output_dir.to_string_lossy())
+            ));
+        }
+        if let Some(s) = &args.script {
+            cmd.push_str(&format!(" --script {}", quote(&s.to_string_lossy())));
+        }
+        if args.keep_going {
+            cmd.push_str(" --keep-going");
+        }
+        if let Some(r) = &args.record {
+            cmd.push_str(&format!(" --record {}", quote(&r.to_string_lossy())));
+        }
+        writeln!(self.file, "{cmd}")?;
+        if args.api_key.is_some() || args.access_token.is_some() {
+            writeln!(
+                self.file,
+                "# --api-key / --access-token given, not recorded"
+            )?;
+        }
         writeln!(self.file, "p2a chat")?;
         writeln!(
             self.file,
             "Connected to {} | Provider: {} ({})",
-            base_url, provider, model
+            base_url, args.provider, args.model
         )?;
         writeln!(self.file)?;
         Ok(())
@@ -243,41 +281,66 @@ impl Recorder {
         writeln!(self.file, "Error: {}", error)?;
         Ok(())
     }
+
+    fn write_cancelled(&mut self) -> anyhow::Result<()> {
+        writeln!(self.file, "[cancelled]")?;
+        writeln!(self.file)?;
+        Ok(())
+    }
+}
+
+/// `s` as one shell word: bare when it is non-empty and only `[A-Za-z0-9_./:=@%+-]`, else in
+/// single quotes with each `'` written `'\''` (the rule of p2a-cli's `shell_quote`).
+fn quote(s: &str) -> String {
+    if !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "_./:=@%+-".contains(c))
+    {
+        return s.to_string();
+    }
+    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 // ---------------------------------------------------------------------------
 // Script reader — reads prompts from a file
 // ---------------------------------------------------------------------------
 
+/// The prompts of a script file. Blank lines separate prompts; a prompt's lines keep their
+/// line breaks (each line without trailing white space, the prompt trimmed). A line that
+/// starts with `#` is a comment; `\#` at the start of a line stands for a `#`.
 fn read_script(path: &PathBuf) -> anyhow::Result<Vec<String>> {
     let file = std::fs::File::open(path)?;
     let reader = std::io::BufReader::new(file);
 
     let mut prompts = Vec::new();
     let mut current = String::new();
+    let mut flush = |current: &mut String| {
+        let prompt = current.trim();
+        if !prompt.is_empty() {
+            prompts.push(prompt.to_string());
+        }
+        current.clear();
+    };
 
     for line in reader.lines() {
         let line = line?;
-        // Lines starting with # are comments
         if line.starts_with('#') {
             continue;
         }
         if line.trim().is_empty() {
-            // Blank line separates multi-line prompts
-            if !current.trim().is_empty() {
-                prompts.push(current.trim().to_string());
-                current.clear();
-            }
-        } else {
-            if !current.is_empty() {
-                current.push(' ');
-            }
-            current.push_str(line.trim());
+            flush(&mut current);
+            continue;
         }
+        let line = match line.strip_prefix("\\#") {
+            Some(rest) => format!("#{rest}"),
+            None => line,
+        };
+        if !current.is_empty() {
+            current.push('\n');
+        }
+        current.push_str(line.trim_end());
     }
-    if !current.trim().is_empty() {
-        prompts.push(current.trim().to_string());
-    }
+    flush(&mut current);
 
     Ok(prompts)
 }
@@ -307,7 +370,12 @@ fn parse_sse_line(line: &str) -> Option<StreamEvent> {
 // Terminal rendering + recording
 // ---------------------------------------------------------------------------
 
-fn render_event(event: &StreamEvent, output_dir: &PathBuf, recorder: &mut Option<Recorder>) {
+fn render_event(
+    event: &StreamEvent,
+    output_dir: &std::path::Path,
+    recorder: &mut Option<Recorder>,
+    charts: &mut ChartNamer,
+) {
     match event {
         StreamEvent::Status { message } => {
             eprintln!("  {}", message.dimmed());
@@ -330,17 +398,11 @@ fn render_event(event: &StreamEvent, output_dir: &PathBuf, recorder: &mut Option
                 let _ = rec.write_tool_end(*elapsed_ms);
             }
         }
-        StreamEvent::ToolResult { images } => {
+        StreamEvent::ToolResult { tool, images } => {
             if let Some(imgs) = images {
-                for (i, img) in imgs.iter().enumerate() {
-                    let ext = match img.mime_type.as_str() {
-                        "image/png" => "png",
-                        "image/svg+xml" => "svg",
-                        _ => "bin",
-                    };
-                    let path = output_dir.join(format!("chart_{}.{}", i, ext));
-                    match save_image(&img.data, &path) {
-                        Ok(()) => {
+                for img in imgs {
+                    match charts.save(output_dir, tool.as_deref(), img) {
+                        Ok(path) => {
                             eprintln!("  {} {}", "Saved:".green(), path.display());
                             if let Some(rec) = recorder.as_mut() {
                                 let _ = rec.write_image_saved(&path);
@@ -399,10 +461,82 @@ fn session_label(id: &str) -> &str {
     p2a_text::truncate_chars(id, 8)
 }
 
-fn save_image(base64_data: &str, path: &std::path::Path) -> anyhow::Result<()> {
-    let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, base64_data)?;
-    std::fs::write(path, bytes)?;
-    Ok(())
+/// The file extension of a chart of MIME type `mime` (`bin` for an unknown type).
+fn chart_extension(mime: &str) -> &'static str {
+    match mime {
+        "image/png" => "png",
+        "image/svg+xml" => "svg",
+        "image/jpeg" | "image/jpg" => "jpg",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        _ => "bin",
+    }
+}
+
+/// A tool name as part of a file name: ASCII letters, digits, `_` and `-` kept, every other
+/// character `_`, at most 40 characters.
+fn chart_tool_part(tool: &str) -> String {
+    let safe: String = tool
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    p2a_text::truncate_chars(&safe, 40).to_string()
+}
+
+/// The most file names [`ChartNamer::save`] tries for one chart.
+const MAX_CHART_TRIES: u32 = 10_000;
+
+/// Names the charts of one run `chart_<NNN>[_<tool>].<ext>`, numbered from 1 over the
+/// whole run, and never overwrites a file: a taken name moves on to the next number.
+#[derive(Debug, Default)]
+struct ChartNamer {
+    /// The last number used
+    last: u32,
+}
+
+impl ChartNamer {
+    /// Decodes `img` and writes it to a new file in `dir`; returns its path.
+    fn save(
+        &mut self,
+        dir: &std::path::Path,
+        tool: Option<&str>,
+        img: &ImageData,
+    ) -> anyhow::Result<PathBuf> {
+        use std::io::Write as _;
+        let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &img.data)?;
+        let ext = chart_extension(&img.mime_type);
+        let tool = tool.map(chart_tool_part).filter(|t| !t.is_empty());
+        for _ in 0..MAX_CHART_TRIES {
+            self.last += 1;
+            let name = match &tool {
+                Some(t) => format!("chart_{:03}_{t}.{ext}", self.last),
+                None => format!("chart_{:03}.{ext}", self.last),
+            };
+            let path = dir.join(name);
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(mut file) => {
+                    file.write_all(&bytes)?;
+                    return Ok(path);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e.into()),
+            }
+        }
+        anyhow::bail!(
+            "no free chart file name in {} after {MAX_CHART_TRIES} tries",
+            dir.display()
+        )
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -563,6 +697,55 @@ fn connect_failure_hint(err: &ConnectError) -> ConnectHint {
 // REPL
 // ---------------------------------------------------------------------------
 
+/// How one prompt ended.
+#[derive(Debug)]
+enum Outcome {
+    /// The answer, complete
+    Done(Message),
+    /// The request or the stream failed
+    Failed(anyhow::Error),
+    /// The user cancelled the answer (Ctrl+C)
+    Cancelled,
+}
+
+/// Runs `answer` until it ends or `cancel` completes, whichever comes first. A cancelled
+/// answer is dropped and its connection closed; the server stops the chat on the
+/// disconnect.
+async fn stream_or_cancel(
+    answer: impl std::future::Future<Output = anyhow::Result<Message>>,
+    cancel: impl std::future::Future<Output = ()>,
+) -> Outcome {
+    let outcome = tokio::select! {
+        result = answer => match result {
+            Ok(message) => Outcome::Done(message),
+            Err(e) => Outcome::Failed(e),
+        },
+        () = cancel => Outcome::Cancelled,
+    };
+    if matches!(outcome, Outcome::Cancelled) {
+        // The connection belongs to a task of the HTTP client, which closes it once polled
+        // after the dropped answer. Let it run now: the caller may block next (the prompt
+        // of the interactive mode reads the terminal on this thread).
+        for _ in 0..CLOSE_YIELDS {
+            tokio::task::yield_now().await;
+        }
+    }
+    outcome
+}
+
+/// How often [`stream_or_cancel`] yields to the runtime after a cancellation.
+const CLOSE_YIELDS: usize = 16;
+
+/// Completes at the next Ctrl+C; never when the signal handler cannot be installed.
+async fn ctrl_c() {
+    if tokio::signal::ctrl_c().await.is_err() {
+        std::future::pending::<()>().await;
+    }
+}
+
+/// Run the chat: a script (`--script`) or the interactive prompt. A scripted run stops at
+/// the first failed prompt and returns an error (with `--keep-going` it sends the rest and
+/// still returns one); Ctrl+C cancels the current answer, and stops a scripted run.
 pub async fn run(args: &ChatArgs) -> anyhow::Result<()> {
     let token = args
         .access_token
@@ -570,7 +753,15 @@ pub async fn run(args: &ChatArgs) -> anyhow::Result<()> {
         .map(str::trim)
         .filter(|t| !t.is_empty());
     let client = build_http_client(token)?;
-    let token_sent = token.is_some();
+    run_with_client(args, client, token.is_some()).await
+}
+
+/// [`run`] with the HTTP client given.
+async fn run_with_client(
+    args: &ChatArgs,
+    client: reqwest::Client,
+    token_sent: bool,
+) -> anyhow::Result<()> {
     let base_url = args.url.trim_end_matches('/');
 
     // Create session
@@ -585,7 +776,7 @@ pub async fn run(args: &ChatArgs) -> anyhow::Result<()> {
     // Initialize recorder
     let mut recorder = if let Some(ref path) = args.record {
         let mut rec = Recorder::new(path)?;
-        rec.write_banner(base_url, &args.provider, &args.model)?;
+        rec.write_banner(args, base_url)?;
         Some(rec)
     } else {
         None
@@ -634,52 +825,85 @@ pub async fn run(args: &ChatArgs) -> anyhow::Result<()> {
     };
 
     let mut history: Vec<Message> = Vec::new();
+    let mut charts = ChartNamer::default();
 
-    // Choose input source: script file or interactive readline
-    if let Some(prompts) = script_prompts {
-        // Non-interactive: run each prompt sequentially
-        for input in &prompts {
-            // Echo the prompt (looks like interactive)
-            println!("{} {}", "p2a>".bright_green().bold(), input);
-            println!();
-
+    // One prompt: send it, stream the answer (Ctrl+C cancels it) and extend the history
+    // when the answer is complete.
+    macro_rules! ask {
+        ($input:expr) => {{
+            let input: &str = $input;
             if let Some(ref mut rec) = recorder {
                 rec.write_prompt(input)?;
             }
-
             let request = LlmChatRequest {
                 session_id: session_id.clone(),
-                message: input.clone(),
+                message: input.to_string(),
                 provider: Some(provider_config.clone()),
                 history: Some(history.clone()),
                 interpret: true,
                 conversation_id: None,
                 retrieve_history: false,
             };
-
-            match stream_chat(
-                &client,
-                base_url,
-                &request,
-                &args.output_dir,
-                &mut recorder,
-                token_sent,
+            let outcome = stream_or_cancel(
+                stream_chat(
+                    &client,
+                    base_url,
+                    &request,
+                    &args.output_dir,
+                    &mut recorder,
+                    &mut charts,
+                    token_sent,
+                ),
+                ctrl_c(),
             )
-            .await
-            {
-                Ok(msg) => {
+            .await;
+            match &outcome {
+                Outcome::Done(msg) => {
                     history.push(Message {
                         role: "user".to_string(),
-                        content: input.clone(),
+                        content: input.to_string(),
                         tool_calls: None,
                         tool_results: None,
                     });
-                    history.push(msg);
+                    history.push(msg.clone());
                 }
-                Err(e) => {
-                    eprintln!("{} {}", "Request failed:".red(), e);
+                Outcome::Failed(e) => eprintln!("{} {}", "Request failed:".red(), e),
+                Outcome::Cancelled => {
+                    println!();
+                    println!("{}", "Cancelled.".dimmed());
+                    if let Some(ref mut rec) = recorder {
+                        let _ = rec.write_cancelled();
+                    }
                 }
             }
+            outcome
+        }};
+    }
+
+    // Choose input source: script file or interactive readline
+    if let Some(prompts) = script_prompts {
+        let n = prompts.len();
+        let mut failed = 0;
+        for (k, input) in prompts.iter().enumerate() {
+            // Echo the prompt (looks like interactive)
+            println!("{} {}", "p2a>".bright_green().bold(), input);
+            println!();
+            match ask!(input) {
+                Outcome::Done(_) => {}
+                Outcome::Failed(e) => {
+                    failed += 1;
+                    if !args.keep_going {
+                        anyhow::bail!(
+                            "prompt {} of {n} failed: {e}; the remaining prompts were not sent (use --keep-going to send them)",
+                            k + 1
+                        );
+                    }
+                }
+                Outcome::Cancelled => anyhow::bail!("interrupted at prompt {} of {n}", k + 1),
+            }
+        }
+        if failed > 0 {
+            anyhow::bail!("{failed} of {n} prompts failed");
         }
     } else {
         // Interactive mode
@@ -724,43 +948,8 @@ pub async fn run(args: &ChatArgs) -> anyhow::Result<()> {
                 _ => {}
             }
 
-            if let Some(ref mut rec) = recorder {
-                rec.write_prompt(input)?;
-            }
-
-            let request = LlmChatRequest {
-                session_id: session_id.clone(),
-                message: input.to_string(),
-                provider: Some(provider_config.clone()),
-                history: Some(history.clone()),
-                interpret: true,
-                conversation_id: None,
-                retrieve_history: false,
-            };
-
-            match stream_chat(
-                &client,
-                base_url,
-                &request,
-                &args.output_dir,
-                &mut recorder,
-                token_sent,
-            )
-            .await
-            {
-                Ok(msg) => {
-                    history.push(Message {
-                        role: "user".to_string(),
-                        content: input.to_string(),
-                        tool_calls: None,
-                        tool_results: None,
-                    });
-                    history.push(msg);
-                }
-                Err(e) => {
-                    eprintln!("{} {}", "Request failed:".red(), e);
-                }
-            }
+            // a failed or cancelled answer returns to the prompt
+            let _ = ask!(input);
         }
     }
 
@@ -805,8 +994,9 @@ async fn stream_chat(
     client: &reqwest::Client,
     base_url: &str,
     request: &LlmChatRequest,
-    output_dir: &PathBuf,
+    output_dir: &std::path::Path,
     recorder: &mut Option<Recorder>,
+    charts: &mut ChartNamer,
     token_sent: bool,
 ) -> anyhow::Result<Message> {
     let resp = client
@@ -827,6 +1017,7 @@ async fn stream_chat(
     let mut stream = resp.bytes_stream();
     let mut buffer: Vec<u8> = Vec::new();
     let mut final_message: Option<Message> = None;
+    let mut last_error: Option<String> = None;
 
     while let Some(chunk_result) = stream.next().await {
         let bytes = chunk_result?;
@@ -842,10 +1033,12 @@ async fn stream_chat(
             }
             let line = String::from_utf8_lossy(&line_bytes[..end]).into_owned();
             if let Some(event) = parse_sse_line(&line) {
-                if let StreamEvent::Done { ref message } = event {
-                    final_message = Some(message.clone());
+                match event {
+                    StreamEvent::Done { ref message } => final_message = Some(message.clone()),
+                    StreamEvent::Error { ref error } => last_error = Some(error.clone()),
+                    _ => {}
                 }
-                render_event(&event, output_dir, recorder);
+                render_event(&event, output_dir, recorder, charts);
             }
         }
     }
@@ -854,14 +1047,20 @@ async fn stream_chat(
     if !buffer.is_empty() {
         let line = String::from_utf8_lossy(&buffer).into_owned();
         if let Some(event) = parse_sse_line(&line) {
-            if let StreamEvent::Done { ref message } = event {
-                final_message = Some(message.clone());
+            match event {
+                StreamEvent::Done { ref message } => final_message = Some(message.clone()),
+                StreamEvent::Error { ref error } => last_error = Some(error.clone()),
+                _ => {}
             }
-            render_event(&event, output_dir, recorder);
+            render_event(&event, output_dir, recorder, charts);
         }
     }
 
-    final_message.ok_or_else(|| anyhow::anyhow!("Stream ended without a Done event"))
+    // the server's own error, when it sent one, says why there is no answer
+    final_message.ok_or_else(|| match last_error {
+        Some(e) => anyhow::Error::msg(e),
+        None => anyhow::anyhow!("Stream ended without a Done event"),
+    })
 }
 
 fn print_help() {
@@ -874,11 +1073,12 @@ fn print_help() {
     println!("  - Ask natural language questions about your data");
     println!("  - Reference datasets by filename (e.g., \"load sales.csv\")");
     println!("  - Follow-up questions use conversation context");
-    println!("  - Use Ctrl+D to exit, Ctrl+C to cancel");
+    println!("  - Ctrl+C cancels the current answer; Ctrl+D or /quit exits");
     println!();
     println!("{}", "Recording:".bold());
     println!("  --record file.txt   Save transcript to file");
     println!("  --script file.txt   Read prompts from file");
+    println!("  --keep-going        With --script, send the remaining prompts after a failed one");
 }
 
 #[cfg(test)]
@@ -1226,5 +1426,406 @@ mod tests {
         assert!(read_script(&p.0).unwrap().is_empty());
         drop(p);
         assert!(read_script(&std::env::temp_dir().join("p2a_chat_no_such_script.txt")).is_err());
+    }
+
+    /// A scratch directory under the temporary directory, removed when dropped.
+    struct ScratchDir(PathBuf);
+
+    impl Drop for ScratchDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn scratch_dir(tag: &str) -> ScratchDir {
+        let p = std::env::temp_dir().join(format!("p2a_chat_charts_{}_{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(&p).unwrap();
+        ScratchDir(p)
+    }
+
+    fn image_event(tool: Option<&str>, mime: &str, bytes: &[u8]) -> StreamEvent {
+        StreamEvent::ToolResult {
+            tool: tool.map(str::to_string),
+            images: Some(vec![ImageData {
+                data: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes),
+                mime_type: mime.to_string(),
+            }]),
+        }
+    }
+
+    fn files(dir: &std::path::Path) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn charts_get_a_running_number_and_the_tool_name() {
+        let d = scratch_dir("numbers");
+        let mut charts = ChartNamer::default();
+        let mut rec = None;
+        render_event(
+            &image_event(None, "image/png", b"first"),
+            &d.0,
+            &mut rec,
+            &mut charts,
+        );
+        render_event(
+            &image_event(Some("viz_scatter"), "image/png", b"second"),
+            &d.0,
+            &mut rec,
+            &mut charts,
+        );
+        assert_eq!(files(&d.0), ["chart_001.png", "chart_002_viz_scatter.png"]);
+        assert_eq!(std::fs::read(d.0.join("chart_001.png")).unwrap(), b"first");
+        assert_eq!(
+            std::fs::read(d.0.join("chart_002_viz_scatter.png")).unwrap(),
+            b"second"
+        );
+    }
+
+    #[test]
+    fn charts_never_overwrite_a_file() {
+        let d = scratch_dir("exists");
+        std::fs::write(d.0.join("chart_001.png"), b"mine").unwrap();
+        let mut charts = ChartNamer::default();
+        render_event(
+            &image_event(None, "image/png", b"new"),
+            &d.0,
+            &mut None,
+            &mut charts,
+        );
+        assert_eq!(std::fs::read(d.0.join("chart_001.png")).unwrap(), b"mine");
+        assert_eq!(std::fs::read(d.0.join("chart_002.png")).unwrap(), b"new");
+    }
+
+    #[test]
+    fn chart_extensions_and_tool_names_are_safe() {
+        let d = scratch_dir("names");
+        let mut charts = ChartNamer::default();
+        render_event(
+            &image_event(None, "image/jpeg", b"j"),
+            &d.0,
+            &mut None,
+            &mut charts,
+        );
+        render_event(
+            &image_event(Some("../x y"), "image/png", b"p"),
+            &d.0,
+            &mut None,
+            &mut charts,
+        );
+        render_event(
+            &image_event(Some(""), "image/x-unknown", b"u"),
+            &d.0,
+            &mut None,
+            &mut charts,
+        );
+        assert_eq!(
+            files(&d.0),
+            ["chart_001.jpg", "chart_002____x_y.png", "chart_003.bin"]
+        );
+        assert_eq!(chart_extension("image/jpg"), "jpg");
+        assert_eq!(chart_extension("image/gif"), "gif");
+        assert_eq!(chart_extension("image/webp"), "webp");
+        assert_eq!(chart_extension("image/svg+xml"), "svg");
+        assert_eq!(chart_tool_part(&"a".repeat(60)).len(), 40);
+    }
+
+    /// Reads one HTTP request (headers and a `Content-Length` body) from `stream`.
+    fn read_request(stream: &mut std::net::TcpStream) -> String {
+        let mut raw = Vec::new();
+        let mut buf = [0u8; 1024];
+        let header_end = loop {
+            let n = stream.read(&mut buf).unwrap_or(0);
+            if n == 0 {
+                break None;
+            }
+            raw.extend_from_slice(&buf[..n]);
+            if let Some(pos) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+                break Some(pos + 4);
+            }
+        };
+        if let Some(end) = header_end {
+            let head = String::from_utf8_lossy(&raw[..end]).to_ascii_lowercase();
+            let content_length = head
+                .lines()
+                .find_map(|l| l.strip_prefix("content-length:"))
+                .and_then(|v| v.trim().parse::<usize>().ok())
+                .unwrap_or(0);
+            while raw.len() < end + content_length {
+                let n = stream.read(&mut buf).unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                raw.extend_from_slice(&buf[..n]);
+            }
+        }
+        String::from_utf8_lossy(&raw).into_owned()
+    }
+
+    /// Serves `responses` in order, one accepted connection per request, each answered
+    /// with `Connection: close`; returns the URL and the number of requests served so far.
+    fn sequential_server(
+        responses: Vec<String>,
+    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = count.clone();
+        std::thread::spawn(move || {
+            for response in responses {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
+                read_request(&mut stream);
+                seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        (format!("http://{addr}"), count)
+    }
+
+    fn json_response(body: &str) -> String {
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    fn sse_response(events: &[&str]) -> String {
+        let mut r = String::from(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
+        );
+        for e in events {
+            r.push_str(&format!("data: {e}\n\n"));
+        }
+        r
+    }
+
+    const FAILED_ANSWER: &str = r#"{"type":"error","error":"provider down"}"#;
+    const GOOD_ANSWER: [&str; 2] = [
+        r#"{"type":"content","text":"ok"}"#,
+        r#"{"type":"done","message":{"role":"assistant","content":"ok"}}"#,
+    ];
+
+    fn script_args(
+        url: &str,
+        script: &std::path::Path,
+        out: &std::path::Path,
+        extra: &[&str],
+    ) -> ChatArgs {
+        let mut argv = vec![
+            "p2a-chat",
+            "--url",
+            url,
+            "--script",
+            script.to_str().unwrap(),
+            "--output-dir",
+            out.to_str().unwrap(),
+            "--provider",
+            "ollama",
+            "--model",
+            "m",
+        ];
+        argv.extend_from_slice(extra);
+        ChatArgs::parse_from(argv)
+    }
+
+    async fn run_local(args: &ChatArgs) -> anyhow::Result<()> {
+        let client = client_builder(None).unwrap().no_proxy().build().unwrap();
+        run_with_client(args, client, false).await
+    }
+
+    #[tokio::test]
+    async fn scripted_run_stops_at_a_failed_prompt() {
+        let d = scratch_dir("stop");
+        let script = script_file("stop", "first\n\nsecond\n");
+        let (url, count) = sequential_server(vec![
+            json_response(OK_SESSION),
+            sse_response(&[FAILED_ANSWER]),
+            sse_response(&GOOD_ANSWER),
+        ]);
+        let err = run_local(&script_args(&url, &script.0, &d.0, &[]))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.starts_with("prompt 1 of 2 failed: provider down"),
+            "{err}"
+        );
+        assert!(err.contains("--keep-going"), "{err}");
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn scripted_run_with_keep_going_sends_the_rest_and_still_fails() {
+        let d = scratch_dir("keep");
+        let script = script_file("keep", "first\n\nsecond\n");
+        let (url, count) = sequential_server(vec![
+            json_response(OK_SESSION),
+            sse_response(&[FAILED_ANSWER]),
+            sse_response(&[FAILED_ANSWER]),
+        ]);
+        let err = run_local(&script_args(&url, &script.0, &d.0, &["--keep-going"]))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert_eq!(err, "2 of 2 prompts failed");
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn scripted_run_with_good_answers_succeeds() {
+        let d = scratch_dir("good");
+        let script = script_file("good", "first\n\nsecond\n");
+        let (url, count) = sequential_server(vec![
+            json_response(OK_SESSION),
+            sse_response(&GOOD_ANSWER),
+            sse_response(&GOOD_ANSWER),
+        ]);
+        run_local(&script_args(&url, &script.0, &d.0, &[]))
+            .await
+            .unwrap();
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn stream_or_cancel_returns_cancelled() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let (fire, cancel) = futures::channel::oneshot::channel::<()>();
+        let (closed_tx, closed_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            read_request(&mut stream);
+            let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n";
+            let _ = stream.write_all(head.as_bytes());
+            let _ = stream.write_all(b"data: {\"type\":\"content\",\"text\":\"partial\"}\n\n");
+            let _ = stream.flush();
+            let _ = fire.send(());
+            // hang guard, not a timing assertion: wait up to 10 s for the client to close
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_millis(100)))
+                .unwrap();
+            let mut buf = [0u8; 64];
+            for _ in 0..100 {
+                match stream.read(&mut buf) {
+                    Ok(0) => {
+                        let _ = closed_tx.send(true);
+                        return;
+                    }
+                    Ok(_) => {}
+                    Err(e)
+                        if matches!(
+                            e.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                        ) => {}
+                    Err(_) => {
+                        let _ = closed_tx.send(true);
+                        return;
+                    }
+                }
+            }
+            let _ = closed_tx.send(false);
+        });
+        let client = client_builder(None).unwrap().no_proxy().build().unwrap();
+        let request = LlmChatRequest {
+            session_id: "s".into(),
+            message: "hi".into(),
+            provider: None,
+            history: None,
+            interpret: true,
+            conversation_id: None,
+            retrieve_history: false,
+        };
+        let d = scratch_dir("cancel");
+        let mut recorder = None;
+        let mut charts = ChartNamer::default();
+        let outcome = stream_or_cancel(
+            stream_chat(
+                &client,
+                &url,
+                &request,
+                &d.0,
+                &mut recorder,
+                &mut charts,
+                false,
+            ),
+            async {
+                let _ = cancel.await;
+            },
+        )
+        .await;
+        assert!(matches!(outcome, Outcome::Cancelled), "{outcome:?}");
+        assert!(
+            closed_rx
+                .recv_timeout(std::time::Duration::from_secs(15))
+                .unwrap(),
+            "the client closed the connection"
+        );
+    }
+
+    #[test]
+    fn banner_records_the_command() {
+        let d = scratch_dir("banner");
+        let record = d.0.join("t.txt");
+        let args = ChatArgs::parse_from([
+            "p2a-chat",
+            "--url",
+            "http://127.0.0.1:9/x",
+            "--provider",
+            "openai",
+            "--model",
+            "gpt x",
+            "--base-url",
+            "http://h/v1",
+            "--script",
+            "p.txt",
+            "--api-key",
+            "sk-test-NOTRECORDED-7f3",
+            "--access-token",
+            "tok-NOTRECORDED-9c1",
+            "--record",
+            record.to_str().unwrap(),
+        ]);
+        let mut rec = Recorder::new(&record).unwrap();
+        rec.write_banner(&args, "http://127.0.0.1:9/x").unwrap();
+        drop(rec);
+        let text = std::fs::read_to_string(&record).unwrap();
+        let mut lines = text.lines();
+        assert_eq!(
+            lines.next().unwrap(),
+            format!(
+                "$ p2a chat --url http://127.0.0.1:9/x --provider openai --model 'gpt x' --base-url http://h/v1 --script p.txt --record {}",
+                quote(record.to_str().unwrap())
+            )
+        );
+        assert_eq!(
+            lines.next().unwrap(),
+            "# --api-key / --access-token given, not recorded"
+        );
+        assert!(!text.contains("NOTRECORDED"), "{text}");
+        assert_eq!(quote("it's"), r"'it'\''s'");
+        assert_eq!(quote(""), "''");
+    }
+
+    #[test]
+    fn read_script_keeps_hash_prompts_and_line_breaks() {
+        let p = script_file(
+            "hash",
+            "# note\n\\#3: rerun with clustering\n\nline one\nline two\n",
+        );
+        assert_eq!(
+            read_script(&p.0).unwrap(),
+            ["#3: rerun with clustering", "line one\nline two"]
+        );
     }
 }

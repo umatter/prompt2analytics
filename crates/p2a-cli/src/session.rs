@@ -5,7 +5,7 @@ use chrono::{DateTime, Utc};
 use p2a_core::{DataLoader, Dataset};
 use serde::{Deserialize, Serialize};
 use std::cell::{OnceCell, RefCell};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -14,7 +14,9 @@ use std::time::Instant;
 pub struct DatasetMeta {
     /// Dataset name/identifier
     pub name: String,
-    /// Original file path
+    /// The file the dataset was loaded from, as an absolute path (session files written by
+    /// older p2a versions may hold a path relative to [`Session::working_dir`]); for a
+    /// derived dataset, the stored copy relative to the session file's directory
     pub source_path: PathBuf,
     /// File format (csv, parquet, excel, stata, sas)
     pub format: String,
@@ -34,6 +36,14 @@ pub struct DatasetMeta {
     /// file's directory. Absent in older session files and for loaded files.
     #[serde(default, skip_serializing_if = "is_false")]
     pub derived: bool,
+    /// Size of the source file in bytes at `data load`; a reload warns when it differs.
+    /// `None` for derived datasets, older files and a file whose size could not be read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_bytes: Option<u64>,
+    /// Modification time of the source file at `data load`; a reload warns when it
+    /// differs. `None` as for `source_bytes`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_modified: Option<DateTime<Utc>>,
 }
 
 /// serde: omit `derived` when it is false.
@@ -114,7 +124,8 @@ fn derived_file(meta: &DatasetMeta, session_path: &Path) -> anyhow::Result<PathB
             Ok(dir.join(f))
         }
         _ => anyhow::bail!(
-            "the session entry points outside {} ({}); refusing to use it",
+            "the stored copy of dataset '{}' must be under {}/ (found {}); was the session file renamed or copied? Re-run the commands that created it",
+            meta.name,
             expected_dir.to_string_lossy(),
             meta.source_path.display()
         ),
@@ -134,7 +145,10 @@ pub struct CommandRecord {
     pub category: String,
     /// Subcommand name (load, ols, fe, etc.)
     pub subcommand: String,
-    /// Structured arguments for reconstruction
+    /// Not filled any more (recorded as `null`); [`CommandRecord::argv`] is the
+    /// canonical record of a command, and `script export` reads only `argv` (or this field
+    /// for records older than `argv`). Still written, because older p2a versions require it.
+    #[serde(default)]
     pub arguments: serde_json::Value,
     /// The command-portion argv (category, subcommand, and args) as actually
     /// invoked: without the program name, without the global flags typed before
@@ -142,10 +156,16 @@ pub struct CommandRecord {
     /// Preferred over `arguments` for faithful, injection-safe script export.
     #[serde(default)]
     pub argv: Vec<String>,
-    /// Referenced datasets by name
+    /// Not filled any more (recorded empty); see [`CommandRecord::arguments`]
+    #[serde(default)]
     pub dataset_refs: Vec<String>,
-    /// Output file paths (for viz commands)
+    /// Not filled any more (recorded empty); see [`CommandRecord::arguments`]
+    #[serde(default)]
     pub output_files: Vec<PathBuf>,
+    /// The working directory of the invocation (`None` in older files); an exported
+    /// script changes into it before replaying the command
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<PathBuf>,
     /// Whether the command succeeded
     pub success: bool,
     /// Optional error message if failed
@@ -165,7 +185,8 @@ pub struct Session {
     pub created_at: DateTime<Utc>,
     /// When the session was last modified
     pub updated_at: DateTime<Utc>,
-    /// Working directory when session was created
+    /// The working directory of the session's first command; older files' relative
+    /// dataset paths are read against it
     pub working_dir: PathBuf,
     /// Datasets loaded during this session
     pub datasets: HashMap<String, DatasetMeta>,
@@ -197,10 +218,17 @@ impl Session {
         Ok(session)
     }
 
-    /// Save the session to a file
+    /// Read a session file for an invocation: `None` when the file does not exist or holds
+    /// only whitespace (an empty file made by `mktemp`, say), the parsed session otherwise.
+    /// [`Session::load`] keeps refusing an empty file.
+    pub fn read(path: &Path) -> anyhow::Result<Option<Session>> {
+        Ok(read_session_file(path)?.0)
+    }
+
+    /// Save the session to a file, atomically ([`write_atomically`]).
     pub fn save(&self, path: &PathBuf) -> anyhow::Result<()> {
         let content = serde_json::to_string_pretty(self)?;
-        std::fs::write(path, content)?;
+        write_atomically(path, content.as_bytes())?;
         Ok(())
     }
 
@@ -223,22 +251,183 @@ impl Default for Session {
     }
 }
 
+/// What identifies the contents of a session file between two reads: length,
+/// modification time and, on Unix, device and inode (a rename over the file changes them).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Fingerprint {
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    #[cfg(unix)]
+    dev: u64,
+    #[cfg(unix)]
+    ino: u64,
+}
+
+impl Fingerprint {
+    fn of(meta: &std::fs::Metadata) -> Self {
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt;
+        Self {
+            len: meta.len(),
+            modified: meta.modified().ok(),
+            #[cfg(unix)]
+            dev: meta.dev(),
+            #[cfg(unix)]
+            ino: meta.ino(),
+        }
+    }
+}
+
+/// Reads a session file through one handle, so the fingerprint describes exactly the bytes
+/// read: `(None, None)` when the file does not exist, `(None, Some(_))` when it holds only
+/// whitespace, the parsed session otherwise.
+fn read_session_file(path: &Path) -> anyhow::Result<(Option<Session>, Option<Fingerprint>)> {
+    use std::io::Read as _;
+    let mut file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((None, None)),
+        Err(e) => return Err(e.into()),
+    };
+    let fingerprint = Fingerprint::of(&file.metadata()?);
+    let mut content = String::new();
+    file.read_to_string(&mut content)?;
+    if content.trim().is_empty() {
+        return Ok((None, Some(fingerprint)));
+    }
+    Ok((Some(serde_json::from_str(&content)?), Some(fingerprint)))
+}
+
+/// `<session file>.lock`, beside the session file: the file [`SessionManager::save`] locks.
+/// Created at the first save and never removed.
+fn lock_path(session_path: &Path) -> PathBuf {
+    let mut name = session_path
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_default();
+    name.push(".lock");
+    session_path.with_file_name(name)
+}
+
+/// Writes `bytes` to `path` so that a reader sees the old file or the new one, never a
+/// part: a temporary file `.<name>.<uuid>.tmp` in the target's directory (with the
+/// existing file's permissions), then a rename over the target. A symbolic link is
+/// followed (the file it points to is replaced, the link stays). The temporary file is
+/// removed on any error. No fsync: the rename is what makes the write atomic for readers.
+pub(crate) fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let target = match std::fs::symlink_metadata(path) {
+        Ok(m) if m.file_type().is_symlink() => std::fs::canonicalize(path)?,
+        _ => path.to_path_buf(),
+    };
+    let name = target.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{} is not a file name", target.display()),
+        )
+    })?;
+    let dir = match target.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    let tmp = dir.join(format!(
+        ".{}.{}.tmp",
+        name.to_string_lossy(),
+        uuid::Uuid::new_v4()
+    ));
+    let written = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)?;
+        file.write_all(bytes)?;
+        if let Ok(old) = std::fs::metadata(&target) {
+            file.set_permissions(old.permissions())?;
+        }
+        drop(file);
+        std::fs::rename(&tmp, &target)
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written
+}
+
 /// Reload a dataset from its source file, with the missing-value strings it was
-/// loaded with. A derived dataset's file is checked by [`derived_file`].
-fn reload_dataset(meta: &DatasetMeta, session_path: &Path) -> anyhow::Result<Dataset> {
+/// loaded with, and the warnings of [`reload_warnings`]. A derived dataset's file is
+/// checked by [`derived_file`]. An absolute source path is read as stored; a relative one
+/// (older session files) against `working_dir` when the file exists there, else against
+/// the current directory.
+fn reload_dataset(
+    meta: &DatasetMeta,
+    session_path: &Path,
+    working_dir: &Path,
+) -> anyhow::Result<(Dataset, Vec<String>)> {
     if meta.derived {
         let df = DataLoader::load_parquet(derived_file(meta, session_path)?)?;
-        return Ok(Dataset::new(df));
+        return Ok((Dataset::new(df), Vec::new()));
     }
+    let path = if meta.source_path.is_absolute() || working_dir.as_os_str().is_empty() {
+        meta.source_path.clone()
+    } else {
+        let in_wd = working_dir.join(&meta.source_path);
+        if in_wd.is_file() {
+            in_wd
+        } else {
+            meta.source_path.clone()
+        }
+    };
+    let file = std::fs::metadata(&path).ok();
     // the markers apply to CSV only; `data load` refuses them for any other format
     let na = match meta.format.as_str() {
         "csv" => meta.na_strings.as_deref(),
         _ => None,
     };
-    Ok(crate::commands::data::load_with_markers(
-        &meta.source_path,
-        na,
-    )?)
+    let dataset = crate::commands::data::load_with_markers(&path, na)?;
+    let warnings = reload_warnings(meta, &path, file.as_ref(), &dataset);
+    Ok((dataset, warnings))
+}
+
+/// Why a reloaded dataset may not match the recording: its file's size or modification
+/// time differ from those recorded at `data load`, or the data have other rows or
+/// columns than recorded. One line each; empty when nothing differs.
+fn reload_warnings(
+    meta: &DatasetMeta,
+    path: &Path,
+    file: Option<&std::fs::Metadata>,
+    dataset: &Dataset,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(file) = file {
+        let size_differs = meta.source_bytes.is_some_and(|b| b != file.len());
+        let time_differs = meta
+            .source_modified
+            .is_some_and(|t| !file.modified().is_ok_and(|m| DateTime::<Utc>::from(m) == t));
+        if size_differs || time_differs {
+            out.push(format!(
+                "the file of dataset '{}' ({}) changed since it was loaded into the session (size or modification time differ); results may not match the recorded ones",
+                meta.name,
+                path.display()
+            ));
+        }
+    }
+    let df = dataset.df();
+    let same_columns = df.width() == meta.columns.len()
+        && df
+            .get_column_names()
+            .iter()
+            .zip(&meta.columns)
+            .all(|(a, b)| a.as_str() == b);
+    if df.height() != meta.nrows || !same_columns {
+        out.push(format!(
+            "dataset '{}' now has {} rows and {} columns; the session recorded {} rows and {} columns",
+            meta.name,
+            df.height(),
+            df.width(),
+            meta.nrows,
+            meta.columns.len()
+        ));
+    }
+    out
 }
 
 /// Estimated memory of the datasets in memory, against `--max-memory`.
@@ -253,7 +442,13 @@ struct MemoryState {
     warned: bool,
 }
 
-/// Manages session state during CLI execution
+/// Manages session state during CLI execution.
+///
+/// Parallel invocations on one session file all record their commands: a save locks
+/// `<session>.lock`, reads the file again when another invocation wrote it since this one
+/// read it, appends this invocation's commands and its registered datasets to what is
+/// there, and replaces the file atomically. A command does not see datasets that a
+/// parallel command registers after it started.
 pub struct SessionManager {
     /// Path to the session file
     path: PathBuf,
@@ -266,18 +461,36 @@ pub struct SessionManager {
     command_start: Option<Instant>,
     /// Memory accounting; charged when a dataset is loaded or stored
     memory: RefCell<MemoryState>,
+    /// What [`SessionManager::save`] merges into the file
+    saved: RefCell<SaveState>,
+}
+
+/// What a save needs to merge this invocation into a file that another invocation wrote.
+struct SaveState {
+    /// The file as this invocation last read or wrote it: `None` when there was no file;
+    /// `Some(None)` after a merge (the file then differs from the session in memory, so
+    /// the next save reads it again)
+    file: Option<Option<Fingerprint>>,
+    /// Commands of `session.commands` already in the file
+    base_commands: usize,
+    /// Datasets this invocation registered since the last save; their entries replace
+    /// the file's
+    touched: BTreeSet<String>,
 }
 
 impl SessionManager {
     /// Create a new session manager, loading existing session if file exists
     /// The session file is read now; its datasets are read when a command first asks for
     /// them ([`SessionManager::get_dataset`]).
+    /// An empty or blank file (made by `mktemp`, say) is a new session.
     pub fn new(path: PathBuf) -> anyhow::Result<Self> {
-        let session = if path.exists() {
-            Session::load(&path)?
-        } else {
-            Session::new()
-        };
+        let (session, fingerprint) = read_session_file(&path)?;
+        let session = session.unwrap_or_default();
+        let saved = RefCell::new(SaveState {
+            file: fingerprint.map(Some),
+            base_commands: session.commands.len(),
+            touched: BTreeSet::new(),
+        });
         let datasets = session
             .datasets
             .keys()
@@ -295,6 +508,7 @@ impl SessionManager {
                 max_mb: 0,
                 warned: false,
             }),
+            saved,
         })
     }
 
@@ -371,42 +585,6 @@ impl SessionManager {
         self.command_start = Some(Instant::now());
     }
 
-    /// Record a completed command
-    pub fn record_command(
-        &mut self,
-        category: &str,
-        subcommand: &str,
-        command_line: &str,
-        arguments: serde_json::Value,
-        dataset_refs: Vec<String>,
-        output_files: Vec<PathBuf>,
-        success: bool,
-        error: Option<String>,
-    ) {
-        let duration_ms = self
-            .command_start
-            .map(|start| start.elapsed().as_millis() as u64)
-            .unwrap_or(0);
-
-        let record = CommandRecord {
-            id: uuid::Uuid::new_v4().to_string(),
-            timestamp: Utc::now(),
-            command_line: command_line.to_string(),
-            category: category.to_string(),
-            subcommand: subcommand.to_string(),
-            arguments,
-            argv: Vec::new(),
-            dataset_refs,
-            output_files,
-            success,
-            error,
-            duration_ms,
-        };
-
-        self.session.record_command(record);
-        self.command_start = None;
-    }
-
     /// Record a command invocation from its command-portion argv (category,
     /// subcommand, and arguments), recorded without the program name, without the
     /// global flags typed before the category and without `--session`; global
@@ -442,6 +620,7 @@ impl SessionManager {
             argv,
             dataset_refs: Vec::new(),
             output_files: Vec::new(),
+            cwd: std::env::current_dir().ok(),
             success,
             error,
             duration_ms,
@@ -463,8 +642,14 @@ impl SessionManager {
         na_strings: Option<Vec<String>>,
     ) {
         self.remove_derived_copy(name);
-        let meta = dataset_meta(name, source_path, format, dataset, na_strings, false);
+        let source_path = std::path::absolute(&source_path).unwrap_or(source_path);
+        let mut meta = dataset_meta(name, source_path, format, dataset, na_strings, false);
+        if let Ok(file) = std::fs::metadata(&meta.source_path) {
+            meta.source_bytes = Some(file.len());
+            meta.source_modified = file.modified().ok().map(DateTime::<Utc>::from);
+        }
         self.session.register_dataset(meta);
+        self.saved.get_mut().touched.insert(name.to_string());
     }
 
     /// Removes the stored file of `name` when the session entry it is about to replace
@@ -513,6 +698,7 @@ impl SessionManager {
         .map_err(|e| anyhow::anyhow!("Could not store dataset '{name}' in the session: {e}"))?;
         let meta = dataset_meta(name, stored, "parquet", &dataset, None, true);
         self.session.register_dataset(meta);
+        self.saved.get_mut().touched.insert(name.to_string());
         self.store_dataset(name.to_string(), dataset);
         Ok(())
     }
@@ -531,8 +717,11 @@ impl SessionManager {
         let cell = self.datasets.get(name)?;
         cell.get_or_init(|| {
             let meta = self.session.datasets.get(name)?;
-            match reload_dataset(meta, &self.path) {
-                Ok(ds) => {
+            match reload_dataset(meta, &self.path, &self.session.working_dir) {
+                Ok((ds, warnings)) => {
+                    for w in warnings {
+                        eprintln!("Warning: {w}");
+                    }
                     self.count_bytes(name.to_string(), estimate_dataset_memory(&ds));
                     self.emit_memory_warning();
                     Some(ds)
@@ -551,9 +740,74 @@ impl SessionManager {
         self.datasets.keys().collect()
     }
 
-    /// Save the session to disk
+    /// Save the session to disk, under an exclusive lock on [`lock_path`]: when another
+    /// invocation wrote the file since this one read it, this invocation's commands are
+    /// appended to the file's and the datasets it registered replace the file's entries
+    /// (the file's id, title, creation time, working directory and version are kept). The
+    /// file is replaced atomically. A file system without locking saves without the lock,
+    /// after a warning.
     pub fn save(&self) -> anyhow::Result<()> {
-        self.session.save(&self.path)
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(lock_path(&self.path))?;
+        match lock.lock() {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::Unsupported => eprintln!(
+                "Warning: the file system does not support file locks; saving {} without one",
+                self.path.display()
+            ),
+            Err(e) => return Err(e.into()),
+        }
+        let mut state = self.saved.borrow_mut();
+        let (on_disk, now) = match std::fs::metadata(&self.path) {
+            Ok(m) => (true, Some(Fingerprint::of(&m))),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (false, None),
+            Err(e) => return Err(e.into()),
+        };
+        let unchanged = match state.file {
+            None => !on_disk,
+            Some(Some(fp)) => now == Some(fp),
+            Some(None) => false,
+        };
+        let merged = if unchanged {
+            None
+        } else {
+            read_session_file(&self.path)?
+                .0
+                .map(|disk| self.merge_into(disk, &state))
+        };
+        let content = serde_json::to_string_pretty(merged.as_ref().unwrap_or(&self.session))?;
+        write_atomically(&self.path, content.as_bytes())?;
+        state.file = if merged.is_some() {
+            Some(None)
+        } else {
+            Some(
+                std::fs::metadata(&self.path)
+                    .ok()
+                    .map(|m| Fingerprint::of(&m)),
+            )
+        };
+        state.base_commands = self.session.commands.len();
+        state.touched.clear();
+        drop(lock); // unlocks
+        Ok(())
+    }
+
+    /// `disk` with this invocation's commands since the last save appended and the
+    /// datasets it registered since then replacing their entries.
+    fn merge_into(&self, mut disk: Session, state: &SaveState) -> Session {
+        let start = state.base_commands.min(self.session.commands.len());
+        disk.commands
+            .extend(self.session.commands[start..].iter().cloned());
+        for name in &state.touched {
+            if let Some(meta) = self.session.datasets.get(name) {
+                disk.datasets.insert(name.clone(), meta.clone());
+            }
+        }
+        disk.updated_at = Utc::now();
+        disk
     }
 
     /// Get reference to the session
@@ -585,41 +839,8 @@ fn dataset_meta(
         loaded_at: Utc::now(),
         na_strings,
         derived,
-    }
-}
-
-/// In-memory dataset store for non-session mode
-pub struct DatasetStore {
-    datasets: HashMap<String, Dataset>,
-}
-
-impl DatasetStore {
-    pub fn new() -> Self {
-        Self {
-            datasets: HashMap::new(),
-        }
-    }
-
-    pub fn insert(&mut self, name: String, dataset: Dataset) {
-        self.datasets.insert(name, dataset);
-    }
-
-    pub fn get(&self, name: &str) -> Option<&Dataset> {
-        self.datasets.get(name)
-    }
-
-    pub fn list(&self) -> Vec<&String> {
-        self.datasets.keys().collect()
-    }
-
-    pub fn remove(&mut self, name: &str) -> Option<Dataset> {
-        self.datasets.remove(name)
-    }
-}
-
-impl Default for DatasetStore {
-    fn default() -> Self {
-        Self::new()
+        source_bytes: None,
+        source_modified: None,
     }
 }
 
@@ -843,6 +1064,23 @@ mod derived_dataset_tests {
             again.register_dataset("d", dir.path().join("d.csv"), "csv", &sample(), None);
             assert!(outside.exists(), "{bad:?} removed the outside file");
         }
+        // the refusal names the expected directory and the path found
+        let mut meta = dataset_meta("d", PathBuf::new(), "parquet", &sample(), None, true);
+        for bad in [
+            "other.datasets/outside.parquet",
+            "../outside.parquet",
+            "s.json.datasets/x.csv",
+        ] {
+            meta.source_path = PathBuf::from(bad);
+            assert_eq!(
+                derived_file(&meta, Path::new("s.json"))
+                    .unwrap_err()
+                    .to_string(),
+                format!(
+                    "the stored copy of dataset 'd' must be under s.json.datasets/ (found {bad}); was the session file renamed or copied? Re-run the commands that created it"
+                )
+            );
+        }
         // the path persist_dataset writes is accepted
         let mut m = SessionManager::new(dir.path().join("t.json")).unwrap();
         m.persist_dataset("d", sample()).unwrap();
@@ -851,6 +1089,22 @@ mod derived_dataset_tests {
             derived_file(meta, &dir.path().join("t.json")).unwrap(),
             dir.path().join("t.json.datasets/d.parquet")
         );
+    }
+
+    #[test]
+    fn old_records_without_cwd_or_legacy_fields_parse() {
+        let old = r#"{"id":"r","timestamp":"2026-01-01T00:00:00Z","command_line":"data list","category":"data","subcommand":"list","argv":["data","list"],"success":true,"error":null,"duration_ms":1}"#;
+        let record: CommandRecord = serde_json::from_str(old).unwrap();
+        assert_eq!(record.cwd, None);
+        assert!(record.arguments.is_null() && record.dataset_refs.is_empty());
+        let written = serde_json::to_value(&record).unwrap();
+        for key in ["arguments", "dataset_refs", "output_files"] {
+            assert!(
+                written.get(key).is_some(),
+                "{key} is written for older p2a versions"
+            );
+        }
+        assert!(written.get("cwd").is_none());
     }
 
     #[test]
@@ -888,5 +1142,287 @@ mod derived_dataset_tests {
         let mut names = again.list_datasets();
         names.sort();
         assert_eq!(names, ["a", "b"]);
+    }
+}
+
+#[cfg(test)]
+mod save_tests {
+    use super::*;
+
+    /// A manager on `path` with one recorded command and a registered dataset `name`.
+    fn record_one(m: &mut SessionManager, cmd: &str, name: &str, dir: &Path) {
+        m.start_command();
+        m.record_invocation(vec!["data".into(), cmd.into()], true, None);
+        let ds = Dataset::new(polars::df! { "x" => [1.5, 2.25] }.unwrap());
+        m.register_dataset(name, dir.join(format!("{name}.csv")), "csv", &ds, None);
+    }
+
+    fn commands(path: &Path) -> Vec<String> {
+        let s = Session::load(&path.to_path_buf()).unwrap();
+        s.commands.iter().map(|c| c.subcommand.clone()).collect()
+    }
+
+    #[test]
+    fn save_merges_concurrent_invocations() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.json");
+        let mut first = SessionManager::new(path.clone()).unwrap();
+        first.record_invocation(vec!["data".into(), "original".into()], true, None);
+        first.save().unwrap();
+
+        let mut a = SessionManager::new(path.clone()).unwrap();
+        let mut b = SessionManager::new(path.clone()).unwrap();
+        record_one(&mut a, "a", "da", dir.path());
+        record_one(&mut b, "b", "db", dir.path());
+        a.save().unwrap();
+        b.save().unwrap();
+
+        assert_eq!(commands(&path), ["original", "a", "b"]);
+        let s = Session::load(&path).unwrap();
+        let mut names: Vec<&String> = s.datasets.keys().collect();
+        names.sort();
+        assert_eq!(names, ["da", "db"]);
+        assert_eq!(s.id, first.session().id);
+    }
+
+    #[test]
+    fn save_merges_into_a_file_created_meanwhile() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.json");
+        let mut a = SessionManager::new(path.clone()).unwrap();
+        let mut b = SessionManager::new(path.clone()).unwrap();
+        record_one(&mut a, "a", "da", dir.path());
+        record_one(&mut b, "b", "db", dir.path());
+        a.save().unwrap();
+        b.save().unwrap();
+        assert_eq!(commands(&path), ["a", "b"]);
+        let s = Session::load(&path).unwrap();
+        assert_eq!(s.id, a.session().id);
+        assert_eq!(s.created_at, a.session().created_at);
+    }
+
+    /// Two saves of one manager write its commands once (the second save re-reads the
+    /// file a merge wrote and adds nothing twice).
+    #[test]
+    fn repeated_saves_do_not_duplicate_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.json");
+        let mut a = SessionManager::new(path.clone()).unwrap();
+        let mut b = SessionManager::new(path.clone()).unwrap();
+        record_one(&mut a, "a", "da", dir.path());
+        record_one(&mut b, "b", "db", dir.path());
+        a.save().unwrap();
+        b.save().unwrap();
+        b.save().unwrap();
+        a.save().unwrap();
+        record_one(&mut a, "c", "dc", dir.path());
+        a.save().unwrap();
+        assert_eq!(commands(&path), ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn save_is_atomic() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.json");
+        let mut m = SessionManager::new(path.clone()).unwrap();
+        record_one(&mut m, "a", "da", dir.path());
+        m.save().unwrap();
+        let mut names: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["s.json", "s.json.lock"]);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let before = std::fs::read(&path).unwrap();
+            let mut m = SessionManager::new(path.clone()).unwrap();
+            record_one(&mut m, "b", "db", dir.path());
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+            let probe = dir.path().join("probe");
+            let root = std::fs::write(&probe, b"x").is_ok();
+            let saved = if root {
+                let _ = std::fs::remove_file(&probe);
+                None
+            } else {
+                Some(m.save())
+            };
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+            if let Some(saved) = saved {
+                assert!(
+                    saved.is_err(),
+                    "a save into a read-only directory must fail"
+                );
+                assert_eq!(std::fs::read(&path).unwrap(), before);
+            }
+        }
+    }
+
+    #[test]
+    fn empty_or_blank_file_is_a_new_session() {
+        let dir = tempfile::tempdir().unwrap();
+        for (i, body) in ["", "\n  \n"].iter().enumerate() {
+            let path = dir.path().join(format!("s{i}.json"));
+            std::fs::write(&path, body).unwrap();
+            let mut m = SessionManager::new(path.clone()).unwrap();
+            assert!(m.session().commands.is_empty());
+            assert!(
+                Session::load(&path).is_err(),
+                "load keeps refusing {body:?}"
+            );
+            assert!(Session::read(&path).unwrap().is_none());
+            record_one(&mut m, "a", "da", dir.path());
+            m.save().unwrap();
+            assert_eq!(commands(&path), ["a"]);
+        }
+    }
+
+    /// The rule-5 shortcut: a file unchanged since `new` (length, modification time,
+    /// inode) is not read again; the save uses the session in memory.
+    #[test]
+    fn unchanged_file_is_not_reread() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.json");
+        let mut m = SessionManager::new(path.clone()).unwrap();
+        record_one(&mut m, "a", "da", dir.path());
+        m.save().unwrap();
+
+        let mut m = SessionManager::new(path.clone()).unwrap();
+        let meta = std::fs::metadata(&path).unwrap();
+        let garbage = vec![b'!'; meta.len() as usize];
+        let f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        use std::io::Write as _;
+        (&f).write_all(&garbage).unwrap();
+        f.set_modified(meta.modified().unwrap()).unwrap();
+        drop(f);
+        record_one(&mut m, "b", "db", dir.path());
+        m.save().unwrap();
+        assert_eq!(commands(&path), ["a", "b"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_keeps_a_symlinked_session_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let mut m = SessionManager::new(real.join("s.json")).unwrap();
+        record_one(&mut m, "a", "da", dir.path());
+        m.save().unwrap();
+        let link = dir.path().join("s.json");
+        std::os::unix::fs::symlink(real.join("s.json"), &link).unwrap();
+        let mut m = SessionManager::new(link.clone()).unwrap();
+        record_one(&mut m, "b", "db", dir.path());
+        m.save().unwrap();
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(commands(&real.join("s.json")), ["a", "b"]);
+        assert!(dir.path().join("s.json.lock").exists());
+    }
+}
+
+#[cfg(test)]
+mod reload_tests {
+    use super::*;
+
+    fn csv(path: &Path, rows: usize) -> Dataset {
+        let mut s = String::from("x,y\n");
+        for i in 0..rows {
+            s.push_str(&format!("{}.5,{}.25\n", i, 2 * i + 1));
+        }
+        std::fs::write(path, s).unwrap();
+        crate::commands::data::load_with_markers(path, None).unwrap()
+    }
+
+    #[test]
+    fn register_dataset_stores_an_absolute_path_and_the_file_stamp() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("d.csv");
+        let ds = csv(&file, 3);
+        let mut m = SessionManager::new(dir.path().join("s.json")).unwrap();
+        m.register_dataset("d", file.clone(), "csv", &ds, None);
+        let meta = &m.session().datasets["d"];
+        let fs_meta = std::fs::metadata(&file).unwrap();
+        assert_eq!(meta.source_path, file);
+        assert_eq!(meta.source_bytes, Some(fs_meta.len()));
+        assert_eq!(
+            meta.source_modified,
+            Some(DateTime::<Utc>::from(fs_meta.modified().unwrap()))
+        );
+
+        let rel = PathBuf::from(format!("p2a_wp33_absent_{}.csv", std::process::id()));
+        m.register_dataset("e", rel.clone(), "csv", &ds, None);
+        let meta = &m.session().datasets["e"];
+        assert_eq!(meta.source_path, std::path::absolute(&rel).unwrap());
+        assert!(meta.source_path.is_absolute());
+        assert_eq!((meta.source_bytes, meta.source_modified), (None, None));
+    }
+
+    #[test]
+    fn legacy_relative_path_resolves_against_working_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        csv(&dir.path().join("d.csv"), 3);
+        let session = format!(
+            r#"{{"id":"x","title":null,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","working_dir":{},"datasets":{{"d":{{"name":"d","source_path":"d.csv","format":"csv","nrows":3,"columns":["x","y"],"loaded_at":"2026-01-01T00:00:00Z"}}}},"commands":[],"version":"0.4.0"}}"#,
+            serde_json::to_string(dir.path()).unwrap()
+        );
+        let path = dir.path().join("s.json");
+        std::fs::write(&path, session).unwrap();
+        let m = SessionManager::new(path).unwrap();
+        assert_eq!(m.get_dataset("d").unwrap().df().height(), 3);
+    }
+
+    #[test]
+    fn changed_source_is_reported_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("d.csv");
+        let ds = csv(&file, 3);
+        let path = dir.path().join("s.json");
+        let mut m = SessionManager::new(path.clone()).unwrap();
+        m.register_dataset("d", file.clone(), "csv", &ds, None);
+        let meta = m.session().datasets["d"].clone();
+        let wd = m.session().working_dir.clone();
+
+        let (_, warnings) = reload_dataset(&meta, &path, &wd).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+
+        csv(&file, 4);
+        let (again, warnings) = reload_dataset(&meta, &path, &wd).unwrap();
+        assert_eq!(again.df().height(), 4, "the data are still used");
+        assert_eq!(
+            warnings,
+            [
+                format!(
+                    "the file of dataset 'd' ({}) changed since it was loaded into the session (size or modification time differ); results may not match the recorded ones",
+                    file.display()
+                ),
+                "dataset 'd' now has 4 rows and 2 columns; the session recorded 3 rows and 2 columns"
+                    .to_string(),
+            ]
+        );
+
+        // a derived dataset is not stamped and gives none
+        m.persist_dataset("e", ds).unwrap();
+        let meta = m.session().datasets["e"].clone();
+        assert_eq!((meta.source_bytes, meta.source_modified), (None, None));
+        let (_, warnings) = reload_dataset(&meta, &path, &wd).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    #[test]
+    fn record_invocation_records_the_working_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut m = SessionManager::new(dir.path().join("s.json")).unwrap();
+        m.record_invocation(vec!["data".into(), "list".into()], true, None);
+        assert_eq!(
+            m.session().commands[0].cwd,
+            Some(std::env::current_dir().unwrap())
+        );
     }
 }

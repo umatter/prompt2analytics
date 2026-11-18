@@ -508,6 +508,9 @@ p2a script export analysis.json -o analysis.sh
 p2a script run analysis.sh
 ```
 
+`script run` runs the script with bash, passes it stdin, streams its output, sets `P2A` to the running p2a
+binary and exits with the script's exit status.
+
 ## Output formats
 
 ### Text (default)
@@ -564,9 +567,23 @@ p2a script export my_analysis.json -o my_analysis.sh
 
 The generated script can be shared and re-executed for reproducible results.
 
+Parallel invocations on one session file all record their commands: a save locks `<session file>.lock` (an
+empty file left beside the session file), merges its commands into what other invocations wrote meanwhile and
+replaces the file atomically. A command does not see a dataset that a parallel command registers after it
+started. An empty session file (made by `mktemp`, say) starts a new session. Dataset paths are stored absolute,
+with the file's size and modification time; a later command warns when the file or the data no longer match
+the recording, and uses them anyway.
+
+The exported script replays the commands that succeeded, in the directory they ran in (set `P2A_WORKDIR` to
+replay a copy elsewhere), with the p2a binary in `$P2A` (default `p2a`). Commands that failed when recorded
+are named in a comment and not replayed; `script export --include-failed` replays them with `|| true`. The
+replay keeps its session in a temporary directory (`mktemp -d` under `$TMPDIR`) that it removes on exit, also
+when a command fails.
+
 What is recorded: each command from its subcommand on, as typed, without the global options
-before the subcommand and without `--session` (wherever it appears before a `--`). The exported
-script supplies its own session file, `p2a --session "$SESSION_FILE" <command>`. Global options
+before the subcommand and without `--session` (wherever it appears before a `--`), with the working
+directory it ran in. The exported script supplies its own session file,
+`"$P2A" --session "$SESSION_FILE" <command>`. Global options
 typed after the subcommand (`-F json`, `--quiet`) are recorded and replayed. The commands
 `script`, `chat` and `smoke-test` are not recorded.
 
@@ -3286,7 +3303,7 @@ p2a script [OPTIONS] <COMMAND>
 |---|---|---|
 | `export` |  | Export session to a reproducible bash script |
 | `history` |  | Show session history |
-| `run` |  | Run a p2a script |
+| `run` |  | Run a p2a script with bash; its output and exit status are the script's |
 
 #### `p2a script export`
 
@@ -3300,7 +3317,8 @@ p2a script export [OPTIONS] --output <OUTPUT> <SESSION_FILE>
 |---|---|
 | `<SESSION_FILE>` | Session file to export |
 | `-o, --output <OUTPUT>` | Output script file |
-| `--comments [<BOOL>]` | Write each recorded command line as a comment above it (true/false; default true). The header and the cleanup comment are always written [default: true] [possible values: true, false] |
+| `--comments [<BOOL>]` | Write each recorded command line as a comment above it (true/false; default true). The header and the lines naming failed commands are always written [default: true] [possible values: true, false] |
+| `--include-failed` | Replay the commands that failed when they were recorded too, each with `\|\| true` so that a failure does not stop the script (by default they are only named in a comment) |
 
 #### `p2a script history`
 
@@ -3316,7 +3334,7 @@ p2a script history [OPTIONS] <SESSION_FILE>
 
 #### `p2a script run`
 
-Run a p2a script
+Run a p2a script with bash; its output and exit status are the script's
 
 ```text
 p2a script run [OPTIONS] <SCRIPT_FILE>
@@ -3344,7 +3362,8 @@ p2a chat [OPTIONS]
 | `--base-url <BASE_URL>` | Override the LLM API base URL [env: P2A_BASE_URL=] |
 | `--output-dir <OUTPUT_DIR>` | Directory for saved images/charts [default: .] |
 | `--record <RECORD>` | Save a plain-text transcript to this file |
-| `--script <SCRIPT>` | Read prompts from a file instead of interactive input (one prompt per line, or multi-line prompts separated by blank lines) |
+| `--script <SCRIPT>` | Read prompts from a file instead of interactive input: prompts are separated by blank lines and keep their line breaks. Lines starting with # are comments; start a prompt line with \\# to send a # |
+| `--keep-going` | With --script: send the remaining prompts after a failed one; the exit status is still non-zero |
 
 ### `p2a smoke-test`
 
