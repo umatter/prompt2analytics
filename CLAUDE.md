@@ -682,6 +682,7 @@ crates/p2a-mcp/src/
 ├── transport/             # http.rs (shared types, build_app, bind/serve, /health), middleware.rs (CORS,
 │                          #   token, body limit, Host check), routes_sessions.rs, routes_tools.rs,
 │                          #   llm_routes.rs (chat, SSE, tool executors), conversation.rs, websocket.rs
+│                          #   dataset_sync.rs (dataset list rows kept in step with the session after each call)
 ├── tools/
 │   ├── mod.rs             # Re-exports
 │   ├── registry.rs        # Search registry: generated from the router plus one CATEGORY_TABLE row per tool
