@@ -11,7 +11,7 @@ A comprehensive analytics toolkit exposing econometrics, machine learning, and v
 
 **🌐 Live demo (bring your own key):** [p2a.qamelab.org](https://p2a.qamelab.org) — the hosted web app. You supply your own LLM API key in the browser; it is never stored server-side. This is a small **demo deployment**: it runs on a modest single instance (limited performance) and accepts uploaded files of up to about 1.5 MB (larger ones are refused with HTTP 413), so expect slower responses and use small datasets. Each tool call stops after 60 seconds, each session holds up to about 200 MB of data and runs one request at a time, and other large or costly requests are refused with a message that names the limit and what to make smaller. For full performance and large data, run the desktop app or self-host the backend container `ghcr.io/umatter/prompt2analytics/backend` (see [docs/guides/DEPLOYMENT.md](docs/guides/DEPLOYMENT.md)).
 
-The demo runs the latest tagged release (check [`/health`](https://p2a-api.qamelab.org/health)) in open public mode with the hosted resource profile: there are no user accounts, per-visitor isolation relies on unguessable session IDs, the session-list and file-browser endpoints are disabled, and idle sessions end after 60 minutes (sooner when the server is full) (threat model and limits in [docs/guides/DEPLOYMENT.md](docs/guides/DEPLOYMENT.md)). Two caveats follow from it being a **public, shared instance**: do **not** upload confidential or personal data — for sensitive work use the desktop app or a self-hosted backend, the deployment mode the project is designed around — and treat sessions as **ephemeral**: the instance has no persistent volume, so uploaded data and results disappear whenever it restarts or is redeployed.
+The demo runs the latest tagged release (check [`/health`](https://p2a-api.qamelab.org/health)) in open public mode with the hosted resource profile: there are no user accounts, per-visitor isolation relies on unguessable session IDs, the session-list, file-browser and database-statistics endpoints and the websocket endpoint are disabled, and idle sessions end after 60 minutes (sooner when the server is full) (threat model and limits in [docs/guides/DEPLOYMENT.md](docs/guides/DEPLOYMENT.md)). Two caveats follow from it being a **public, shared instance**: do **not** upload confidential or personal data — for sensitive work use the desktop app or a self-hosted backend, the deployment mode the project is designed around — and treat sessions as **ephemeral**: the instance has no persistent volume, so uploaded data and results disappear whenever it restarts or is redeployed.
 
 **Requirements**: Rust 1.95+ (edition 2024)
 
@@ -51,7 +51,7 @@ The demo runs the latest tagged release (check [`/health`](https://p2a-api.qamel
 - **LaTeX**: Publication-ready regression tables (OLS, Panel, Discrete)
 - **Markdown**: GitHub-compatible tables for documentation
 - **HTML**: Self-contained tables with embedded CSS
-- **CSV**: Generic export via `CsvExport` trait for all result types
+- **CSV**: the `CsvExport` trait, implemented for OLS, discrete-choice, panel, Hausman, PCA, k-means and DBSCAN results
 
 ### Command-Line Interface
 - Full access to all analytics via `p2a` binary
@@ -486,7 +486,7 @@ prompt2analytics/
 │   │   ├── diagnostics/   # Identification diagnostics (IV, DiD, RD, matching)
 │   │   ├── forecasting/   # ARIMA, MSTL, changepoint
 │   │   ├── ml/            # Clustering, PCA, t-SNE, Random Forest, SVM
-│   │   ├── visualization/ # Static (plotters) and interactive (plotlars) charts
+│   │   ├── visualization/ # Static (plotters) and interactive (Plotly HTML) charts
 │   │   ├── export/        # LaTeX, Markdown, HTML, CSV export
 │   │   ├── linalg/        # Matrix operations (via faer)
 │   │   └── traits/        # LinearEstimator trait
@@ -696,7 +696,7 @@ cd crates/p2a-dioxus && dx serve
 | Statistical Distributions | `statrs` | 0.18 |
 | DataFrames | `polars` | 0.52 |
 | Static Visualization | `plotters` | 0.3 |
-| Interactive Visualization | `plotlars` | 0.11 |
+| Interactive Visualization | Plotly JSON written by p2a-core (plotly.js loaded by the page) | plotly.js 3.0.1 |
 | MCP Protocol | `rmcp` | 0.8 |
 | Database | `surrealdb` | embedded SurrealKV (on disk) or in-memory store |
 | Web Frontend | `dioxus` | 0.7 |
