@@ -1,7 +1,7 @@
 //! Export functionality for conversations
 //!
 //! Supports exporting conversations in multiple formats:
-//! - JSON: Full archive format, can be re-imported
+//! - JSON: shareable archive of the transcript, tool calls and charts (there is no import)
 //! - Markdown: Human-readable, suitable for GitHub/docs
 //! - HTML: Self-contained shareable report
 

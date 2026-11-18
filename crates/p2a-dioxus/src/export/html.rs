@@ -5,6 +5,10 @@ use crate::state::ChatMessage;
 
 use super::types::HtmlExportOptions;
 
+/// The project's repository, linked from the report footer (the workspace
+/// `repository` field; a test keeps the two equal).
+const PROJECT_URL: &str = "https://github.com/umatter/prompt2analytics";
+
 /// Export a conversation and its messages to self-contained HTML
 pub fn export_to_html(
     conversation: Option<&Conversation>,
@@ -53,7 +57,7 @@ pub fn export_to_html(
 {messages_html}
         </main>
         <footer>
-            <p>Exported from <a href="https://github.com/prompt2analytics/prompt2analytics">prompt2analytics</a></p>
+            <p>Exported from <a href="{PROJECT_URL}">prompt2analytics</a></p>
         </footer>
     </div>
 </body>
@@ -561,6 +565,15 @@ mod tests {
             escape_html("<script>alert('xss')</script>"),
             "&lt;script&gt;alert(&#39;xss&#39;)&lt;/script&gt;"
         );
+    }
+
+    #[test]
+    fn test_footer_links_the_project_repository() {
+        let result = export_to_html(None, &[], &HtmlExportOptions::default());
+        assert!(result.contains(r#"href="https://github.com/umatter/prompt2analytics""#));
+        assert!(!result.contains("github.com/prompt2analytics/prompt2analytics"));
+        let workspace = include_str!("../../../../Cargo.toml");
+        assert!(workspace.contains(&format!("repository = \"{PROJECT_URL}\"")));
     }
 
     #[test]
