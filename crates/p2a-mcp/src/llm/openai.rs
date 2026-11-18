@@ -4,7 +4,9 @@
 //! module is message conversion and transport; the tool-calling loop is [`super::tool_loop`].
 
 use super::LlmSettings;
+use super::provider::is_default_endpoint;
 use super::retry::{MAX_UPSTREAM_BODY_BYTES, count_streamed, read_json_capped, upstream_error};
+use super::stream::{LineBuffer, sse_data, stream_failed};
 use super::tool_loop::{
     AssistantTurn, StreamSink, ToolLoopConfig, ToolLoopProvider, run_tool_loop,
 };
@@ -88,6 +90,14 @@ impl OpenAIProvider {
             .api_key
             .as_deref()
             .ok_or(LlmError::InvalidApiKey)
+    }
+
+    /// The request's sampling and token fields for this provider's model and endpoint
+    /// ([`token_params`]), on an otherwise empty request.
+    fn sampling(&self) -> OpenAIChatRequest {
+        let default_endpoint =
+            is_default_endpoint(ProviderType::OpenAI, self.config.base_url.as_deref());
+        token_params(&self.config.model, &self.config, default_endpoint)
     }
 
     /// Convert our Message format to OpenAI's message format.
@@ -212,9 +222,8 @@ impl OpenAIProvider {
             model: self.config.model.clone(),
             messages: openai_messages,
             tools: openai_tools,
-            temperature: self.config.temperature,
-            max_tokens: self.config.max_tokens,
             stream: None,
+            ..self.sampling()
         };
 
         let retry_config = super::retry::RetryConfig::default();
@@ -292,9 +301,8 @@ impl OpenAIProvider {
             model: self.config.model.clone(),
             messages: openai_messages,
             tools: openai_tools,
-            temperature: self.config.temperature,
-            max_tokens: self.config.max_tokens,
             stream: Some(true),
+            ..self.sampling()
         };
 
         // No total timeout: a stream is bounded by the client's per-read
@@ -320,64 +328,81 @@ impl OpenAIProvider {
 
         // Process SSE stream
         let mut stream = response.bytes_stream();
-        let mut buffer = String::new();
+        let mut lines = LineBuffer::new();
         let mut content = String::new();
         let mut received = 0usize;
 
         // For accumulating tool calls across chunks
         let mut tool_calls_map: HashMap<usize, (String, String, String)> = HashMap::new(); // index -> (id, name, arguments)
 
-        while let Some(chunk_result) = stream.next().await {
-            let chunk = chunk_result?;
-            count_streamed(&mut received, chunk.len())?;
-            let chunk_str = String::from_utf8_lossy(&chunk);
-            buffer.push_str(&chunk_str);
+        let mut finished = false;
 
-            // Process complete SSE lines
-            while let Some(line_end) = buffer.find('\n') {
-                let line = buffer[..line_end].trim().to_string();
-                buffer = buffer[line_end + 1..].to_string();
+        // One line of the stream: an error object fails the call; true once `[DONE]` or a finish
+        // reason has arrived (an OpenAI-compatible endpoint may send only one of them).
+        let mut handle = |line: &str| -> Result<bool, LlmError> {
+            let Some(data) = sse_data(line) else {
+                return Ok(false);
+            };
+            if data.trim() == "[DONE]" {
+                return Ok(true);
+            }
+            let Ok(chunk_response) = serde_json::from_str::<OpenAIStreamChunk>(data) else {
+                return Ok(false);
+            };
+            if let Some(error) = chunk_response.error {
+                return Err(stream_failed(
+                    PROVIDER,
+                    error.kind.as_deref(),
+                    error.message.as_deref().unwrap_or_default(),
+                ));
+            }
+            let Some(choice) = chunk_response.choices.first() else {
+                return Ok(false);
+            };
+            // Handle content delta
+            if let Some(ref delta_content) = choice.delta.content {
+                content.push_str(delta_content);
+                callback(StreamChunk::Text {
+                    content: delta_content.clone(),
+                });
+            }
 
-                if line.is_empty() || line == "data: [DONE]" {
-                    continue;
-                }
+            // Handle tool call deltas
+            if let Some(ref tool_calls) = choice.delta.tool_calls {
+                for tc in tool_calls {
+                    let entry = tool_calls_map
+                        .entry(tc.index)
+                        .or_insert_with(|| (String::new(), String::new(), String::new()));
 
-                if let Some(data) = line.strip_prefix("data: ") {
-                    if let Ok(chunk_response) = serde_json::from_str::<OpenAIStreamChunk>(data) {
-                        if let Some(choice) = chunk_response.choices.first() {
-                            // Handle content delta
-                            if let Some(ref delta_content) = choice.delta.content {
-                                content.push_str(delta_content);
-                                callback(StreamChunk::Text {
-                                    content: delta_content.clone(),
-                                });
-                            }
-
-                            // Handle tool call deltas
-                            if let Some(ref tool_calls) = choice.delta.tool_calls {
-                                for tc in tool_calls {
-                                    let entry =
-                                        tool_calls_map.entry(tc.index).or_insert_with(|| {
-                                            (String::new(), String::new(), String::new())
-                                        });
-
-                                    if let Some(ref id) = tc.id {
-                                        entry.0 = id.clone();
-                                    }
-                                    if let Some(ref func) = tc.function {
-                                        if let Some(ref name) = func.name {
-                                            entry.1 = name.clone();
-                                        }
-                                        if let Some(ref args) = func.arguments {
-                                            entry.2.push_str(args);
-                                        }
-                                    }
-                                }
-                            }
+                    if let Some(ref id) = tc.id {
+                        entry.0 = id.clone();
+                    }
+                    if let Some(ref func) = tc.function {
+                        if let Some(ref name) = func.name {
+                            entry.1 = name.clone();
+                        }
+                        if let Some(ref args) = func.arguments {
+                            entry.2.push_str(args);
                         }
                     }
                 }
             }
+            Ok(choice.finish_reason.is_some())
+        };
+
+        while let Some(chunk_result) = stream.next().await {
+            let chunk = chunk_result?;
+            count_streamed(&mut received, chunk.len())?;
+            lines.push(&chunk);
+            while let Some(line) = lines.next_line() {
+                finished |= handle(&line?)?;
+            }
+        }
+        if let Some(line) = lines.finish() {
+            finished |= handle(&line?)?;
+        }
+        if !finished {
+            return Err(LlmError::StreamIncomplete { provider: PROVIDER });
         }
 
         // Convert accumulated tool calls to our format
@@ -401,6 +426,57 @@ impl OpenAIProvider {
             content,
             tool_calls: calls.into_iter().map(|(_, tc)| tc).collect(),
         })
+    }
+}
+
+/// The ids of a models list that name chat models. OpenAI's own endpoint (`default_endpoint`)
+/// also lists embedding, audio, image, moderation and legacy completion models, which are left
+/// out; any other endpoint (OpenRouter, a local server) keeps every id.
+fn chat_model_ids(ids: impl Iterator<Item = String>, default_endpoint: bool) -> Vec<String> {
+    const NOT_CHAT: [&str; 10] = [
+        "embedding",
+        "whisper",
+        "tts",
+        "dall-e",
+        "moderation",
+        "transcribe",
+        "davinci",
+        "babbage",
+        "gpt-image",
+        "sora",
+    ];
+    ids.filter(|id| !default_endpoint || !NOT_CHAT.iter().any(|w| id.contains(w)))
+        .collect()
+}
+
+/// Whether `model` is one of OpenAI's reasoning models, which refuse a `temperature`: names
+/// starting `o1`, `o3`, `o4` or `gpt-5`, except the `gpt-5-chat` models. A name rule: a new
+/// reasoning family needs its prefix added here.
+fn is_reasoning_model(model: &str) -> bool {
+    let m = model.trim().to_ascii_lowercase();
+    ["o1", "o3", "o4", "gpt-5"].iter().any(|p| m.starts_with(p)) && !m.starts_with("gpt-5-chat")
+}
+
+/// The temperature and token-limit fields of a request (the rest empty). On OpenAI's own endpoint
+/// (`default_endpoint`), the limit goes in `max_completion_tokens`, which every OpenAI chat model
+/// takes and its reasoning models require (they refuse `max_tokens`), and the reasoning models
+/// ([`is_reasoning_model`]) get no `temperature`. Any other endpoint (OpenRouter, a local
+/// OpenAI-compatible server) gets `max_tokens` and the configured temperature, as before.
+fn token_params(model: &str, config: &ProviderConfig, default_endpoint: bool) -> OpenAIChatRequest {
+    let (temperature, max_tokens, max_completion_tokens) = if default_endpoint {
+        let temperature = config.temperature.filter(|_| !is_reasoning_model(model));
+        (temperature, None, config.max_tokens)
+    } else {
+        (config.temperature, config.max_tokens, None)
+    };
+    OpenAIChatRequest {
+        model: String::new(),
+        messages: Vec::new(),
+        tools: None,
+        temperature,
+        max_tokens,
+        max_completion_tokens,
+        stream: None,
     }
 }
 
@@ -434,15 +510,12 @@ impl LlmProvider for OpenAIProvider {
         let models_response: OpenAIModelsResponse =
             read_json_capped(response, MAX_UPSTREAM_BODY_BYTES).await?;
 
-        // Filter to chat models only
-        let chat_models: Vec<String> = models_response
-            .data
-            .into_iter()
-            .filter(|m| m.id.starts_with("gpt-"))
-            .map(|m| m.id)
-            .collect();
-
-        Ok(chat_models)
+        let default_endpoint =
+            is_default_endpoint(ProviderType::OpenAI, self.config.base_url.as_deref());
+        Ok(chat_model_ids(
+            models_response.data.into_iter().map(|m| m.id),
+            default_endpoint,
+        ))
     }
 
     async fn chat(
@@ -489,15 +562,6 @@ impl LlmProvider for OpenAIProvider {
 
 #[async_trait]
 impl ToolLoopProvider for OpenAIProvider {
-    fn convert(&self, messages: &[Message]) -> Result<Value, LlmError> {
-        let mut wire = serde_json::Map::new();
-        wire.insert(
-            "messages".into(),
-            serde_json::to_value(self.to_openai_messages(messages))?,
-        );
-        Ok(Value::Object(wire))
-    }
-
     async fn call(
         &self,
         messages: &[Message],
@@ -523,6 +587,8 @@ struct OpenAIChatRequest {
     temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_completion_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stream: Option<bool>,
 }
@@ -596,7 +662,20 @@ struct OpenAIModel {
 
 #[derive(Debug, Deserialize)]
 struct OpenAIStreamChunk {
+    #[serde(default)]
     choices: Vec<OpenAIStreamChoice>,
+    /// An error in the middle of the stream.
+    #[serde(default)]
+    error: Option<OpenAIStreamError>,
+}
+
+/// The `error` object of a stream chunk.
+#[derive(Debug, Deserialize)]
+struct OpenAIStreamError {
+    #[serde(rename = "type", default)]
+    kind: Option<String>,
+    #[serde(default)]
+    message: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -705,6 +784,65 @@ mod tests {
             .map(|m| m["role"].as_str().unwrap())
             .collect();
         assert_eq!(roles, ["system", "user", "assistant", "user"]);
+    }
+
+    /// LLM-19: OpenAI's own list keeps the chat and reasoning models; another endpoint keeps all.
+    #[test]
+    fn the_default_endpoint_lists_only_chat_models() {
+        let ids = [
+            "gpt-4o",
+            "o4-mini",
+            "text-embedding-3-small",
+            "whisper-1",
+            "tts-1",
+            "dall-e-3",
+            "omni-moderation-latest",
+        ];
+        let all = || ids.iter().map(|s| s.to_string());
+        assert_eq!(chat_model_ids(all(), true), ["gpt-4o", "o4-mini"]);
+        assert_eq!(chat_model_ids(all(), false), ids);
+    }
+
+    /// LLM-21: the token and temperature fields by endpoint and model.
+    #[test]
+    fn reasoning_models_get_the_completion_limit_and_no_temperature() {
+        let config = ProviderConfig {
+            provider_type: ProviderType::OpenAI,
+            temperature: Some(0.7),
+            max_tokens: Some(4096),
+            ..ProviderConfig::default()
+        };
+        let fields = |model: &str, default_endpoint: bool| {
+            let mut v =
+                serde_json::to_value(token_params(model, &config, default_endpoint)).unwrap();
+            v.as_object_mut().unwrap().retain(|k, _| {
+                ["temperature", "max_tokens", "max_completion_tokens"].contains(&k.as_str())
+            });
+            v
+        };
+        let t = Value::from(0.7_f32 as f64);
+        assert_eq!(
+            fields("gpt-4o-mini", true),
+            serde_json::json!({"max_completion_tokens": 4096, "temperature": t})
+        );
+        for model in ["o4-mini", "gpt-5-mini", "o1", "o3-pro"] {
+            assert_eq!(
+                fields(model, true),
+                serde_json::json!({"max_completion_tokens": 4096}),
+                "{model}"
+            );
+        }
+        assert_eq!(
+            fields("gpt-5-chat-latest", true),
+            serde_json::json!({"max_completion_tokens": 4096, "temperature": t})
+        );
+        for model in ["gpt-4o-mini", "o4-mini"] {
+            assert_eq!(
+                fields(model, false),
+                serde_json::json!({"max_tokens": 4096, "temperature": t}),
+                "{model}"
+            );
+        }
     }
 
     #[test]

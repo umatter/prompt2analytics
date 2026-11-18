@@ -187,16 +187,11 @@ pub async fn start_embedded_server(
     let listener = transport::http::bind(&server_config).await?;
     let bound = listener.local_addr()?;
     // Take the hold `serve` takes, for the configuration as `serve` reads it
-    // (at the bound address), so that limits or process policies that
-    // conflict with a server already running in this process are refused
-    // here, not only in the spawned task's log. `serve` shares this hold;
-    // the task drops it once `serve` has returned.
-    let held = {
-        let mut served = server_config.clone();
-        served.http.addr = bound;
-        let limits = tools::limits::resolve(&served).map_err(transport::TransportError::Config)?;
-        transport::http::hold_limits(&limits, &exec::ExecConfig::from_config(&served))?
-    };
+    // (at the bound address, validated), so that an invalid configuration, or
+    // limits or process policies that conflict with a server already running
+    // in this process, are refused here, not only in the spawned task's log.
+    // `serve` shares this hold; the task drops it once `serve` has returned.
+    let (held, _, _) = transport::http::hold_for_socket(&mut server_config.clone(), bound)?;
     let port = bound.port();
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel();

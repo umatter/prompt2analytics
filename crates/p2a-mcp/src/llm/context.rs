@@ -268,7 +268,14 @@ fn columns_header(listed: usize, width: usize) -> String {
 fn column_line(col_name: &str, column: &Column) -> String {
     let series = column.as_materialized_series();
     let dtype = series.dtype();
-    let null_count = series.null_count();
+    // Missing: null, or NaN in a float column; a float column's range comes from the same pass.
+    let float_scan = if matches!(dtype, DataType::Float32 | DataType::Float64) {
+        scan_floats(series)
+    } else {
+        None
+    };
+    let nan_count = float_scan.as_ref().map_or(0, |scan| scan.nan);
+    let missing_count = series.null_count() + nan_count;
     let total_count = series.len();
 
     // Get dtype as a friendly string
@@ -291,12 +298,16 @@ fn column_line(col_name: &str, column: &Column) -> String {
         parts.push(format!("e.g. {}", samples.join(", ")));
     }
 
-    if null_count > 0 {
-        let null_pct = (null_count as f64 / total_count as f64 * 100.0).round();
-        parts.push(format!("{}% null", null_pct));
+    if missing_count > 0 {
+        let missing_pct = (missing_count as f64 / total_count as f64 * 100.0).round();
+        parts.push(format!("{}% missing", missing_pct));
     }
 
-    if dtype.is_numeric() {
+    if let Some(scan) = &float_scan {
+        if let Some((min, max)) = scan.range {
+            parts.push(range_text(min, max));
+        }
+    } else if dtype.is_numeric() {
         if let Some(stats) = get_numeric_stats(series) {
             parts.push(stats);
         }
@@ -309,7 +320,39 @@ fn column_line(col_name: &str, column: &Column) -> String {
     parts.join(" | ")
 }
 
-/// Up to `max_samples` non-null sample values from the first rows, each cut
+/// A float column's NaN count (nulls not counted) and the range of its present values.
+struct FloatScan {
+    nan: usize,
+    range: Option<(f64, f64)>,
+}
+
+/// One pass over a float series for [`FloatScan`]. `f64::min` and `f64::max` pass over a NaN
+/// operand, so the loop has no branch.
+fn scan_floats(series: &Series) -> Option<FloatScan> {
+    // Float64 casts to itself without a copy.
+    let float = series.cast(&DataType::Float64).ok()?;
+    let ca = float.f64().ok()?;
+    let (mut nan, mut min, mut max) = (0usize, f64::INFINITY, f64::NEG_INFINITY);
+    let mut visit = |x: f64| {
+        nan += usize::from(x.is_nan());
+        min = min.min(x);
+        max = max.max(x);
+    };
+    if ca.null_count() == 0 {
+        for arr in ca.downcast_iter() {
+            arr.values().iter().copied().for_each(&mut visit);
+        }
+    } else {
+        ca.iter().flatten().for_each(&mut visit);
+    }
+    let present = ca.len() - ca.null_count() - nan;
+    Some(FloatScan {
+        nan,
+        range: (present > 0).then_some((min, max)),
+    })
+}
+
+/// Up to `max_samples` present (not null, not NaN) sample values from the first rows, each cut
 /// to [`MAX_SAMPLE_VALUE_LEN`] bytes and JSON-quoted. String values are taken
 /// raw, not through `Display` (which adds its own quotes).
 fn get_sample_values(series: &Series, max_samples: usize) -> Vec<String> {
@@ -321,6 +364,8 @@ fn get_sample_values(series: &Series, max_samples: usize) -> Vec<String> {
         }
         let value = match series.get(i) {
             Ok(AnyValue::Null) | Err(_) => continue,
+            Ok(AnyValue::Float64(x)) if x.is_nan() => continue,
+            Ok(AnyValue::Float32(x)) if x.is_nan() => continue,
             Ok(v) => v,
         };
         let raw = match value.get_str() {
@@ -341,16 +386,19 @@ fn get_sample_values(series: &Series, max_samples: usize) -> Vec<String> {
     samples
 }
 
-/// Get basic statistics for a numeric series.
+/// The range of a non-float numeric series' present values; `None` when it has none.
 fn get_numeric_stats(series: &Series) -> Option<String> {
     // Try to cast to f64 for statistics
     let float_series = series.cast(&DataType::Float64).ok()?;
-    // na-legacy(T4): context statistics over present values (NaN not counted as missing)
     let ca = float_series.f64().ok()?;
 
-    let min = ca.min()?;
-    let max = ca.max()?;
+    let min = ca.min().filter(|x| !x.is_nan())?;
+    let max = ca.max().filter(|x| !x.is_nan())?;
+    Some(range_text(min, max))
+}
 
+/// `range: min..max`, whole numbers as integers.
+fn range_text(min: f64, max: f64) -> String {
     // Format nicely - use integer format if values are whole numbers
     let format_num = |n: f64| {
         if n.fract() == 0.0 && n.abs() < 1e9 {
@@ -362,7 +410,7 @@ fn get_numeric_stats(series: &Series) -> Option<String> {
         }
     };
 
-    Some(format!("range: {}..{}", format_num(min), format_num(max)))
+    format!("range: {}..{}", format_num(min), format_num(max))
 }
 
 /// Configuration for context window management.
@@ -935,6 +983,34 @@ mod tests {
     use super::test_support::is_any_line_break;
     use super::*;
     use crate::llm::{ProviderType, ToolDefinition};
+
+    /// A float column's NaN counts as missing next to its nulls; NaN is never a sample, and a
+    /// column with no present value has no range.
+    #[test]
+    fn nan_counts_as_missing_in_the_dataset_block() {
+        let df = DataFrame::new(vec![
+            Column::new("x".into(), [Some(f64::NAN), Some(1.37), None, Some(2.91)]),
+            Column::new("all_nan".into(), [f64::NAN, f64::NAN, f64::NAN, f64::NAN]),
+            Column::new("k".into(), [Some(3i64), None, Some(5), Some(8)]),
+        ])
+        .unwrap();
+        let x = column_line("x", df.column("x").unwrap());
+        assert!(x.contains("| 50% missing"), "{x}");
+        assert!(x.contains("e.g. \"1.37\", \"2.91\""), "{x}");
+        assert!(x.contains("range: 1.37..2.91"), "{x}");
+        assert!(!x.contains("NaN"), "{x}");
+        let all_nan = column_line("all_nan", df.column("all_nan").unwrap());
+        assert!(all_nan.contains("100% missing"), "{all_nan}");
+        assert!(
+            !all_nan.contains("range") && !all_nan.contains("NaN"),
+            "{all_nan}"
+        );
+        let k = column_line("k", df.column("k").unwrap());
+        assert!(
+            k.contains("25% missing") && k.contains("range: 3..8"),
+            "{k}"
+        );
+    }
 
     /// A 5-row frame with `n` noisy numeric columns `c0..c{n-1}`.
     fn df_with_cols(n: usize) -> DataFrame {

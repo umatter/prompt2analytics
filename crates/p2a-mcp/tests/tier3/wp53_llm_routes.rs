@@ -554,7 +554,8 @@ mod providers {
                 );
                 assert_eq!(
                     r.message.content,
-                    "Analysis reached the maximum number of tool calls. Here are the results gathered so far."
+                    "Analysis stopped at the limit of model calls for one request before the \
+                     model wrote an answer. Ask again with a narrower request."
                 );
             }
         }

@@ -72,6 +72,11 @@ pub struct AppState {
 /// #     listener: tokio::net::TcpListener,
 /// # ) -> Result<(), Box<dyn std::error::Error>> {
 /// use p2a_mcp::{exec, tools, transport::http};
+/// // As `serve` reads it: at the bound socket, over HTTP, validated.
+/// let mut config = config;
+/// config.http.addr = listener.local_addr()?;
+/// config.transport = p2a_mcp::TransportType::Http;
+/// config.validate()?;
 /// let limits = tools::limits::resolve(&config)?;
 /// let exec = exec::ExecConfig::from_config(&config);
 /// let hold = http::hold_limits(&limits, &exec)?;
@@ -187,32 +192,55 @@ struct Held {
     limits: Limits,
     alloc_ceiling_bytes: Option<usize>,
     /// The holders, counted by [`DirsSetting`] (its discriminant).
-    holders: [usize; 3],
+    holders: [usize; 2],
 }
 
 /// The session-directory setting a server holds. A stdio server holds
-/// `Either`: it never sets the switch, and its calls run outside any session
-/// scope, so the switch does not reach them.
+/// `Off`: it runs with the switch off, and an HTTP server that turned it on
+/// in the same process would send the stdio server's dataset paths into
+/// session directories it never enters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DirsSetting {
     Off = 0,
     On = 1,
-    Either = 2,
 }
 
 /// The refusal of a start whose request limits differ from those of a server
 /// still running in this process.
 const LIMITS_CONFLICT: &str = "another server in this process is running under different request \
-     limits (another resource profile, or other --limit-override (P2A_LIMIT_OVERRIDES) entries); \
-     the request limits are process-wide, so stop that server first or serve this configuration \
-     from a process of its own";
+     limits (another resource profile (--limits, P2A_LIMITS, or the deployment mode: open public \
+     servers run hosted), or other --limit-override (P2A_LIMIT_OVERRIDES) entries); the request \
+     limits are process-wide, so stop that server first or serve this configuration from a \
+     process of its own";
 
 /// The refusal of a start whose request limits equal those of a running
-/// server but whose allocation ceiling or session-directory setting differs.
-const POLICIES_CONFLICT: &str = "another server in this process is running under the same request \
-     limits but another allocation ceiling (--max-alloc-mb, P2A_MAX_ALLOC_MB) or session-directory \
-     setting (--session-dirs, P2A_SESSION_DIRS); both are process-wide, so stop that server first \
-     or serve this configuration from a process of its own";
+/// server but whose allocation ceiling or session-directory setting differs,
+/// naming the setting that differs (`setting`, with the running and the
+/// requested value).
+fn policies_conflict(setting: &str) -> String {
+    format!(
+        "another server in this process is running under the same request limits but another \
+         {setting}; it is process-wide, so stop that server first or serve this configuration \
+         from a process of its own"
+    )
+}
+
+/// An allocation ceiling as the refusals name it.
+fn ceiling_text(bytes: Option<usize>) -> String {
+    match bytes {
+        None => "unlimited".to_string(),
+        Some(b) if b % (1 << 20) == 0 => format!("{} MiB", b >> 20),
+        Some(b) => format!("{b} bytes"),
+    }
+}
+
+/// A session-directory setting as the refusals name it.
+fn dirs_text(dirs: DirsSetting) -> &'static str {
+    match dirs {
+        DirsSetting::Off => "off",
+        DirsSetting::On => "on",
+    }
+}
 
 /// A running server's hold on the process-wide request limits and process
 /// policies (the p2a-core allocation ceiling and the session-directory
@@ -284,12 +312,22 @@ pub fn hold_limits(limits: &Limits, exec: &ExecConfig) -> TransportResult<Limits
 }
 
 /// [`hold_limits`] for a stdio server: its limits and allocation ceiling,
-/// and either session-directory setting ([`DirsSetting::Either`]).
+/// and the session directories off ([`DirsSetting::Off`]), so an HTTP server
+/// with them on cannot start beside it, nor it beside one.
 pub(crate) fn hold_stdio_limits(
     limits: &Limits,
     alloc_ceiling_bytes: Option<usize>,
 ) -> TransportResult<LimitsHold> {
-    hold_in(&SERVING, limits, alloc_ceiling_bytes, DirsSetting::Either)
+    hold_stdio_in(&SERVING, limits, alloc_ceiling_bytes)
+}
+
+/// [`hold_stdio_limits`] on `slot`.
+fn hold_stdio_in(
+    slot: &'static Serving,
+    limits: &Limits,
+    alloc_ceiling_bytes: Option<usize>,
+) -> TransportResult<LimitsHold> {
+    hold_in(slot, limits, alloc_ceiling_bytes, DirsSetting::Off)
 }
 
 fn hold_in(
@@ -302,18 +340,33 @@ fn hold_in(
     let held = serving.get_or_insert_with(|| Held {
         limits: limits.clone(),
         alloc_ceiling_bytes,
-        holders: [0; 3],
+        holders: [0; 2],
     });
     let other_dirs = match dirs {
         DirsSetting::Off => held.holders[DirsSetting::On as usize],
         DirsSetting::On => held.holders[DirsSetting::Off as usize],
-        DirsSetting::Either => 0,
     };
     if held.limits != *limits {
         return Err(TransportError::Config(LIMITS_CONFLICT.to_string()));
     }
-    if held.alloc_ceiling_bytes != alloc_ceiling_bytes || other_dirs > 0 {
-        return Err(TransportError::Config(POLICIES_CONFLICT.to_string()));
+    if held.alloc_ceiling_bytes != alloc_ceiling_bytes {
+        return Err(TransportError::Config(policies_conflict(&format!(
+            "allocation ceiling (--max-alloc-mb, P2A_MAX_ALLOC_MB; running: {}, requested: {})",
+            ceiling_text(held.alloc_ceiling_bytes),
+            ceiling_text(alloc_ceiling_bytes)
+        ))));
+    }
+    if other_dirs > 0 {
+        let running = match dirs {
+            DirsSetting::Off => DirsSetting::On,
+            DirsSetting::On => DirsSetting::Off,
+        };
+        return Err(TransportError::Config(policies_conflict(&format!(
+            "session-directory setting (--session-dirs, P2A_SESSION_DIRS; running: {}, \
+             requested: {})",
+            dirs_text(running),
+            dirs_text(dirs)
+        ))));
     }
     held.holders[dirs as usize] += 1;
     Ok(LimitsHold { slot, dirs })
@@ -472,22 +525,17 @@ pub async fn bind(config: &ServerConfig) -> TransportResult<tokio::net::TcpListe
 ///
 /// Before it returns, it stops the health readers and writes out every audit
 /// entry queued by then; a call still running after its deadline answer is
-/// logged when its work ends.
+/// logged when its work ends. The health readers also stop when the `serve`
+/// future is dropped.
 pub async fn serve(
     listener: tokio::net::TcpListener,
     mut config: ServerConfig,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> TransportResult<()> {
-    config.http.addr = listener
+    let addr = listener
         .local_addr()
         .map_err(|e| TransportError::Http(format!("Failed to read the bound address: {e}")))?;
-    config.transport = TransportType::Http;
-    config
-        .validate()
-        .map_err(|e| TransportError::Config(e.to_string()))?;
-    let limits = resolve_limits(&config)?;
-    let exec = ExecConfig::from_config(&config);
-    let held = hold_limits(&limits, &exec)?;
+    let (held, limits, exec) = hold_for_socket(&mut config, addr)?;
     let (app, state) = build_app_with(&config, exec).await?;
     // Every connection task and websocket session of this server keeps the
     // hold, not only this future (see `LimitsHold`).
@@ -510,28 +558,57 @@ pub async fn serve(
     serve_app(listener, app, state, shutdown).await
 }
 
+/// A task aborted when this guard is dropped.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Read `config` as [`serve`] serves it on the socket bound at `addr` (its
+/// address replaced by the socket's and its transport set to HTTP), validate
+/// it, and take its hold ([`hold_limits`]): the hold, the resolved request
+/// limits and the governor settings. [`serve`] and `start_embedded_server`
+/// derive their hold here, so the two cannot disagree on it.
+pub(crate) fn hold_for_socket(
+    config: &mut ServerConfig,
+    addr: std::net::SocketAddr,
+) -> TransportResult<(LimitsHold, Limits, ExecConfig)> {
+    config.http.addr = addr;
+    config.transport = TransportType::Http;
+    config
+        .validate()
+        .map_err(|e| TransportError::Config(e.to_string()))?;
+    let limits = resolve_limits(config)?;
+    let exec = ExecConfig::from_config(config);
+    let held = hold_limits(&limits, &exec)?;
+    Ok((held, limits, exec))
+}
+
 /// Serve a built app with its health readers ([`spawn_health_readers`])
 /// until `shutdown` resolves, then stop the readers and write out the queued
-/// audit entries.
+/// audit entries. The readers also stop when this future is dropped.
 async fn serve_app(
     listener: tokio::net::TcpListener,
     app: Router,
     state: AppState,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> TransportResult<()> {
-    let readers = spawn_health_readers(&state.governor, state.governor.config());
+    // Each reader holds the governor, and through it the session manager and
+    // every session's datasets; both start heap hand-backs through
+    // `health()`, and the watchdog could still exit the process (code 70)
+    // over a server that has stopped. An embedder that keeps the process
+    // after a graceful shutdown must keep none of that. The guard aborts
+    // them when the serve ends, and also when this future is dropped.
+    let readers = spawn_health_readers(&state.governor, state.governor.config()).map(AbortOnDrop);
 
     let served = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown)
         .await
         .map_err(|e| TransportError::Http(format!("HTTP server error: {}", e)));
-    // Each reader holds the governor, and through it the session manager
-    // and every session's datasets, and the plain poll keeps handing memory
-    // back; an embedder that keeps the process after a graceful shutdown
-    // must not keep those too.
-    if let Some(readers) = readers {
-        readers.abort();
-    }
+    drop(readers);
     // Write out the queued audit entries before returning, so a caller that
     // exits right after a graceful shutdown keeps them. The governor's logger
     // holds the entries of every tool call; `state.audit_logger` is opened
@@ -551,9 +628,12 @@ async fn serve_app(
 /// task. That stops it accepting connections, but the connections and
 /// websocket sessions it accepted are still served, under its limits, and
 /// it holds them ([`LimitsHold`]) until the last of those has closed; until
-/// then a start of other limits or policies is refused. To start one right
-/// after, serve with [`bind`] and [`serve`] and stop it through `serve`'s
-/// shutdown future.
+/// then a start of other limits or policies is refused. To start one after
+/// it, serve with [`bind`] and [`serve`] and stop it through `serve`'s
+/// shutdown future. A start of other limits is accepted once `serve` has
+/// returned and its websocket sessions (with `enable_ws`) have closed. One
+/// made immediately after the return can be refused for a moment while the
+/// connection tasks wind down, so retry it.
 pub async fn start_http_transport(config: &ServerConfig) -> TransportResult<()> {
     let listener = bind(config).await?;
     serve(listener, config.clone(), std::future::pending()).await
@@ -754,7 +834,9 @@ fn create_base_router(state: AppState, config: &ServerConfig) -> Router {
 
     // WebSocket route: off in open public mode unless --enable-ws
     // (P2A_ENABLE_WS). Its tool messages run under the governor like HTTP
-    // calls, and its message and frame sizes are capped like request bodies.
+    // calls, and its message and frame sizes are capped at the request-body
+    // cap (P2A_MAX_HTTP_BODY_MB), not at the hosted HTTP JSON limit
+    // (middleware::parsed_body_bytes).
     #[cfg(feature = "websocket")]
     if mode != DeploymentMode::OpenPublic || config.http.enable_ws {
         router = router.route("/ws", get(super::websocket::ws_handler));
@@ -1026,12 +1108,13 @@ mod serve_tests {
         assert_eq!(health.rss_bytes, Some(LIMIT / 2));
     }
 
-    /// The health readers stop when the server does. Each holds the
+    /// The health readers stop when the server does, after a graceful
+    /// shutdown and when the serve future is dropped. Each holds the
     /// governor, and through it the session manager and every session's
     /// datasets, and the plain poll keeps handing memory back, so a reader
-    /// left running after a graceful shutdown would keep a dead server's
-    /// memory and its hand-backs for as long as an embedder keeps the
-    /// process (PR-04).
+    /// left running would keep a dead server's memory and its hand-backs for
+    /// as long as an embedder keeps the process (PR-04). Without a reader the
+    /// governor goes with the server (the control).
     #[tokio::test]
     async fn the_health_readers_stop_when_the_server_does() {
         let config = ServerConfig {
@@ -1039,6 +1122,8 @@ mod serve_tests {
             ..Default::default()
         };
         let readers = [
+            // The control: no reader, so the governor goes with the server.
+            ("no reader", ExecConfig::default()),
             (
                 // A soft limit far above any RSS, so nothing is refused or
                 // handed back, and no watchdog.
@@ -1058,11 +1143,26 @@ mod serve_tests {
             ),
         ];
         let mut outlived = Vec::new();
-        for (reader, exec) in readers {
+        for (reader, exec, dropped) in readers.iter().flat_map(|(reader, exec)| {
+            [
+                (*reader, exec.clone(), false),
+                (*reader, exec.clone(), true),
+            ]
+        }) {
             let (app, state) = build_app_with(&config, exec).await.unwrap();
             let governor = Arc::downgrade(&state.governor);
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            serve_app(listener, app, state, async {}).await.unwrap();
+            if dropped {
+                // A serve future dropped before its shutdown (an embedder's timeout or
+                // abort) stops its readers too.
+                let serving = serve_app(listener, app, state, std::future::pending());
+                assert!(
+                    tokio::time::timeout(Duration::ZERO, serving).await.is_err(),
+                    "the serve ended without its shutdown"
+                );
+            } else {
+                serve_app(listener, app, state, async {}).await.unwrap();
+            }
             // A bound on the wait, not a timing assertion: an aborted task
             // is dropped on its next turn on the runtime.
             for _ in 0..500 {
@@ -1072,7 +1172,7 @@ mod serve_tests {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
             if governor.upgrade().is_some() {
-                outlived.push(reader);
+                outlived.push((reader, dropped));
             }
         }
         assert!(outlived.is_empty(), "outlived the server: {outlived:?}");
@@ -1142,7 +1242,7 @@ mod serve_tests {
         let ceiling = Some(256 << 20);
         let policies = |result| {
             refusal(result).map(|message| {
-                assert_eq!(message, POLICIES_CONFLICT);
+                assert!(message.contains("same request limits"), "{message}");
             })
         };
         let public = hold_in(&SLOT, &hosted, ceiling, DirsSetting::On).unwrap();
@@ -1151,29 +1251,119 @@ mod serve_tests {
             Some(()),
             "another allocation ceiling"
         );
+        // The refusal names the setting that differs, with both values.
+        let message = refusal(hold_in(&SLOT, &hosted, None, DirsSetting::On)).unwrap();
+        assert!(
+            message.contains("--max-alloc-mb")
+                && message.contains("running: 256 MiB, requested: unlimited")
+                && !message.contains("--session-dirs"),
+            "{message}"
+        );
+        let message = refusal(hold_in(&SLOT, &hosted, ceiling, DirsSetting::Off)).unwrap();
+        assert!(
+            message.contains("--session-dirs")
+                && message.contains("running: on, requested: off")
+                && !message.contains("--max-alloc-mb"),
+            "{message}"
+        );
         assert_eq!(
             policies(hold_in(&SLOT, &hosted, ceiling, DirsSetting::Off)),
             Some(()),
             "the session directories off"
         );
-        // A stdio server holds either session-directory setting, so it
-        // shares the hold; its allocation ceiling is held like any other.
-        let stdio = hold_in(&SLOT, &hosted, ceiling, DirsSetting::Either).unwrap();
+        // A stdio server holds the session directories off: it conflicts
+        // with a server that has them on.
+        assert_eq!(
+            policies(hold_stdio_in(&SLOT, &hosted, ceiling)),
+            Some(()),
+            "a stdio server beside session directories"
+        );
         drop(public);
+        assert!(SLOT.lock().unwrap().is_none());
+        // It shares the hold with a server that has them off, and its
+        // allocation ceiling is held like any other.
+        let stdio = hold_stdio_in(&SLOT, &hosted, ceiling).unwrap();
+        let local = hold_in(&SLOT, &hosted, ceiling, DirsSetting::Off).unwrap();
         assert_eq!(
             policies(hold_in(&SLOT, &hosted, None, DirsSetting::Off)),
             Some(())
         );
-        // With only the stdio server left, an HTTP server of either setting
-        // can start, and then holds its own setting against the other.
-        let local = hold_in(&SLOT, &hosted, ceiling, DirsSetting::Off).unwrap();
         assert_eq!(
             policies(hold_in(&SLOT, &hosted, ceiling, DirsSetting::On)),
             Some(())
         );
         drop(local);
+        assert_eq!(
+            policies(hold_in(&SLOT, &hosted, ceiling, DirsSetting::On)),
+            Some(()),
+            "the stdio server alone still holds them off"
+        );
         drop(stdio);
         assert!(SLOT.lock().unwrap().is_none());
+    }
+
+    /// A chat stream keeps the server's hold while it runs, past the return
+    /// of its handler (its task outlives the connection's request), and
+    /// releases it once its client is gone (PR-18-4). The hold is taken on a
+    /// private slot; the provider is a loopback Ollama stub that accepts the
+    /// chat's request and never answers.
+    #[cfg(feature = "llm")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_chat_stream_keeps_the_servers_hold_while_it_runs() {
+        use crate::transport::llm_routes::{LlmChatRequest, llm_chat_stream};
+        static SLOT: Serving = Mutex::new(None);
+
+        let stub = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let stub_addr = stub.local_addr().unwrap();
+        let (asked, mut asked_rx) = tokio::sync::mpsc::channel::<()>(4);
+        let silent = tokio::spawn(async move {
+            let mut open = Vec::new();
+            while let Ok((stream, _)) = stub.accept().await {
+                open.push(stream);
+                let _ = asked.try_send(());
+            }
+        });
+
+        let config = ServerConfig {
+            transport: TransportType::Http,
+            ..Default::default()
+        };
+        let (_app, state) = build_app_with(&config, ExecConfig::default())
+            .await
+            .unwrap();
+        let session_id = state.session_manager.create_session(None).await.unwrap();
+        let hold = hold_in(&SLOT, &Limits::off(), None, DirsSetting::Off).unwrap();
+        let request: LlmChatRequest = serde_json::from_value(json!({
+            "session_id": session_id,
+            "message": "hello",
+            "provider": {
+                "provider_type": "ollama",
+                "base_url": format!("http://{stub_addr}"),
+                "model": "stub",
+            },
+        }))
+        .unwrap();
+        let response = llm_chat_stream(
+            axum::extract::State(state),
+            Some(axum::Extension(Arc::new(hold))),
+            Json(request),
+        )
+        .await;
+        // The handler has returned; the chat is waiting on the provider.
+        tokio::time::timeout(Duration::from_secs(30), asked_rx.recv())
+            .await
+            .expect("the chat never asked the provider");
+        assert!(
+            SLOT.lock().unwrap().is_some(),
+            "released while the chat runs"
+        );
+
+        drop(response);
+        assert!(
+            released_within_a_bound(&SLOT).await,
+            "the hold outlived the chat's client"
+        );
+        silent.abort();
     }
 
     /// Whether `slot` is released within a bound (a liveness guard, not a

@@ -5,6 +5,7 @@
 
 use super::LlmSettings;
 use super::retry::{MAX_UPSTREAM_BODY_BYTES, count_streamed, read_json_capped, upstream_error};
+use super::stream::{LineBuffer, sse_data, stream_failed};
 use super::tool_loop::{
     AssistantTurn, StreamSink, ToolLoopConfig, ToolLoopProvider, run_tool_loop,
 };
@@ -335,74 +336,86 @@ impl AnthropicProvider {
 
         // Process SSE stream
         let mut stream = response.bytes_stream();
-        let mut buffer = String::new();
+        let mut lines = LineBuffer::new();
         let mut text_content = String::new();
         let mut tool_calls: Vec<ToolCall> = Vec::new();
         let mut current_tool_id = String::new();
         let mut current_tool_name = String::new();
         let mut current_tool_input = String::new();
         let mut received = 0usize;
+        let mut stopped = false;
 
-        while let Some(chunk_result) = stream.next().await {
-            let chunk = chunk_result?;
-            count_streamed(&mut received, chunk.len())?;
-            let chunk_str = String::from_utf8_lossy(&chunk);
-            buffer.push_str(&chunk_str);
-
-            // Process complete SSE lines
-            while let Some(line_end) = buffer.find('\n') {
-                let line = buffer[..line_end].trim().to_string();
-                buffer = buffer[line_end + 1..].to_string();
-
-                if line.is_empty() {
-                    continue;
-                }
-
-                if let Some(data) = line.strip_prefix("data: ") {
-                    if let Ok(event) = serde_json::from_str::<AnthropicStreamEvent>(data) {
-                        match event {
-                            AnthropicStreamEvent::ContentBlockStart { content_block, .. } => {
-                                match content_block {
-                                    AnthropicStreamContentBlock::Text { .. } => {}
-                                    AnthropicStreamContentBlock::ToolUse { id, name } => {
-                                        current_tool_id = id;
-                                        current_tool_name = name;
-                                        current_tool_input.clear();
-                                    }
-                                }
-                            }
-                            AnthropicStreamEvent::ContentBlockDelta { delta, .. } => match delta {
-                                AnthropicStreamDelta::TextDelta { text } => {
-                                    text_content.push_str(&text);
-                                    callback(StreamChunk::Text { content: text });
-                                }
-                                AnthropicStreamDelta::InputJsonDelta { partial_json } => {
-                                    current_tool_input.push_str(&partial_json);
-                                }
-                            },
-                            AnthropicStreamEvent::ContentBlockStop { .. } => {
-                                // If we were building a tool call, finalize it
-                                if !current_tool_id.is_empty() {
-                                    // Empty for a tool without parameters.
-                                    let input = ToolCall::parse_arguments(&current_tool_input);
-                                    tool_calls.push(ToolCall {
-                                        id: current_tool_id.clone(),
-                                        name: current_tool_name.clone(),
-                                        arguments: input,
-                                    });
-                                    current_tool_id.clear();
-                                    current_tool_name.clear();
-                                    current_tool_input.clear();
-                                }
-                            }
-                            AnthropicStreamEvent::MessageStop => {
-                                // End of message
-                            }
-                            _ => {}
+        // One line of the stream: an error event fails the call, and `message_stop` ends the
+        // answer (true).
+        let mut handle = |line: &str| -> Result<bool, LlmError> {
+            let Some(data) = sse_data(line) else {
+                return Ok(false);
+            };
+            let Ok(event) = serde_json::from_str::<AnthropicStreamEvent>(data) else {
+                return Ok(false);
+            };
+            match event {
+                AnthropicStreamEvent::ContentBlockStart { content_block, .. } => {
+                    match content_block {
+                        AnthropicStreamContentBlock::Text { .. } => {}
+                        AnthropicStreamContentBlock::ToolUse { id, name } => {
+                            current_tool_id = id;
+                            current_tool_name = name;
+                            current_tool_input.clear();
                         }
                     }
                 }
+                AnthropicStreamEvent::ContentBlockDelta { delta, .. } => match delta {
+                    AnthropicStreamDelta::TextDelta { text } => {
+                        text_content.push_str(&text);
+                        callback(StreamChunk::Text { content: text });
+                    }
+                    AnthropicStreamDelta::InputJsonDelta { partial_json } => {
+                        current_tool_input.push_str(&partial_json);
+                    }
+                },
+                AnthropicStreamEvent::ContentBlockStop { .. } => {
+                    // If we were building a tool call, finalize it
+                    if !current_tool_id.is_empty() {
+                        // Empty for a tool without parameters.
+                        let input = ToolCall::parse_arguments(&current_tool_input);
+                        tool_calls.push(ToolCall {
+                            id: std::mem::take(&mut current_tool_id),
+                            name: std::mem::take(&mut current_tool_name),
+                            arguments: input,
+                        });
+                        current_tool_input.clear();
+                    }
+                }
+                AnthropicStreamEvent::MessageStop => return Ok(true),
+                AnthropicStreamEvent::Error { error } => {
+                    return Err(stream_failed(
+                        PROVIDER,
+                        error.kind.as_deref(),
+                        error.message.as_deref().unwrap_or_default(),
+                    ));
+                }
+                _ => {}
             }
+            Ok(false)
+        };
+
+        'read: while let Some(chunk_result) = stream.next().await {
+            let chunk = chunk_result?;
+            count_streamed(&mut received, chunk.len())?;
+            lines.push(&chunk);
+            while let Some(line) = lines.next_line() {
+                if handle(&line?)? {
+                    stopped = true;
+                    break 'read;
+                }
+            }
+        }
+        if !stopped && let Some(line) = lines.finish() {
+            stopped = handle(&line?)?;
+        }
+        if !stopped {
+            return Err(LlmError::StreamIncomplete { provider: PROVIDER });
         }
 
         Ok(AssistantTurn {
@@ -423,17 +436,25 @@ impl LlmProvider for AnthropicProvider {
         Ok(self.config.api_key.is_some())
     }
 
+    /// The models of Anthropic's models endpoint (`GET /v1/models`, up to 1,000), with the
+    /// caller's key.
     async fn list_models(&self) -> Result<Vec<String>, LlmError> {
-        // Anthropic doesn't have a models list endpoint, return known models
-        Ok(vec![
-            "claude-opus-4-5-20251101".to_string(),
-            "claude-sonnet-4-20250514".to_string(),
-            "claude-3-5-sonnet-20241022".to_string(),
-            "claude-3-5-haiku-20241022".to_string(),
-            "claude-3-opus-20240229".to_string(),
-            "claude-3-sonnet-20240229".to_string(),
-            "claude-3-haiku-20240307".to_string(),
-        ])
+        let url = format!("{}/v1/models?limit=1000", self.base_url());
+        let api_key = self.api_key()?;
+        let response = self
+            .client()?
+            .get(&url)
+            .timeout(self.timeout)
+            .header("x-api-key", api_key)
+            .header("anthropic-version", "2023-06-01")
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            return Err(upstream_error(PROVIDER, response).await);
+        }
+        let models: AnthropicModelsResponse =
+            read_json_capped(response, MAX_UPSTREAM_BODY_BYTES).await?;
+        Ok(models.data.into_iter().map(|m| m.id).collect())
     }
 
     async fn chat(
@@ -480,14 +501,6 @@ impl LlmProvider for AnthropicProvider {
 
 #[async_trait]
 impl ToolLoopProvider for AnthropicProvider {
-    fn convert(&self, messages: &[Message]) -> Result<Value, LlmError> {
-        let (system, wire_messages) = self.to_anthropic_messages(messages);
-        let mut wire = serde_json::Map::new();
-        wire.insert("system".into(), serde_json::to_value(system)?);
-        wire.insert("messages".into(), serde_json::to_value(wire_messages)?);
-        Ok(Value::Object(wire))
-    }
-
     async fn call(
         &self,
         messages: &[Message],
@@ -575,6 +588,16 @@ enum AnthropicResponseBlock {
     },
 }
 
+#[derive(Debug, Deserialize)]
+struct AnthropicModelsResponse {
+    data: Vec<AnthropicModel>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicModel {
+    id: String,
+}
+
 // ========== Anthropic Streaming Types ==========
 
 #[derive(Debug, Deserialize)]
@@ -604,8 +627,22 @@ enum AnthropicStreamEvent {
     },
     MessageStop,
     Ping,
+    /// An error in the middle of the stream (`overloaded_error`, `api_error`, ...).
+    Error {
+        #[serde(default)]
+        error: AnthropicStreamError,
+    },
     #[serde(other)]
     Unknown,
+}
+
+/// The `error` object of a stream's error event.
+#[derive(Debug, Default, Deserialize)]
+struct AnthropicStreamError {
+    #[serde(rename = "type", default)]
+    kind: Option<String>,
+    #[serde(default)]
+    message: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

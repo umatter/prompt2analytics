@@ -309,10 +309,12 @@ async fn serve_refuses_other_process_policies_under_the_same_limits() {
         .await
         .expect_err("serve turned off the session directories of an open public server");
     let message = e.to_string();
+    // The refusal names the setting that differs, not the one that is equal.
     assert!(
         message.contains("same request limits")
-            && message.contains("--max-alloc-mb")
-            && message.contains("--session-dirs"),
+            && message.contains("--session-dirs")
+            && message.contains("running: on, requested: off")
+            && !message.contains("--max-alloc-mb"),
         "{message}"
     );
     assert_eq!(*limits::current(), expected());
@@ -325,7 +327,48 @@ async fn serve_refuses_other_process_policies_under_the_same_limits() {
     let e = p2a_mcp::transport::http::serve(listener, cfg, std::future::ready(()))
         .await
         .expect_err("serve changed the allocation ceiling of an open public server");
-    assert!(e.to_string().contains("same request limits"), "{e}");
+    assert!(
+        e.to_string().contains("same request limits") && e.to_string().contains("--max-alloc-mb"),
+        "{e}"
+    );
+    assert_eq!(p2a_core::resource::alloc_ceiling_bytes(), ceiling);
+
+    assert_serves_open_public_limits(addr).await;
+    stop.send(()).unwrap();
+    server.await.unwrap().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn start_transport_refuses_a_stdio_server_beside_session_directories() {
+    let (addr, stop, server) = running_open_public().await;
+
+    // A stdio configuration with `--limits hosted` and the same overrides has
+    // the open public server's request limits and allocation ceiling, but it
+    // runs with the session directories off, which the open public server
+    // holds on. A start that does not refuse runs on stdio until the bound.
+    let mut cfg = ServerConfig::default();
+    assert_eq!(cfg.transport, TransportType::Stdio);
+    cfg.limits.profile = Some(p2a_mcp::config::ResourceProfile::Hosted);
+    cfg.limits.overrides = overrides();
+    assert_eq!(limits::resolve(&cfg), Ok(expected()));
+    let ceiling = p2a_core::resource::alloc_ceiling_bytes();
+    assert_eq!(cfg.alloc_ceiling_bytes(), ceiling);
+    let started = tokio::time::timeout(
+        Duration::from_secs(60),
+        p2a_mcp::transport::start_transport(&cfg),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("a stdio server was started beside session directories"));
+    let message = started
+        .expect_err("start_transport returned Ok")
+        .to_string();
+    assert!(
+        message.contains("same request limits")
+            && message.contains("--session-dirs")
+            && message.contains("running: on, requested: off"),
+        "{message}"
+    );
+    assert_eq!(*limits::current(), expected());
     assert_eq!(p2a_core::resource::alloc_ceiling_bytes(), ceiling);
 
     assert_serves_open_public_limits(addr).await;

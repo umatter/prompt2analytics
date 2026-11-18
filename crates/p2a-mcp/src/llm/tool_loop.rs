@@ -1,12 +1,12 @@
 //! The one tool-calling loop of the three LLM providers (LLM-20).
 //!
-//! A provider implements [`ToolLoopProvider`]: [`ToolLoopProvider::convert`] turns the conversation
-//! into its wire messages and [`ToolLoopProvider::call`] sends one model turn, streaming text deltas
-//! when a sink is given. [`run_tool_loop`] does the rest: the iteration cap, loop detection, tool
+//! A provider implements [`ToolLoopProvider`]: [`ToolLoopProvider::call`] makes one model call (its
+//! own conversion of the conversation into wire messages included), streaming text deltas when a
+//! sink is given. [`run_tool_loop`] does the rest: the iteration cap, loop detection, tool
 //! execution, `interpret`, and tool-call ids unique per request (`call_<request>_<n>`). A call is
 //! announced on the stream ([`StreamChunk::ToolCall`]) only when it is about to run.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 use async_trait::async_trait;
@@ -34,9 +34,6 @@ pub struct AssistantTurn {
 #[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait ToolLoopProvider: Send + Sync {
-    /// The provider's wire messages for `messages`, as JSON: `{"messages": [..]}`, plus `"system"`
-    /// for Anthropic. Tool results attached to an assistant message follow it (LLM-17).
-    fn convert(&self, messages: &[Message]) -> Result<serde_json::Value, LlmError>;
     /// One model turn. With `stream`, each text delta goes to the sink as [`StreamChunk::Text`] as it
     /// arrives; nothing else is sent to it.
     async fn call(
@@ -93,19 +90,33 @@ pub fn tool_call_id(request_id: &str, n: usize) -> String {
     format!("call_{request_id}_{n}")
 }
 
-/// Calls of one tool name a request may make before the loop stops.
-pub const MAX_CALLS_PER_TOOL: usize = 3;
+/// Rounds of one request in which one tool name may appear: a round that would be the tool's
+/// fourth stops the loop before it runs. Calls of one tool in the same round (parallel calls)
+/// count once.
+pub const MAX_ROUNDS_PER_TOOL: usize = 3;
+/// Tool calls run in one round. The calls past it get an error result without running, so the
+/// model can make them in the next round.
+pub const MAX_CALLS_PER_ROUND: usize = 16;
 /// The answer when the loop reaches the iteration cap and the model wrote no text.
-pub const MAX_ITERATIONS_NOTE: &str =
-    "Analysis reached the maximum number of tool calls. Here are the results gathered so far.";
+pub const MAX_ITERATIONS_NOTE: &str = "Analysis stopped at the limit of model calls for one \
+     request before the model wrote an answer. Ask again with a narrower request.";
 /// The answer when a round repeats the previous one exactly and the model wrote no text.
 pub const REPEATED_CALLS_NOTE: &str = "Analysis detected a repeated tool call pattern and stopped. Please try rephrasing your request.";
 
-/// The answer when one tool is called more than [`MAX_CALLS_PER_TOOL`] times and the model wrote no
-/// text; the name is cut to 64 bytes on a char boundary.
+/// The result of a call past [`MAX_CALLS_PER_ROUND`] in its round, which does not run.
+fn over_round_cap_result() -> String {
+    format!(
+        "not run: a round may make at most {MAX_CALLS_PER_ROUND} tool calls; make the rest in \
+         the next round"
+    )
+}
+
+/// The answer when one tool appears in more than [`MAX_ROUNDS_PER_TOOL`] rounds and the model
+/// wrote no text; the name is cut to 64 bytes on a char boundary.
 pub fn repeated_tool_note(name: &str) -> String {
     format!(
-        "Analysis stopped: tool '{}' was called repeatedly. Here are the results gathered so far.",
+        "Analysis stopped: tool '{}' was called in more than {MAX_ROUNDS_PER_TOOL} rounds. Ask \
+         again with a narrower request.",
         truncate_str(name, 64)
     )
 }
@@ -116,13 +127,13 @@ enum Stop {
     Tool(String),
 }
 
-/// Loop detection: an exact repeat of the previous round (names and arguments), or more than
-/// [`MAX_CALLS_PER_TOOL`] calls of one name in the request. Tier 4's LLM-10 (parallel calls of one
-/// tool in one round count separately) is this rule, kept as it was in the six copies.
+/// Loop detection: an exact repeat of the previous round (names and arguments), or a tool name
+/// in more than [`MAX_ROUNDS_PER_TOOL`] rounds of the request. Each name counts once per round,
+/// however often the round calls it, so parallel calls of one tool run.
 #[derive(Default)]
 struct LoopGuard {
     previous: Option<u64>,
-    per_tool: HashMap<String, usize>,
+    rounds: HashMap<String, usize>,
 }
 
 impl LoopGuard {
@@ -137,10 +148,14 @@ impl LoopGuard {
             return Some(Stop::Repeat);
         }
         self.previous = Some(hash);
+        let mut seen: HashSet<&str> = HashSet::new();
         for tc in calls {
-            let n = self.per_tool.entry(tc.name.clone()).or_insert(0);
+            if !seen.insert(tc.name.as_str()) {
+                continue;
+            }
+            let n = self.rounds.entry(tc.name.clone()).or_insert(0);
             *n += 1;
-            if *n > MAX_CALLS_PER_TOOL {
+            if *n > MAX_ROUNDS_PER_TOOL {
                 return Some(Stop::Tool(tc.name.clone()));
             }
         }
@@ -149,9 +164,10 @@ impl LoopGuard {
 }
 
 /// Run the tool loop: call the model; while it asks for tools, run them (in order, announcing each
-/// on the stream just before it runs) and call it again with the results, until it answers without
-/// a tool call, `interpret` is false (the first round's calls and results are returned), the loop
-/// guard refuses a round, or `max_iterations` model calls were made.
+/// on the stream just before it runs; at most [`MAX_CALLS_PER_ROUND`] per round) and call it again
+/// with the results, until it answers without a tool call, `interpret` is false (the first round's
+/// calls and results are returned), the loop guard refuses a round, or `max_iterations` model
+/// calls were made.
 pub async fn run_tool_loop(
     provider: &dyn ToolLoopProvider,
     messages: &[Message],
@@ -205,7 +221,19 @@ pub async fn run_tool_loop(
         conversation.push(Message::assistant_with_tools(turn.content, calls.clone()));
         let mut results = Vec::with_capacity(calls.len());
         let mut outputs = Vec::with_capacity(calls.len());
-        for tc in &calls {
+        for (i, tc) in calls.iter().enumerate() {
+            if i >= MAX_CALLS_PER_ROUND {
+                // Not run and not announced; every call keeps a result, which the providers
+                // require.
+                let content = over_round_cap_result();
+                outputs.push(format!("**{}**:\n{}", tc.name, content));
+                results.push(ToolResult {
+                    tool_call_id: tc.id.clone(),
+                    content,
+                    is_error: true,
+                });
+                continue;
+            }
             if let Some(sink) = stream {
                 sink(StreamChunk::ToolCall {
                     tool_call: tc.clone(),
@@ -276,9 +304,6 @@ mod tests {
     }
     #[async_trait]
     impl ToolLoopProvider for Scripted {
-        fn convert(&self, messages: &[Message]) -> Result<Value, LlmError> {
-            Ok(serde_json::to_value(messages)?)
-        }
         async fn call(
             &self,
             messages: &[Message],
@@ -451,7 +476,11 @@ mod tests {
         let tools = Tools::default();
         let (m, _) = run(&p, &tools, &config(2, true)).await;
         assert_eq!((p.calls(), tools.0.lock().unwrap().len()), (2, 2));
-        assert_eq!(m.content, MAX_ITERATIONS_NOTE);
+        assert_eq!(
+            m.content,
+            "Analysis stopped at the limit of model calls for one request before the model wrote \
+             an answer. Ask again with a narrower request."
+        );
         let p = Scripted::new(script("working"));
         let (m, _) = run(&p, &Tools::default(), &config(2, true)).await;
         assert_eq!(m.content, "working");
@@ -471,7 +500,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_fourth_call_of_one_tool_stops_the_loop() {
+    async fn the_fourth_round_of_one_tool_stops_the_loop() {
         let p = Scripted::new(
             (1..=4)
                 .map(|i| turn("", &[("t", json!({"i": i}))]))
@@ -479,10 +508,50 @@ mod tests {
         );
         let tools = Tools::default();
         let (m, _) = run(&p, &tools, &config(25, true)).await;
-        assert_eq!(tools.0.lock().unwrap().len(), MAX_CALLS_PER_TOOL);
+        assert_eq!(tools.0.lock().unwrap().len(), MAX_ROUNDS_PER_TOOL);
         assert_eq!(
             m.content,
-            "Analysis stopped: tool 't' was called repeatedly. Here are the results gathered so far."
+            "Analysis stopped: tool 't' was called in more than 3 rounds. Ask again with a \
+             narrower request."
+        );
+    }
+
+    /// LLM-10: four parallel calls of one tool in one round run, and the model's answer follows.
+    #[tokio::test]
+    async fn parallel_calls_of_one_tool_in_one_round_run() {
+        let calls: Vec<(&str, Value)> = (0..4)
+            .map(|i| ("describe_dataset", json!({"name": format!("d{i}")})))
+            .collect();
+        let p = Scripted::new(vec![turn("", &calls), turn("four datasets", &[])]);
+        let tools = Tools::default();
+        let (m, chunks) = run(&p, &tools, &config(25, true)).await;
+        assert_eq!(tools.0.lock().unwrap().len(), 4);
+        assert_eq!(chunks.iter().filter(|c| c.starts_with("call:")).count(), 4);
+        assert_eq!(m.content, "four datasets");
+    }
+
+    /// A round of 17 calls runs 16; the 17th gets an error result without running or being
+    /// announced, and the loop goes on.
+    #[tokio::test]
+    async fn calls_past_the_round_cap_get_an_error_result_and_the_loop_goes_on() {
+        let calls: Vec<(&str, Value)> = (0..17).map(|i| ("t", json!({"i": i}))).collect();
+        let p = Scripted::new(vec![turn("", &calls), turn("done", &[])]);
+        let tools = Tools::default();
+        let (m, chunks) = run(&p, &tools, &config(25, true)).await;
+        assert_eq!(tools.0.lock().unwrap().len(), MAX_CALLS_PER_ROUND);
+        assert_eq!(chunks.iter().filter(|c| c.starts_with("call:")).count(), 16);
+        assert_eq!(m.content, "done");
+        let second = &p.seen.lock().unwrap()[1];
+        let results = second.last().unwrap().tool_results.as_ref().unwrap();
+        assert_eq!(results.len(), 17);
+        assert!(results[..16].iter().all(|r| !r.is_error));
+        assert_eq!(
+            (results[16].tool_call_id.as_str(), results[16].is_error),
+            ("call_req_17", true)
+        );
+        assert_eq!(
+            results[16].content,
+            "not run: a round may make at most 16 tool calls; make the rest in the next round"
         );
     }
 

@@ -124,7 +124,7 @@ fn server_key_var(t: ProviderType) -> Option<&'static str> {
 
 /// Whether `base_url` (unset, or after trimming one trailing `/`) is the
 /// provider's built-in endpoint.
-fn is_default_endpoint(t: ProviderType, base_url: Option<&str>) -> bool {
+pub(crate) fn is_default_endpoint(t: ProviderType, base_url: Option<&str>) -> bool {
     match base_url {
         None => true,
         Some(url) => url.strip_suffix('/').unwrap_or(url) == t.default_base_url(),
@@ -236,7 +236,8 @@ impl Message {
     /// The tool results an assistant message carries for its own tool calls, in the results' order
     /// (`/api/llm/chat` with `interpret: false` returns the calls and their results on one message).
     /// A result whose `tool_call_id` names none of the message's calls is left out: no provider
-    /// accepts a result without its call. Empty for every other message.
+    /// accepts a result without its call. Only the first result of each call is kept, since a
+    /// provider takes one result per call. Empty for every other message.
     ///
     /// Cost: the converters that replay these results take 1.7-2.3x what they took when they
     /// dropped them (and the provider answered 400) on a quiet machine, 4.6x on a loaded run;
@@ -249,10 +250,16 @@ impl Message {
         let (Some(calls), Some(results)) = (&self.tool_calls, &self.tool_results) else {
             return Vec::new();
         };
-        let ids: std::collections::HashSet<&str> = calls.iter().map(|c| c.id.as_str()).collect();
+        // Each call id, and whether a result of it was kept.
+        let mut answered: std::collections::HashMap<&str, bool> =
+            calls.iter().map(|c| (c.id.as_str(), false)).collect();
         results
             .iter()
-            .filter(|r| ids.contains(r.tool_call_id.as_str()))
+            .filter(|r| {
+                answered
+                    .get_mut(r.tool_call_id.as_str())
+                    .is_some_and(|kept| !std::mem::replace(kept, true))
+            })
             .collect()
     }
 
@@ -446,6 +453,20 @@ pub enum LlmError {
     /// The provider's response body exceeded the size cap.
     #[error("The LLM provider's response exceeded {0} bytes")]
     ResponseTooLarge(usize),
+
+    /// The provider reported an error in the middle of a streamed answer. `kind` is its error
+    /// type (`overloaded_error`, `server_error`, ...), or `unknown`; its message is logged at
+    /// debug only and never part of the error.
+    #[error("{provider} reported an error during its answer ({kind}); try again")]
+    StreamFailed {
+        provider: &'static str,
+        kind: String,
+    },
+
+    /// The provider's stream ended without its end marker (a dropped connection or a proxy that
+    /// cut it), so the answer is not complete.
+    #[error("{provider}'s answer ended before it was complete; try again")]
+    StreamIncomplete { provider: &'static str },
 }
 
 /// What a caller can do about an upstream status.
@@ -538,8 +559,8 @@ pub trait LlmProvider: Send + Sync {
 mod attached_tool_results_tests {
     use super::*;
 
-    /// Duplicates and the results' order are kept, an orphan is dropped, and only an assistant
-    /// message has attached results: the output of a nested filter over calls and results.
+    /// The results' order is kept, a repeated result and an orphan are dropped, and only an
+    /// assistant message has attached results.
     #[test]
     fn test_attached_tool_results_keeps_matching_results_in_order() {
         let call = |id: &str| ToolCall {
@@ -563,7 +584,7 @@ mod attached_tool_results_tests {
             .iter()
             .map(|r| r.tool_call_id.as_str())
             .collect();
-        assert_eq!(ids, ["c", "a", "b", "a"]);
+        assert_eq!(ids, ["c", "a", "b"]);
         message.role = MessageRole::User;
         assert!(message.attached_tool_results().is_empty());
     }

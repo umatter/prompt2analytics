@@ -6,6 +6,7 @@ mod wp05_mechanics;
 mod wp27_munging;
 mod wp28_cleaning;
 mod wp29_viz;
+mod wp30_llm_transport;
 mod wp53_llm_routes;
 mod wp54_ui_persistence;
 mod wp55_causal;

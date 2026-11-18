@@ -176,8 +176,10 @@ impl ChatSession {
     /// `SessionManager::cleanup_expired` removed it first, and the lookup
     /// finds no session under the id. The chat's own `Arc` tells the second
     /// case from a deletion or an eviction: a removed session is no longer
-    /// touched, so an expired one is still past its TTL (as is one deleted or
-    /// evicted once past it, which had expired by then).
+    /// touched, so an expired one is still past its TTL. A session deleted or
+    /// evicted is reported as expired too when this lookup comes after its
+    /// TTL has run out, since it would have expired by then; one replaced
+    /// under its id stays `NotFound`.
     async fn live(&self) -> Result<Arc<Session>, SessionGone> {
         let gone = match self.gone.reason.get() {
             Some(gone) => *gone,
@@ -376,7 +378,8 @@ impl ToolCallStore {
     }
 
     /// Complete or fail the call's row `row` and capture the dataset metadata of a successful
-    /// dataset loader. Failed writes are logged.
+    /// dataset loader. A call that failed, or whose tool answered with an error result, fails the
+    /// row. Failed writes are logged.
     async fn finished(
         &self,
         row: Option<&str>,
@@ -388,17 +391,22 @@ impl ToolCallStore {
         let Some(db) = &self.db else {
             return;
         };
-        let result = match outcome {
-            Ok(result) => result,
-            Err(e) => {
-                // Update tool call record with error
-                if let Some(tc_id) = row
-                    && let Err(db_err) = db.fail_tool_call(tc_id, e, duration_ms).await
-                {
-                    tracing::warn!("Failed to update tool call record: {}", db_err);
-                }
-                return;
+        let error = match outcome {
+            Ok(result) if result.success => None,
+            Ok(result) => Some(truncate_str(&tool_result_text(result), 10_240).to_string()),
+            Err(e) => Some(e.clone()),
+        };
+        if let Some(error) = error {
+            // Update tool call record with error
+            if let Some(tc_id) = row
+                && let Err(db_err) = db.fail_tool_call(tc_id, &error, duration_ms).await
+            {
+                tracing::warn!("Failed to update tool call record: {}", db_err);
             }
+            return;
+        }
+        let Ok(result) = outcome else {
+            return;
         };
         let capture = self
             .session_id
@@ -449,6 +457,20 @@ impl ToolCallStore {
             .await;
         }
     }
+}
+
+/// The text items of a tool result, one per line (images left out).
+#[cfg(feature = "db")]
+fn tool_result_text(result: &super::http::ToolResult) -> String {
+    result
+        .content
+        .iter()
+        .filter_map(|item| match item {
+            ContentItem::Text { text } => Some(text.as_str()),
+            ContentItem::Image { .. } => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// The milliseconds of a tool call as the store records them.
@@ -600,7 +622,8 @@ struct UnfinishedReply {
 
 #[cfg(feature = "db")]
 impl UnfinishedReply {
-    /// The chat ended; the route stores its outcome.
+    /// The chat ended and the route has stored its outcome. Called after that write, so a chat
+    /// dropped while the write waits still closes the reply.
     fn disarm(reply: Option<Self>) {
         if let Some(mut reply) = reply {
             reply.armed = false;
@@ -735,7 +758,12 @@ impl ToolExecutor for SessionToolExecutor {
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
-                Ok(content)
+                // A tool's own error result reaches the model as an error.
+                if result.success {
+                    Ok(content)
+                } else {
+                    Err(content)
+                }
             }
             Err(e) => Err(e),
         }
@@ -785,15 +813,86 @@ fn build_provider(cfg: ProviderConfig, settings: &LlmSettings) -> Box<dyn LlmPro
     }
 }
 
-/// The HTTP status of a failed LLM call: the provider's own failure is a
-/// 502, its silence a 504, a refused endpoint or key the caller's 400. The
-/// message is the error's text, which never carries an upstream body.
+/// The HTTP status of a failed LLM call: a failure on the provider's side
+/// (its error status, a network error, an answer too large, cut off or not
+/// understood) is a 502, its silence a 504, a provider that cannot be reached
+/// at all a 503, a refused endpoint or key the caller's 400, and a tool
+/// error a 500. The message is the error's text, which never carries an
+/// upstream body. The code is [`llm_error_code`].
 fn llm_error_status(e: &LlmError) -> StatusCode {
     match e {
-        LlmError::Upstream { .. } => StatusCode::BAD_GATEWAY,
         LlmError::Timeout => StatusCode::GATEWAY_TIMEOUT,
+        LlmError::NotAvailable(_) => StatusCode::SERVICE_UNAVAILABLE,
         LlmError::EgressDenied(_) | LlmError::InvalidApiKey => StatusCode::BAD_REQUEST,
-        _ => StatusCode::INTERNAL_SERVER_ERROR,
+        LlmError::ToolError(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        LlmError::Upstream { .. }
+        | LlmError::StreamFailed { .. }
+        | LlmError::StreamIncomplete { .. }
+        | LlmError::NetworkError(_)
+        | LlmError::ResponseTooLarge(_)
+        | LlmError::SerializationError(_)
+        | LlmError::ApiError(_)
+        | LlmError::RateLimited
+        | LlmError::ModelNotFound(_) => StatusCode::BAD_GATEWAY,
+    }
+}
+
+/// The 400 `invalid_provider` answer of a provider config `resolve_provider_config` refused.
+fn invalid_provider(message: String) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(ApiResponse::<()>::error_with_code(
+            message,
+            "invalid_provider",
+            None,
+        )),
+    )
+        .into_response()
+}
+
+/// The answer of a failed LLM call: its status and code, and `message`.
+fn llm_error_response(e: &LlmError, message: String) -> Response {
+    (
+        llm_error_status(e),
+        Json(ApiResponse::<()>::error_with_code(
+            message,
+            llm_error_code(e),
+            None,
+        )),
+    )
+        .into_response()
+}
+
+/// The code of a refused session lookup, as the session routes give it:
+/// `not_found`, `session_expired`, `capacity` (the registry is full) or
+/// `internal` (the store failed).
+fn lookup_error_code(e: &LookupError) -> &'static str {
+    match e {
+        LookupError::Session(SessionError::NotFound) => "not_found",
+        LookupError::Session(SessionError::Expired) => "session_expired",
+        LookupError::Session(SessionError::MaxSessionsReached) => "capacity",
+        LookupError::Internal => "internal",
+    }
+}
+
+/// The code of a failed LLM call, beside [`llm_error_status`]: `upstream_error` for a failure on
+/// the provider's side, `upstream_timeout` for its silence, `provider_unavailable` when it cannot
+/// be reached at all, `invalid_provider` for a refused endpoint or key, `internal` otherwise.
+fn llm_error_code(e: &LlmError) -> &'static str {
+    match e {
+        LlmError::Timeout => "upstream_timeout",
+        LlmError::NotAvailable(_) => "provider_unavailable",
+        LlmError::EgressDenied(_) | LlmError::InvalidApiKey => "invalid_provider",
+        LlmError::ToolError(_) => "internal",
+        LlmError::Upstream { .. }
+        | LlmError::StreamFailed { .. }
+        | LlmError::StreamIncomplete { .. }
+        | LlmError::NetworkError(_)
+        | LlmError::ResponseTooLarge(_)
+        | LlmError::SerializationError(_)
+        | LlmError::ApiError(_)
+        | LlmError::RateLimited
+        | LlmError::ModelNotFound(_) => "upstream_error",
     }
 }
 
@@ -893,9 +992,14 @@ async fn build_chat_messages(
     cfg: &ProviderConfig,
     settings: &LlmSettings,
 ) -> Result<Vec<Message>, ToolCallError> {
+    // A history that already ends with the prompt (a client that sends it in both fields, or a
+    // stored conversation the client posted the prompt to) would give the model the question
+    // twice. Dropped before the history is fitted, so a long duplicate costs no budget.
+    let mut history = history;
+    drop_repeated_prompt(&mut history, &user_message);
     let dataset_context =
         governed_dataset_context(governor, session, settings.context_bytes).await?;
-    let system_prompt = get_system_prompt_with_context(dataset_context.as_deref(), tools);
+    let system_prompt = get_system_prompt_with_context(dataset_context.as_deref());
     let reserved_for_response = cfg.max_tokens.unwrap_or(4096) as usize;
     let processed = ContextManager::for_request(
         &cfg.model,
@@ -917,6 +1021,18 @@ async fn build_chat_messages(
     messages.extend(processed.messages);
     messages.push(Message::user(user_message));
     Ok(messages)
+}
+
+/// Drop the last message of `history` when it is a user turn without tool results whose text is
+/// `prompt`: the chat routes append the prompt after the history themselves.
+fn drop_repeated_prompt(history: &mut Vec<Message>, prompt: &str) {
+    if history.last().is_some_and(|m| {
+        m.role == crate::llm::MessageRole::User
+            && m.tool_results.as_ref().is_none_or(Vec::is_empty)
+            && m.content == prompt
+    }) {
+        history.pop();
+    }
 }
 
 /// LLM chat endpoint.
@@ -945,9 +1061,7 @@ pub async fn llm_chat(
         &server_env,
     ) {
         Ok(cfg) => cfg,
-        Err(msg) => {
-            return (StatusCode::BAD_REQUEST, Json(ApiResponse::<()>::error(msg))).into_response();
-        }
+        Err(msg) => return invalid_provider(msg),
     };
 
     // Get the session (a stored one is adopted)
@@ -1059,19 +1173,18 @@ pub async fn llm_chat(
             // conversations are deleted with it when it was deleted or evicted).
             #[cfg(feature = "db")]
             {
-                UnfinishedReply::disarm(unfinished);
                 if let (Some(db), Some(msg_id)) = (&db, &message_id) {
                     store_reply(db, msg_id, "[Error: session gone]").await;
                 }
+                UnfinishedReply::disarm(unfinished);
             }
             return gone.into_response();
         }
     };
     let elapsed = start.elapsed();
 
-    // The chat ended: its outcome is stored below.
-    #[cfg(feature = "db")]
-    UnfinishedReply::disarm(unfinished);
+    // The chat ended: its outcome is stored, and only then is the guard disarmed, so a drop
+    // during the write still closes the reply.
     #[cfg(feature = "db")]
     if let (Some(db), Some(msg_id)) = (&db, &message_id) {
         match &result {
@@ -1079,6 +1192,8 @@ pub async fn llm_chat(
             Err(e) => store_reply(db, msg_id, &format!("[Error: {e}]")).await,
         }
     }
+    #[cfg(feature = "db")]
+    UnfinishedReply::disarm(unfinished);
 
     match result {
         Ok(response) => {
@@ -1091,31 +1206,73 @@ pub async fn llm_chat(
         }
         Err(e) => {
             tracing::error!(error = %e, elapsed_ms = %elapsed.as_millis(), "LLM chat failed");
-            (
-                llm_error_status(&e),
-                Json(ApiResponse::<()>::error(e.to_string())),
-            )
-                .into_response()
+            llm_error_response(&e, e.to_string())
         }
     }
 }
 
-/// List available LLM models.
-pub async fn llm_list_models(State(_state): State<AppState>) -> impl IntoResponse {
-    // The model list comes from the default local Ollama endpoint, which the
-    // egress policy may not allow (hosted profile, explicit allowlist).
-    let settings = LlmSettings::current();
-    let config = ProviderConfig::default();
-    if settings.egress.check_provider_config(&config).is_err() {
-        return (
+/// Request of `POST /api/llm/models`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LlmModelsRequest {
+    /// The provider whose models are listed, with the settings the chat routes take; absent: the
+    /// server's default local Ollama, as `GET`.
+    #[serde(default)]
+    pub provider: Option<ProviderConfig>,
+}
+
+/// List the models of the server's default local Ollama endpoint: 503 `provider_unavailable` when
+/// the egress policy does not admit it (hosted profile, explicit allowlist) or it does not answer.
+pub async fn llm_list_models(State(_state): State<AppState>) -> Response {
+    list_models_response(None, &LlmSettings::current()).await
+}
+
+/// List the models of the caller's provider (`POST /api/llm/models`), checked by the egress and
+/// key policy of the chat routes (`resolve_provider_config`): 400 `invalid_provider` for a refused
+/// endpoint or a missing key, and the chat routes' status and code for a failed list. Without a
+/// provider it answers as `GET`.
+pub async fn llm_list_models_for(
+    State(_state): State<AppState>,
+    Json(request): Json<LlmModelsRequest>,
+) -> Response {
+    list_models_response(request.provider, &LlmSettings::current()).await
+}
+
+/// The answer of the model routes for `provider` under `settings`.
+async fn list_models_response(
+    provider: Option<ProviderConfig>,
+    settings: &LlmSettings,
+) -> Response {
+    let unavailable = |message: String| {
+        (
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(ApiResponse::error(
-                "LLM provider not available: the default local Ollama endpoint is not enabled \
-                 on this server",
+            Json(ApiResponse::<()>::error_with_code(
+                message,
+                "provider_unavailable",
+                None,
             )),
-        );
-    }
-    let provider = build_provider(config, &settings);
+        )
+            .into_response()
+    };
+    let default_ollama = provider.is_none();
+    let config = match provider {
+        None => {
+            let config = ProviderConfig::default();
+            if settings.egress.check_provider_config(&config).is_err() {
+                return unavailable(
+                    "LLM provider not available: the default local Ollama endpoint is not \
+                     enabled on this server"
+                        .to_string(),
+                );
+            }
+            config
+        }
+        Some(cfg) => match resolve_provider_config(Some(cfg), None, settings, &server_env) {
+            Ok(cfg) => cfg,
+            Err(msg) => return invalid_provider(msg),
+        },
+    };
+    let provider = build_provider(config, settings);
 
     match provider.list_models().await {
         Ok(models) => (
@@ -1124,14 +1281,10 @@ pub async fn llm_list_models(State(_state): State<AppState>) -> impl IntoRespons
                 provider: provider.provider_type().to_string(),
                 models,
             })),
-        ),
-        Err(e) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(ApiResponse::error(format!(
-                "LLM provider not available: {}",
-                e
-            ))),
-        ),
+        )
+            .into_response(),
+        Err(e) if default_ollama => unavailable(format!("LLM provider not available: {e}")),
+        Err(e) => llm_error_response(&e, format!("Could not list the provider's models: {e}")),
     }
 }
 
@@ -1173,13 +1326,13 @@ pub struct GenerateTitleResponse {
 }
 
 /// Generate a conversation title using the LLM.
-pub async fn llm_generate_title(Json(request): Json<GenerateTitleRequest>) -> impl IntoResponse {
+pub async fn llm_generate_title(Json(request): Json<GenerateTitleRequest>) -> Response {
     // Resolve the provider (egress policy, key policy) before any request.
     let settings = LlmSettings::current();
     let provider_config =
         match resolve_provider_config(request.provider, None, &settings, &server_env) {
             Ok(cfg) => cfg,
-            Err(msg) => return (StatusCode::BAD_REQUEST, Json(ApiResponse::error(msg))),
+            Err(msg) => return invalid_provider(msg),
         };
 
     let provider = build_provider(provider_config, &settings);
@@ -1219,16 +1372,11 @@ pub async fn llm_generate_title(Json(request): Json<GenerateTitleRequest>) -> im
                 StatusCode::OK,
                 Json(ApiResponse::success(GenerateTitleResponse { title })),
             )
+                .into_response()
         }
         Err(e) => {
             tracing::error!(error = %e, "Failed to generate title");
-            (
-                llm_error_status(&e),
-                Json(ApiResponse::error(format!(
-                    "Failed to generate title: {}",
-                    e
-                ))),
-            )
+            llm_error_response(&e, format!("Failed to generate title: {e}"))
         }
     }
 }
@@ -1254,10 +1402,13 @@ pub enum ProgressEvent {
         tool: String,
         arguments: serde_json::Value,
     },
+    /// A tool call finished; `status` is `success`, or `error` when the call failed or the tool
+    /// answered with an error result.
     ToolEnd {
         tool: String,
         elapsed_ms: u64,
         result: Option<String>,
+        status: &'static str,
     },
     /// Tool result with images (for viz tools)
     ToolResult {
@@ -1270,8 +1421,12 @@ pub enum ProgressEvent {
     Done {
         message: Message,
     },
+    /// The chat failed or was refused; `code` is the code the JSON routes give the same refusal
+    /// (`invalid_provider`, `upstream_error`, a session code, the governor's code, ...).
     Error {
         error: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        code: Option<&'static str>,
     },
 }
 
@@ -1284,12 +1439,57 @@ pub struct ImageData {
 
 /// Streaming tool executor that sends progress events. Tool calls run
 /// through the governor, like [`SessionToolExecutor`].
+/// The events of one streamed chat, shared by the provider's text callback, the tool executor and
+/// the route. A text delta that does not fit in the full channel is held and sent with the next
+/// one, and any held text is sent before the next other event, so no text is lost and text stays
+/// ahead of the tool or end event that follows it. The held text is at most the text the model has
+/// streamed in this call, which the provider holds too.
+#[derive(Clone)]
+pub(crate) struct ChatEvents {
+    tx: tokio::sync::mpsc::Sender<ProgressEvent>,
+    pending: Arc<std::sync::Mutex<String>>,
+}
+
+impl ChatEvents {
+    pub(crate) fn new(tx: tokio::sync::mpsc::Sender<ProgressEvent>) -> Self {
+        Self {
+            tx,
+            pending: Arc::default(),
+        }
+    }
+
+    /// A text delta, from the synchronous stream callback: sent at once with any held text, or
+    /// held when the channel is full.
+    pub(crate) fn text(&self, delta: &str) {
+        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        pending.push_str(delta);
+        let text = std::mem::take(&mut *pending);
+        if let Err(tokio::sync::mpsc::error::TrySendError::Full(ProgressEvent::Content { text })) =
+            self.tx.try_send(ProgressEvent::Content { text })
+        {
+            *pending = text;
+        }
+    }
+
+    /// Send `event` after any held text; an error when the receiver is gone.
+    pub(crate) async fn send(
+        &self,
+        event: ProgressEvent,
+    ) -> Result<(), tokio::sync::mpsc::error::SendError<ProgressEvent>> {
+        let held = std::mem::take(&mut *self.pending.lock().unwrap_or_else(|e| e.into_inner()));
+        if !held.is_empty() {
+            self.tx.send(ProgressEvent::Content { text: held }).await?;
+        }
+        self.tx.send(event).await
+    }
+}
+
 pub struct StreamingToolExecutor {
     governor: Arc<ToolGovernor>,
     server: Arc<crate::server::AnalyticsServer>,
     chat: ChatSession,
     audit: Arc<AuditLogger>,
-    sender: tokio::sync::mpsc::Sender<ProgressEvent>,
+    events: ChatEvents,
     /// Where the tool calls and the datasets they load are recorded
     #[cfg(feature = "db")]
     store: ToolCallStore,
@@ -1310,10 +1510,17 @@ impl StreamingToolExecutor {
             server,
             chat,
             audit,
-            sender,
+            events: ChatEvents::new(sender),
             #[cfg(feature = "db")]
             store: ToolCallStore::default(),
         }
+    }
+
+    /// Report on `events`, which the route and the provider's text callback share, in place of
+    /// the sender given to [`Self::new`].
+    pub(crate) fn with_events(mut self, events: ChatEvents) -> Self {
+        self.events = events;
+        self
     }
 
     #[cfg(feature = "db")]
@@ -1388,7 +1595,7 @@ impl StreamingToolExecutor {
         // Parse result to extract dataset info
         // Format: "Successfully loaded dataset 'name'\n\nDimensions: X rows x Y columns\n\nColumns:..."
         let first_line = result_text.lines().next();
-        tracing::info!(
+        tracing::debug!(
             first_line = ?first_line,
             "[METADATA_CAPTURE] First line of result"
         );
@@ -1396,7 +1603,7 @@ impl StreamingToolExecutor {
         let dataset_name = first_line.and_then(|line| {
             let start = line.find('\'');
             let end = line.rfind('\'');
-            tracing::info!(
+            tracing::debug!(
                 line = %line,
                 start_quote_pos = ?start,
                 end_quote_pos = ?end,
@@ -1430,7 +1637,7 @@ impl StreamingToolExecutor {
         let dimensions = dimensions_line.and_then(|line| {
             // "Dimensions: X rows x Y columns"
             let parts: Vec<&str> = line.split_whitespace().collect();
-            tracing::info!(
+            tracing::debug!(
                 parts = ?parts,
                 parts_len = parts.len(),
                 "[METADATA_CAPTURE] Dimensions line parts"
@@ -1683,7 +1890,7 @@ impl ToolExecutor for StreamingToolExecutor {
 
         // Send tool start event with arguments
         let _ = self
-            .sender
+            .events
             .send(ProgressEvent::ToolStart {
                 tool: name.to_string(),
                 arguments: arguments.clone(),
@@ -1711,6 +1918,10 @@ impl ToolExecutor for StreamingToolExecutor {
             .map_err(|e| e.to_string());
         let elapsed = start.elapsed();
 
+        let status = match &result {
+            Ok(r) if r.success => "success",
+            _ => "error",
+        };
         // Extract result text for the ToolEnd event
         let result_text = match &result {
             Ok(r) => {
@@ -1731,11 +1942,12 @@ impl ToolExecutor for StreamingToolExecutor {
 
         // Send tool end event with result
         let _ = self
-            .sender
+            .events
             .send(ProgressEvent::ToolEnd {
                 tool: name.to_string(),
                 elapsed_ms: elapsed.as_millis() as u64,
                 result: result_text,
+                status,
             })
             .await;
 
@@ -1770,7 +1982,7 @@ impl ToolExecutor for StreamingToolExecutor {
                 // If there are images, send them to the frontend
                 if !images.is_empty() {
                     let _ = self
-                        .sender
+                        .events
                         .send(ProgressEvent::ToolResult {
                             tool: name.to_string(),
                             images,
@@ -1788,7 +2000,12 @@ impl ToolExecutor for StreamingToolExecutor {
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
-                Ok(content)
+                // A tool's own error result reaches the model as an error.
+                if result.success {
+                    Ok(content)
+                } else {
+                    Err(content)
+                }
             }
             Err(e) => Err(e),
         }
@@ -1998,12 +2215,13 @@ async fn run_chat_stream(
     let session = match live_session(&state, &request.session_id).await {
         Ok(s) => s,
         Err(e) => {
+            let code = Some(lookup_error_code(&e));
             let error = match e {
                 LookupError::Session(SessionError::NotFound) => "Session not found".to_string(),
                 LookupError::Session(e) => e.to_string(),
                 LookupError::Internal => "internal error".to_string(),
             };
-            let _ = tx.send(ProgressEvent::Error { error }).await;
+            let _ = tx.send(ProgressEvent::Error { error, code }).await;
             return;
         }
     };
@@ -2024,7 +2242,12 @@ async fn run_chat_stream(
     ) {
         Ok(cfg) => cfg,
         Err(msg) => {
-            let _ = tx.send(ProgressEvent::Error { error: msg }).await;
+            let _ = tx
+                .send(ProgressEvent::Error {
+                    error: msg,
+                    code: Some("invalid_provider"),
+                })
+                .await;
             return;
         }
     };
@@ -2048,6 +2271,7 @@ async fn run_chat_stream(
         let _ = tx
             .send(ProgressEvent::Error {
                 error: "Conversation not found".to_string(),
+                code: Some("not_found"),
             })
             .await;
         return;
@@ -2070,6 +2294,7 @@ async fn run_chat_stream(
     // messages are, below)
     // Only the db build reconfigures the executor below.
     let chat = ChatSession::new(state.session_manager.clone(), session.clone());
+    let events = ChatEvents::new(tx.clone());
     #[cfg_attr(not(feature = "db"), allow(unused_mut))]
     let mut tool_executor = StreamingToolExecutor::new(
         state.governor.clone(),
@@ -2077,7 +2302,8 @@ async fn run_chat_stream(
         chat.clone(),
         state.audit_logger.clone(),
         tx.clone(),
-    );
+    )
+    .with_events(events.clone());
 
     // Track whether we've set up the executor for persistence
     #[cfg(feature = "db")]
@@ -2163,6 +2389,7 @@ async fn run_chat_stream(
             let _ = tx
                 .send(ProgressEvent::Error {
                     error: e.to_string(),
+                    code: Some(e.code()),
                 })
                 .await;
             return;
@@ -2171,18 +2398,22 @@ async fn run_chat_stream(
     let provider = build_provider(provider_config, &settings);
 
     // Create streaming callback that forwards content chunks
+    let callback_events = events.clone();
     let tx_for_callback = tx.clone();
     let stream_callback: Box<dyn Fn(StreamChunk) + Send + Sync> = Box::new(move |chunk| {
         match chunk {
             StreamChunk::Text { content } => {
-                // Use try_send for non-blocking send from sync callback
-                let _ = tx_for_callback.try_send(ProgressEvent::Content { text: content });
+                // Non-blocking from the sync callback; held when the channel is full.
+                callback_events.text(&content);
             }
             StreamChunk::Done => {
                 // Done is handled separately after chat_stream returns
             }
             StreamChunk::Error { message } => {
-                let _ = tx_for_callback.try_send(ProgressEvent::Error { error: message });
+                let _ = tx_for_callback.try_send(ProgressEvent::Error {
+                    error: message,
+                    code: Some("upstream_error"),
+                });
             }
             StreamChunk::ToolCall { .. } | StreamChunk::ToolResult { .. } => {
                 // Tool events are handled by StreamingToolExecutor
@@ -2206,9 +2437,10 @@ async fn run_chat_stream(
             // Nothing is stored: the session's conversations, messages and
             // tool calls are deleted with it (the persistent manager's
             // removal listener).
-            let _ = tx
+            let _ = events
                 .send(ProgressEvent::Error {
                     error: gone.message().to_string(),
+                    code: Some(gone.code()),
                 })
                 .await;
             return;
@@ -2230,7 +2462,7 @@ async fn run_chat_stream(
                 content_preview = %content_preview,
                 "Sending Done event with message content"
             );
-            let _ = tx.send(ProgressEvent::Done { message: response }).await;
+            let _ = events.send(ProgressEvent::Done { message: response }).await;
         }
         Err(e) => {
             // Update message with error content if persistence is enabled
@@ -2240,9 +2472,10 @@ async fn run_chat_stream(
                 let _ = db.update_message_content(msg_id, &error_content).await;
             }
 
-            let _ = tx
+            let _ = events
                 .send(ProgressEvent::Error {
                     error: e.to_string(),
+                    code: Some(llm_error_code(&e)),
                 })
                 .await;
         }
@@ -2611,6 +2844,45 @@ mod chat_tests {
     use crate::session::SessionManager;
     use crate::tools::limits::Limits;
 
+    /// LLM-26: 1,000 deltas into a channel of 4 that nobody reads while they arrive all reach the
+    /// client, in order, and before the event that follows them.
+    #[tokio::test]
+    async fn no_text_delta_is_lost_when_the_client_lags() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let events = ChatEvents::new(tx);
+        let deltas: Vec<String> = (0..1_000).map(|i| format!("d{i} ")).collect();
+        for d in &deltas {
+            events.text(d);
+        }
+        let reader = tokio::spawn(async move {
+            let mut text = String::new();
+            let mut last = None;
+            while let Some(event) = rx.recv().await {
+                match event {
+                    ProgressEvent::Content { text: t } => text.push_str(&t),
+                    other => {
+                        last = Some(other);
+                        break;
+                    }
+                }
+            }
+            (text, last)
+        });
+        events
+            .send(ProgressEvent::Status {
+                message: "end".into(),
+            })
+            .await
+            .unwrap();
+        drop(events);
+        let (text, last) = reader.await.unwrap();
+        assert_eq!(text, deltas.concat());
+        assert!(
+            matches!(last, Some(ProgressEvent::Status { ref message }) if message == "end"),
+            "{last:?}"
+        );
+    }
+
     /// An admitting governor and a chat on one live session.
     async fn admitting_parts() -> (Arc<ToolGovernor>, ChatSession) {
         let (governor, chat, _sessions) = admitting_parts_with_sessions().await;
@@ -2701,6 +2973,60 @@ mod chat_tests {
         assert_eq!(msgs.last().unwrap().content, "now");
     }
 
+    /// MCP-20: a history that ends with the prompt gives the model the prompt once, also when the
+    /// prompt is longer than the hosted history budget (the duplicate is dropped before the history
+    /// is fitted). A different last turn, and one with tool results, stay.
+    #[tokio::test]
+    async fn a_history_that_ends_with_the_prompt_sends_it_once() {
+        let (governor, chat) = admitting_parts().await;
+        let session = chat.session().clone();
+        let settings = LlmSettings::from_limits(&Limits::hosted(), None);
+        let long = format!(
+            "Regress price on size. {}",
+            "w".repeat(settings.history_bytes + 1_000)
+        );
+        for prompt in ["Describe the data".to_string(), long] {
+            let history = vec![
+                Message::user("earlier"),
+                Message::assistant("an answer"),
+                Message::user(prompt.clone()),
+            ];
+            let msgs = build_chat_messages(
+                &governor,
+                &session,
+                history,
+                prompt.clone(),
+                &[],
+                &ProviderConfig::default(),
+                &settings,
+            )
+            .await
+            .unwrap();
+            let copies = msgs.iter().filter(|m| m.content.contains(&prompt)).count();
+            assert_eq!(copies, 1, "{}", prompt.len());
+            assert_eq!(msgs.last().unwrap().content, prompt);
+            assert!(msgs.iter().any(|m| m.content == "earlier"));
+        }
+
+        let mut with_results = Message::user("same");
+        with_results.tool_results = Some(vec![crate::llm::ToolResult {
+            tool_call_id: "c".into(),
+            content: "r".into(),
+            is_error: false,
+        }]);
+        for (last, kept) in [(Message::user("other"), true), (with_results, true)] {
+            let mut history = vec![last];
+            drop_repeated_prompt(&mut history, "same");
+            assert_eq!(history.len() == 1, kept);
+        }
+        let mut history = vec![Message::assistant("same")];
+        drop_repeated_prompt(&mut history, "same");
+        assert_eq!(history.len(), 1);
+        let mut history = vec![Message::user("same")];
+        drop_repeated_prompt(&mut history, "same");
+        assert!(history.is_empty());
+    }
+
     #[tokio::test]
     async fn dataset_block_has_one_closing_delimiter_under_any_line_rule() {
         let (governor, chat) = admitting_parts().await;
@@ -2760,7 +3086,7 @@ mod chat_tests {
         }
         // Split the whole system prompt at every one of those breaks.
         let lines: Vec<&str> = sys.split(is_break).collect();
-        let count = |s: &str| lines.iter().filter(|l| **l == s).count();
+        let count = |s: &str| lines.iter().filter(|l| l.trim() == s).count();
         assert_eq!(count("DATASETS>>>"), 1, "{block:?}");
         assert_eq!(count("<<<DATASETS"), 1, "{block:?}");
         assert!(
@@ -2863,13 +3189,99 @@ mod chat_tests {
             (LlmError::Timeout, StatusCode::GATEWAY_TIMEOUT),
             (LlmError::EgressDenied("no".into()), StatusCode::BAD_REQUEST),
             (LlmError::InvalidApiKey, StatusCode::BAD_REQUEST),
-            (
-                LlmError::NetworkError("x".into()),
-                StatusCode::INTERNAL_SERVER_ERROR,
-            ),
+            (LlmError::NetworkError("x".into()), StatusCode::BAD_GATEWAY),
         ];
         for (e, want) in cases {
             assert_eq!(llm_error_status(&e), want, "{e}");
+        }
+        // Every variant: its status and code.
+        let gateway = (StatusCode::BAD_GATEWAY, "upstream_error");
+        let cases = [
+            (
+                LlmError::Upstream {
+                    provider: "P",
+                    status: 500,
+                },
+                gateway,
+            ),
+            (
+                LlmError::StreamFailed {
+                    provider: "P",
+                    kind: "overloaded_error".into(),
+                },
+                gateway,
+            ),
+            (LlmError::StreamIncomplete { provider: "P" }, gateway),
+            (LlmError::NetworkError("x".into()), gateway),
+            (LlmError::ResponseTooLarge(8), gateway),
+            (LlmError::SerializationError("x".into()), gateway),
+            (LlmError::ApiError("x".into()), gateway),
+            (LlmError::RateLimited, gateway),
+            (LlmError::ModelNotFound("m".into()), gateway),
+            (
+                LlmError::Timeout,
+                (StatusCode::GATEWAY_TIMEOUT, "upstream_timeout"),
+            ),
+            (
+                LlmError::NotAvailable("x".into()),
+                (StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable"),
+            ),
+            (
+                LlmError::EgressDenied("no".into()),
+                (StatusCode::BAD_REQUEST, "invalid_provider"),
+            ),
+            (
+                LlmError::InvalidApiKey,
+                (StatusCode::BAD_REQUEST, "invalid_provider"),
+            ),
+            (
+                LlmError::ToolError("x".into()),
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
+            ),
+        ];
+        for (e, want) in cases {
+            assert_eq!((llm_error_status(&e), llm_error_code(&e)), want, "{e}");
+        }
+    }
+
+    /// LLM-25: the model routes under the hosted profile: without a provider the local Ollama is
+    /// not admitted (503 `provider_unavailable`); a provider whose endpoint the egress policy
+    /// refuses, or that has no key, is the caller's 400 `invalid_provider`. No request is made.
+    #[tokio::test]
+    async fn the_model_routes_refuse_what_the_hosted_profile_does_not_admit() {
+        let hosted = LlmSettings::from_limits(&Limits::hosted(), None);
+        let answer = |r: Response| async move {
+            let status = r.status();
+            let body = axum::body::to_bytes(r.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            (
+                status,
+                body["code"].as_str().unwrap_or_default().to_string(),
+            )
+        };
+        assert_eq!(
+            answer(list_models_response(None, &hosted).await).await,
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "provider_unavailable".into()
+            )
+        );
+        let refused = ProviderConfig {
+            base_url: Some("http://10.0.0.5:11434".into()),
+            ..ProviderConfig::default()
+        };
+        let no_key = ProviderConfig {
+            provider_type: ProviderType::Anthropic,
+            model: "m".into(),
+            ..ProviderConfig::default()
+        };
+        for cfg in [refused, no_key] {
+            assert_eq!(
+                answer(list_models_response(Some(cfg), &hosted).await).await,
+                (StatusCode::BAD_REQUEST, "invalid_provider".into())
+            );
         }
     }
 
@@ -2931,7 +3343,7 @@ mod chat_tests {
     /// longer counts toward the session cap or the total dataset quota.
     #[tokio::test]
     async fn llm_executors_refuse_calls_once_the_session_is_gone() {
-        for removal in ["deleted", "expired", "replaced"] {
+        for removal in ["deleted", "expired", "cleaned up", "replaced"] {
             let (governor, chat, sessions) = admitting_parts_with_sessions().await;
             let id = chat.session().id.clone();
             let want = match removal {
@@ -2942,6 +3354,13 @@ mod chat_tests {
                 "expired" => {
                     *chat.session().last_accessed.write().await =
                         chrono::Utc::now() - chrono::Duration::minutes(61);
+                    SessionGone::Expired
+                }
+                // The periodic cleanup removed it for its age before the lookup: expired too.
+                "cleaned up" => {
+                    *chat.session().last_accessed.write().await =
+                        chrono::Utc::now() - chrono::Duration::minutes(61);
+                    assert_eq!(sessions.cleanup_expired().await, 1);
                     SessionGone::Expired
                 }
                 _ => {
@@ -3034,8 +3453,9 @@ mod chat_tests {
     /// The answer of a non-streaming chat whose session went while it ran
     /// (`llm_chat` answers with the response of the reason `run` returns): a
     /// deleted or evicted session answers 404 `session_not_found`, an expired
-    /// one 410 `session_expired`, each as a failed `ApiResponse` whose error
-    /// is the reason's message.
+    /// one 410 `session_expired` (also when the periodic cleanup removed it
+    /// for its age before the lookup), each as a failed `ApiResponse` whose
+    /// error is the reason's message.
     #[tokio::test]
     async fn a_chat_on_a_gone_session_answers_with_the_reasons_status_and_code() {
         for (removal, want, status, code) in [
@@ -3051,6 +3471,12 @@ mod chat_tests {
                 StatusCode::GONE,
                 "session_expired",
             ),
+            (
+                "cleaned up",
+                SessionGone::Expired,
+                StatusCode::GONE,
+                "session_expired",
+            ),
         ] {
             let (governor, chat, sessions) = admitting_parts_with_sessions().await;
             if removal == "deleted" {
@@ -3058,6 +3484,9 @@ mod chat_tests {
             } else {
                 *chat.session().last_accessed.write().await =
                     chrono::Utc::now() - chrono::Duration::minutes(61);
+                if removal == "cleaned up" {
+                    assert_eq!(sessions.cleanup_expired().await, 1);
+                }
             }
             let server = Arc::new(crate::server::AnalyticsServer::new());
             let executor = SessionToolExecutor::new(governor, server, chat.clone(), no_audit());
@@ -3076,33 +3505,6 @@ mod chat_tests {
             assert_eq!(body["success"], false, "{removal}");
             assert_eq!(body["error"], want.message(), "{removal}");
         }
-    }
-
-    /// A session the periodic cleanup removed for its age, before the chat's
-    /// next tool call looked it up, expired: the chat ends with 410
-    /// `session_expired`, as when that lookup finds it expired itself, not
-    /// with the 404 of a deleted session.
-    #[tokio::test]
-    async fn a_chat_whose_session_the_cleanup_expired_answers_session_expired() {
-        let (governor, chat, sessions) = admitting_parts_with_sessions().await;
-        *chat.session().last_accessed.write().await =
-            chrono::Utc::now() - chrono::Duration::minutes(61);
-        assert_eq!(sessions.cleanup_expired().await, 1);
-        let server = Arc::new(crate::server::AnalyticsServer::new());
-        let executor = SessionToolExecutor::new(governor, server, chat.clone(), no_audit());
-        let gone = chat
-            .run(executor.execute("list_datasets", serde_json::json!({})))
-            .await
-            .unwrap_err();
-        assert_eq!(gone, SessionGone::Expired);
-        let resp = gone.into_response();
-        assert_eq!(resp.status(), StatusCode::GONE);
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(body["code"], "session_expired");
-        assert_eq!(body["error"], SessionGone::Expired.message());
     }
 
     /// The argument string of a tool call the model did not finish, as a
