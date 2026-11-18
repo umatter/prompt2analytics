@@ -39,6 +39,21 @@ fn report_error(session: Signal<SessionState>, mut conv: Signal<ConversationStat
     }
 }
 
+/// The label of the archived section's toggle.
+fn archived_toggle_label(count: usize, open: bool) -> String {
+    if open {
+        format!("Hide archived ({count})")
+    } else {
+        format!("Archived ({count})")
+    }
+}
+
+/// Whether the archived section's toggle is shown (any conversation is
+/// archived).
+fn show_archived_toggle(count: usize) -> bool {
+    count > 0
+}
+
 /// Conversation sidebar component
 #[component]
 pub fn ConversationSidebar() -> Element {
@@ -53,6 +68,9 @@ pub fn ConversationSidebar() -> Element {
 
     // Confirmation state for delete
     let mut delete_confirm_id = use_signal(|| Option::<String>::None);
+
+    // Whether the archived conversations are listed
+    let mut show_archived = use_signal(|| false);
 
     // Load conversations when session is ready
     use_effect(move || {
@@ -267,13 +285,20 @@ pub fn ConversationSidebar() -> Element {
     };
 
     // Handle archive/unarchive
+    // Archiving the current conversation keeps it selected and opens the
+    // archived section, so it stays in view.
     let handle_toggle_archive = move |id: String, is_archived: bool| {
         let mut conv = conversation_state;
         spawn(async move {
             let state = conv.read().clone();
             match state.set_conversation_archived(&id, !is_archived).await {
                 Ok(updated) => {
+                    let archived_current = updated.is_archived
+                        && conv.read().current_conversation_id.as_deref() == Some(id.as_str());
                     conv.write().update_conversation(updated);
+                    if archived_current {
+                        show_archived.set(true);
+                    }
                 }
                 Err(e) => {
                     tracing::error!("Failed to toggle archive: {}", e);
@@ -283,19 +308,206 @@ pub fn ConversationSidebar() -> Element {
         });
     };
 
-    // Get conversations to display (filter out archived)
+    // The active conversations, then (in their own section) the archived ones
     let state = conversation_state.read();
-    let conversations: Vec<Conversation> = state
+    let (archived, conversations): (Vec<Conversation>, Vec<Conversation>) = state
         .conversations
         .iter()
-        .filter(|c| !c.is_archived)
         .cloned()
-        .collect();
+        .partition(|c| c.is_archived);
+    let archived_open = *show_archived.read();
     let current_id = state.current_conversation_id.clone();
     let is_loading = state.is_loading;
     let sidebar_error = state.error.clone();
     // Why "+" is unavailable now, if it is (shown as its tooltip).
     let new_blocked = switch_blocked(&chat_state.read(), &state);
+
+    // One conversation row (active or archived): select, rename, archive or
+    // unarchive, delete.
+    let row_current_id = current_id.clone();
+    let render_row = move |conv: &Conversation| -> Element {
+        let conv_id = conv.id.clone();
+        let conv_title = conv.title.clone();
+        let is_current = row_current_id.as_ref() == Some(&conv_id);
+        let is_editing = editing_id.read().as_ref() == Some(&conv_id);
+        let is_archived = conv.is_archived;
+        let message_count = conv.message_count;
+
+        rsx! {
+            div {
+                key: "{conv_id}",
+                class: if is_current {
+                    "group relative p-3 rounded-lg mb-1 cursor-pointer bg-teal-50 dark:bg-teal-900/30 border border-teal-400 dark:border-teal-700"
+                } else {
+                    "group relative p-3 rounded-lg mb-1 cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-800 border border-gray-200 dark:border-transparent"
+                },
+                onclick: {
+                    let id = conv_id.clone();
+                    move |_| handle_select(id.clone())
+                },
+
+                // Title row
+                div { class: "flex items-center gap-2",
+                    if is_editing {
+                        input {
+                            class: "flex-1 px-2 py-1 text-sm rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-teal-500",
+                            value: "{edit_title}",
+                            oninput: move |e| edit_title.set(e.value().clone()),
+                            onkeydown: move |e| {
+                                if e.key() == Key::Enter {
+                                    handle_save_rename(())
+                                } else if e.key() == Key::Escape {
+                                    handle_cancel_rename(())
+                                }
+                            },
+                            onclick: |e| e.stop_propagation()
+                        }
+                        button {
+                            class: "p-1 text-teal-600 hover:text-teal-700 dark:text-teal-400",
+                            onclick: move |e| {
+                                e.stop_propagation();
+                                handle_save_rename(())
+                            },
+                            svg {
+                                class: "w-4 h-4",
+                                fill: "none",
+                                stroke: "currentColor",
+                                view_box: "0 0 24 24",
+                                path {
+                                    stroke_linecap: "round",
+                                    stroke_linejoin: "round",
+                                    stroke_width: "2",
+                                    d: "M5 13l4 4L19 7"
+                                }
+                            }
+                        }
+                        button {
+                            class: "p-1 text-gray-500 hover:text-gray-700 dark:text-gray-400",
+                            onclick: move |e| {
+                                e.stop_propagation();
+                                handle_cancel_rename(())
+                            },
+                            svg {
+                                class: "w-4 h-4",
+                                fill: "none",
+                                stroke: "currentColor",
+                                view_box: "0 0 24 24",
+                                path {
+                                    stroke_linecap: "round",
+                                    stroke_linejoin: "round",
+                                    stroke_width: "2",
+                                    d: "M6 18L18 6M6 6l12 12"
+                                }
+                            }
+                        }
+                    } else {
+                        // Title
+                        span {
+                            class: if is_archived {
+                                "flex-1 text-sm font-medium text-gray-400 dark:text-gray-500 truncate italic"
+                            } else {
+                                "flex-1 text-sm font-medium text-gray-800 dark:text-gray-200 truncate"
+                            },
+                            "{conv_title}"
+                        }
+
+                        // Archived badge
+                        if is_archived {
+                            span { class: "px-1.5 py-0.5 text-xs rounded bg-gray-200 dark:bg-gray-700 text-gray-500 dark:text-gray-400",
+                                "archived"
+                            }
+                        }
+
+                        // Action buttons (shown on hover)
+                        div { class: "opacity-0 group-hover:opacity-100 flex items-center gap-0.5 transition-opacity",
+                            // Rename button
+                            button {
+                                class: "action-btn-rename p-1.5 rounded transition-all cursor-pointer hover:bg-teal-50 dark:hover:bg-teal-900/30",
+                                title: "Rename",
+                                onclick: {
+                                    let id = conv_id.clone();
+                                    let title = conv_title.clone();
+                                    move |e: Event<MouseData>| {
+                                        e.stop_propagation();
+                                        handle_start_rename(id.clone(), title.clone())
+                                    }
+                                },
+                                svg {
+                                    class: "w-3.5 h-3.5 text-gray-400 transition-colors",
+                                    fill: "none",
+                                    stroke: "currentColor",
+                                    view_box: "0 0 24 24",
+                                    path {
+                                        stroke_linecap: "round",
+                                        stroke_linejoin: "round",
+                                        stroke_width: "2",
+                                        d: "M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"
+                                    }
+                                }
+                            }
+                            // Archive button
+                            button {
+                                class: "action-btn-archive p-1.5 rounded transition-all cursor-pointer hover:bg-orange-50 dark:hover:bg-orange-900/30",
+                                title: if is_archived { "Unarchive" } else { "Archive" },
+                                onclick: {
+                                    let id = conv_id.clone();
+                                    move |e: Event<MouseData>| {
+                                        e.stop_propagation();
+                                        handle_toggle_archive(id.clone(), is_archived)
+                                    }
+                                },
+                                svg {
+                                    class: "w-3.5 h-3.5 text-gray-400 transition-colors",
+                                    fill: "none",
+                                    stroke: "currentColor",
+                                    view_box: "0 0 24 24",
+                                    path {
+                                        stroke_linecap: "round",
+                                        stroke_linejoin: "round",
+                                        stroke_width: "2",
+                                        d: "M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4"
+                                    }
+                                }
+                            }
+                            // Delete button
+                            button {
+                                class: "action-btn-delete p-1.5 rounded transition-all cursor-pointer hover:bg-red-50 dark:hover:bg-red-900/30",
+                                title: "Delete",
+                                onclick: {
+                                    let id = conv_id.clone();
+                                    move |e: Event<MouseData>| {
+                                        e.stop_propagation();
+                                        handle_request_delete(id.clone())
+                                    }
+                                },
+                                svg {
+                                    class: "w-3.5 h-3.5 text-gray-400 transition-colors",
+                                    fill: "none",
+                                    stroke: "currentColor",
+                                    view_box: "0 0 24 24",
+                                    path {
+                                        stroke_linecap: "round",
+                                        stroke_linejoin: "round",
+                                        stroke_width: "2",
+                                        d: "M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Message count
+                if !is_editing {
+                    div { class: "mt-1 flex items-center gap-2",
+                        span { class: "text-xs text-gray-400 dark:text-gray-500",
+                            "{message_count} messages"
+                        }
+                    }
+                }
+            }
+        }
+    };
 
     // Track if we need to show delete dialog (read outside of sidebar div)
     let show_delete_dialog = delete_confirm_id.read().is_some();
@@ -385,188 +597,19 @@ pub fn ConversationSidebar() -> Element {
                     }
                 } else {
                     for conv in conversations.iter() {
-                        {
-                            let conv_id = conv.id.clone();
-                            let conv_title = conv.title.clone();
-                            let is_current = current_id.as_ref() == Some(&conv_id);
-                            let is_editing = editing_id.read().as_ref() == Some(&conv_id);
-                            let is_archived = conv.is_archived;
-                            let message_count = conv.message_count;
-
-                            rsx! {
-                                div {
-                                    key: "{conv_id}",
-                                    class: if is_current {
-                                        "group relative p-3 rounded-lg mb-1 cursor-pointer bg-teal-50 dark:bg-teal-900/30 border border-teal-400 dark:border-teal-700"
-                                    } else {
-                                        "group relative p-3 rounded-lg mb-1 cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-800 border border-gray-200 dark:border-transparent"
-                                    },
-                                    onclick: {
-                                        let id = conv_id.clone();
-                                        move |_| handle_select(id.clone())
-                                    },
-
-                                    // Title row
-                                    div { class: "flex items-center gap-2",
-                                        if is_editing {
-                                            input {
-                                                class: "flex-1 px-2 py-1 text-sm rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-teal-500",
-                                                value: "{edit_title}",
-                                                oninput: move |e| edit_title.set(e.value().clone()),
-                                                onkeydown: move |e| {
-                                                    if e.key() == Key::Enter {
-                                                        handle_save_rename(())
-                                                    } else if e.key() == Key::Escape {
-                                                        handle_cancel_rename(())
-                                                    }
-                                                },
-                                                onclick: |e| e.stop_propagation()
-                                            }
-                                            button {
-                                                class: "p-1 text-teal-600 hover:text-teal-700 dark:text-teal-400",
-                                                onclick: move |e| {
-                                                    e.stop_propagation();
-                                                    handle_save_rename(())
-                                                },
-                                                svg {
-                                                    class: "w-4 h-4",
-                                                    fill: "none",
-                                                    stroke: "currentColor",
-                                                    view_box: "0 0 24 24",
-                                                    path {
-                                                        stroke_linecap: "round",
-                                                        stroke_linejoin: "round",
-                                                        stroke_width: "2",
-                                                        d: "M5 13l4 4L19 7"
-                                                    }
-                                                }
-                                            }
-                                            button {
-                                                class: "p-1 text-gray-500 hover:text-gray-700 dark:text-gray-400",
-                                                onclick: move |e| {
-                                                    e.stop_propagation();
-                                                    handle_cancel_rename(())
-                                                },
-                                                svg {
-                                                    class: "w-4 h-4",
-                                                    fill: "none",
-                                                    stroke: "currentColor",
-                                                    view_box: "0 0 24 24",
-                                                    path {
-                                                        stroke_linecap: "round",
-                                                        stroke_linejoin: "round",
-                                                        stroke_width: "2",
-                                                        d: "M6 18L18 6M6 6l12 12"
-                                                    }
-                                                }
-                                            }
-                                        } else {
-                                            // Title
-                                            span {
-                                                class: if is_archived {
-                                                    "flex-1 text-sm font-medium text-gray-400 dark:text-gray-500 truncate italic"
-                                                } else {
-                                                    "flex-1 text-sm font-medium text-gray-800 dark:text-gray-200 truncate"
-                                                },
-                                                "{conv_title}"
-                                            }
-
-                                            // Archived badge
-                                            if is_archived {
-                                                span { class: "px-1.5 py-0.5 text-xs rounded bg-gray-200 dark:bg-gray-700 text-gray-500 dark:text-gray-400",
-                                                    "archived"
-                                                }
-                                            }
-
-                                            // Action buttons (shown on hover)
-                                            div { class: "opacity-0 group-hover:opacity-100 flex items-center gap-0.5 transition-opacity",
-                                                // Rename button
-                                                button {
-                                                    class: "action-btn-rename p-1.5 rounded transition-all cursor-pointer hover:bg-teal-50 dark:hover:bg-teal-900/30",
-                                                    title: "Rename",
-                                                    onclick: {
-                                                        let id = conv_id.clone();
-                                                        let title = conv_title.clone();
-                                                        move |e: Event<MouseData>| {
-                                                            e.stop_propagation();
-                                                            handle_start_rename(id.clone(), title.clone())
-                                                        }
-                                                    },
-                                                    svg {
-                                                        class: "w-3.5 h-3.5 text-gray-400 transition-colors",
-                                                        fill: "none",
-                                                        stroke: "currentColor",
-                                                        view_box: "0 0 24 24",
-                                                        path {
-                                                            stroke_linecap: "round",
-                                                            stroke_linejoin: "round",
-                                                            stroke_width: "2",
-                                                            d: "M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"
-                                                        }
-                                                    }
-                                                }
-                                                // Archive button
-                                                button {
-                                                    class: "action-btn-archive p-1.5 rounded transition-all cursor-pointer hover:bg-orange-50 dark:hover:bg-orange-900/30",
-                                                    title: if is_archived { "Unarchive" } else { "Archive" },
-                                                    onclick: {
-                                                        let id = conv_id.clone();
-                                                        move |e: Event<MouseData>| {
-                                                            e.stop_propagation();
-                                                            handle_toggle_archive(id.clone(), is_archived)
-                                                        }
-                                                    },
-                                                    svg {
-                                                        class: "w-3.5 h-3.5 text-gray-400 transition-colors",
-                                                        fill: "none",
-                                                        stroke: "currentColor",
-                                                        view_box: "0 0 24 24",
-                                                        path {
-                                                            stroke_linecap: "round",
-                                                            stroke_linejoin: "round",
-                                                            stroke_width: "2",
-                                                            d: "M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4"
-                                                        }
-                                                    }
-                                                }
-                                                // Delete button
-                                                button {
-                                                    class: "action-btn-delete p-1.5 rounded transition-all cursor-pointer hover:bg-red-50 dark:hover:bg-red-900/30",
-                                                    title: "Delete",
-                                                    onclick: {
-                                                        let id = conv_id.clone();
-                                                        move |e: Event<MouseData>| {
-                                                            e.stop_propagation();
-                                                            handle_request_delete(id.clone())
-                                                        }
-                                                    },
-                                                    svg {
-                                                        class: "w-3.5 h-3.5 text-gray-400 transition-colors",
-                                                        fill: "none",
-                                                        stroke: "currentColor",
-                                                        view_box: "0 0 24 24",
-                                                        path {
-                                                            stroke_linecap: "round",
-                                                            stroke_linejoin: "round",
-                                                            stroke_width: "2",
-                                                            d: "M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    // Message count
-                                    if !is_editing {
-                                        div { class: "mt-1 flex items-center gap-2",
-                                            span { class: "text-xs text-gray-400 dark:text-gray-500",
-                                                "{message_count} messages"
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+                        {render_row(conv)}
+                    }
+                }
+                // Archived conversations, collapsed under the list
+                if !is_loading && show_archived_toggle(archived.len()) {
+                    button {
+                        class: "w-full mt-2 px-3 py-1.5 text-xs font-medium text-left text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg transition-colors",
+                        onclick: move |_| show_archived.set(!archived_open),
+                        "{archived_toggle_label(archived.len(), archived_open)}"
+                    }
+                    if archived_open {
+                        for conv in archived.iter() {
+                            {render_row(conv)}
                         }
                     }
                 }
@@ -622,5 +665,18 @@ pub fn ConversationSidebar() -> Element {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn archived_toggle_names_the_count() {
+        assert_eq!(archived_toggle_label(3, false), "Archived (3)");
+        assert_eq!(archived_toggle_label(3, true), "Hide archived (3)");
+        assert!(show_archived_toggle(1));
+        assert!(!show_archived_toggle(0));
     }
 }
