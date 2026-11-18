@@ -444,17 +444,13 @@ mod tests {
             }
             app.clone().oneshot(req.body(Body::from(body)).unwrap())
         };
-        // A mistyped value quoting a 10 kB string: 422, cut to 160 + note + 96 bytes.
-        let long = "x".repeat(10_000);
+        // A value of the wrong type: 422 in the error shape.
         for (uri, body) in [
             (
                 "/api/tools/load_dataset",
-                serde_json::json!({"session_id": ["not", "a", &long], "arguments": {}}),
+                serde_json::json!({"session_id": ["not", "a", "string"], "arguments": {}}),
             ),
-            (
-                "/api/sessions",
-                serde_json::json!({"user_id": ["not", "a", &long]}),
-            ),
+            ("/api/sessions", serde_json::json!({"user_id": [1, 2]})),
         ] {
             let resp = send(uri, Some("application/json"), body.to_string())
                 .await
@@ -463,8 +459,45 @@ mod tests {
             let json = body_of(resp).await;
             assert_eq!(json["success"], false, "{uri}: {json}");
             assert_eq!(json["code"], "invalid_arguments", "{uri}: {json}");
-            let error = json["error"].as_str().unwrap();
-            assert!(error.len() < 400, "{uri}: {} bytes", error.len());
+        }
+        // serde quotes a mistyped string value and an unknown field name in
+        // full: the refusal keeps the quote's two ends around the cut note.
+        #[cfg(feature = "llm")]
+        {
+            use crate::server::MAX_QUOTE_BYTES;
+            let long = "x".repeat(10_000);
+            let mut unknown_field = serde_json::Map::new();
+            unknown_field.insert(long.clone(), serde_json::json!(1));
+            for (uri, body) in [
+                (
+                    "/api/llm/chat",
+                    serde_json::json!({"session_id": "s", "message": "m", "interpret": &long}),
+                ),
+                (
+                    "/api/llm/chat/stream",
+                    serde_json::json!({"session_id": "s", "message": "m", "interpret": &long}),
+                ),
+                ("/api/llm/models", serde_json::Value::Object(unknown_field)),
+            ] {
+                let resp = send(uri, Some("application/json"), body.to_string())
+                    .await
+                    .unwrap();
+                assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY, "{uri}");
+                let json = body_of(resp).await;
+                assert_eq!(json["code"], "invalid_arguments", "{uri}: {json}");
+                let error = json["error"].as_str().unwrap();
+                let note_start = error.find("[... ").expect("no cut note");
+                let note_len = error[note_start..]
+                    .find(" bytes cut ...]")
+                    .expect("no cut note")
+                    + " bytes cut ...]".len();
+                assert!(
+                    error.len() <= MAX_QUOTE_BYTES + note_len,
+                    "{uri}: {} bytes",
+                    error.len()
+                );
+                assert!(!error.contains(&long), "{uri}: the quote is whole");
+            }
         }
         // Malformed JSON keeps 400, a missing content type 415, both with the JSON body.
         for (content_type, body, status) in [
@@ -478,7 +511,12 @@ mod tests {
             #[allow(unused_mut)]
             let mut uris = vec!["/api/tools/load_dataset", "/api/sessions"];
             #[cfg(feature = "llm")]
-            uris.push("/api/llm/generate-title");
+            uris.extend([
+                "/api/llm/generate-title",
+                "/api/llm/chat",
+                "/api/llm/chat/stream",
+                "/api/llm/models",
+            ]);
             for uri in uris {
                 let resp = send(uri, content_type, body.clone()).await.unwrap();
                 assert_eq!(resp.status(), status, "{uri}");
