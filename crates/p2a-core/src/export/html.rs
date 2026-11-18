@@ -6,9 +6,12 @@
 //! - Jupyter notebook integration
 //! - Standalone reports
 //!
-//! Undefined values (NaN, e.g. aliased coefficients) print as `NA`, as R does.
+//! Undefined values (NaN, e.g. aliased coefficients) print as `NA`, as R does. An estimate or
+//! standard error that would round to zero at the style's decimals is written with that many
+//! significant digits in scientific notation (`1.156e-07`).
 
 use super::latex::format_cell;
+use super::{LegendStyle, format_estimate, significance_legend};
 use crate::econometrics::{DiscreteResult, PanelResult};
 use crate::regression::OlsResult;
 use crate::traits::SignificanceLevel;
@@ -156,7 +159,7 @@ impl HtmlTableBuilder {
                     };
                     html.push_str(&format!(
                         "      <td class=\"coef\">{}{}</td>\n",
-                        format_cell(coef.estimate, self.style.coef_decimals),
+                        format_estimate(coef.estimate, self.style.coef_decimals),
                         stars
                     ));
                 } else {
@@ -174,7 +177,7 @@ impl HtmlTableBuilder {
                         let coef = &result.coefficients[idx];
                         html.push_str(&format!(
                             "      <td class=\"se\">({})</td>\n",
-                            format_cell(coef.std_error, self.style.se_decimals)
+                            format_estimate(coef.std_error, self.style.se_decimals)
                         ));
                     } else {
                         html.push_str("      <td></td>\n");
@@ -235,8 +238,10 @@ impl HtmlTableBuilder {
         // Significance note
         if self.style.significance_stars {
             html.push_str("<p class=\"sig-note\"><small>");
-            html.push_str("Standard errors in parentheses. ");
-            html.push_str("* p &lt; 0.05, ** p &lt; 0.01, *** p &lt; 0.001");
+            if self.style.se_in_parentheses {
+                html.push_str("Standard errors in parentheses. ");
+            }
+            html.push_str(&significance_legend(LegendStyle::Html));
             html.push_str("</small></p>\n");
         }
 
@@ -314,12 +319,12 @@ impl DiscreteResult {
             ));
             html.push_str(&format!(
                 "      <td class=\"coef\">{}{}</td>\n",
-                format_cell(self.coefficients[i], 4),
+                format_estimate(self.coefficients[i], 4),
                 stars
             ));
             html.push_str(&format!(
                 "      <td class=\"se\">{}</td>\n",
-                format_cell(self.std_errors[i], 4)
+                format_estimate(self.std_errors[i], 4)
             ));
             html.push_str(&format!(
                 "      <td>{}</td>\n",
@@ -331,7 +336,7 @@ impl DiscreteResult {
             ));
             html.push_str(&format!(
                 "      <td>{}</td>\n",
-                format_cell(self.marginal_effects[i], 4)
+                format_estimate(self.marginal_effects[i], 4)
             ));
             html.push_str("    </tr>\n");
         }
@@ -354,7 +359,10 @@ impl DiscreteResult {
         html.push_str("  </tfoot>\n");
 
         html.push_str("</table>\n");
-        html.push_str("<p class=\"sig-note\"><small>* p &lt; 0.05, ** p &lt; 0.01, *** p &lt; 0.001</small></p>\n");
+        html.push_str(&format!(
+            "<p class=\"sig-note\"><small>{}</small></p>\n",
+            significance_legend(LegendStyle::Html)
+        ));
 
         html
     }
@@ -394,12 +402,12 @@ impl PanelResult {
             ));
             html.push_str(&format!(
                 "      <td class=\"coef\">{}{}</td>\n",
-                format_cell(self.coefficients[i], 4),
+                format_estimate(self.coefficients[i], 4),
                 stars
             ));
             html.push_str(&format!(
                 "      <td class=\"se\">{}</td>\n",
-                format_cell(self.std_errors[i], 4)
+                format_estimate(self.std_errors[i], 4)
             ));
             html.push_str(&format!(
                 "      <td>{}</td>\n",
@@ -433,7 +441,10 @@ impl PanelResult {
         html.push_str("  </tfoot>\n");
 
         html.push_str("</table>\n");
-        html.push_str("<p class=\"sig-note\"><small>* p &lt; 0.05, ** p &lt; 0.01, *** p &lt; 0.001</small></p>\n");
+        html.push_str(&format!(
+            "<p class=\"sig-note\"><small>{}</small></p>\n",
+            significance_legend(LegendStyle::Html)
+        ));
 
         html
     }

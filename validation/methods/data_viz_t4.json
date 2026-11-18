@@ -1,0 +1,45 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "export_small_coefficients",
+      "name": "CSV export at full precision and table cells that do not round to zero",
+      "category": "data",
+      "reference": "stats::lm; summary.lm; confint.lm",
+      "doc": "validation/visualization/charts.md",
+      "cases": [
+        "export_ols_grunfeld_usd"
+      ],
+      "tests": [
+        "p2a-core::export::csv::tests::test_validate_csv_ols_grunfeld_usd",
+        "p2a-core::export::latex::tests::test_validate_latex_small_coefficient_grunfeld_usd"
+      ],
+      "quantities": [
+        "coefficients, SEs, t, p, confint bounds, R2, adj. R2, F, sigma (CSV, full precision)",
+        "a 1e-7 coefficient and its SE at 4 significant digits (LaTeX)"
+      ],
+      "tolerance": "validation/README.md n = 200 rows (CSV); 5e-4 relative (4 significant digits)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_viz_boxplot_stats",
+      "name": "viz_boxplot statistics per group through the MCP path",
+      "category": "data",
+      "reference": "grDevices::boxplot.stats (coef = 1.5)",
+      "doc": "validation/visualization/charts.md",
+      "cases": [
+        "viz_boxplot_groups"
+      ],
+      "tests": [
+        "p2a-mcp::tier3::wp29_viz::test_validate_mcp_boxplot_groups"
+      ],
+      "quantities": [
+        "whiskers, hinges and median (printed at 4 decimals), n, the number of outliers and their values, per group"
+      ],
+      "tolerance": "printed precision (Tol::printed(4)); counts exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}

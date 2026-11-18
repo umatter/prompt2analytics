@@ -5,16 +5,18 @@
 //!
 //! ## Data Loading
 //!
-//! | Format | Function | Description |
-//! |--------|----------|-------------|
-//! | **CSV/TSV** | [`DataLoader`] | Comma/tab-separated values |
-//! | **Parquet** | [`DataLoader`] | Apache Parquet columnar format |
-//! | **JSON** | [`DataLoader`] | JSON Lines format |
-//! | **Excel** | [`DataLoader`] | XLSX files (feature: `excel`) |
-//! | **Stata** | [`load_stata`] | Stata .dta files |
-//! | **SAS** | [`load_sas`] | SAS .sas7bdat files |
-//! | **SQLite** | [`query_sqlite`] | SQLite queries (feature: `database`) |
-//! | **DuckDB** | [`query_duckdb`] | DuckDB queries (feature: `database`) |
+//! [`DataLoader::load`] picks the reader by file extension:
+//!
+//! | Format | Extensions | Function | Description |
+//! |--------|------------|----------|-------------|
+//! | **CSV** | `csv` | [`DataLoader`] | Comma-separated values |
+//! | **Parquet** | `parquet`, `pq` | [`DataLoader`] | Apache Parquet columnar format |
+//! | **JSON** | `jsonl`, `ndjson`, `json` | [`DataLoader`] | JSON Lines, or a JSON array of records |
+//! | **Excel** | `xlsx`, `xls`, `xlsb`, `ods` | [`DataLoader`] | Workbooks (feature: `file-formats`) |
+//! | **Stata** | `dta` | [`load_stata`] | Stata .dta files |
+//! | **SAS** | `sas7bdat` | [`load_sas`] | SAS .sas7bdat files |
+//! | **SQLite** | | `query_sqlite` | SQLite queries (feature: `database`) |
+//! | **DuckDB** | | `query_duckdb` | DuckDB queries (feature: `database`) |
 //!
 //! The SQL functions run exactly one read-only statement on a connection the
 //! engine itself locks (no file access beyond the named database or file, no
@@ -32,17 +34,28 @@
 //!
 //! | Operation | Function | Description |
 //! |-----------|----------|-------------|
-//! | **Select** | `select_columns` | Choose columns |
-//! | **Filter** | `filter_rows` | Row filtering with predicates |
-//! | **Mutate** | `mutate`, `transform_column` | Create/transform columns |
+//! | **Select** | `select` (or the method `Dataset::select_columns`) | Choose columns |
+//! | **Filter** | `filter`, `filter_and` | Row filtering with predicates |
+//! | **Mutate** | `mutate` | Create/transform columns |
 //! | **Join** | `left_join`, `inner_join`, `full_join` | Merge datasets |
-//! | **Reshape** | `pivot_wider`, `pivot_longer` | Wide/long transformations |
+//! | **Reshape** | `pivot`, `melt` | Wide/long transformations |
 //! | **Aggregate** | `group_by`, `summarize` | Group-wise operations |
-//! | **Sort** | `arrange`, `order_by` | Row ordering |
-//! | **Distinct** | `distinct` | Remove duplicates |
-//! | **Missing** | `drop_na`, `fill_na`, `replace_na` | Handle missing values |
+//! | **Sort** | `sort` | Row ordering |
+//! | **Distinct** | `deduplicate` | Remove duplicates |
+//! | **Missing** | `drop_na`, `fill_na` | Handle missing values |
 //! | **Bin** | `bin`, `bin_with` | R `cut()` intervals; missing and out-of-range values are NA |
 //! | **Cast** | `cast`, `cast_with` | Type conversion that reports values that fail to convert |
+//!
+//! Every function the table names exists (the example below fails to compile otherwise):
+//!
+//! ```
+//! #[allow(unused_imports)]
+//! use p2a_core::data::munging::{
+//!     bin, bin_with, cast, cast_with, deduplicate, drop_na, fill_na, filter, filter_and,
+//!     full_join, group_by, inner_join, left_join, melt, mutate, pivot, select, sort, summarize,
+//! };
+//! let _ = p2a_core::data::Dataset::select_columns;
+//! ```
 //!
 //! ## Data Quality ([`quality`])
 //!

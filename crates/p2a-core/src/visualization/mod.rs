@@ -2,7 +2,9 @@
 //!
 //! This module provides two types of visualizations:
 //! - **Static charts** (via `plotters`): Generate PNG images encoded as base64 strings
-//! - **Interactive charts** (via `plotlars`): Generate HTML with embedded Plotly.js
+//! - **Interactive charts**: a Plotly figure written as JSON into an HTML page that loads
+//!   plotly.js 3.0.1 and MathJax from cdn.plot.ly and cdn.jsdelivr.net when opened; viewing needs
+//!   network access (docs/guides/DATA_SECURITY.md). Values are kept in double precision.
 //!
 //! Use static charts when you need:
 //! - Lightweight output for embedding
