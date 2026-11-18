@@ -120,6 +120,25 @@ pub struct ToolCallInfo {
     pub is_expanded: bool,
 }
 
+impl ToolCallInfo {
+    /// Whether the call has ended: it has an outcome or a result. A finished
+    /// call with `success == None` ended with an unknown outcome (a server
+    /// older than 0.6.0 sends no status).
+    pub fn is_finished(&self) -> bool {
+        self.success.is_some() || self.result.is_some()
+    }
+}
+
+/// A `tool_end` status as a call's outcome: `"success"` and `"error"` (the
+/// 0.6.0 server's values), anything else or none unknown.
+pub fn tool_outcome(status: Option<&str>) -> Option<bool> {
+    match status {
+        Some("success") => Some(true),
+        Some("error") => Some(false),
+        _ => None,
+    }
+}
+
 impl From<&ToolCall> for ToolCallInfo {
     fn from(tc: &ToolCall) -> Self {
         Self {
@@ -164,6 +183,8 @@ impl From<&PersistedToolCall> for ToolCallInfo {
 pub struct ActiveToolCall {
     pub name: String,
     pub started_at: DateTime<Utc>,
+    /// Index of the call its start added to the streaming message's calls.
+    pub index: Option<usize>,
 }
 
 /// Chat state
@@ -252,8 +273,8 @@ impl ChatState {
                             id: tc.id.clone(),
                             name: tc.name.clone(),
                             arguments: tc.arguments.clone(),
-                            result: None, // Will be filled from tool_results if present
-                            success: Some(true), // If we got them in Done, they succeeded
+                            result: None,  // Will be filled from tool_results if present
+                            success: None, // Unknown unless a result says otherwise
                             is_expanded: false,
                         }
                     })
@@ -313,49 +334,54 @@ impl ChatState {
         self.active_tool = None;
     }
 
-    /// Set active tool call and add to current message's tool calls
+    /// Set the active tool call and add a running call to the streaming
+    /// message. The server runs one call at a time, so the next `tool_end`
+    /// belongs to this call.
     pub fn set_active_tool(&mut self, name: String, arguments: serde_json::Value) {
-        self.active_tool = Some(ActiveToolCall {
-            name: name.clone(),
-            started_at: Utc::now(),
-        });
-
-        // Add a pending tool call to the current streaming message
+        let mut index = None;
         if let Some(last) = self.messages.last_mut()
             && last.is_streaming
         {
-            // Only add if not already present (avoid duplicates on re-renders)
-            if !last
-                .tool_calls
-                .iter()
-                .any(|tc| tc.name == name && tc.success.is_none())
-            {
-                last.tool_calls.push(ToolCallInfo {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    name,
-                    arguments,
-                    result: None,
-                    success: None, // None means still running
-                    is_expanded: false,
-                });
-            }
+            index = Some(last.tool_calls.len());
+            last.tool_calls.push(ToolCallInfo {
+                id: uuid::Uuid::new_v4().to_string(),
+                name: name.clone(),
+                arguments,
+                result: None,
+                success: None,
+                is_expanded: false,
+            });
         }
+        self.active_tool = Some(ActiveToolCall {
+            name,
+            started_at: Utc::now(),
+            index,
+        });
     }
 
-    /// Clear active tool call and mark it as complete with result
-    pub fn clear_active_tool(&mut self, result: Option<String>) {
-        if let Some(active) = self.active_tool.take() {
-            // Mark the tool call as successful in the current message
-            if let Some(last) = self.messages.last_mut()
-                && last.is_streaming
-                && let Some(tc) = last
-                    .tool_calls
-                    .iter_mut()
-                    .find(|tc| tc.name == active.name && tc.success.is_none())
-            {
-                tc.success = Some(true);
-                tc.result = result;
-            }
+    /// End the active tool call with its result and its `tool_end` status
+    /// (`"success"`, `"error"`, or none from an older server: unknown).
+    pub fn clear_active_tool(&mut self, result: Option<String>, status: Option<&str>) {
+        let Some(active) = self.active_tool.take() else {
+            return;
+        };
+        let Some(last) = self.messages.last_mut().filter(|m| m.is_streaming) else {
+            return;
+        };
+        let at_index = active.index.filter(|&i| {
+            last.tool_calls
+                .get(i)
+                .is_some_and(|tc| tc.name == active.name && !tc.is_finished())
+        });
+        // A stale index (the calls were replaced): the last running call of that name.
+        let target = at_index.or_else(|| {
+            last.tool_calls
+                .iter()
+                .rposition(|tc| tc.name == active.name && !tc.is_finished())
+        });
+        if let Some(tc) = target.and_then(|i| last.tool_calls.get_mut(i)) {
+            tc.success = tool_outcome(status);
+            tc.result = result;
         }
     }
 
@@ -616,12 +642,15 @@ mod tests {
         let mut chat = ChatState::new();
         send(&mut chat, "fit both models");
         chat.set_active_tool("regression_ols".to_string(), json!({"dataset": "sales"}));
-        chat.clear_active_tool(Some("OLS Regression Results".to_string()));
+        chat.clear_active_tool(Some("OLS Regression Results".to_string()), Some("success"));
         chat.set_active_tool(
             "panel_fixed_effects".to_string(),
             json!({"dataset": "sales"}),
         );
-        chat.clear_active_tool(Some("Error: column 'firm' not found".to_string()));
+        chat.clear_active_tool(
+            Some("Error: column 'firm' not found".to_string()),
+            Some("error"),
+        );
         finish(
             &mut chat,
             Message {
@@ -690,9 +719,9 @@ mod tests {
         let mut chat = ChatState::new();
         send(&mut chat, "summarise price and sqft");
         chat.set_active_tool("summary_stats".to_string(), json!({"column": "price"}));
-        chat.clear_active_tool(Some("price: mean 312.4".to_string()));
+        chat.clear_active_tool(Some("price: mean 312.4".to_string()), Some("success"));
         chat.set_active_tool("summary_stats".to_string(), json!({"column": "sqft"}));
-        chat.clear_active_tool(Some("sqft: mean 1840".to_string()));
+        chat.clear_active_tool(Some("sqft: mean 1840".to_string()), Some("success"));
         finish(&mut chat, reply("Price averages 312.4, sqft 1840."));
         let last = chat.messages.last().expect("the reply");
         assert_eq!(last.content, "Price averages 312.4, sqft 1840.");
@@ -709,8 +738,105 @@ mod tests {
             ]
         );
         assert!(chat.active_tool.is_none());
-        // The success flag a ToolEnd sets is not asserted. ToolEnd carries no status, so a failed
-        // call cannot be told apart here.
+        let status: Vec<Option<bool>> = last.tool_calls.iter().map(|tc| tc.success).collect();
+        assert_eq!(status, [Some(true), Some(true)]);
+    }
+
+    /// The UI-13 scenario: a ToolEnd with status "error" marks the call failed, and it goes back
+    /// to the model as a failed result (interpret = true: Done carries no calls).
+    #[test]
+    fn test_tool_end_error_status_marks_the_call_failed() {
+        let mut chat = ChatState::new();
+        send(&mut chat, "describe the data");
+        chat.set_active_tool(
+            "describe_dataset".to_string(),
+            json!({"dataset": "does_not_exist"}),
+        );
+        chat.clear_active_tool(
+            Some("Dataset 'does_not_exist' not found. Load it first with load_dataset.".into()),
+            Some("error"),
+        );
+        finish(&mut chat, reply("The dataset is not loaded."));
+        let last = chat.messages.last().expect("the reply");
+        assert_eq!(last.tool_calls.len(), 1);
+        assert_eq!(last.tool_calls[0].success, Some(false));
+        assert!(last.tool_calls[0].is_finished());
+        let history = chat.build_history();
+        let results = history[2].tool_results.as_deref().unwrap_or_default();
+        assert!(results[0].is_error, "{history:?}");
+    }
+
+    /// An older server sends no status: the call is finished, its outcome unknown, and it is not
+    /// reported to the model as an error.
+    #[test]
+    fn test_tool_end_without_status_is_unknown() {
+        let mut chat = ChatState::new();
+        send(&mut chat, "describe sales");
+        chat.set_active_tool("describe_dataset".to_string(), json!({"dataset": "sales"}));
+        chat.clear_active_tool(Some("100 rows".into()), None);
+        let call = &chat.messages.last().unwrap().tool_calls[0];
+        assert_eq!(call.success, None);
+        assert!(call.is_finished());
+        finish(&mut chat, reply("Sales has 100 rows."));
+        let history = chat.build_history();
+        let results = history[2].tool_results.as_deref().unwrap_or_default();
+        assert!(!results[0].is_error);
+    }
+
+    /// Two calls of one tool, the first failed: each end lands on its own call, and both cards
+    /// stay (a finished call with an unknown outcome is not taken for a running one).
+    #[test]
+    fn test_two_calls_of_one_tool_each_get_their_end() {
+        let mut chat = ChatState::new();
+        send(&mut chat, "load both files");
+        chat.set_active_tool("load_dataset".to_string(), json!({"path": "a.csv"}));
+        assert!(!chat.messages.last().unwrap().tool_calls[0].is_finished());
+        chat.clear_active_tool(Some("Error: a.csv not found".into()), Some("error"));
+        chat.set_active_tool("load_dataset".to_string(), json!({"path": "b.csv"}));
+        chat.clear_active_tool(Some("Loaded b".into()), Some("success"));
+        let calls = &chat.messages.last().unwrap().tool_calls;
+        let got: Vec<(serde_json::Value, Option<bool>)> = calls
+            .iter()
+            .map(|tc| (tc.arguments.clone(), tc.success))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (json!({"path": "a.csv"}), Some(false)),
+                (json!({"path": "b.csv"}), Some(true)),
+            ]
+        );
+
+        // Two calls that each end without a status are still two cards.
+        let mut chat = ChatState::new();
+        send(&mut chat, "load both files");
+        for path in ["a.csv", "b.csv"] {
+            chat.set_active_tool("load_dataset".to_string(), json!({"path": path}));
+            chat.clear_active_tool(Some(format!("Loaded {path}")), None);
+        }
+        assert_eq!(chat.messages.last().unwrap().tool_calls.len(), 2);
+    }
+
+    /// interpret = false: a call Done lists without a matching result has an unknown outcome,
+    /// not a success.
+    #[test]
+    fn test_done_call_without_result_is_unknown() {
+        let mut chat = ChatState::new();
+        send(&mut chat, "fit it");
+        finish(
+            &mut chat,
+            Message {
+                role: "assistant".to_string(),
+                content: String::new(),
+                tool_calls: Some(vec![ToolCall {
+                    id: "call_1".into(),
+                    name: "regression_ols".into(),
+                    arguments: json!({"dataset": "sales"}),
+                }]),
+                tool_results: Some(vec![]),
+            },
+        );
+        assert_eq!(chat.messages.last().unwrap().tool_calls[0].success, None);
     }
 
     /// A result over 2,000 bytes is cut on a char boundary in the history.
@@ -721,7 +847,7 @@ mod tests {
         chat.set_active_tool("head_dataset".to_string(), json!({"dataset": "labels"}));
         // 'a' then 1500 x 'é' (2 bytes each): 3001 bytes. Byte 2000 falls inside an 'é' (bytes
         // 1999..2001), so the cut is at 1999: "a" + 999 x 'é'.
-        chat.clear_active_tool(Some(format!("a{}", "é".repeat(1500))));
+        chat.clear_active_tool(Some(format!("a{}", "é".repeat(1500))), Some("success"));
         finish(&mut chat, reply("Here are the labels."));
         let history = chat.build_history();
         assert_eq!(history.len(), 3, "{history:?}");

@@ -368,8 +368,8 @@ pub fn ChatPanel() -> Element {
                         StreamEvent::ToolStart { tool, arguments } => {
                             chat.write().set_active_tool(tool, arguments);
                         }
-                        StreamEvent::ToolEnd { result, .. } => {
-                            chat.write().clear_active_tool(result);
+                        StreamEvent::ToolEnd { result, status, .. } => {
+                            chat.write().clear_active_tool(result, status.as_deref());
                         }
                         StreamEvent::ToolResult { images } => {
                             if let Some(imgs) = images {
