@@ -590,7 +590,7 @@ mod http_paths {
             let sid = new_session(&app).await;
             // 1,000 rows, each its own `idx` and `key` value: a 1,000 x 1,001 wide table,
             // 1,001,000 cells, from a long table of 1,000 rows. Its 1,001 columns are within
-            // pivot_columns.
+            // pivot_columns. The count stops once 700 rows pass the 700,000-cell budget.
             create(&app, &sid, "long", &long_csv(1_000, 1_000)).await;
             let (status, body) =
                 post_tool(&app, &sid, "munge_pivot", pivot_args("long", "wide")).await;
@@ -598,14 +598,14 @@ mod http_paths {
             assert_eq!(body["code"], "limit_exceeded", "{body}");
             assert_eq!(
                 body["details"],
-                json!({"parameter": "index", "requested": "at least 1001000", "limit": "1000000"}),
+                json!({"parameter": "index", "requested": "at least 700700", "limit": "700000"}),
                 "{body}"
             );
             let error = body["error"].as_str().unwrap();
             assert!(
-                error.starts_with("`munge_pivot` would make at least 1000 rows")
+                error.starts_with("`munge_pivot` would make at least 700 rows")
                     && error.contains("by 1001 columns")
-                    && error.contains("limit of 1000000 cells (pivot_cells)"),
+                    && error.contains("limit of 700000 cells (pivot_cells)"),
                 "{error}"
             );
             assert_eq!(
