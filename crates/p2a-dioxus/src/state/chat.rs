@@ -2,7 +2,18 @@
 
 use crate::api::{ConversationMessage, Message, PersistedToolCall, ToolCall};
 use chrono::{DateTime, Utc};
+use std::sync::atomic::{AtomicU64, Ordering};
 use uuid::Uuid;
+
+/// The source of `ChatMessage::tool_rev`: one counter for the process, so
+/// no two states of any messages share a revision, not even those of a
+/// message rebuilt with the same id.
+static NEXT_TOOL_REV: AtomicU64 = AtomicU64::new(1);
+
+/// A tool-call revision never handed out before.
+fn next_rev() -> u64 {
+    NEXT_TOOL_REV.fetch_add(1, Ordering::Relaxed)
+}
 
 /// A chat message in the UI
 #[derive(Debug, Clone)]
@@ -22,9 +33,11 @@ pub struct ChatMessage {
     /// Whether the answer ended before it was finished (stopped, a stream
     /// that closed or went silent, a session that ended)
     pub interrupted: bool,
-    /// Bumped whenever `tool_calls` change (a call added, ended or
-    /// replaced), so the props comparison sees the change in constant time.
-    /// Write the calls through `set_tool_calls` or the ChatState methods.
+    /// A fresh revision ([`next_rev`], unique in the process) whenever
+    /// `tool_calls` change (a call added, ended or replaced) and at every
+    /// construction, so the props comparison sees the change in constant
+    /// time. Write the calls through `set_tool_calls` or the ChatState
+    /// methods.
     pub(crate) tool_rev: u64,
     /// Message timestamp
     pub timestamp: DateTime<Utc>,
@@ -41,7 +54,7 @@ impl ChatMessage {
             images: Vec::new(),
             is_streaming: false,
             interrupted: false,
-            tool_rev: 0,
+            tool_rev: next_rev(),
             timestamp: Utc::now(),
         }
     }
@@ -56,7 +69,7 @@ impl ChatMessage {
             images: Vec::new(),
             is_streaming: true,
             interrupted: false,
-            tool_rev: 0,
+            tool_rev: next_rev(),
             timestamp: Utc::now(),
         }
     }
@@ -77,7 +90,7 @@ impl ChatMessage {
             images: Vec::new(),
             is_streaming: false,
             interrupted: false,
-            tool_rev: 0,
+            tool_rev: next_rev(),
             timestamp: Utc::now(),
         }
     }
@@ -97,7 +110,7 @@ impl ChatMessage {
             images: Vec::new(),
             is_streaming: false,
             interrupted: false,
-            tool_rev: 0,
+            tool_rev: next_rev(),
             timestamp,
         }
     }
@@ -115,7 +128,7 @@ impl ChatMessage {
     /// Set tool calls on this message
     pub fn set_tool_calls(&mut self, tool_calls: Vec<ToolCallInfo>) {
         self.tool_calls = tool_calls;
-        self.tool_rev += 1;
+        self.tool_rev = next_rev();
     }
 }
 
@@ -578,7 +591,7 @@ impl ChatState {
             && last.is_streaming
         {
             index = Some(last.tool_calls.len());
-            last.tool_rev += 1;
+            last.tool_rev = next_rev();
             last.tool_calls.push(ToolCallInfo {
                 id: uuid::Uuid::new_v4().to_string(),
                 name: name.clone(),
@@ -618,7 +631,7 @@ impl ChatState {
         if let Some(tc) = target.and_then(|i| last.tool_calls.get_mut(i)) {
             tc.success = tool_outcome(status);
             tc.result = result;
-            last.tool_rev += 1;
+            last.tool_rev = next_rev();
         }
     }
 

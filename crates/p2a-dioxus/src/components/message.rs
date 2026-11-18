@@ -14,7 +14,7 @@ pub struct MessageProps {
 
 /// Whether a message must be redrawn: its text, streaming and interrupted
 /// state, its plot count, and its tool calls (a call added, ended or
-/// replaced bumps `tool_rev`).
+/// replaced gives `tool_rev` a revision unique in the process).
 impl PartialEq for ChatMessage {
     fn eq(&self, other: &Self) -> bool {
         self.id == other.id
@@ -173,7 +173,7 @@ pub fn Message(props: MessageProps) -> Element {
 
 #[cfg(test)]
 mod tests {
-    use crate::state::ChatState;
+    use crate::state::{ChatMessage, ChatState};
 
     /// The card of a call that ended or failed is redrawn although the text
     /// and the number of calls are unchanged.
@@ -202,6 +202,41 @@ mod tests {
         let shown = interrupted.clone();
         interrupted.interrupted = true;
         assert_ne!(shown, interrupted);
+    }
+
+    /// A message rebuilt from the store keeps its id, text and number of
+    /// calls; a call whose outcome changed between the two loads still
+    /// redraws it.
+    #[test]
+    fn a_rebuilt_message_with_another_outcome_redraws() {
+        use crate::api::{ConversationMessage, PersistedToolCall};
+        let stored = ConversationMessage {
+            id: "m-1".into(),
+            conversation_id: "c-1".into(),
+            role: "assistant".into(),
+            content: "Fitted.".into(),
+            created_at: "2026-11-18T10:00:00Z".into(),
+            token_count: None,
+            model: None,
+        };
+        let call = |status: &str| PersistedToolCall {
+            id: "call_1".into(),
+            message_id: "m-1".into(),
+            conversation_id: "c-1".into(),
+            tool_name: "regression_ols".into(),
+            arguments: r#"{"dataset": "sales"}"#.into(),
+            result: Some("OLS results".into()),
+            error: None,
+            status: status.into(),
+            started_at: "2026-11-18T10:00:01Z".into(),
+            completed_at: None,
+            duration_ms: None,
+        };
+        let first = ChatMessage::from_conversation_message_with_tools(&stored, &[call("success")]);
+        let second = ChatMessage::from_conversation_message_with_tools(&stored, &[call("error")]);
+        assert_ne!(first, second);
+        // A clone is the same message and is not redrawn.
+        assert_eq!(first, first.clone());
     }
 }
 
