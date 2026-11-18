@@ -56,6 +56,18 @@ fn get_result_preview(result: &str, max_lines: usize) -> (String, bool) {
     (preview, has_more)
 }
 
+/// A tool call's status as words: its outcome, or, without one, "status
+/// unknown" once the call has ended (an older server sends no status) and
+/// "running" while it runs.
+pub fn status_label(success: Option<bool>, finished: bool) -> &'static str {
+    match (success, finished) {
+        (Some(true), _) => "completed",
+        (Some(false), _) => "failed",
+        (None, true) => "status unknown",
+        (None, false) => "running",
+    }
+}
+
 /// Props for ToolCallDisplay
 #[derive(Props, Clone, PartialEq)]
 pub struct ToolCallProps {
@@ -71,6 +83,9 @@ pub struct ToolCallProps {
     /// Whether the tool call succeeded
     #[props(default)]
     pub success: Option<bool>,
+    /// Whether the call has ended (with no outcome: "status unknown")
+    #[props(default)]
+    pub finished: bool,
 }
 
 /// ToolCall display component - expandable card showing tool invocation
@@ -117,6 +132,25 @@ pub fn ToolCallDisplay(props: ToolCallProps) -> Element {
                 }
             },
         ),
+        // Ended without an outcome (an older server sends none).
+        None if props.finished => (
+            "bg-gray-100 dark:bg-gray-700",
+            "text-gray-600 dark:text-gray-300",
+            rsx! {
+                svg {
+                    class: "w-4 h-4",
+                    fill: "none",
+                    stroke: "currentColor",
+                    view_box: "0 0 24 24",
+                    path {
+                        stroke_linecap: "round",
+                        stroke_linejoin: "round",
+                        stroke_width: "2",
+                        d: "M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+                    }
+                }
+            },
+        ),
         None => (
             "bg-orange-100 dark:bg-orange-900/30",
             "text-orange-700 dark:text-orange-400",
@@ -143,6 +177,8 @@ pub fn ToolCallDisplay(props: ToolCallProps) -> Element {
         ),
     };
 
+    let status_word = status_label(props.success, props.finished);
+    let unknown = props.success.is_none() && props.finished;
     let args_pretty = serde_json::to_string_pretty(&props.arguments).unwrap_or_default();
     let expanded = *is_expanded.read();
 
@@ -158,7 +194,7 @@ pub fn ToolCallDisplay(props: ToolCallProps) -> Element {
 
                 div { class: "flex items-center gap-3",
                     // Status icon
-                    span { class: "{status_text}",
+                    span { class: "{status_text}", title: "{status_word}",
                         {status_icon}
                     }
                     // Tool name
@@ -168,6 +204,9 @@ pub fn ToolCallDisplay(props: ToolCallProps) -> Element {
                     // Small badge showing it's a tool
                     span { class: "px-2 py-0.5 text-xs font-medium rounded bg-orange-100 dark:bg-orange-800 text-orange-700 dark:text-orange-300",
                         "tool"
+                    }
+                    if unknown {
+                        span { class: "text-xs text-gray-500 dark:text-gray-400", "{status_word}" }
                     }
                 }
 
@@ -410,5 +449,20 @@ pub fn ToolCallDisplay(props: ToolCallProps) -> Element {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_label_table() {
+        assert_eq!(status_label(Some(true), true), "completed");
+        assert_eq!(status_label(Some(false), true), "failed");
+        assert_eq!(status_label(None, true), "status unknown");
+        assert_eq!(status_label(None, false), "running");
+        assert_eq!(status_label(Some(true), false), "completed");
+        assert_eq!(status_label(Some(false), false), "failed");
     }
 }

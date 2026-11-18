@@ -26,4 +26,4 @@ pub use message::Message;
 pub use message_list::{MessageList, next_at_bottom};
 pub use settings_modal::SettingsModal;
 pub use shortcuts_modal::ShortcutsModal;
-pub use tool_call::ToolCallDisplay;
+pub use tool_call::{ToolCallDisplay, status_label as tool_status_label};

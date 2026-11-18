@@ -72,11 +72,8 @@ fn format_message(msg: &ChatMessage, options: &MarkdownExportOptions) -> String 
     // Tool calls in collapsible sections
     if options.include_tool_calls && !msg.tool_calls.is_empty() {
         for tc in &msg.tool_calls {
-            let status_indicator = match tc.success {
-                Some(true) => "completed",
-                Some(false) => "failed",
-                None => "pending",
-            };
+            // Exports hold finished messages only, so every call has ended.
+            let status_indicator = crate::components::tool_status_label(tc.success, true);
 
             output.push_str(&format!(
                 "<details>\n<summary>Tool: <code>{}</code> ({})</summary>\n\n",
@@ -210,6 +207,33 @@ mod tests {
         finished.interrupted = false;
         let out = export_to_markdown(None, &[finished], &MarkdownExportOptions::default());
         assert!(!out.contains("interrupted"), "{out}");
+    }
+
+    fn with_call(success: Option<bool>) -> ChatMessage {
+        let mut msg = ChatMessage::assistant_streaming();
+        msg.content = "Fitted.".to_string();
+        msg.is_streaming = false;
+        msg.tool_calls.push(crate::state::ToolCallInfo {
+            id: "call_1".into(),
+            name: "regression_ols".into(),
+            arguments: serde_json::json!({"dataset": "sales"}),
+            result: Some("OLS results".into()),
+            success,
+            is_expanded: false,
+        });
+        msg
+    }
+
+    #[test]
+    fn a_finished_call_without_status_is_not_pending() {
+        let opts = MarkdownExportOptions::default();
+        let out = export_to_markdown(None, &[with_call(None)], &opts);
+        assert!(out.contains("(status unknown)"), "{out}");
+        assert!(!out.contains("pending"), "{out}");
+        let out = export_to_markdown(None, &[with_call(Some(true))], &opts);
+        assert!(out.contains("(completed)"), "{out}");
+        let out = export_to_markdown(None, &[with_call(Some(false))], &opts);
+        assert!(out.contains("(failed)"), "{out}");
     }
 
     #[test]

@@ -93,14 +93,11 @@ fn format_message_html(msg: &ChatMessage, options: &HtmlExportOptions) -> String
             let status_class = match tc.success {
                 Some(true) => "success",
                 Some(false) => "error",
-                None => "pending",
+                None => "unknown",
             };
 
-            let status_text = match tc.success {
-                Some(true) => "completed",
-                Some(false) => "failed",
-                None => "pending",
-            };
+            // Exports hold finished messages only, so every call has ended.
+            let status_text = crate::components::tool_status_label(tc.success, true);
 
             let args_json = serde_json::to_string_pretty(&tc.arguments)
                 .unwrap_or_else(|_| tc.arguments.to_string());
@@ -317,6 +314,10 @@ const CSS_LIGHT: &str = r#"
             color: var(--error-color);
         }
 
+        .tool-call.unknown .status {
+            color: var(--text-secondary);
+        }
+
         .interrupted {
             color: var(--text-secondary);
             font-style: italic;
@@ -493,6 +494,10 @@ const CSS_DARK: &str = r#"
             color: var(--error-color);
         }
 
+        .tool-call.unknown .status {
+            color: var(--text-secondary);
+        }
+
         .interrupted {
             color: var(--text-secondary);
             font-style: italic;
@@ -607,6 +612,34 @@ mod tests {
         msg.interrupted = false;
         let out = export_to_html(None, &[msg], &HtmlExportOptions::default());
         assert!(!out.contains(r#"<p class="interrupted">"#), "{out}");
+    }
+
+    fn with_call(success: Option<bool>) -> ChatMessage {
+        let mut msg = ChatMessage::assistant_streaming();
+        msg.content = "Fitted.".to_string();
+        msg.is_streaming = false;
+        msg.tool_calls.push(crate::state::ToolCallInfo {
+            id: "call_1".into(),
+            name: "regression_ols".into(),
+            arguments: serde_json::json!({"dataset": "sales"}),
+            result: Some("OLS results".into()),
+            success,
+            is_expanded: false,
+        });
+        msg
+    }
+
+    #[test]
+    fn a_finished_call_without_status_is_not_pending() {
+        let opts = HtmlExportOptions::default();
+        let out = export_to_html(None, &[with_call(None)], &opts);
+        assert!(out.contains(r#"class="tool-call unknown""#), "{out}");
+        assert!(out.contains("(status unknown)"), "{out}");
+        assert!(!out.contains("pending"), "{out}");
+        let out = export_to_html(None, &[with_call(Some(true))], &opts);
+        assert!(out.contains(r#"class="tool-call success""#) && out.contains("(completed)"));
+        let out = export_to_html(None, &[with_call(Some(false))], &opts);
+        assert!(out.contains(r#"class="tool-call error""#) && out.contains("(failed)"));
     }
 
     #[test]

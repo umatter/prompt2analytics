@@ -161,7 +161,9 @@ pub fn Message(props: MessageProps) -> Element {
                                     name: tool_call.name.clone(),
                                     arguments: tool_call.arguments.clone(),
                                     result: tool_call.result.clone(),
-                                    success: tool_call.success
+                                    success: tool_call.success,
+                                    // A Done call without a result has ended too.
+                                    finished: tool_call.is_finished() || !message.is_streaming
                                 }
                             }
                         }
