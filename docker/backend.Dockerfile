@@ -11,7 +11,7 @@ WORKDIR /app
 
 # Install build dependencies.
 # clang + libclang-dev: required by bindgen-based -sys crates pulled in by the
-#   `full` feature (duckdb-sys, librocksdb-sys) — without libclang the release
+#   `full` feature (duckdb-sys) — without libclang the release
 #   build fails with "Unable to find libclang".
 # cmake: needed by some native -sys builds.
 RUN apt-get update && apt-get install -y \

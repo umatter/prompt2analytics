@@ -57,8 +57,8 @@ services:
       # file tools can write anywhere under P2A_DATA_ROOT, so a database there
       # could be overwritten, and the server refuses to start with one there.
       # Upgrading from a compose file that used P2A_DB_PATH=/data: move the old
-      # RocksDB store out of the p2a-data volume into p2a-db (as /var/lib/p2a/db),
-      # or delete it.
+      # store out of the p2a-data volume into p2a-db (as /var/lib/p2a/db), or
+      # delete it (a RocksDB store of v0.5.0 or earlier is set aside at start-up).
       - P2A_DB_PATH=/var/lib/p2a/db
     restart: unless-stopped
     # --- Container hardening ---

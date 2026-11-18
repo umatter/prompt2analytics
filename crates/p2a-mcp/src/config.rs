@@ -232,7 +232,7 @@ pub struct CliArgs {
     )]
     pub limit_overrides: Vec<String>,
 
-    /// Async runtime worker threads (default: max(2, CPUs); at most 1024).
+    /// Async runtime worker threads (default: max(2, CPUs); a value given must be 1 to 1024).
     #[arg(long, env = "P2A_WORKER_THREADS")]
     pub worker_threads: Option<usize>,
 

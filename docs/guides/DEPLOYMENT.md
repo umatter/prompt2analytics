@@ -133,14 +133,15 @@ websocket `tool` messages runs through one governor
   runs out, and core loops stop at their next checkpoint
   (`p2a_core::resource::checkpoint`). A call whose work stops there answers
   504 `deadline_exceeded`, with `details.limit_secs`, as soon as it has
-  stopped, which for work with checkpoints is a few milliseconds after the
-  deadline (60.02 s was measured with the hosted 60 s). The governor waits
+  stopped: at its next checkpoint, so as late as the work's longest stretch
+  without one, and at most 250 ms past the deadline (60.02 s was measured with
+  the hosted 60 s on work that checks often). The governor waits
   for the work at most 250 ms past the deadline: work still running then
   (work without checkpoints, or work that reached none in that time) is
   detached, and the call answers 504 at the deadline plus 250 ms. Work that
   finishes successfully within those 250 ms keeps its result. A client that
-  disconnects cancels its call the same way, and closing a chat stream stops
-  its tool loop.
+  disconnects cancels its call: the work stops at its next checkpoint and
+  nobody receives an answer. Closing a chat stream stops its tool loop.
 - **Panics.** A tool that panics answers 500 `internal`; the session and the
   process survive.
 - **Integer overflow.** Release builds keep Rust's default: integer overflow
@@ -196,8 +197,9 @@ websocket `tool` messages runs through one governor
   setting has passed (checks run a little after their 5 s marks, so even a
   setting that is a multiple of 5 s can take one check more). The exit
   therefore comes between `P2A_STUCK_EXIT_SECS` and `P2A_STUCK_EXIT_SECS`
-  plus 10 s after `/health` first reports the state: 300 to 310 s in the
-  hosted profile (35 s was measured with the setting at 25). A restart
+  plus 10 s after the state begins (which `/health` reports from that moment):
+  300 to 310 s in the hosted profile (with the setting at 25, the exit was
+  measured 30 s after the start of the state; the range tops at 35 s). A restart
   discards every in-memory session. A soft limit below the server's idle
   RSS therefore restarts it every `P2A_STUCK_EXIT_SECS` plus up to 10 s.
 - **Session capacity.** When `P2A_MAX_SESSIONS` (100) sessions exist, creating
@@ -255,8 +257,9 @@ before they are deserialised, on the HTTP, LLM, websocket and stdio paths.
   links, the work of an ARIMA fit, the memory of a tree-ensemble fit, the work
   of an scpi call, of a ctree permutation test, and the rows of a SAR probit
   with impacts, SQL results, the conversation store and the LLM context.
-- **Response size.** A tool's text and image output above `response_bytes`
-  (16 MiB) is replaced by a refusal.
+- **Response size.** A tool's result (its text, image and other content items)
+  above `response_bytes` (16 MiB) is replaced by a refusal; the call itself has
+  run, so its work and any dataset it stored are not undone.
 
 An argument, row, pivot-shape or response-size refusal answers 422
 `limit_exceeded` with `details {parameter, requested, limit}` and a message that
@@ -377,7 +380,8 @@ HTTP), and they never depend on the resource profile:
   target and renamed into place, so a link planted at the target is replaced,
   never followed. A process stopped in the middle of a write leaves its
   temporary file (`.<name>.<uuid>.p2a-tmp`); a leftover is removed by the
-  first sweep of its folder after nobody has written to it for ten minutes. A
+  first sweep of its folder after the temporary file has not been written for
+  ten minutes. A
   tool path that resolves through the data-root jail sweeps the root (or the
   session's directory) and the folder the path lies in or names, the first
   time in a process and then at most once every ten minutes.
@@ -543,9 +547,9 @@ profile. For the timeout, watchdog, memory, data, allocation and eviction knobs
 | `--audit-path` | `P2A_AUDIT_PATH` | `p2a-audit.log` in the working directory | same | |
 | `--limits` | `P2A_LIMITS` | none (the mode decides) | same | `hosted` or `off`; `off` is refused in OpenPublic |
 | `--limit-override` | `P2A_LIMIT_OVERRIDES` | none | none | `key=value` list, see the next table |
-| `--worker-threads` | `P2A_WORKER_THREADS` | max(2, CPUs) | max(2, CPUs) | async runtime workers |
+| `--worker-threads` | `P2A_WORKER_THREADS` | max(2, CPUs) | max(2, CPUs) | async runtime workers; a value given must be 1 to 1024 (the default is not capped) |
 | `--tool-concurrency` | `P2A_TOOL_CONCURRENCY` | CPUs | CPUs | tool calls at once, server-wide; calls share one rayon pool, so with a value above 1 a long parallel call can slow the others, and the server logs a warning at start-up |
-| `--session-concurrency` | `P2A_SESSION_CONCURRENCY` | CPUs | 1 | tool calls at once per session |
+| `--session-concurrency` | `P2A_SESSION_CONCURRENCY` | CPUs (1 when a session or total data quota is set) | 1 | tool calls at once per session |
 | `--tool-queue-wait-secs` | `P2A_TOOL_QUEUE_WAIT_SECS` | 300 | 10 | wait for a slot before 429/503 |
 | `--tool-timeout-secs` | `P2A_TOOL_TIMEOUT_SECS` | none | 60 | per-call deadline |
 | `--stuck-exit-secs` | `P2A_STUCK_EXIT_SECS` | off | 300 | watchdog, exit code 70 |
@@ -556,7 +560,7 @@ profile. For the timeout, watchdog, memory, data, allocation and eviction knobs
 | `--session-evict-idle-minutes` | `P2A_SESSION_EVICT_IDLE_MINUTES` | never | 10 | eviction when the table is full |
 | `--auth-enabled` | `P2A_AUTH_ENABLED` | | | deprecated, no effect (feature `auth`) |
 | `--jwt-secret` | `P2A_JWT_SECRET` | | | deprecated, no effect (feature `auth`) |
-| env only | `P2A_MAX_HTTP_BODY_MB` | 32 | 32 | request bodies and websocket messages, MiB; must be a positive whole number (surrounding whitespace is ignored; empty means unset); `0`, an invalid or non-UTF-8 value or one too large to count in bytes means the default 32, with a warning in the log (there is no unlimited setting); in the hosted profile HTTP JSON bodies at most 2 MiB; websocket messages keep the cap ([HTTP surface](#http-surface)) |
+| env only | `P2A_MAX_HTTP_BODY_MB` | 32 | 32 | request bodies and websocket messages, MiB; must be a positive whole number (surrounding whitespace is ignored; empty means unset); `0`, an invalid or non-UTF-8 value or one too large to count in bytes means the default 32, with a warning in the log (there is no unlimited setting); in the hosted profile HTTP JSON bodies are at most 2 MiB; websocket messages keep the cap ([HTTP surface](#http-surface)) |
 | env only | `P2A_DATA_ROOT` | working directory | same | must exist; resolved once, on first use |
 | env only | `P2A_LLM_ALLOWED_HOSTS` | none (any public host) | api.openai.com, api.anthropic.com, openrouter.ai | comma-separated bare hostnames |
 | env only | `P2A_AUDIT_MAX_MB` | 50 | 50 | audit log rotation size; `0` = never rotate; keeps 3 old files |
@@ -634,7 +638,7 @@ Named budgets:
 | `generated_bytes` | estimated bytes of generated data | 200 MiB | none |
 | `export_bytes` | `export_dataset`, `export_session` and `import_session` sizes | 64 MiB | none |
 | `load_file_bytes` | size of the file `load_dataset` or a dataset reload reads, checked before parsing | 64 MiB | none |
-| `response_bytes` | one tool's text and image output | 16 MiB | none |
+| `response_bytes` | one tool's result (text, image and other content items), measured after the call ran | 16 MiB | none |
 | `session_disk_bytes` | bytes in one session's data directory | 64 MiB | none |
 | `spatial_links` | total links of a `spatial_neighbors` structure | 2,000,000 | none |
 | `arima_fit_work` | work of an ARIMA fit, observations × ((p + q + 3)² + d), checked before the fit starts; while set, a series holding a nonzero value below 1e-100 is refused as well | 7,500,000 | none |
@@ -664,11 +668,16 @@ The hosted `arima_fit_work` of 7,500,000 allows ARIMA(1,1,1) on 288,461
 observations. It bounds a call's cost before the fit starts: on a release build,
 one fit at a time on one of the slower cores of a laptop CPU, the slowest fit
 measured at that value took about 7.5 s, and since a fit makes at most about
-twice the passes of the fits measured, the slowest fit it allows takes about
-15 s, a quarter of the default deadline. While the budget is set, a column holding
-a nonzero value below 1e-100 is refused as well, because the squares and
-products the fit forms from values that small can be subnormal (below about
-2.2e-308), and arithmetic on those takes a much slower path. The margin to the
+twice the passes of the fits measured, the slowest fit it allows on ordinary
+floating-point data takes about 15 s, a quarter of the default deadline. While
+the budget is set, a column holding a nonzero value below 1e-100 is refused as
+well, because the squares, products and differences the fit forms from values
+that small can be subnormal (below about 2.2e-308), and arithmetic on those
+takes a much slower path. One case the floor does not cover: at an intercept of
+exactly 0 over a stretch of exact zeros, the MA residual recursion can decay
+into the subnormal range, and one pass in that state was measured at about 28
+times the time of a pass over ordinary data; such a fit ends at the deadline as
+a cancelled call (`ARIMA_MIN_MAGNITUDE` in `tools/limits/rules.rs`). The margin to the
 deadline assumes the default 60 s: with a lower `P2A_TOOL_TIMEOUT_SECS`, or on a
 throttled shared CPU, lower `arima_fit_work` in proportion with
 `P2A_LIMIT_OVERRIDES`. The fit checks the call's budget every iteration and
@@ -1078,8 +1087,17 @@ Nothing here runs automatically except the two workflows named in steps 0 and
 
    ```bash
    cargo update --workspace
-   git diff --stat Cargo.lock      # only the six p2a-* entries may change
+   git diff --stat Cargo.lock      # only the seven p2a-* entries may change
    git commit -am "chore: bump workspace version to X.Y.Z"
+   ```
+
+   CI does not build with the MSRV (`rust-version` in `Cargo.toml`, 1.95), so
+   check it before tagging, with the CI feature sets:
+
+   ```bash
+   cargo +1.95.0 check -p p2a-core --no-default-features --features ci
+   cargo +1.95.0 check -p p2a-mcp --no-default-features --features "http,llm,auth,websocket"
+   cargo +1.95.0 check -p p2a-cli --no-default-features --features spectral-analysis
    ```
 2. **Tag.** The tag push is what builds and publishes the backend image (and the
    desktop bundles, `.github/workflows/desktop-bundle.yml`):
@@ -1124,7 +1142,8 @@ Nothing here runs automatically except the two workflows named in steps 0 and
    machine for high availability. `min_machines_running = 1` in `fly.toml` is a
    floor and does not prevent this. Pass the flag on every deploy; if `fly
    status` lists two machines, `fly scale count 1 -a p2a-qamelab-backend`
-   returns to one.
+   returns to one by destroying the extra machine, and with it every session on
+   that machine.
 
    A deploy restarts the machine and discards every in-memory session, so pick
    a quiet time.

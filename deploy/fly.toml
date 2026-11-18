@@ -149,7 +149,8 @@ primary_region = "fra"          # Frankfurt — EU
   # heap memory back ("memory_stuck": every call is refused). The stuck
   # watchdog checks every 5 s; once a check finds that this has lasted
   # P2A_STUCK_EXIT_SECS (300 s in the hosted profile), the process exits with
-  # code 70, 300 to 310 s after /health first reports it, and the restart
+  # code 70, 300 to 310 s after the state begins (which /health reports from
+  # that moment), and the restart
   # policy below starts it again. A restart discards every in-memory session.
   [[http_service.checks]]
     path = "/health"
