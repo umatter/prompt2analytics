@@ -64,26 +64,28 @@ The Rust step lists the tests of p2a-core, p2a-cli and p2a-mcp on CI's feature s
 (`cargo test -p <pkg> --tests -- --list`), keeps the `test_validate` tests, selects a
 category by module path and test binary (`validation/tools/validation_status.py select`),
 and runs them with `--exact`, plus every self-test of `p2a-validation`. A compile error, a
-failing test, fewer tests run than selected, a selected test without a parsed result, or no
-selected `test_validate` test is a failure. Full runs also lint the methods registry. The R
-step recomputes every R reference case (see "Adding an R-pinned validation" below).
-`--legacy-r` runs each legacy script in a
-scratch directory with a copy of `validation/datasets`, so tracked files are never written,
-and compares the CSVs it produces with `validation/expected/*.csv`.
+failing test, fewer tests run than selected, a selected test without a parsed result or a
+parsed result for a test not selected, or no selected `test_validate` test is a failure. Full
+runs also lint the methods registry. The R step recomputes every R reference case (see
+"Adding an R-pinned validation" below). `--legacy-r` runs each legacy script in a scratch
+directory with a copy of `validation/datasets`, so tracked files are never written, and
+compares the CSVs it produces with `validation/expected/*.csv`.
 
 Exit codes of `run_validation.sh`: 0 PASS, 1 FAIL (including a compile error or zero
 selected tests), 2 usage error, 3 INCOMPLETE (`cargo` or `Rscript` missing for a requested
 step). Results go to `validation/reports/<timestamp>-<pid>/` (gitignored): the logs,
 `results.json` and `report.md`; both record the commit, marked `-dirty` when tracked files
 differ from it. `--write-status` describes the whole suite, so it is refused (exit 2) with
-`--category`, `--rust-only` or `--r-only`, and a run in which a selected test has no parsed
-result leaves the page as it was. `--release`, `--verbose` (`-v`) and the environment
+`--category`, `--rust-only` or `--r-only`. A run in which a selected test has no parsed
+result or a parsed result was not selected, a test list or selection failed (a compile error
+shows at the list step), or the results could not be collected leaves the page as it was. `--release`, `--verbose` (`-v`) and the environment
 variables `P2A_RSCRIPT`, `P2A_LEGACY_R_TIMEOUT` (whole seconds >= 1, default 300; read only
 with `--legacy-r`) and `PYTHON` are also accepted. `--verbose` shows the cargo output and
 every comparison a `Check` makes, which libtest prints after the test status lines
-(`--show-output`). The runner sets `CARGO_TERM_COLOR=never` for cargo, since it parses
-cargo's output. In a direct cargo run, set `P2A_VALIDATION_VERBOSE=1` to print every
-comparison a `Check` makes.
+(`--show-output`). The runner sets `CARGO_TERM_COLOR=never`, `CARGO_TERM_QUIET=false` and
+`CARGO_TERM_VERBOSE=false` for cargo, since it parses cargo's output. In a direct cargo run,
+set `P2A_VALIDATION_VERBOSE=1` and pass `-- --show-output` (or `-- --nocapture`) to print
+every comparison a `Check` makes: libtest hides a passing test's output otherwise.
 
 Direct cargo filters are substrings of the libtest path, not regexes. Module paths such as
 `regression::ols::tests::test_validate`, `econometrics::panel::tests::test_validate` and
@@ -93,7 +95,11 @@ Direct cargo filters are substrings of the libtest path, not regexes. Module pat
 `VALIDATION_STATUS.md` is regenerated once per wave integration, after the lanes are merged
 (`validation/run_validation.sh --write-status`), and never edited by hand. CI's status-page
 check (`P2A_CHECK_STATUS_PAGE=1`, `validation/tools/tests/test_status_page.py`) fails when the
-page's per-package `test_validate` counts differ from `cargo test -- --list`.
+page's per-package `test_validate` counts differ from `cargo test -- --list`, and its other
+checks (`test_pinned_section_lists_only_registered_methods`, `test_registered_tests_are_run`)
+fail when an entry is added to or removed from `validation/methods/*.json` without a new page.
+A method whose registered tests ran is PASS (or PASS (known deviations)); one with a failing
+registered test, a `registered-property` one included, is FAIL.
 
 ## Prerequisites
 
@@ -211,7 +217,8 @@ This is the workflow every new or fixed validation follows.
 6. **Run** `python3 validation/tools/validation_status.py lint --strict --tests
    target/*-tests.txt` and `validation/run_validation.sh`.
 7. **Regenerate the status page.** Adding, removing or renaming a `test_validate` test
-   changes the counts CI checks: regenerate `VALIDATION_STATUS.md` with
+   changes the counts CI checks, and adding or removing an entry in
+   `validation/methods/*.json` changes the page's method list: regenerate `VALIDATION_STATUS.md` with
    `validation/run_validation.sh --write-status` before the change reaches main (during the
    review campaign: at the wave integration, not in a lane).
 
@@ -225,7 +232,9 @@ are listed, with their kind and the reason, in `tools/validate_property_tests.tx
 example that non-convergence is reported) keeps its name and is listed there with kind
 `registered-property`. Neither a listed nor a `registered-property` test counts as R-pinned.
 `tools/tests/test_tier3_closure.py` enforces these rules in CI: every `test_validate_*` test in
-the cargo test lists is registered or listed, and a validation test cannot pass on `Err`, print
+the cargo test lists is registered or listed (CI writes the lists with its own feature sets,
+so a `test_validate_*` test compiled only under `database`, `db` or `cuda` is not in them and
+must be checked by hand), and a validation test cannot pass on `Err`, print
 instead of asserting, or guard its only comparison.
 
 A mismatch is a defect. Fix it, or record a deviation `{"finding", "quantity", "note"}` in the

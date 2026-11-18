@@ -1404,7 +1404,8 @@ def render(results: dict, root: Path) -> str:
         "",
         "Registered and run on their method's case, but they check properties on R's data "
         "(kind `registered-property` in `validation/tools/validate_property_tests.txt`); "
-        "they do not count as R-pinned.",
+        "they do not count as R-pinned. A failing one still marks its method FAIL in "
+        "\"Methods pinned to R\".",
         "",
     ]
     rows = [(m["id"], t) for _, m, _ in sorted(methods, key=lambda x: x[1]["id"]) for t in m["tests"]
