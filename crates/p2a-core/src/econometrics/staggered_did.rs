@@ -374,30 +374,6 @@ impl Default for StaggeredDidConfig {
     }
 }
 
-/// Aggregation type for group-time ATTs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Aggregation {
-    /// Event study: aggregate by relative time e = t - g
-    EventStudy,
-    /// Group average: aggregate by cohort g
-    Group,
-    /// Overall: single weighted average
-    Overall,
-    /// Calendar time: aggregate by time period t
-    Calendar,
-}
-
-impl fmt::Display for Aggregation {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Aggregation::EventStudy => write!(f, "Event Study"),
-            Aggregation::Group => write!(f, "Group Average"),
-            Aggregation::Overall => write!(f, "Overall"),
-            Aggregation::Calendar => write!(f, "Calendar Time"),
-        }
-    }
-}
-
 // ═══════════════════════════════════════════════════════════════════════════════
 // Result Types
 // ═══════════════════════════════════════════════════════════════════════════════

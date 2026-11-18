@@ -546,7 +546,6 @@ pub use econometrics::{
     AftDistribution,
     AftResult,
     AggregatedEffect,
-    Aggregation,
     AttEstimationMethod,
     // Balke-Pearl bounds for nonparametric IV
     BPBoundsConfig,
