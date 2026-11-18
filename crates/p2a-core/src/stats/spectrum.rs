@@ -2078,6 +2078,39 @@ mod tests {
         assert!(spec.iter().all(|v| v.is_finite()));
     }
 
+    /// Through `spectrum_ar`: two noisy cycles of period 4 give an AR(2) fit with a sharp peak at
+    /// frequency 1/4, above the series' sum of squares. Scaled so that the sum of squares still
+    /// fits in an f64 but the peak does not, the fit is refused, naming the order and the
+    /// frequency of the peak.
+    #[test]
+    fn spectrum_ar_refuses_a_fit_whose_peak_overflows() {
+        let mut rng = ChaCha8Rng::seed_from_u64(37);
+        let x: Vec<f64> = [0.0, 1.0, 0.0, -1.0, 0.0, 1.0, 0.0, -1.0]
+            .iter()
+            .map(|v| v + 1e-6 * rng.gen_range(-1.0..1.0))
+            .collect();
+        // Unscaled, the spectrum is finite and its peak, on the grid at 0.25, is above the sum
+        // of squares.
+        let r = spectrum_ar(&x, Some(2), Some(5)).unwrap();
+        let sum_sq: f64 = x.iter().map(|v| v * v).sum();
+        assert!(r.spec.iter().all(|v| v.is_finite()), "{:?}", r.spec);
+        assert!(
+            r.spec[2] > 1.2 * sum_sq,
+            "peak {:e}, sum of squares {sum_sq:e}",
+            r.spec[2]
+        );
+        // Scaled so that the sum of squares is 1.5e308: the peak would pass f64::MAX.
+        let scale = (1.5e308 / sum_sq).sqrt();
+        let scaled: Vec<f64> = x.iter().map(|v| v * scale).collect();
+        match spectrum_ar(&scaled, Some(2), Some(5)).unwrap_err() {
+            EconError::InvalidSpecification { message } => {
+                assert!(message.contains("AR(2)"), "{message}");
+                assert!(message.contains("at frequency 0.25 "), "{message}");
+            }
+            other => panic!("{other}"),
+        }
+    }
+
     /// STAT-38: an AR spectrum has no chi-square df (R's spec.ar has none), so it has no interval.
     #[test]
     fn test_spectrum_ar_no_ci() {
@@ -2135,7 +2168,8 @@ mod tests {
     }
 
     /// Median of 31 interleaved timings of `old` and `new` after 3 warm-ups, each sample
-    /// `reps` calls; returns (old ns per call, new ns per call).
+    /// `reps` calls; returns (old ns per call, new ns per call). The same helper is in
+    /// p2a-mcp's `munging::bound` tests.
     fn interleaved_medians(
         reps: usize,
         mut old: impl FnMut(),
@@ -2209,10 +2243,12 @@ mod tests {
 
     /// The AR spectrum grid with its finiteness check against the grid before it, at 100,
     /// 1,000 and 10,000 grid points of an AR(8). Times only; run with
-    /// `taskset -c 2 cargo test --release ... -- --ignored --nocapture benchmark_wp37`.
+    /// `cargo test --release --offline -p p2a-core --lib --no-run --no-default-features --features ci`, then
+    /// `taskset -c 2 <test binary> --ignored --nocapture --test-threads 1 benchmark_spectrum_ar_grid_finiteness_check`
+    /// (pinning the run, not the build, to one core).
     #[test]
     #[ignore = "benchmark; run with --release -- --ignored --nocapture"]
-    fn benchmark_wp37_spectrum_ar_grid() {
+    fn benchmark_spectrum_ar_grid_finiteness_check() {
         let phi = [0.41, -0.23, 0.12, 0.07, -0.05, 0.031, -0.017, 0.009];
         println!("spectrum_ar grid, AR(8): n_pts | before ns | after ns | after/before");
         for n_pts in [100usize, 1_000, 10_000] {
