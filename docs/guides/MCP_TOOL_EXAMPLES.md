@@ -264,6 +264,29 @@ Test effects of two factors and their interaction.
 - Testing main effects and interactions in experimental designs
 - Analyzing treatment × covariate effects
 
+### stats_model_tables
+Tables of means or effects of a one- or two-way ANOVA, as R's `model.tables()`.
+
+```
+# Cell and marginal means of a two-way design
+/stats_model_tables dataset:experiment response:yield factors:["fertilizer", "irrigation"]
+
+# Effects (deviations from the grand mean) of one factor, without standard errors
+/stats_model_tables dataset:experiment response:yield factors:["fertilizer"] table_type:effects se:false
+```
+
+**Parameters:**
+- `dataset` (required): Dataset name
+- `response` (required): Numeric response variable column
+- `factors` (required): One factor column (one-way) or two (two-way)
+- `table_type` (optional): `means` (default) or `effects`
+- `se` (optional): Standard errors (default true): one per term, of a difference of two means or of an effect, for balanced designs only; an unbalanced design gets a note instead
+
+**Output includes:**
+- The table type, the grand mean, and the levels, values and counts of each term (each factor, and the interaction in a two-way design)
+- The residual mean square and its degrees of freedom
+- Standard errors of balanced designs (`se_note` for an unbalanced one)
+
 ---
 
 ## Hypothesis Testing
