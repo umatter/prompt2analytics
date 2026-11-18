@@ -823,11 +823,22 @@ pub(crate) fn sample_column(
     name: &str,
     test: &str,
 ) -> EconResult<(Vec<f64>, MissingSummary)> {
+    // The context is built only when it is reported.
     let mut cols = ColumnRequest::new(df)
         .numeric(name)
         .na(NaPolicy::Omit)
-        .min_rows(1, &format!("{test}: column '{name}'"))
-        .extract()?;
+        .min_rows(1, "")
+        .extract()
+        .map_err(|e| match e {
+            EconError::InsufficientData {
+                required, provided, ..
+            } => EconError::InsufficientData {
+                required,
+                provided,
+                context: format!("{test}: column '{name}'"),
+            },
+            other => other,
+        })?;
     let values = cols.numerics.remove(name).unwrap_or_default();
     Ok((values, cols.missing))
 }
@@ -1318,12 +1329,33 @@ fn time_values(col: &Column, name: &str) -> EconResult<Vec<Option<i64>>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use crate::data::DataLoader;
     use crate::resource;
     use p2a_validation::{Check, Tol};
     use polars::prelude::{
         Categories, DataType, FrozenCategories, IntoColumn, NamedFrom, Series, TimeUnit, df,
     };
+
+    #[test]
+    fn sample_column_names_the_test_and_column_when_empty() {
+        let df = df!("x" => [None::<f64>, None]).unwrap();
+        match sample_column(&df, "x", "t-test") {
+            Err(EconError::InsufficientData {
+                required,
+                provided,
+                context,
+            }) => {
+                assert_eq!((required, provided), (1, 0));
+                assert_eq!(context, "t-test: column 'x'");
+            }
+            other => panic!("{other:?}"),
+        }
+        let df = df!("x" => [Some(1.5), None, Some(2.5)]).unwrap();
+        let (values, missing) = sample_column(&df, "x", "t-test").unwrap();
+        assert_eq!(values, [1.5, 2.5]);
+        assert!(!missing.is_empty());
+    }
 
     fn strings(labels: &[&str]) -> Vec<String> {
         labels.iter().map(|s| s.to_string()).collect()

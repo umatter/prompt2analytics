@@ -22,7 +22,7 @@ pub struct PreviewCleaningRequest {
 
     /// Type of cleaning operation to preview
     #[schemars(
-        description = "The type of cleaning operation: 'trim', 'lowercase', 'uppercase', 'fill_na', 'drop_na', 'deduplicate', 'replace', or 'filter'."
+        description = "The type of cleaning operation: 'trim', 'lowercase', 'uppercase', 'fill_na', 'drop_na', 'deduplicate', 'replace', 'filter' (with operator and filter_value), or 'drop_column' (drops the columns named in columns)."
     )]
     pub operation: String,
 
@@ -145,7 +145,7 @@ pub struct CleaningSessionApplyRequest {
 
     /// Type of cleaning operation to apply
     #[schemars(
-        description = "The type of cleaning operation: 'trim', 'lowercase', 'uppercase', 'fill_na', 'drop_na', 'deduplicate', 'replace', or 'filter'."
+        description = "The type of cleaning operation: 'trim', 'lowercase', 'uppercase', 'fill_na', 'drop_na', 'deduplicate', 'replace', 'filter' (with operator and filter_value), or 'drop_column' (drops the columns named in columns)."
     )]
     pub operation: String,
 

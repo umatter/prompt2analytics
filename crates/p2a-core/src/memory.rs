@@ -32,43 +32,28 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-/// Estimate the memory usage of a dataset in bytes.
-///
-/// This is a rough estimate based on the dataset dimensions and data types.
-/// Actual memory usage may vary due to Polars internal optimizations,
-/// string interning, and chunked array storage.
+/// Bytes of one String or Binary view (polars' `View`), charged per value on top of the frame's
+/// buffer sizes, as the MCP server's session accounting charges it.
+const VIEW_BYTES: usize = 16;
+
+/// Estimate the memory usage of a dataset in bytes: polars' `DataFrame::estimated_size` (the
+/// sizes of the frame's buffers, text bytes included) plus 16 bytes per String or Binary value
+/// (its view).
 pub fn estimate_dataset_memory(dataset: &Dataset) -> usize {
     let df = dataset.df();
-    let nrows = df.height();
-
-    let mut total_bytes = 0usize;
-
-    for col in df.get_columns() {
-        let dtype = col.dtype();
-        let bytes_per_value = match dtype {
-            polars::datatypes::DataType::Boolean => 1,
-            polars::datatypes::DataType::Int8 | polars::datatypes::DataType::UInt8 => 1,
-            polars::datatypes::DataType::Int16 | polars::datatypes::DataType::UInt16 => 2,
-            polars::datatypes::DataType::Int32 | polars::datatypes::DataType::UInt32 => 4,
-            polars::datatypes::DataType::Int64 | polars::datatypes::DataType::UInt64 => 8,
-            polars::datatypes::DataType::Float32 => 4,
-            polars::datatypes::DataType::Float64 => 8,
-            polars::datatypes::DataType::String => 24, // Average string overhead (pointer + len + capacity + small string)
-            polars::datatypes::DataType::Date => 4,
-            polars::datatypes::DataType::Datetime(_, _) => 8,
-            polars::datatypes::DataType::Duration(_) => 8,
-            polars::datatypes::DataType::Time => 8,
-            polars::datatypes::DataType::Categorical(_, _) => 4, // Index into dictionary
-            polars::datatypes::DataType::List(_) => 32,          // List overhead
-            polars::datatypes::DataType::Struct(_) => 16,        // Struct overhead
-            _ => 8, // Default estimate for unknown types
-        };
-
-        total_bytes += nrows * bytes_per_value;
-    }
-
-    // Add overhead for DataFrame structure (approximately 10%)
-    total_bytes + (total_bytes / 10)
+    let views: usize = df
+        .get_columns()
+        .iter()
+        .filter(|c| {
+            matches!(
+                c.dtype(),
+                polars::datatypes::DataType::String | polars::datatypes::DataType::Binary
+            )
+        })
+        .map(|c| c.len())
+        .sum();
+    df.estimated_size()
+        .saturating_add(views.saturating_mul(VIEW_BYTES))
 }
 
 /// Format bytes as a human-readable string.
@@ -457,27 +442,60 @@ impl Default for MemoryProfiler {
     }
 }
 
+/// The `AT_PAGESZ` (key 6) entry of an auxiliary vector (`/proc/self/auxv`: native-endian
+/// (key, value) pairs of machine words, ending at key 0); `None` without one.
+#[cfg(any(target_os = "linux", test))]
+fn auxv_page_size(auxv: &[u8]) -> Option<usize> {
+    const AT_PAGESZ: usize = 6;
+    let word = std::mem::size_of::<usize>();
+    let read = |chunk: &[u8]| -> usize {
+        let mut b = [0u8; std::mem::size_of::<usize>()];
+        b.copy_from_slice(chunk);
+        usize::from_ne_bytes(b)
+    };
+    for pair in auxv.chunks_exact(2 * word) {
+        let (key, value) = (read(&pair[..word]), read(&pair[word..]));
+        match key {
+            0 => return None,
+            AT_PAGESZ if value > 0 => return Some(value),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The kernel's page size, read once from `/proc/self/auxv`; 4096 when it cannot be read.
+#[cfg(target_os = "linux")]
+fn page_size() -> usize {
+    static PAGE_SIZE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *PAGE_SIZE.get_or_init(|| {
+        std::fs::read("/proc/self/auxv")
+            .ok()
+            .and_then(|auxv| auxv_page_size(&auxv))
+            .unwrap_or(4096)
+    })
+}
+
 /// Get process memory information.
 ///
-/// This uses platform-specific APIs to get actual process memory usage.
-/// Returns None if the information is not available.
+/// Linux only (`/proc/self/statm`, in pages of the kernel's page size); `None` elsewhere, and
+/// when the information cannot be read.
 #[cfg(target_os = "linux")]
 pub fn get_process_memory() -> Option<ProcessMemory> {
     use std::fs;
 
     // Read /proc/self/statm for memory info
-    // Format: size resident shared text lib data dt
-    // Units are pages (usually 4KB)
+    // Format: size resident shared text lib data dt, in pages
     let statm = fs::read_to_string("/proc/self/statm").ok()?;
     let parts: Vec<&str> = statm.split_whitespace().collect();
 
     if parts.len() >= 2 {
-        let page_size = 4096usize; // Typical page size
+        let page_size = page_size();
         let virtual_pages: usize = parts[0].parse().ok()?;
         let rss_pages: usize = parts[1].parse().ok()?;
 
-        let virtual_bytes = virtual_pages * page_size;
-        let rss_bytes = rss_pages * page_size;
+        let virtual_bytes = virtual_pages.saturating_mul(page_size);
+        let rss_bytes = rss_pages.saturating_mul(page_size);
 
         Some(ProcessMemory {
             rss_bytes,
@@ -490,6 +508,7 @@ pub fn get_process_memory() -> Option<ProcessMemory> {
     }
 }
 
+/// Process memory is read on Linux only: `None` here.
 #[cfg(target_os = "macos")]
 pub fn get_process_memory() -> Option<ProcessMemory> {
     // macOS uses different APIs - would need mach APIs
@@ -497,6 +516,7 @@ pub fn get_process_memory() -> Option<ProcessMemory> {
     None
 }
 
+/// Process memory is read on Linux only: `None` here.
 #[cfg(target_os = "windows")]
 pub fn get_process_memory() -> Option<ProcessMemory> {
     // Windows uses different APIs - would need GetProcessMemoryInfo
@@ -504,6 +524,7 @@ pub fn get_process_memory() -> Option<ProcessMemory> {
     None
 }
 
+/// Process memory is read on Linux only: `None` here.
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 pub fn get_process_memory() -> Option<ProcessMemory> {
     None
@@ -513,6 +534,62 @@ pub fn get_process_memory() -> Option<ProcessMemory> {
 mod tests {
     use super::*;
     use polars::prelude::*;
+
+    #[test]
+    fn estimate_tracks_estimated_size() {
+        // Pre-fix a 40-byte text value was charged 24 bytes plus 10% (26.4).
+        let n = 1_000;
+        let text: Vec<String> = (0..n).map(|i| format!("{i:0>40}")).collect();
+        let df = df! {
+            "f" => (0..n).map(|i| i as f64 * 0.5 + 0.1).collect::<Vec<_>>(),
+            "i" => (0..n).map(|i| i as i32).collect::<Vec<_>>(),
+            "s" => text,
+            "b" => (0..n).map(|i| i % 3 == 0).collect::<Vec<_>>(),
+        }
+        .unwrap();
+        let ds = Dataset::new(df.clone());
+        let est = estimate_dataset_memory(&ds);
+        assert_eq!(est, df.estimated_size() + 16 * n);
+        let s_only = Dataset::new(df.select(["s"]).unwrap());
+        assert!(estimate_dataset_memory(&s_only) >= 56 * n);
+    }
+
+    #[test]
+    fn auxv_parser_finds_the_page_size_or_none() {
+        let w = std::mem::size_of::<usize>();
+        let pairs = |kv: &[(usize, usize)]| -> Vec<u8> {
+            kv.iter()
+                .flat_map(|(k, v)| {
+                    let mut b = k.to_ne_bytes().to_vec();
+                    b.extend(v.to_ne_bytes());
+                    b
+                })
+                .collect()
+        };
+        assert_eq!(
+            auxv_page_size(&pairs(&[(3, 7), (6, 16384), (0, 0)])),
+            Some(16384)
+        );
+        assert_eq!(auxv_page_size(&pairs(&[(3, 7), (0, 0), (6, 4096)])), None);
+        assert_eq!(auxv_page_size(&pairs(&[(3, 7)])), None);
+        assert_eq!(auxv_page_size(&[0u8; 3]), None);
+        assert_eq!(pairs(&[(1, 2)]).len(), 2 * w);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn page_size_comes_from_auxv() {
+        let auxv = std::fs::read("/proc/self/auxv").unwrap();
+        let w = std::mem::size_of::<usize>();
+        let word = |b: &[u8]| usize::from_ne_bytes(b.try_into().unwrap());
+        let expected = auxv
+            .chunks_exact(2 * w)
+            .find(|p| word(&p[..w]) == 6)
+            .map(|p| word(&p[w..]))
+            .unwrap();
+        assert_eq!(page_size(), expected);
+        assert!(expected >= 4096 && expected.is_power_of_two());
+    }
 
     fn make_test_dataset() -> Dataset {
         let df = df! {

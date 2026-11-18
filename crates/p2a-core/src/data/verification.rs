@@ -11,8 +11,13 @@ use serde::{Deserialize, Serialize};
 
 use super::Dataset;
 use super::columns::is_numeric_dtype;
-use super::munging::clean::{FillStrategy, ReplaceOptions, fill_na_with, replace_with};
-use super::quality::generate_quality_profile;
+use super::munging::clean::{
+    FillStrategy, ReplaceOptions, deduplicate, drop_na, fill_na_with, replace_with,
+};
+use super::munging::transform::{drop_columns, filter};
+use super::quality::{
+    DataIssue, DataQualityProfile, completeness, generate_quality_profile, missing_cells,
+};
 
 /// Result of a cleaning operation with verification.
 #[derive(Clone, Serialize, Deserialize)]
@@ -35,8 +40,12 @@ pub struct VerificationReport {
     pub rows_before: usize,
     /// Number of rows after the operation
     pub rows_after: usize,
-    /// Number of rows that were modified
+    /// Number of rows with at least one changed cell (rows of the same index; 0 when the row
+    /// count changed)
     pub rows_modified: usize,
+    /// Number of changed cells
+    #[serde(default)]
+    pub cells_modified: usize,
     /// Number of rows that were removed
     pub rows_removed: usize,
     /// Number of rows that were added
@@ -90,6 +99,10 @@ pub struct QualityDelta {
     pub issues_resolved: Vec<String>,
     /// New issues introduced (if any)
     pub issues_introduced: Vec<String>,
+    /// Issues of the same kind and column on both sides whose count or detail changed, e.g.
+    /// "missing values in 'x': 12 -> 3"
+    #[serde(default)]
+    pub issues_changed: Vec<String>,
 }
 
 /// Preview of what a cleaning operation would do.
@@ -97,13 +110,19 @@ pub struct QualityDelta {
 pub struct CleaningPreview {
     /// Description of the operation
     pub operation: String,
-    /// Number of rows that would be affected
+    /// Number of distinct rows the operation would change or remove
     pub rows_affected: usize,
-    /// Percentage of rows affected
+    /// Percentage of rows affected (at most 100)
     pub pct_affected: f64,
+    /// Number of cells the operation would change (0 for an operation that removes rows or
+    /// columns)
+    #[serde(default)]
+    pub cells_affected: usize,
     /// Sample of changes that would be made
     pub sample_changes: Vec<ChangeExample>,
-    /// Estimated quality improvement
+    /// The change in completeness (the share of present cells, NaN counted as missing) the
+    /// operation would make, in percentage points: the operation is run on the frame and the
+    /// completeness of the result compared with that of the frame
     pub estimated_quality_change: f64,
     /// Any potential concerns
     pub warnings: Vec<String>,
@@ -146,6 +165,8 @@ pub enum CleaningOperation {
         operator: String,
         value: String,
     },
+    /// Drop whole columns
+    DropColumns { columns: Vec<String> },
 }
 
 impl CleaningOperation {
@@ -207,6 +228,9 @@ impl CleaningOperation {
             } => {
                 format!("Filter rows where {} {} {}", column, operator, value)
             }
+            CleaningOperation::DropColumns { columns } => {
+                format!("Drop columns: {}", columns.join(", "))
+            }
         }
     }
 }
@@ -258,6 +282,82 @@ pub fn preview_cleaning(
             operator,
             value,
         } => preview_filter(df, column, operator, value, row_count),
+        CleaningOperation::DropColumns { columns } => preview_drop_columns(df, columns),
+    }
+}
+
+/// Preview dropping columns: no row changes, the columns named, and a warning for a name the
+/// frame does not have (the apply refuses it).
+fn preview_drop_columns(df: &DataFrame, columns: &[String]) -> CleaningPreview {
+    let mut warnings = Vec::new();
+    let mut quality_change = 0.0;
+    let names: Vec<&str> = columns.iter().map(String::as_str).collect();
+    if columns.is_empty() {
+        warnings.push("No columns named to drop".to_string());
+    } else {
+        match drop_columns(&Dataset::new(df.clone()), &names) {
+            Err(e) => warnings.push(e.to_string()),
+            Ok(after) => {
+                quality_change = completeness_change(df, after.df());
+                if after.df().width() == 0 {
+                    warnings.push("Warning: This operation would drop ALL columns!".to_string());
+                }
+            }
+        }
+    }
+    CleaningPreview {
+        operation: CleaningOperation::DropColumns {
+            columns: columns.to_vec(),
+        }
+        .description(),
+        rows_affected: 0,
+        pct_affected: 0.0,
+        cells_affected: 0,
+        sample_changes: vec![],
+        estimated_quality_change: quality_change,
+        warnings,
+    }
+}
+
+/// `n` as a percentage of `rows`; 0 for a frame with no rows.
+fn pct_of(n: usize, rows: usize) -> f64 {
+    if rows > 0 {
+        n as f64 / rows as f64 * 100.0
+    } else {
+        0.0
+    }
+}
+
+/// The completeness change from `before` to `after` in percentage points.
+fn completeness_change(before: &DataFrame, after: &DataFrame) -> f64 {
+    100.0 * (completeness(after) - completeness(before))
+}
+
+/// Calls `f` with each row a fill changed in one column (missing in `before`, present in
+/// `after`; missing is null, or NaN in a float column), in order, until `f` returns false.
+fn filled_positions(before: &Column, after: &Column, mut f: impl FnMut(usize) -> bool) {
+    let float = |c: &Column| matches!(c.dtype(), DataType::Float64 | DataType::Float32);
+    if float(before)
+        && float(after)
+        && let (Ok(b), Ok(a)) = (
+            before.cast(&DataType::Float64),
+            after.cast(&DataType::Float64),
+        )
+        && let (Ok(b), Ok(a)) = (b.f64(), a.f64())
+    {
+        let missing = |v: Option<f64>| v.is_none_or(f64::is_nan);
+        for (idx, (was, is)) in b.iter().zip(a.iter()).enumerate() {
+            if missing(was) && !missing(is) && !f(idx) {
+                return;
+            }
+        }
+        return;
+    }
+    let (was, is) = (before.is_null(), after.is_null());
+    for (idx, (was, is)) in was.iter().zip(is.iter()).enumerate() {
+        if was == Some(true) && is == Some(false) && !f(idx) {
+            return;
+        }
     }
 }
 
@@ -269,7 +369,8 @@ fn preview_trim(
     row_count: usize,
 ) -> CleaningPreview {
     let mut sample_changes = Vec::new();
-    let mut total_affected = 0;
+    let mut cells = 0usize;
+    let mut rows = vec![false; row_count];
     let mut warnings = Vec::new();
 
     let cols_to_check: Vec<String> = match columns {
@@ -287,23 +388,26 @@ fn preview_trim(
     };
 
     for col_name in &cols_to_check {
-        if let Ok(col) = df.column(col_name) {
-            if let Ok(ca) = col.str() {
-                for (idx, val) in ca.into_iter().enumerate() {
-                    if let Some(s) = val {
-                        let trimmed = s.trim();
-                        if trimmed != s {
-                            total_affected += 1;
-                            if sample_changes.len() < sample_size {
-                                sample_changes.push(ChangeExample {
-                                    row_index: idx,
-                                    column: col_name.clone(),
-                                    before: format!("'{}'", s),
-                                    after: format!("'{}'", trimmed),
-                                });
-                            }
-                        }
-                    }
+        let Ok(col) = df.column(col_name) else {
+            warnings.push(format!("Column '{col_name}' not found"));
+            continue;
+        };
+        let Ok(ca) = col.str() else {
+            continue;
+        };
+        for (idx, val) in ca.iter().enumerate() {
+            let Some(s) = val else { continue };
+            let trimmed = s.trim();
+            if trimmed != s {
+                cells += 1;
+                rows[idx] = true;
+                if sample_changes.len() < sample_size {
+                    sample_changes.push(ChangeExample {
+                        row_index: idx,
+                        column: col_name.clone(),
+                        before: format!("'{}'", s),
+                        after: format!("'{}'", trimmed),
+                    });
                 }
             }
         }
@@ -312,22 +416,19 @@ fn preview_trim(
     if cols_to_check.is_empty() {
         warnings.push("No string columns found to trim".to_string());
     }
-
-    let pct_affected = if row_count > 0 {
-        (total_affected as f64 / row_count as f64) * 100.0
-    } else {
-        0.0
-    };
+    let rows_affected = rows.iter().filter(|r| **r).count();
 
     CleaningPreview {
         operation: CleaningOperation::Trim {
             columns: columns.map(|c| c.to_vec()),
         }
         .description(),
-        rows_affected: total_affected,
-        pct_affected,
+        rows_affected,
+        pct_affected: pct_of(rows_affected, row_count),
+        cells_affected: cells,
         sample_changes,
-        estimated_quality_change: pct_affected * 0.1, // Simple heuristic
+        // Trimming changes no missing value.
+        estimated_quality_change: 0.0,
         warnings,
     }
 }
@@ -373,11 +474,7 @@ fn preview_case_change(
         warnings.push(format!("Column '{}' not found", column));
     }
 
-    let pct_affected = if row_count > 0 {
-        (total_affected as f64 / row_count as f64) * 100.0
-    } else {
-        0.0
-    };
+    let pct_affected = pct_of(total_affected, row_count);
 
     let operation = if to_lower {
         CleaningOperation::ToLowercase {
@@ -393,6 +490,7 @@ fn preview_case_change(
         operation: operation.description(),
         rows_affected: total_affected,
         pct_affected,
+        cells_affected: total_affected,
         sample_changes,
         estimated_quality_change: 0.0, // Case changes don't affect quality score
         warnings,
@@ -410,16 +508,6 @@ fn cell_text(col: &Column, idx: usize) -> String {
     }
 }
 
-/// Is cell `idx` of `col` what a fill treats as missing (null, or NaN in a float column)?
-fn cell_is_missing(col: &Column, idx: usize) -> bool {
-    match col.get(idx) {
-        Ok(AnyValue::Null) => true,
-        Ok(AnyValue::Float64(v)) => v.is_nan(),
-        Ok(AnyValue::Float32(v)) => v.is_nan(),
-        _ => false,
-    }
-}
-
 /// Preview fill_na operation: runs the fill, so the samples show the real new values, and an unknown
 /// strategy or one that does not apply is a warning with nothing affected.
 fn preview_fill_na(
@@ -431,7 +519,10 @@ fn preview_fill_na(
     row_count: usize,
 ) -> CleaningPreview {
     let mut sample_changes = Vec::new();
-    let mut total_affected = 0;
+    let mut cells = 0usize;
+    let mut rows = Vec::new();
+    let mut single_rows = 0usize;
+    let mut quality_change = 0.0;
     let mut warnings = Vec::new();
 
     let named: Option<Vec<&str>> = columns.map(|c| c.iter().map(String::as_str).collect());
@@ -442,22 +533,30 @@ fn preview_fill_na(
         Err(e) => warnings.push(e.to_string()),
         Ok(outcome) => {
             let filled_df = outcome.dataset.df();
+            if outcome.filled.iter().filter(|(_, n)| *n > 0).count() > 1 {
+                rows = vec![false; row_count];
+            }
             for (col_name, n_filled) in &outcome.filled {
                 if *n_filled == 0 {
                     continue;
                 }
-                total_affected += *n_filled;
+                cells += *n_filled;
                 let (Ok(before), Ok(after)) = (df.column(col_name), filled_df.column(col_name))
                 else {
                     continue;
                 };
-                // Up to 2 samples per column.
+                // One filled column: its filled cells are the rows, and only the samples need
+                // positions. Several: the rows are the union of their filled cells.
+                let single = outcome.filled.iter().filter(|(_, n)| *n > 0).count() == 1;
                 let mut samples_for_col = 0;
-                for idx in 0..before.len() {
-                    if samples_for_col == 2 || sample_changes.len() >= sample_size {
-                        break;
+                filled_positions(before, after, |idx| {
+                    if !single {
+                        rows[idx] = true;
+                    } else if samples_for_col == 2 || sample_changes.len() >= sample_size {
+                        return false;
                     }
-                    if cell_is_missing(before, idx) && !cell_is_missing(after, idx) {
+                    // Up to 2 samples per column.
+                    if samples_for_col < 2 && sample_changes.len() < sample_size {
                         sample_changes.push(ChangeExample {
                             row_index: idx,
                             column: col_name.clone(),
@@ -466,22 +565,23 @@ fn preview_fill_na(
                         });
                         samples_for_col += 1;
                     }
+                    true
+                });
+                if single {
+                    single_rows = *n_filled;
                 }
             }
+            // A fill turns missing cells into present ones and changes nothing else.
+            quality_change = pct_of(cells, row_count.saturating_mul(df.width()));
             for (col_name, reason) in &outcome.skipped {
                 warnings.push(format!("Column '{col_name}' would be skipped: {reason}"));
             }
-            if total_affected == 0 {
+            if cells == 0 {
                 warnings.push("No null values found in specified columns".to_string());
             }
         }
     }
-
-    let pct_affected = if row_count > 0 {
-        (total_affected as f64 / row_count as f64) * 100.0
-    } else {
-        0.0
-    };
+    let rows_affected = single_rows.max(rows.iter().filter(|r| **r).count());
 
     CleaningPreview {
         operation: CleaningOperation::FillNa {
@@ -490,10 +590,11 @@ fn preview_fill_na(
             value: value.map(|v| v.to_string()),
         }
         .description(),
-        rows_affected: total_affected,
-        pct_affected,
+        rows_affected,
+        pct_affected: pct_of(rows_affected, row_count),
+        cells_affected: cells,
         sample_changes,
-        estimated_quality_change: pct_affected * 0.5, // Filling nulls significantly improves completeness
+        estimated_quality_change: quality_change,
         warnings,
     }
 }
@@ -507,59 +608,27 @@ fn preview_drop_na(
     row_count: usize,
 ) -> CleaningPreview {
     let mut warnings = Vec::new();
-
-    let cols_to_check: Vec<&str> = match columns {
-        Some(cols) => cols.iter().map(|s| s.as_str()).collect(),
-        None => df
-            .get_column_names()
-            .into_iter()
-            .map(|s| s.as_str())
-            .collect(),
-    };
-
-    // Count rows that would be dropped
     let mut rows_to_drop = 0;
+    let mut quality_change = 0.0;
 
-    for row_idx in 0..df.height() {
-        let mut has_null = false;
-        let mut all_null = true;
-
-        for col_name in &cols_to_check {
-            if let Ok(col) = df.column(col_name) {
-                let is_null = col.get(row_idx).map(|v| v.is_null()).unwrap_or(false);
-                if is_null {
-                    has_null = true;
-                } else {
-                    all_null = false;
-                }
-            }
-        }
-
-        let should_drop = match how.to_lowercase().as_str() {
-            "any" => has_null,
-            "all" => all_null,
-            _ => has_null,
-        };
-
-        if should_drop {
-            rows_to_drop += 1;
+    // The apply's own drop: NaN is missing, a missing column or an unknown `how` is reported.
+    let named: Option<Vec<&str>> = columns.map(|c| c.iter().map(String::as_str).collect());
+    match drop_na(&Dataset::new(df.clone()), named.as_deref(), how) {
+        Err(e) => warnings.push(e.to_string()),
+        Ok(after) => {
+            rows_to_drop = row_count.saturating_sub(after.nrows());
+            quality_change = completeness_change(df, after.df());
         }
     }
 
-    if rows_to_drop == row_count {
+    if row_count > 0 && rows_to_drop == row_count {
         warnings.push("Warning: This operation would drop ALL rows!".to_string());
-    } else if rows_to_drop as f64 / row_count as f64 > 0.5 {
+    } else if rows_to_drop * 2 > row_count {
         warnings.push(format!(
             "Warning: This operation would drop more than 50% of rows ({} of {})",
             rows_to_drop, row_count
         ));
     }
-
-    let pct_affected = if row_count > 0 {
-        (rows_to_drop as f64 / row_count as f64) * 100.0
-    } else {
-        0.0
-    };
 
     CleaningPreview {
         operation: CleaningOperation::DropNa {
@@ -568,9 +637,10 @@ fn preview_drop_na(
         }
         .description(),
         rows_affected: rows_to_drop,
-        pct_affected,
+        pct_affected: pct_of(rows_to_drop, row_count),
+        cells_affected: 0,
         sample_changes: vec![], // No specific changes to show for row deletion
-        estimated_quality_change: 10.0, // Dropping nulls improves completeness to 100%
+        estimated_quality_change: quality_change,
         warnings,
     }
 }
@@ -583,33 +653,20 @@ fn preview_deduplicate(
     row_count: usize,
 ) -> CleaningPreview {
     let mut warnings = Vec::new();
+    let mut duplicates = 0;
+    let mut quality_change = 0.0;
 
-    // Count duplicates
-    let subset: Option<Vec<String>> = columns.map(|cols| cols.to_vec());
-
-    let keep_strategy = match keep.to_lowercase().as_str() {
-        "first" => UniqueKeepStrategy::First,
-        "last" => UniqueKeepStrategy::Last,
-        "none" => UniqueKeepStrategy::None,
-        _ => UniqueKeepStrategy::First,
-    };
-
-    let unique_count = df
-        .unique::<String, String>(subset.as_deref(), keep_strategy, None)
-        .map(|u| u.height())
-        .unwrap_or(row_count);
-
-    let duplicates = row_count.saturating_sub(unique_count);
-
-    if duplicates == 0 {
-        warnings.push("No duplicate rows found".to_string());
+    let named: Option<Vec<&str>> = columns.map(|c| c.iter().map(String::as_str).collect());
+    match deduplicate(&Dataset::new(df.clone()), named.as_deref(), keep) {
+        Err(e) => warnings.push(e.to_string()),
+        Ok(after) => {
+            duplicates = row_count.saturating_sub(after.nrows());
+            quality_change = completeness_change(df, after.df());
+            if duplicates == 0 {
+                warnings.push("No duplicate rows found".to_string());
+            }
+        }
     }
-
-    let pct_affected = if row_count > 0 {
-        (duplicates as f64 / row_count as f64) * 100.0
-    } else {
-        0.0
-    };
 
     CleaningPreview {
         operation: CleaningOperation::Deduplicate {
@@ -618,9 +675,10 @@ fn preview_deduplicate(
         }
         .description(),
         rows_affected: duplicates,
-        pct_affected,
+        pct_affected: pct_of(duplicates, row_count),
+        cells_affected: 0,
         sample_changes: vec![],
-        estimated_quality_change: pct_affected * 0.3,
+        estimated_quality_change: quality_change,
         warnings,
     }
 }
@@ -636,6 +694,7 @@ fn preview_replace(
 ) -> CleaningPreview {
     let mut sample_changes = Vec::new();
     let mut total_affected = 0;
+    let mut quality_change = 0.0;
     let mut warnings = Vec::new();
 
     match replace_with(
@@ -648,6 +707,15 @@ fn preview_replace(
         Err(e) => warnings.push(e.to_string()),
         Ok(outcome) => {
             total_affected = outcome.n_replaced;
+            // Only `column` changes, and only where a value was replaced.
+            if total_affected > 0
+                && let (Ok(before), Ok(after)) =
+                    (df.column(column), outcome.dataset.df().column(column))
+            {
+                let cells = row_count.saturating_mul(df.width());
+                quality_change =
+                    pct_of(missing_cells(before), cells) - pct_of(missing_cells(after), cells);
+            }
             if total_affected == 0 {
                 warnings.push(format!(
                     "No values matching '{}' found in column '{}'",
@@ -675,11 +743,7 @@ fn preview_replace(
         }
     }
 
-    let pct_affected = if row_count > 0 {
-        (total_affected as f64 / row_count as f64) * 100.0
-    } else {
-        0.0
-    };
+    let pct_affected = pct_of(total_affected, row_count);
 
     CleaningPreview {
         operation: CleaningOperation::Replace {
@@ -690,8 +754,9 @@ fn preview_replace(
         .description(),
         rows_affected: total_affected,
         pct_affected,
+        cells_affected: total_affected,
         sample_changes,
-        estimated_quality_change: 0.0,
+        estimated_quality_change: quality_change,
         warnings,
     }
 }
@@ -706,82 +771,19 @@ fn preview_filter(
 ) -> CleaningPreview {
     let mut warnings = Vec::new();
     let mut rows_to_remove = 0;
+    let mut quality_change = 0.0;
 
-    if let Ok(col) = df.column(column) {
-        // Try to build a filter mask
-        let mask = match col.dtype() {
-            DataType::Float64 | DataType::Float32 | DataType::Int64 | DataType::Int32 => {
-                if let Ok(val) = value.parse::<f64>() {
-                    let float_col = col.cast(&DataType::Float64).ok();
-                    float_col.and_then(|fc| {
-                        let ca = fc.f64().ok()?;
-                        Some(match operator {
-                            ">" | "gt" => ca.gt(val),
-                            ">=" | "gte" | "ge" => ca.gt_eq(val),
-                            "<" | "lt" => ca.lt(val),
-                            "<=" | "lte" | "le" => ca.lt_eq(val),
-                            "==" | "eq" | "=" => ca.equal(val),
-                            "!=" | "ne" | "<>" => ca.not_equal(val),
-                            _ => return None,
-                        })
-                    })
-                } else {
-                    warnings.push(format!("Cannot parse '{}' as a number", value));
-                    None
-                }
+    // The apply's own filter: its operators, literal `contains`, its typing of `value` and its
+    // treatment of missing values.
+    match filter(&Dataset::new(df.clone()), column, operator, value) {
+        Err(e) => warnings.push(e.to_string()),
+        Ok(after) => {
+            rows_to_remove = row_count.saturating_sub(after.nrows());
+            quality_change = completeness_change(df, after.df());
+            if row_count > 0 && rows_to_remove == row_count {
+                warnings.push("Warning: This filter would remove ALL rows!".to_string());
             }
-            DataType::String => {
-                if let Ok(ca) = col.str() {
-                    Some(match operator {
-                        "==" | "eq" | "=" => ca.equal(value),
-                        "!=" | "ne" | "<>" => ca.not_equal(value),
-                        "contains" => ca.contains(value, false).unwrap_or_else(|_| {
-                            BooleanChunked::new(PlSmallStr::from("mask"), &[] as &[bool])
-                        }),
-                        _ => {
-                            warnings.push(format!(
-                                "Operator '{}' not supported for string columns",
-                                operator
-                            ));
-                            return CleaningPreview {
-                                operation: format!("Filter {} {} {}", column, operator, value),
-                                rows_affected: 0,
-                                pct_affected: 0.0,
-                                sample_changes: vec![],
-                                estimated_quality_change: 0.0,
-                                warnings,
-                            };
-                        }
-                    })
-                } else {
-                    None
-                }
-            }
-            _ => {
-                warnings.push(format!(
-                    "Unsupported column type for filtering: {:?}",
-                    col.dtype()
-                ));
-                None
-            }
-        };
-
-        if let Some(m) = mask {
-            // Count rows that DON'T match (will be removed)
-            rows_to_remove = m.into_iter().filter(|v| !v.unwrap_or(false)).count();
         }
-    } else {
-        warnings.push(format!("Column '{}' not found", column));
-    }
-
-    let pct_affected = if row_count > 0 {
-        (rows_to_remove as f64 / row_count as f64) * 100.0
-    } else {
-        0.0
-    };
-
-    if rows_to_remove == row_count {
-        warnings.push("Warning: This filter would remove ALL rows!".to_string());
     }
 
     CleaningPreview {
@@ -792,9 +794,10 @@ fn preview_filter(
         }
         .description(),
         rows_affected: rows_to_remove,
-        pct_affected,
+        pct_affected: pct_of(rows_to_remove, row_count),
+        cells_affected: 0,
         sample_changes: vec![],
-        estimated_quality_change: 0.0,
+        estimated_quality_change: quality_change,
         warnings,
     }
 }
@@ -808,38 +811,7 @@ pub fn verify_cleaning(before: &Dataset, after: &Dataset, _operation: &str) -> V
     let profile_before = generate_quality_profile(before);
     let profile_after = generate_quality_profile(after);
 
-    // Calculate quality delta
-    let issues_before: Vec<String> = profile_before
-        .all_issues()
-        .iter()
-        .map(|i| i.description())
-        .collect();
-    let issues_after: Vec<String> = profile_after
-        .all_issues()
-        .iter()
-        .map(|i| i.description())
-        .collect();
-
-    let issues_resolved: Vec<String> = issues_before
-        .iter()
-        .filter(|i| !issues_after.contains(i))
-        .cloned()
-        .collect();
-    let issues_introduced: Vec<String> = issues_after
-        .iter()
-        .filter(|i| !issues_before.contains(i))
-        .cloned()
-        .collect();
-
-    let quality_delta = QualityDelta {
-        completeness_before: profile_before.completeness_score,
-        completeness_after: profile_after.completeness_score,
-        completeness_change: profile_after.completeness_score - profile_before.completeness_score,
-        issues_before: issues_before.len(),
-        issues_after: issues_after.len(),
-        issues_resolved,
-        issues_introduced,
-    };
+    let quality_delta = quality_delta(&profile_before, &profile_after);
 
     // Detect changes by comparing dataframes
     let scan = detect_changes(before, after, 5);
@@ -860,6 +832,7 @@ pub fn verify_cleaning(before: &Dataset, after: &Dataset, _operation: &str) -> V
         rows_before,
         rows_after,
         rows_modified: scan.rows_modified,
+        cells_modified: scan.cells_modified,
         rows_removed: rows_before.saturating_sub(rows_after),
         rows_added: rows_after.saturating_sub(rows_before),
         sample_changes: scan.sample_changes,
@@ -869,21 +842,131 @@ pub fn verify_cleaning(before: &Dataset, after: &Dataset, _operation: &str) -> V
     }
 }
 
+/// An issue's identity across two profiles: its kind and its column (`None` for a dataset-level
+/// issue; the columns joined for possible duplicates).
+type IssueKey = (std::mem::Discriminant<DataIssue>, Option<String>);
+
+fn issue_key(issue: &DataIssue) -> IssueKey {
+    let column = match issue {
+        DataIssue::DuplicateRows { .. } => None,
+        DataIssue::PossibleDuplicates { columns, .. } => Some(columns.join(", ")),
+        DataIssue::HighNullRate { column, .. }
+        | DataIssue::MixedTypes { column, .. }
+        | DataIssue::OutlierValues { column, .. }
+        | DataIssue::InconsistentFormat { column, .. }
+        | DataIssue::WhitespaceIssues { column, .. }
+        | DataIssue::ConstantColumn { column, .. }
+        | DataIssue::LowCardinality { column, .. }
+        | DataIssue::HighCardinality { column, .. }
+        | DataIssue::EmptyStrings { column, .. } => Some(column.clone()),
+    };
+    (std::mem::discriminant(issue), column)
+}
+
+/// What an issue counts, and how many, for the "changed" line; `None` for a kind without a count.
+fn issue_count(issue: &DataIssue, profile: &DataQualityProfile) -> Option<(&'static str, usize)> {
+    match issue {
+        DataIssue::HighNullRate { column, .. } => profile
+            .columns
+            .iter()
+            .find(|c| &c.name == column)
+            .map(|c| ("missing values", c.null_count)),
+        DataIssue::DuplicateRows { count } => Some(("duplicate rows", *count)),
+        DataIssue::PossibleDuplicates { count, .. } => Some(("possible duplicate rows", *count)),
+        DataIssue::OutlierValues { count, .. } => Some(("outliers", *count)),
+        DataIssue::WhitespaceIssues { count, .. } => {
+            Some(("values with leading/trailing whitespace", *count))
+        }
+        DataIssue::EmptyStrings { count, .. } => Some(("empty strings", *count)),
+        DataIssue::LowCardinality { unique_count, .. } => Some(("unique values", *unique_count)),
+        _ => None,
+    }
+}
+
+/// The quality delta of two profiles, issues matched by kind and column: an issue on one side
+/// only is resolved or introduced, one on both sides whose count or detail differs is changed.
+fn quality_delta(before: &DataQualityProfile, after: &DataQualityProfile) -> QualityDelta {
+    let (issues_before, issues_after) = (before.all_issues(), after.all_issues());
+    let find = |issues: &[&DataIssue], key: &IssueKey| -> Option<DataIssue> {
+        issues
+            .iter()
+            .find(|i| &issue_key(i) == key)
+            .map(|i| (*i).clone())
+    };
+    let mut issues_resolved = Vec::new();
+    let mut issues_changed = Vec::new();
+    for issue in &issues_before {
+        let key = issue_key(issue);
+        match find(&issues_after, &key) {
+            None => issues_resolved.push(issue.description()),
+            Some(now) => {
+                let (was_text, now_text) = (issue.description(), now.description());
+                if was_text == now_text {
+                    continue;
+                }
+                let line = match (issue_count(issue, before), issue_count(&now, after)) {
+                    (Some((what, was)), Some((_, is))) if was != is => match &key.1 {
+                        Some(column) => format!("{what} in '{column}': {was} -> {is}"),
+                        None => format!("{what}: {was} -> {is}"),
+                    },
+                    _ => format!("{was_text} -> {now_text}"),
+                };
+                issues_changed.push(line);
+            }
+        }
+    }
+    let issues_introduced = issues_after
+        .iter()
+        .filter(|i| find(&issues_before, &issue_key(i)).is_none())
+        .map(|i| i.description())
+        .collect();
+    QualityDelta {
+        completeness_before: before.completeness_score,
+        completeness_after: after.completeness_score,
+        completeness_change: after.completeness_score - before.completeness_score,
+        issues_before: issues_before.len(),
+        issues_after: issues_after.len(),
+        issues_resolved,
+        issues_introduced,
+        issues_changed,
+    }
+}
+
 /// What [`detect_changes`] found.
 struct ChangeScan {
     rows_modified: usize,
+    cells_modified: usize,
     sample_changes: Vec<ChangeExample>,
     dtype_changes: Vec<DtypeChange>,
     warnings: Vec<String>,
 }
 
+/// Do `before` and `after` compare cell by cell as values (one type, not categorical), rather
+/// than through a cast?
+fn compares_by_value(before: &Column, after: &Column) -> bool {
+    let categorical = |dt: &DataType| matches!(dt, DataType::Categorical(..) | DataType::Enum(..));
+    before.dtype() == after.dtype() && !categorical(before.dtype())
+}
+
+/// Does cell `idx` differ between two columns that [`compares_by_value`]? NaN equals NaN.
+fn cell_changed(before: &Column, after: &Column, idx: usize) -> bool {
+    match (before.get(idx), after.get(idx)) {
+        (Ok(AnyValue::Float64(a)), Ok(AnyValue::Float64(b))) => {
+            !(a == b || (a.is_nan() && b.is_nan()))
+        }
+        (Ok(AnyValue::Float32(a)), Ok(AnyValue::Float32(b))) => {
+            !(a == b || (a.is_nan() && b.is_nan()))
+        }
+        (a, b) => a.ok() != b.ok(),
+    }
+}
+
 /// The first `limit` rows where [`changed_mask`] would be true, without comparing the rest of the
 /// column when the two columns share a type.
 fn first_changes(before: &Column, after: &Column, limit: usize) -> Result<Vec<usize>, String> {
-    let categorical = |dt: &DataType| matches!(dt, DataType::Categorical(..) | DataType::Enum(..));
-    if before.dtype() == after.dtype() && !categorical(before.dtype()) {
+    if compares_by_value(before, after) {
         return Ok((0..before.len())
-            .filter(|&idx| before.get(idx).ok() != after.get(idx).ok())
+            .filter(|&idx| cell_changed(before, after, idx))
             .take(limit)
             .collect());
     }
@@ -906,10 +989,9 @@ fn first_changes(before: &Column, after: &Column, limit: usize) -> Result<Vec<us
 fn changed_mask(before: &Column, after: &Column) -> Result<Vec<bool>, String> {
     let (dt_before, dt_after) = (before.dtype(), after.dtype());
     let incomparable = || format!("{dt_before} -> {dt_after}");
-    let categorical = |dt: &DataType| matches!(dt, DataType::Categorical(..) | DataType::Enum(..));
-    if dt_before == dt_after && !categorical(dt_before) {
+    if compares_by_value(before, after) {
         return Ok((0..before.len())
-            .map(|idx| before.get(idx).ok() != after.get(idx).ok())
+            .map(|idx| cell_changed(before, after, idx))
             .collect());
     }
     if is_numeric_dtype(dt_before, true) && is_numeric_dtype(dt_after, true) {
@@ -946,6 +1028,7 @@ fn detect_changes(before: &Dataset, after: &Dataset, sample_size: usize) -> Chan
 
     let mut scan = ChangeScan {
         rows_modified: 0,
+        cells_modified: 0,
         sample_changes: Vec::new(),
         dtype_changes: Vec::new(),
         warnings: Vec::new(),
@@ -956,6 +1039,8 @@ fn detect_changes(before: &Dataset, after: &Dataset, sample_size: usize) -> Chan
         .iter()
         .map(|s| s.to_string())
         .collect();
+    let same_height = df_before.height() == df_after.height();
+    let mut rows = vec![false; if same_height { df_before.height() } else { 0 }];
 
     for col_name in &col_names {
         let col_before = match df_before.column(col_name) {
@@ -981,7 +1066,7 @@ fn detect_changes(before: &Dataset, after: &Dataset, sample_size: usize) -> Chan
         }
 
         // Cells are only compared when the row counts are the same
-        if df_before.height() != df_after.height() {
+        if !same_height {
             continue;
         }
 
@@ -995,7 +1080,8 @@ fn detect_changes(before: &Dataset, after: &Dataset, sample_size: usize) -> Chan
             }
         };
         for (idx, _) in mask.iter().enumerate().filter(|(_, changed)| **changed) {
-            scan.rows_modified += 1;
+            scan.cells_modified += 1;
+            rows[idx] = true;
             if scan.sample_changes.len() < sample_size {
                 scan.sample_changes.push(ChangeExample {
                     row_index: idx,
@@ -1007,6 +1093,7 @@ fn detect_changes(before: &Dataset, after: &Dataset, sample_size: usize) -> Chan
         }
     }
 
+    scan.rows_modified = rows.iter().filter(|r| **r).count();
     scan
 }
 
@@ -1029,7 +1116,10 @@ impl VerificationReport {
             summary.push_str(&format!("(+{} added) ", self.rows_added));
         }
         if self.rows_modified > 0 {
-            summary.push_str(&format!("({} modified)", self.rows_modified));
+            summary.push_str(&format!(
+                "({} modified, {} cells)",
+                self.rows_modified, self.cells_modified
+            ));
         }
         summary.push('\n');
 
@@ -1061,6 +1151,16 @@ impl VerificationReport {
                 self.quality_delta.issues_resolved.len()
             ));
             for issue in &self.quality_delta.issues_resolved {
+                summary.push_str(&format!("  - {}\n", issue));
+            }
+        }
+
+        if !self.quality_delta.issues_changed.is_empty() {
+            summary.push_str(&format!(
+                "\nChanged issues ({}):\n",
+                self.quality_delta.issues_changed.len()
+            ));
+            for issue in &self.quality_delta.issues_changed {
                 summary.push_str(&format!("  - {}\n", issue));
             }
         }
@@ -1110,9 +1210,12 @@ impl CleaningPreview {
             self.rows_affected, self.pct_affected
         ));
 
+        if self.cells_affected > 0 {
+            summary.push_str(&format!("Cells affected: {}\n", self.cells_affected));
+        }
         if self.estimated_quality_change != 0.0 {
             summary.push_str(&format!(
-                "Estimated quality change: {:+.1}%\n",
+                "Completeness change: {:+.1} percentage points\n",
                 self.estimated_quality_change
             ));
         }
@@ -1144,6 +1247,353 @@ impl CleaningPreview {
 mod tests {
     use super::*;
     use polars::prelude::df;
+
+    /// x = [1, null, NaN, 4], y = ["a", null, "c", "d"]: completeness 5/8.
+    fn half_missing() -> Dataset {
+        Dataset::new(
+            df! {
+                "x" => [Some(1.0), None, Some(f64::NAN), Some(4.0)],
+                "y" => [Some("a"), None, Some("c"), Some("d")],
+            }
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn trim_preview_counts_rows_not_cells() {
+        // Pre-fix the 3 cells were 3 rows (75%), and above 100% when every cell changed.
+        let ds = Dataset::new(
+            df! {
+                "a" => [" p", "q", "r ", "s"],
+                "b" => ["t ", "u", "v", "w"],
+            }
+            .unwrap(),
+        );
+        let p = preview_cleaning(&ds, &CleaningOperation::Trim { columns: None }, 5);
+        assert_eq!(p.rows_affected, 2);
+        assert_eq!(p.cells_affected, 3);
+        assert_eq!(p.pct_affected, 50.0);
+        assert!(p.summary().contains("Cells affected: 3"));
+        let all = Dataset::new(df! { "a" => [" p", " q"], "b" => ["r ", "s "] }.unwrap());
+        let p = preview_cleaning(&all, &CleaningOperation::Trim { columns: None }, 5);
+        assert_eq!(
+            (p.rows_affected, p.cells_affected, p.pct_affected),
+            (2, 4, 100.0)
+        );
+    }
+
+    #[test]
+    fn fill_na_preview_counts_nan_and_reports_completeness() {
+        // Pre-fix NaN was not counted and the quality change was pct_affected * 0.5.
+        let p = preview_cleaning(
+            &half_missing(),
+            &CleaningOperation::FillNa {
+                columns: Some(vec!["x".into()]),
+                strategy: "median".into(),
+                value: None,
+            },
+            5,
+        );
+        assert_eq!(p.rows_affected, 2);
+        assert_eq!(p.cells_affected, 2);
+        assert_eq!(p.pct_affected, 50.0);
+        assert!(
+            (p.estimated_quality_change - 25.0).abs() < 1e-12,
+            "{}",
+            p.estimated_quality_change
+        );
+        assert!(
+            p.summary().contains("Completeness change: +25.0"),
+            "{}",
+            p.summary()
+        );
+    }
+
+    #[test]
+    fn filter_preview_agrees_with_filter() {
+        let ds = Dataset::new(
+            df! {
+                "v" => [Some(1.5), Some(2.5), None, Some(4.25), Some(f64::NAN)],
+                "s" => ["abc", "a.c", "xyz", "a.cd", "q"],
+            }
+            .unwrap(),
+        );
+        let preview = |column: &str, operator: &str, value: &str| {
+            preview_cleaning(
+                &ds,
+                &CleaningOperation::Filter {
+                    column: column.into(),
+                    operator: operator.into(),
+                    value: value.into(),
+                },
+                5,
+            )
+        };
+        // Pre-fix an unknown operator was silently 0 rows.
+        let p = preview("v", "~", "2");
+        assert_eq!(p.rows_affected, 0);
+        assert!(
+            p.warnings.iter().any(|w| w.contains("Valid operators")),
+            "{:?}",
+            p.warnings
+        );
+        // Pre-fix contains was a regex, so "a.c" also matched "abc".
+        let p = preview("s", "contains", "a.c");
+        let kept = filter(&ds, "s", "contains", "a.c").unwrap().nrows();
+        assert_eq!(kept, 2);
+        assert_eq!(p.rows_affected, 5 - kept);
+        let p = preview("nope", ">", "1");
+        assert!(
+            p.warnings.iter().any(|w| w.contains("'nope'")),
+            "{:?}",
+            p.warnings
+        );
+        for (op, value) in [(">", "2"), ("<=", "4.25"), ("!=", "1.5")] {
+            let p = preview("v", op, value);
+            let kept = filter(&ds, "v", op, value).unwrap().nrows();
+            assert_eq!(p.rows_affected, 5 - kept, "{op} {value}");
+        }
+        // drop_na: NaN is missing, as in the apply; a missing column is reported.
+        let drop = |columns: Option<Vec<String>>| {
+            preview_cleaning(
+                &ds,
+                &CleaningOperation::DropNa {
+                    columns,
+                    how: "any".into(),
+                },
+                5,
+            )
+        };
+        let p = drop(Some(vec!["v".into()]));
+        let kept = drop_na(&ds, Some(&["v"]), "any").unwrap().nrows();
+        assert_eq!(kept, 3);
+        assert_eq!(p.rows_affected, 2);
+        let p = drop(Some(vec!["nope".into()]));
+        assert_eq!(p.rows_affected, 0);
+        assert!(
+            p.warnings.iter().any(|w| w.contains("'nope'")),
+            "{:?}",
+            p.warnings
+        );
+    }
+
+    #[test]
+    fn replace_preview_reports_the_completeness_change() {
+        // The change is taken from the replaced column only; it equals the whole-frame measure.
+        let ds = Dataset::new(
+            df! {
+                "x" => [Some(1.5), None, Some(f64::NAN), Some(4.25)],
+                "y" => ["a", "", "c", ""],
+            }
+            .unwrap(),
+        );
+        let op = CleaningOperation::Replace {
+            column: "y".into(),
+            old_value: "".into(),
+            new_value: "null".into(),
+        };
+        let p = preview_cleaning(&ds, &op, 5);
+        let after = replace_with(&ds, "y", "", Some("null"), &ReplaceOptions::default()).unwrap();
+        let whole = completeness_change(ds.df(), after.dataset.df());
+        assert_eq!(p.rows_affected, 2);
+        assert!((p.estimated_quality_change - whole).abs() < 1e-12);
+        assert!(
+            (p.estimated_quality_change + 25.0).abs() < 1e-12,
+            "{}",
+            p.estimated_quality_change
+        );
+    }
+
+    #[test]
+    fn empty_frame_preview() {
+        let ds = Dataset::new(df! { "v" => Vec::<f64>::new() }.unwrap());
+        for op in [
+            CleaningOperation::Filter {
+                column: "v".into(),
+                operator: ">".into(),
+                value: "1".into(),
+            },
+            CleaningOperation::DropNa {
+                columns: None,
+                how: "any".into(),
+            },
+            CleaningOperation::Trim { columns: None },
+        ] {
+            let p = preview_cleaning(&ds, &op, 5);
+            assert_eq!(p.pct_affected, 0.0);
+            assert!(
+                !p.warnings.iter().any(|w| w.contains("ALL")),
+                "{:?}",
+                p.warnings
+            );
+        }
+    }
+
+    #[test]
+    fn fill_and_drop_previews_measure_the_completeness_change() {
+        // Three columns, one complete: filling x's 2 missing cells moves completeness from 9/12
+        // to 11/12, +16.67 points; the old pct_affected * 0.5 rule said 25.
+        let mut wide = half_missing().df().clone();
+        wide.with_column(Column::new("z".into(), [1.5, 2.5, 3.5, 4.5]))
+            .unwrap();
+        let p = preview_cleaning(
+            &Dataset::new(wide),
+            &CleaningOperation::FillNa {
+                columns: Some(vec!["x".into()]),
+                strategy: "median".into(),
+                value: None,
+            },
+            5,
+        );
+        assert_eq!(p.cells_affected, 2);
+        let want = 100.0 * 2.0 / 12.0;
+        assert!(
+            (p.estimated_quality_change - want).abs() < 1e-12,
+            "{}",
+            p.estimated_quality_change
+        );
+        // Dropping the rows with any missing cell keeps rows 1 and 4: 5/8 -> 1, +37.5 points.
+        let p = preview_cleaning(
+            &half_missing(),
+            &CleaningOperation::DropNa {
+                columns: None,
+                how: "any".into(),
+            },
+            5,
+        );
+        assert_eq!(p.rows_affected, 2);
+        assert!(
+            (p.estimated_quality_change - 37.5).abs() < 1e-12,
+            "{}",
+            p.estimated_quality_change
+        );
+    }
+
+    #[test]
+    fn nan_constant_fill_preview_warns() {
+        let p = preview_cleaning(
+            &half_missing(),
+            &CleaningOperation::FillNa {
+                columns: Some(vec!["x".into()]),
+                strategy: "constant".into(),
+                value: Some("NaN".into()),
+            },
+            5,
+        );
+        assert_eq!(p.rows_affected, 0);
+        assert!(
+            p.warnings
+                .iter()
+                .any(|w| w.contains("NaN is a missing value")),
+            "{:?}",
+            p.warnings
+        );
+    }
+
+    #[test]
+    fn drop_columns_preview_reports_completeness() {
+        let p = preview_cleaning(
+            &half_missing(),
+            &CleaningOperation::DropColumns {
+                columns: vec!["x".into()],
+            },
+            5,
+        );
+        assert_eq!((p.rows_affected, p.cells_affected), (0, 0));
+        // 5/8 -> 3/4
+        assert!((p.estimated_quality_change - 12.5).abs() < 1e-12);
+        let p = preview_cleaning(
+            &half_missing(),
+            &CleaningOperation::DropColumns {
+                columns: vec!["nope".into()],
+            },
+            5,
+        );
+        assert!(
+            p.warnings.iter().any(|w| w.contains("'nope'")),
+            "{:?}",
+            p.warnings
+        );
+    }
+
+    #[test]
+    fn first_changes_and_changed_mask_agree() {
+        let cat = |v: &[&str]| {
+            Column::new("c".into(), v)
+                .cast(&DataType::from_categories(Categories::global()))
+                .unwrap()
+        };
+        let pairs = [
+            (
+                Column::new("s".into(), ["a", "b", "c", "d"]),
+                Column::new("s".into(), ["a", "B", "c", "D"]),
+            ),
+            (
+                Column::new("n".into(), [1.0, f64::NAN, 3.0, 4.5]),
+                Column::new("n".into(), [1.0, f64::NAN, 3.5, 4.0]),
+            ),
+            (cat(&["u", "v", "w", "u"]), cat(&["u", "w", "w", "v"])),
+            (
+                Column::new("i".into(), [1i64, 2, 3, 4]),
+                Column::new("i".into(), [1.0, 2.5, 3.0, 4.0]),
+            ),
+        ];
+        for (before, after) in &pairs {
+            let mask = changed_mask(before, after).unwrap();
+            let expected: Vec<usize> = mask
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| **c)
+                .map(|(i, _)| i)
+                .collect();
+            assert!(!expected.is_empty());
+            for limit in 0..=4 {
+                let first = first_changes(before, after, limit).unwrap();
+                assert_eq!(
+                    first,
+                    expected.iter().copied().take(limit).collect::<Vec<_>>()
+                );
+            }
+        }
+        // NaN to NaN is no change.
+        assert_eq!(
+            changed_mask(&pairs[1].0, &pairs[1].1).unwrap(),
+            [false, false, true, true]
+        );
+    }
+
+    #[test]
+    fn verify_reports_a_count_change_once() {
+        // Pre-fix: one issue resolved ("30.0% missing") and one introduced ("7.5% missing").
+        let n = 40;
+        let x = |missing: usize| -> Vec<Option<f64>> {
+            (0..n)
+                .map(|i| (i >= missing).then_some(i as f64 * 1.37 + 0.2))
+                .collect()
+        };
+        // `id` keeps the rows with a missing x apart (no duplicate-row issue).
+        let id: Vec<i64> = (0..n as i64).collect();
+        let before = Dataset::new(df! { "id" => id.clone(), "x" => x(12) }.unwrap());
+        let after = Dataset::new(df! { "id" => id, "x" => x(3) }.unwrap());
+        let report = verify_cleaning(&before, &after, "fill");
+        let d = &report.quality_delta;
+        assert!(d.issues_resolved.is_empty(), "{:?}", d.issues_resolved);
+        assert!(d.issues_introduced.is_empty(), "{:?}", d.issues_introduced);
+        assert_eq!(d.issues_changed, ["missing values in 'x': 12 -> 3"]);
+        assert!(report.summary().contains("Changed issues (1):"));
+    }
+
+    #[test]
+    fn verify_counts_modified_rows() {
+        // Pre-fix rows_modified counted the 3 cells.
+        let before =
+            Dataset::new(df! { "a" => ["p", "q", "r", "s"], "b" => [1.5, 2.5, 3.5, 4.5] }.unwrap());
+        let after =
+            Dataset::new(df! { "a" => ["P", "q", "R", "s"], "b" => [1.5, 2.5, 9.5, 4.5] }.unwrap());
+        let report = verify_cleaning(&before, &after, "edit");
+        assert_eq!(report.rows_modified, 2);
+        assert_eq!(report.cells_modified, 3);
+    }
 
     #[test]
     fn test_preview_trim() {
@@ -1299,6 +1749,7 @@ mod tests {
             operation: "Trim whitespace".to_string(),
             rows_affected: 10,
             pct_affected: 5.0,
+            cells_affected: 12,
             sample_changes: vec![ChangeExample {
                 row_index: 0,
                 column: "name".to_string(),

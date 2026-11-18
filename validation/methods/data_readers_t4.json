@@ -1,0 +1,37 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "data_read_dta_formats",
+      "name": "Stata .dta display formats, value labels and strL text (releases 117, 118, 119; LSF and MSF)",
+      "category": "data",
+      "reference": "haven::read_dta (haven 2.5.5, ReadStat) on haven-written fixtures and a byte-level big-endian copy, formats and labels kept",
+      "doc": "validation/data/readers.md",
+      "cases": [
+        "data_readers_formats_values"
+      ],
+      "tests": [
+        "p2a-core::data::stata::tests::test_validate_read_dta_strl_117",
+        "p2a-core::data::stata::tests::test_validate_read_dta_strl_118",
+        "p2a-core::data::stata::tests::test_validate_read_dta_strl_119",
+        "p2a-core::data::stata::tests::test_validate_read_dta_strl_119_big_endian",
+        "p2a-core::data::stata::tests::test_validate_read_dta_formats_117",
+        "p2a-core::data::stata::tests::test_validate_read_dta_formats_118",
+        "p2a-core::data::stata::tests::test_validate_read_dta_formats_119",
+        "p2a-core::data::stata::tests::test_validate_read_dta_formats_119_big_endian",
+        "p2a-core::data::stata::tests::test_validate_data_readers_t4_manifest_lists_every_fixture"
+      ],
+      "quantities": [
+        "dates (%td, days since 1970-01-01)",
+        "datetimes (%tc, milliseconds since 1970-01-01 UTC)",
+        "strL text and byte lengths",
+        "value-label codes and text",
+        "label sets (labels and codes)",
+        "%tm column kept numeric"
+      ],
+      "tolerance": "exact (Tol::exact): the reader decodes the same bytes haven decodes",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}

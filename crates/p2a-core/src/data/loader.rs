@@ -108,12 +108,18 @@ const POLARS_TYPE_KEYS: [&str; 4] = [
 /// nested decoder leaves those unimplemented and panics. At the top level
 /// polars decodes such a dictionary as strings, and it passes.
 ///
-/// This does not rule out every panic polars has on a parquet file. Some
-/// depend on the data rather than the schema: a nested Categorical with
-/// more labels than its code width holds, which also counts the labels
-/// earlier loads put into the same process-wide categories. Others come
-/// before this check can run, such as an ARROW:schema too short to hold its
-/// own header. [`read_parquet`] catches those.
+/// It refuses, too, an Arrow extension type and an Arrow interval, which
+/// polars-core panics on (month-day intervals load as structs when
+/// `POLARS_IMPORT_INTERVAL_AS_STRUCT=1`).
+///
+/// This does not rule out every panic polars has on a parquet file. Two
+/// kinds pass this check and are caught by [`read_parquet`] instead, which
+/// answers them with [`LoadError::ParquetPanic`] and logs a warning: panics
+/// that depend on the data rather than the schema (a nested Categorical
+/// with more labels than its code width holds, counting the labels earlier
+/// loads put into the same process-wide categories), and panics that come
+/// before this check can run (an ARROW:schema too short to hold its own
+/// header).
 fn check_parquet_schema(schema: &ArrowSchema) -> Result<(), LoadError> {
     for field in schema.iter_values() {
         check_dtype(&field.dtype, field.metadata.as_deref(), false).map_err(|reason| {
@@ -166,17 +172,46 @@ fn check_dtype<M: MetaDataExt>(
             Ok(())
         }
         // polars parses the time zone with this function and unwraps the
-        // result. Its error quotes the file's time zone whole, so the
-        // refusal shows a bounded part of it.
+        // result. The refusal shows a bounded part of the file's time zone
+        // and the setting that makes polars accept it, not polars' error.
         ArrowDataType::Timestamp(_, tz) => {
-            TimeZone::opt_try_new(tz.clone()).map(|_| ()).map_err(|e| {
+            TimeZone::opt_try_new(tz.clone()).map(|_| ()).map_err(|_| {
                 format!(
-                    "its time zone '{}' is not one polars can parse: {}",
-                    shown(tz.as_deref().unwrap_or("")),
-                    shown_up_to(&e.to_string(), 300)
+                    "its time zone '{}' is not one polars can parse (setting \
+                     POLARS_IGNORE_TIMEZONE_PARSE_ERROR=1 lets polars accept it)",
+                    shown(tz.as_deref().unwrap_or(""))
                 )
             })
         }
+        // polars-core loads only its own POLARS_EXTENSION_TYPE, and only with
+        // its `object` feature, which this build does not enable; it panics on
+        // every other extension type.
+        ArrowDataType::Extension(ext) => Err(format!(
+            "its type is an Arrow extension type ('{}') polars cannot load",
+            shown(ext.name.as_str())
+        )),
+        // polars-core imports month-day-nano and month-day-millisecond
+        // intervals as structs only when this variable is "1" (read as polars
+        // reads it), and panics on year-month and day-time intervals.
+        ArrowDataType::Interval(unit) => match format!("{unit:?}").as_str() {
+            "MonthDayNano" | "MonthDayMillis" => {
+                if std::env::var("POLARS_IMPORT_INTERVAL_AS_STRUCT").as_deref() == Ok("1") {
+                    Ok(())
+                } else {
+                    Err("it holds Arrow intervals, which polars loads only with \
+                         POLARS_IMPORT_INTERVAL_AS_STRUCT=1"
+                        .to_string())
+                }
+            }
+            "YearMonth" => {
+                Err("it holds Arrow year-month intervals, which polars cannot load".into())
+            }
+            "DayTime" => Err("it holds Arrow day-time intervals, which polars cannot load".into()),
+            other => Err(format!(
+                "it holds Arrow {} intervals, which polars cannot load",
+                other.to_lowercase()
+            )),
+        },
         ArrowDataType::List(inner)
         | ArrowDataType::LargeList(inner)
         | ArrowDataType::FixedSizeList(inner, _) => check_nested(inner),
@@ -938,7 +973,8 @@ impl DataLoader {
 
     /// Load a Parquet file eagerly (entire file into memory).
     ///
-    /// A file whose polars type metadata is malformed is refused with
+    /// A file whose ARROW:schema is malformed, or holds a type polars cannot
+    /// load, is refused with
     /// [`LoadError::ParquetSchema`] naming the column, before it is decoded
     /// (see [`DataLoader::check_parquet_schema`]). A panic in polars while
     /// it reads the file is caught and answered as
@@ -1027,8 +1063,15 @@ impl DataLoader {
     ///
     /// # Arguments
     /// * `path` - Path to the CSV file
-    /// * `skip_rows` - Number of rows to skip (excluding header)
+    /// * `skip_rows` - Number of data rows to skip after the header; every chunk keeps
+    ///   the file's header names
     /// * `n_rows` - Number of rows to read
+    ///
+    /// Each chunk infers its column types from its own rows and from the data row just before
+    /// it (read to work around an offset bug in polars, then dropped), so a chunk's types can
+    /// differ from the whole file's and from other chunks': a text cell in that
+    /// preceding row can make a numeric column of the chunk `String`. Cast chunks to one schema
+    /// before stacking them.
     ///
     /// # Example
     /// ```ignore
@@ -1047,14 +1090,31 @@ impl DataLoader {
         skip_rows: usize,
         n_rows: usize,
     ) -> Result<DataFrame, LoadError> {
+        // polars misreads an offset equal to the number of data rows (a row of
+        // nulls from the end of the file), so the read starts one row early,
+        // where a data row is known to exist, and that row is dropped.
+        let before = skip_rows.saturating_sub(1);
+        let lead = skip_rows - before;
         let options = csv_options(Self::DEFAULT_NA_STRINGS)
-            .with_skip_rows(skip_rows)
-            .with_n_rows(Some(n_rows));
+            .with_skip_rows_after_header(before)
+            .with_n_rows(Some(n_rows.saturating_add(lead)));
 
-        let df = options
+        match options
             .try_into_reader_with_file_path(Some(path.as_ref().to_path_buf()))?
-            .finish()?;
-        Ok(df)
+            .finish()
+        {
+            Ok(df) => Ok(df.slice(lead as i64, n_rows)),
+            // An offset past the last data row: return the header with no rows, read without
+            // skipping (a header-only file reads as an empty frame).
+            Err(PolarsError::NoData(_)) if skip_rows > 0 => {
+                Ok(csv_options(Self::DEFAULT_NA_STRINGS)
+                    .with_n_rows(Some(0))
+                    .try_into_reader_with_file_path(Some(path.as_ref().to_path_buf()))?
+                    .finish()?
+                    .slice(0, 0))
+            }
+            Err(e) => Err(e.into()),
+        }
     }
 
     /// Create a chunk iterator for processing large CSV files.
@@ -1224,10 +1284,19 @@ impl DataLoader {
         excel_range_to_dataframe(&range)
     }
 
-    /// Load a Stata DTA file.
+    /// Load a Stata DTA file: `%td`/`%tc` columns as dates and datetimes, value-labelled
+    /// columns as their codes (see [`DataLoader::load_stata_with`] for the labels).
     pub fn load_stata(path: impl AsRef<Path>) -> Result<DataFrame, LoadError> {
-        let df = super::stata::load_stata(path)?;
-        Ok(df)
+        Ok(Self::load_stata_with(path, &super::stata::StataOptions::default())?.df)
+    }
+
+    /// Load a Stata DTA file with `options`: the frame, the value labels of its labelled
+    /// columns, and notes on what the reader left unconverted.
+    pub fn load_stata_with(
+        path: impl AsRef<Path>,
+        options: &super::stata::StataOptions,
+    ) -> Result<super::stata::StataLoad, LoadError> {
+        Ok(super::stata::load_stata_with(path, options)?)
     }
 
     /// Load a SAS7BDAT file.
@@ -1267,15 +1336,7 @@ fn excel_range_to_dataframe(range: &Range<Data>) -> Result<DataFrame, LoadError>
         return Err(LoadError::ExcelError("Empty worksheet".to_string()));
     }
 
-    // Extract headers from first row
-    let mut headers: Vec<String> = Vec::with_capacity(width);
-    for col_idx in 0..width {
-        let header = match range.get((0, col_idx)) {
-            Some(data) => data_to_string(data),
-            None => format!("col_{}", col_idx),
-        };
-        headers.push(header);
-    }
+    let headers = excel_headers(range, width);
 
     // Extract data columns - need to determine types
     // First pass: collect all values as strings, then infer types
@@ -1304,7 +1365,7 @@ fn excel_range_to_dataframe(range: &Range<Data>) -> Result<DataFrame, LoadError>
             // Parse as integers
             let values: Vec<Option<i64>> = col_data
                 .iter()
-                .map(|opt| opt.as_ref().and_then(|s| s.parse::<i64>().ok()))
+                .map(|opt| opt.as_deref().and_then(excel_int))
                 .collect();
             Column::new(name.as_str().into(), values)
         } else if is_all_numeric {
@@ -1324,6 +1385,45 @@ fn excel_range_to_dataframe(range: &Range<Data>) -> Result<DataFrame, LoadError>
     }
 
     DataFrame::new(column_vec).map_err(LoadError::PolarsError)
+}
+
+/// Column names from the first row: a blank or missing cell is named
+/// `col_{i}` (0-based column index), and a repeated name gets the suffix
+/// `_duplicated_{k}` (k from 0), as polars names repeated CSV headers.
+#[cfg(feature = "file-formats")]
+fn excel_headers(range: &Range<Data>, width: usize) -> Vec<String> {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut repeats: HashMap<String, usize> = HashMap::new();
+    let mut headers = Vec::with_capacity(width);
+    for col_idx in 0..width {
+        let base = match range.get((0, col_idx)).map(data_to_string) {
+            Some(text) if !text.is_empty() => text,
+            _ => format!("col_{col_idx}"),
+        };
+        let mut name = base.clone();
+        while seen.contains(&name) {
+            let k = repeats.entry(base.clone()).or_insert(0);
+            name = format!("{base}_duplicated_{k}");
+            *k += 1;
+        }
+        seen.insert(name.clone());
+        headers.push(name);
+    }
+    headers
+}
+
+/// The integer a cell's text holds: an i64, or a finite, integral number
+/// within the i64 range written as a float ("3.0", "1e3"). Used both to choose
+/// the column type and to convert the cells, so the two agree.
+#[cfg(feature = "file-formats")]
+fn excel_int(s: &str) -> Option<i64> {
+    if let Ok(i) = s.parse::<i64>() {
+        return Some(i);
+    }
+    let f = s.parse::<f64>().ok()?;
+    // 2^63 is exactly representable; the i64 range is [-2^63, 2^63).
+    const LIMIT: f64 = 9_223_372_036_854_775_808.0;
+    (f.is_finite() && f.fract() == 0.0 && (-LIMIT..LIMIT).contains(&f)).then_some(f as i64)
 }
 
 /// Convert calamine Data to a string representation.
@@ -1365,8 +1465,7 @@ fn check_numeric_type(col_data: &[Option<String>]) -> (bool, bool) {
 
             // Check if it parses as a number
             if s.parse::<f64>().is_ok() {
-                // Check if it's an integer (no decimal point or ends with .0)
-                if s.parse::<i64>().is_err() && !s.ends_with(".0") {
+                if is_all_int && excel_int(s).is_none() {
                     is_all_int = false;
                 }
             } else {
@@ -1838,6 +1937,145 @@ mod tests {
             .unwrap();
         assert_eq!(first.column("x").unwrap().dtype(), &DataType::Float64);
         assert_eq!(first.column("x").unwrap().null_count(), 1);
+
+        // A second chunk keeps the header and holds rows 601-1100, NA at 1050.
+        let chunks: Vec<DataFrame> = DataLoader::iter_csv_chunks(&path, 600)
+            .map(|c| c.unwrap())
+            .collect();
+        assert_eq!(chunks.len(), 2);
+        let second = &chunks[1];
+        assert_eq!(second.get_column_names(), ["id", "x"]);
+        assert_eq!(second.height(), 500);
+        let ids = second.column("id").unwrap().cast(&DataType::Int64).unwrap();
+        assert_eq!(ids.i64().unwrap().get(0), Some(601));
+        assert_eq!(ids.i64().unwrap().get(499), Some(1100));
+        assert_eq!(null_rows(second, "x"), vec![1050 - 601]);
+    }
+
+    #[test]
+    fn csv_chunks_keep_the_header_and_cover_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut text = String::from("id,x,s\n");
+        for i in 1..=23 {
+            let x = if i == 9 {
+                String::new()
+            } else {
+                format!("{}", i as f64 * 1.7 + ((i * 37) % 11) as f64 / 10.0)
+            };
+            text.push_str(&format!("{i},{x},w{}\n", (i * 7) % 5));
+        }
+        let path = dir.path().join("chunks.csv");
+        std::fs::write(&path, text).unwrap();
+        let whole = DataLoader::load_csv(&path).unwrap();
+        assert_eq!(whole.height(), 23);
+        let schema = whole.schema();
+        for size in [1usize, 5, 7, 23] {
+            let chunks: Vec<DataFrame> = DataLoader::iter_csv_chunks(&path, size)
+                .map(|c| c.unwrap())
+                .collect();
+            let mut stacked: Option<DataFrame> = None;
+            let mut rows = 0;
+            for chunk in &chunks {
+                assert_eq!(chunk.get_column_names(), ["id", "x", "s"], "size {size}");
+                rows += chunk.height();
+                let cast = DataFrame::new(
+                    chunk
+                        .get_columns()
+                        .iter()
+                        .map(|c| c.cast(schema.get(c.name()).unwrap()).unwrap())
+                        .collect(),
+                )
+                .unwrap();
+                stacked = Some(match stacked {
+                    None => cast,
+                    Some(acc) => acc.vstack(&cast).unwrap(),
+                });
+            }
+            assert_eq!(rows, 23, "size {size}");
+            assert!(stacked.unwrap().equals_missing(&whole), "size {size}");
+        }
+        // Offsets at and past the end give the header with no rows.
+        for skip in [23usize, 24, 100] {
+            let empty = DataLoader::load_csv_chunk(&path, skip, 5).unwrap();
+            assert_eq!(empty.height(), 0, "skip {skip}");
+            assert_eq!(empty.get_column_names(), ["id", "x", "s"], "skip {skip}");
+        }
+        // A file with a header and no rows gives the header at every offset.
+        let header_only = dir.path().join("header_only.csv");
+        std::fs::write(&header_only, "id,x,s\n").unwrap();
+        for skip in [0usize, 1, 5] {
+            let empty = DataLoader::load_csv_chunk(&header_only, skip, 5).unwrap();
+            assert_eq!(empty.height(), 0, "header only, skip {skip}");
+            assert_eq!(
+                empty.get_column_names(),
+                ["id", "x", "s"],
+                "header only, skip {skip}"
+            );
+        }
+    }
+
+    #[cfg(feature = "file-formats")]
+    fn excel_range(cells: &[&[Data]]) -> Range<Data> {
+        let rows = cells.len() as u32;
+        let cols = cells[0].len() as u32;
+        let mut range = Range::new((0, 0), (rows - 1, cols - 1));
+        for (i, row) in cells.iter().enumerate() {
+            for (j, cell) in row.iter().enumerate() {
+                range.set_value((i as u32, j as u32), cell.clone());
+            }
+        }
+        range
+    }
+
+    #[test]
+    #[cfg(feature = "file-formats")]
+    fn excel_blank_and_repeated_headers_get_unique_names() {
+        let s = |t: &str| Data::String(t.to_string());
+        let range = excel_range(&[
+            &[s("a"), Data::Empty, s("a"), Data::Empty],
+            &[Data::Int(1), Data::Float(2.5), s("u"), Data::Int(4)],
+            &[Data::Int(2), Data::Float(3.5), s("v"), Data::Int(5)],
+            &[Data::Int(3), Data::Float(4.5), s("w"), Data::Int(7)],
+        ]);
+        let df = excel_range_to_dataframe(&range).unwrap();
+        assert_eq!(
+            df.get_column_names(),
+            ["a", "col_1", "a_duplicated_0", "col_3"]
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "file-formats")]
+    fn excel_integer_text_with_a_zero_fraction_is_an_integer() {
+        let s = |t: &str| Data::String(t.to_string());
+        let column = |cells: [Data; 3]| {
+            let range = excel_range(&[
+                &[s("v")],
+                &[cells[0].clone()],
+                &[cells[1].clone()],
+                &[cells[2].clone()],
+            ]);
+            excel_range_to_dataframe(&range)
+                .unwrap()
+                .column("v")
+                .unwrap()
+                .clone()
+        };
+        let ints = column([Data::Int(1), s("3.0"), Data::Float(2.0)]);
+        assert_eq!(ints.dtype(), &DataType::Int64);
+        assert_eq!(
+            ints.i64().unwrap().into_iter().collect::<Vec<_>>(),
+            [Some(1), Some(3), Some(2)]
+        );
+        let half = column([Data::Int(1), s("3.5"), Data::Float(2.0)]);
+        assert_eq!(half.dtype(), &DataType::Float64);
+        assert_eq!(half.f64().unwrap().get(1), Some(3.5));
+        let big = column([Data::Int(1), s("9.3e18"), Data::Float(2.0)]);
+        assert_eq!(big.dtype(), &DataType::Float64);
+        assert_eq!(big.f64().unwrap().get(1), Some(9.3e18));
+        assert_eq!(excel_int("inf"), None);
+        assert_eq!(excel_int("NaN"), None);
+        assert_eq!(excel_int("-9223372036854775808.0"), Some(i64::MIN));
     }
 
     #[test]
@@ -2050,16 +2288,8 @@ mod tests {
         // that it creates for that chunk and reuses from page to page: the
         // path every zstd Parquet file a user loads or uploads takes, and the
         // one .github/workflows/audit.yml's zstd exemptions argue about.
-        let x: Vec<f64> = (0..20_000)
-            .map(|i| f64::from(i) * 0.37)
-            .map(|t| t.sin() * 10.0 + t * 1e-3)
-            .collect();
         let k: Vec<i64> = (0..20_000_i64).map(|i| i * 7919 % 10_007 - 5_000).collect();
-        let mut df = DataFrame::new(vec![
-            Series::new("x".into(), x).into(),
-            Series::new("k".into(), k).into(),
-        ])
-        .unwrap();
+        let mut df = frame_of(Series::new("k".into(), k));
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("pages.parquet");
         ParquetWriter::new(std::fs::File::create(&path).unwrap())
@@ -2401,11 +2631,88 @@ mod tests {
                 text.contains("its time zone 'Europe/Parix' is not one polars can parse"),
                 "{name}: {text}"
             );
-            assert!(text.contains("unable to parse time zone"), "{name}: {text}");
+            assert!(
+                text.contains(
+                    "(setting POLARS_IGNORE_TIMEZONE_PARSE_ERROR=1 lets polars accept it)"
+                ),
+                "{name}: {text}"
+            );
+            assert!(
+                !text.contains("unable to parse time zone"),
+                "{name}: {text}"
+            );
             if let Some(nested) = nested {
                 assert!(text.contains(nested), "{name}: {text}");
             }
         }
+    }
+
+    #[test]
+    fn parquet_with_an_extension_type_is_refused_naming_the_column() {
+        // R 4.3.3, arrow 25.0.1:
+        //   t <- arrow_table(x = c(1.5, 2.5, 3.5),
+        //                    k = vctrs_extension_array(factor(c("a", "b", "a"))))
+        //   write_parquet(t, "arrow_extension_vctrs.parquet")   # 1,149 bytes
+        // polars-core panics converting any extension type but its own.
+        let text = parquet_error(&fixture("arrow_extension_vctrs.parquet"));
+        assert!(text.contains("column 'k'"), "{text}");
+        assert!(
+            text.contains(
+                "its type is an Arrow extension type ('arrow.r.vctrs') polars cannot load"
+            ),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn parquet_with_intervals_is_refused_naming_the_column() {
+        // No writer at hand makes a parquet file with an Arrow interval
+        // (R arrow 25.0.1 has no month_day_nano_interval()), so the schema
+        // check, which the loader runs before decoding, gets the schema
+        // directly. POLARS_IMPORT_INTERVAL_AS_STRUCT is process-global and
+        // left unset here.
+        let interval = |unit: &str| -> ArrowDataType {
+            serde_json::from_str(&format!("{{\"Interval\":\"{unit}\"}}")).unwrap()
+        };
+        let refusal = |dtype: ArrowDataType| {
+            let schema: ArrowSchema = [
+                ArrowField::new("x".into(), ArrowDataType::Float64, true),
+                ArrowField::new("k".into(), dtype, true),
+            ]
+            .into_iter()
+            .map(|f| (f.name.clone(), f))
+            .collect();
+            DataLoader::check_parquet_schema(&schema)
+                .unwrap_err()
+                .to_string()
+        };
+        if std::env::var("POLARS_IMPORT_INTERVAL_AS_STRUCT").as_deref() != Ok("1") {
+            let text = refusal(interval("MonthDayNano"));
+            assert!(text.contains("column 'k'"), "{text}");
+            assert!(
+                text.contains(
+                    "it holds Arrow intervals, which polars loads only with \
+                     POLARS_IMPORT_INTERVAL_AS_STRUCT=1"
+                ),
+                "{text}"
+            );
+        }
+        let text = refusal(interval("YearMonth"));
+        assert!(text.contains("column 'k'"), "{text}");
+        assert!(
+            text.contains("it holds Arrow year-month intervals, which polars cannot load"),
+            "{text}"
+        );
+        let nested = ArrowDataType::LargeList(Box::new(ArrowField::new(
+            "item".into(),
+            interval("DayTime"),
+            true,
+        )));
+        let text = refusal(nested);
+        assert!(
+            text.contains("its nested field 'item': it holds Arrow day-time intervals"),
+            "{text}"
+        );
     }
 
     #[test]

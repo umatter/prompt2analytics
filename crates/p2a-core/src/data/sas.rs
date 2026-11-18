@@ -549,7 +549,8 @@ struct RowSink {
     text: Vec<Vec<Option<String>>>,
     rows: usize,
     /// Bytes the decoded cells hold. Compressed rows can decode to far more than the file's size,
-    /// so this total is held to the allocation ceiling row by row.
+    /// so this total is held to the allocation ceiling row by row; with no ceiling (Off mode)
+    /// nothing holds the decoded total but the process's memory.
     held_bytes: usize,
     /// The allocation ceiling in force when the read began (`usize::MAX`: none).
     ceiling: usize,
@@ -1287,6 +1288,34 @@ mod tests {
     use super::*;
     use p2a_validation::Case;
     use std::io::Cursor;
+
+    #[test]
+    fn checkpoint_every_rows_checks_at_the_stride() {
+        // With the budget cancelled up front, only a row count on the stride consults it.
+        let token = crate::resource::CancelToken::new();
+        token.cancel();
+        let budget = crate::resource::Budget::new(None, token);
+        let mut sink = RowSink {
+            numeric: Vec::new(),
+            text: Vec::new(),
+            rows: 0,
+            held_bytes: 0,
+            ceiling: usize::MAX,
+        };
+        crate::resource::with_budget(budget, || {
+            assert!(sink.checkpoint_every_rows().is_err()); // row 0 is on the stride
+            for rows in 1..ROWS_PER_CHECKPOINT {
+                sink.rows = rows;
+                assert!(sink.checkpoint_every_rows().is_ok(), "{rows}");
+            }
+            sink.rows = ROWS_PER_CHECKPOINT;
+            match sink.checkpoint_every_rows() {
+                Err(SasError::ParseError(m)) => assert!(m.contains("cancelled"), "{m}"),
+                other => panic!("expected the cancellation, got {other:?}"),
+            }
+        });
+        assert_eq!(ROWS_PER_CHECKPOINT, 1 << 16);
+    }
 
     fn load(b: Vec<u8>) -> Result<DataFrame, SasError> {
         SasReader::new(Cursor::new(b))?.read_to_dataframe()

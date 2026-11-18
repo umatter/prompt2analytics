@@ -51,6 +51,8 @@ pub struct SessionCheckpoint {
     dataset: Dataset,
     /// Quality profile at this checkpoint
     pub quality_profile: DataQualityProfile,
+    /// The checkpoint this one was applied to; `None` only for the initial state.
+    parent: Option<usize>,
 }
 
 /// Record of an operation performed during the session.
@@ -141,6 +143,7 @@ impl CleaningSession {
             description: "Initial state".to_string(),
             dataset,
             quality_profile,
+            parent: None,
         };
 
         CleaningSession {
@@ -186,7 +189,7 @@ impl CleaningSession {
             successful_operations: successful_ops,
             current_row_count: current.dataset.nrows(),
             current_completeness: current.quality_profile.completeness_score,
-            can_rollback: self.current_checkpoint > 0,
+            can_rollback: self.can_rollback(),
         }
     }
 
@@ -226,6 +229,7 @@ impl CleaningSession {
                     description: description.to_string(),
                     dataset: new_dataset,
                     quality_profile,
+                    parent: Some(checkpoint_before),
                 };
 
                 self.checkpoints.push(new_checkpoint);
@@ -315,12 +319,19 @@ impl CleaningSession {
         Ok(())
     }
 
-    /// Rollback to the previous checkpoint (undo last operation).
+    /// Undo the operation that produced the current state: return to the checkpoint it was
+    /// applied to, which after an undo and a new operation is not the previous index.
     pub fn rollback(&mut self) -> Result<(), String> {
-        if self.current_checkpoint == 0 {
-            return Err("Already at initial state, cannot rollback further".to_string());
+        match self.checkpoints[self.current_checkpoint].parent {
+            Some(parent) => self.rollback_to(parent),
+            None => Err("Already at initial state, cannot rollback further".to_string()),
         }
-        self.rollback_to(self.current_checkpoint - 1)
+    }
+
+    /// Whether [`CleaningSession::rollback`] has a state to return to (only the initial state
+    /// has none).
+    pub fn can_rollback(&self) -> bool {
+        self.checkpoints[self.current_checkpoint].parent.is_some()
     }
 
     /// Get a list of all checkpoints.
@@ -588,6 +599,73 @@ mod tests {
         assert!(rollback_result.is_ok());
         assert_eq!(session.current_checkpoint, 0);
         assert_eq!(session.current_dataset().nrows(), 4); // Back to original
+    }
+
+    /// A step that keeps the rows whose `value` is not `drop`.
+    fn without(session: &mut CleaningSession, drop: i32) {
+        session
+            .apply_operation("filter", &format!("drop {drop}"), HashMap::new(), |ds| {
+                let df = ds
+                    .df()
+                    .clone()
+                    .lazy()
+                    .filter(
+                        col("value")
+                            .neq(polars::prelude::lit(drop))
+                            .or(col("value").is_null()),
+                    )
+                    .collect()
+                    .map_err(|e: PolarsError| e.to_string())?;
+                Ok(Dataset::new(df))
+            })
+            .unwrap();
+    }
+
+    fn values(session: &CleaningSession) -> Vec<Option<i32>> {
+        session
+            .current_dataset()
+            .df()
+            .column("value")
+            .unwrap()
+            .i32()
+            .unwrap()
+            .into_iter()
+            .collect()
+    }
+
+    #[test]
+    fn rollback_after_reapply_returns_to_the_branch_point() {
+        // Pre-fix the second undo went to the abandoned checkpoint B (index 2).
+        let mut session = CleaningSession::new(create_test_dataset(), "test_data");
+        let original = values(&session);
+        without(&mut session, 100); // A
+        let a = values(&session);
+        without(&mut session, 200); // B
+        session.rollback().unwrap(); // back at A
+        assert_eq!(values(&session), a);
+        without(&mut session, 400); // C, applied on A
+        assert_eq!(values(&session), [Some(200), None]);
+        session.rollback().unwrap();
+        assert_eq!(values(&session), a, "undo returns to A, not to B");
+        session.rollback().unwrap();
+        assert_eq!(values(&session), original);
+        assert!(!session.can_rollback());
+        assert!(session.rollback().is_err());
+    }
+
+    #[test]
+    fn rollback_to_then_apply_records_the_parent() {
+        let mut session = CleaningSession::new(create_test_dataset(), "test_data");
+        let original = values(&session);
+        without(&mut session, 100);
+        without(&mut session, 200);
+        session.rollback_to(0).unwrap();
+        assert!(!session.can_rollback());
+        without(&mut session, 400); // D, applied on the initial state
+        assert!(session.status().can_rollback);
+        session.rollback().unwrap();
+        assert_eq!(session.current_checkpoint, 0);
+        assert_eq!(values(&session), original);
     }
 
     #[test]

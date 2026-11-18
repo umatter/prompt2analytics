@@ -1,0 +1,5 @@
+"file","format","encoding","origin"
+"dta117_formats.dta","dta","UTF-8","haven::write_dta(version = 13, strl_threshold = 10)"
+"dta118_formats.dta","dta","","haven::write_dta(version = 14, strl_threshold = 10)"
+"dta119_formats.dta","dta","","haven::write_dta(version = 15, strl_threshold = 10)"
+"dta119_formats_msf.dta","dta","","dta119_formats.dta converted to MSF"

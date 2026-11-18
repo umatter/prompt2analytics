@@ -75,10 +75,13 @@ pub fn suggest_similar_columns(
     max_distance: usize,
     max_suggestions: usize,
 ) -> Vec<String> {
+    // Distances ignore case, so a name differing from `target` only in case is at distance 0
+    // and comes first; only `target` itself is left out.
     let mut scored: Vec<(usize, &String)> = available
         .iter()
+        .filter(|col| col.as_str() != target)
         .map(|col| (levenshtein_distance(target, col), col))
-        .filter(|(dist, _)| *dist > 0 && *dist <= max_distance)
+        .filter(|(dist, _)| *dist <= max_distance)
         .collect();
 
     // Sort by distance (closest first)
@@ -431,6 +434,22 @@ pub type EconResult<T> = Result<T, EconError>;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn case_only_typo_is_suggested_first() {
+        // Pre-fix "price" was at distance 0 and dropped with the exact name.
+        let available: Vec<String> = ["prize", "rice", "price", "Price"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let got = suggest_similar_columns("Price", &available, 3, 3);
+        assert_eq!(got[0], "price");
+        assert!(!got.iter().any(|c| c == "Price"), "{got:?}");
+        assert_eq!(
+            format_suggestions("Price", &available[..3]).unwrap(),
+            r#"Did you mean one of: ["price", "prize", "rice"]?"#
+        );
+    }
 
     #[test]
     fn test_error_display() {

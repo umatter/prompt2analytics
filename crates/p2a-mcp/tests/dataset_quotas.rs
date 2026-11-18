@@ -524,7 +524,7 @@ fn without_polars_metadata(ipc: &str) -> String {
     engine.encode(ipc)
 }
 
-/// The footer entry of the parquet file at `path` holding its ARROW:schema.
+/// The value of `footer`'s ARROW:schema key-value entry.
 fn arrow_schema(footer: &mut FileMetaData) -> &mut Option<String> {
     &mut footer
         .key_value_metadata
@@ -1123,8 +1123,9 @@ async fn a_time_zone_polars_cannot_parse_is_refused_alike_with_and_without_quota
         let schema = arrow_schema(footer);
         let engine = base64::engine::general_purpose::STANDARD;
         let mut ipc = engine.decode(schema.as_ref().unwrap()).unwrap();
-        let at = ipc.windows(12).position(|w| w == b"Europe/Paris").unwrap();
-        ipc[at..at + 12].copy_from_slice(b"Europe/Parix");
+        let (from, to) = (b"Europe/Paris", b"Europe/Parix");
+        let at = ipc.windows(from.len()).position(|w| w == from).unwrap();
+        ipc[at..at + to.len()].copy_from_slice(to);
         *schema = Some(engine.encode(ipc));
     });
     let content = base64::engine::general_purpose::STANDARD.encode(std::fs::read(&path).unwrap());
@@ -1152,6 +1153,57 @@ async fn a_time_zone_polars_cannot_parse_is_refused_alike_with_and_without_quota
             );
             assert!(
                 text.contains("its time zone 'Europe/Parix' is not one polars can parse"),
+                "{mode}, {tool}: {body}"
+            );
+            assert!(
+                text.contains(
+                    "(setting POLARS_IGNORE_TIMEZONE_PARSE_ERROR=1 lets polars accept it)"
+                ),
+                "{mode}, {tool}: {body}"
+            );
+            // Not polars' own parse error.
+            assert!(
+                !text.contains("Time Zone Database"),
+                "{mode}, {tool}: {body}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn an_arrow_extension_type_is_refused_alike_with_and_without_quotas() {
+    // A column of an Arrow extension type other than polars' own (R arrow's
+    // vctrs extension, written by arrow 25.0.1; the core loader's fixture).
+    // Upload and load answer the core loader's refusal naming the column,
+    // with quotas and without.
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../p2a-core/tests/data/arrow_extension_vctrs.parquet");
+    let bytes = std::fs::read(&fixture).unwrap();
+    let dir = data_dir();
+    let path = dir.path().join("vctrs.parquet");
+    std::fs::write(&path, &bytes).unwrap();
+    let content = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    let upload = json!({"content": content, "filename": "vctrs.parquet"});
+    let load = json!({"path": path.to_string_lossy(), "name": "vctrs"});
+
+    let (with_quotas, _) = app_with_quota(8 * MIB).await;
+    let (without, _) = build_app_with(&local(), ExecConfig::default())
+        .await
+        .unwrap();
+    for (app, mode) in [(&with_quotas, "with quotas"), (&without, "without")] {
+        for (tool, args) in [("upload_dataset", &upload), ("load_dataset", &load)] {
+            let sid = new_session(app).await;
+            let (status, body) = call(app, &sid, tool, args.clone()).await;
+            assert_eq!(status, StatusCode::OK, "{mode}, {tool}: {body}");
+            assert_eq!(
+                body["data"]["success"],
+                json!(false),
+                "{mode}, {tool}: {body}"
+            );
+            let text = body.to_string();
+            assert!(text.contains("column 'k'"), "{mode}, {tool}: {body}");
+            assert!(
+                text.contains("Arrow extension type ('arrow.r.vctrs')"),
                 "{mode}, {tool}: {body}"
             );
         }
