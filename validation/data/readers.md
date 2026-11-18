@@ -90,7 +90,7 @@ Case `data_readers_formats_values` (`validation/r/cases/data_readers_t4.R`, regi
 |---|---|---|
 | `<formats>` entry (map slot 5) | 49 bytes | 57 bytes |
 | `<value_label_names>` entry (slot 6) | 33 bytes | 129 bytes |
-| strL reference in a data row | v u32, o u32 | v u16, o 48 bits (haven's split; 119 falls back to Stata's v u24, o u40 when that does not resolve) |
+| strL reference in a data row | v u32, o u32 | v u16, o 48 bits (haven's split; in 119 also Stata's v u24, o u40: the first non-empty cell references itself, and the split under which it does is used for the whole file) |
 | GSO header in `<strls>` (slot 10) | `GSO`, v u32, o u32, type u8, length u32 | `GSO`, v u32, o u64, type u8, length u32 |
 | `<lbl>` table in `<value_labels>` (slot 11) | len i32, name 33, 3 pad, n, txtlen, off[n], val[n], text | len i32, name 129, 3 pad, the same table |
 
@@ -197,19 +197,21 @@ harness binary per side pinned to core 2 (`taskset -c 2`, `RAYON_NUM_THREADS=1`,
 cwd `/dev/shm`); 9 interleaved processes per side, each the median of 2,001 / 301 / 41 calls (n = 100 /
 1,000 / 10,000) after 10 warm-ups; the table gives the median of the 9 medians. Seeded data with noise
 (ChaCha8 in the harness, `set.seed(n)` for the files R writes). Load average during the runs 4.3-12.4
-(other work on the machine).
+(other work on the machine). The Stata rows were re-timed after the reader began to hold strL copies
+to the allocation ceiling and to pick the release-119 split once per file: same harness, 7
+interleaved processes per side, load average 7.8-10.5; the other rows are from the first run.
 
 | Hot path | n | v0.5.0 (µs) | lane (µs) | lane/v0.5.0 |
 |---|---|---|---|---|
 | CSV chunks (5 columns, chunk n/10) | 100 | 1,015.6 | 1,050.1 | 1.03x |
 | CSV chunks (5 columns, chunk n/10) | 1,000 | 11,685.4 | 11,365.8 | 0.97x |
 | CSV chunks (5 columns, chunk n/10) | 10,000 | 34,193.5 | 33,635.4 | 0.98x |
-| Stata load (6 columns: 2 numeric, %td, %tc, labelled, str10) | 100 | 43.5 | 60.4 | 1.39x |
-| Stata load (6 columns: 2 numeric, %td, %tc, labelled, str10) | 1,000 | 260.7 | 301.9 | 1.16x |
-| Stata load (6 columns: 2 numeric, %td, %tc, labelled, str10) | 10,000 | 2,592.4 | 2,984.5 | 1.15x |
-| Stata load, plus a strL column of 20-byte values | 100 | 54.8 | 95.2 | 1.74x |
-| Stata load, plus a strL column of 20-byte values | 1,000 | 362.0 | 666.6 | 1.84x |
-| Stata load, plus a strL column of 20-byte values | 10,000 | 3,679.9 | 5,850.5 | 1.59x |
+| Stata load (6 columns: 2 numeric, %td, %tc, labelled, str10) | 100 | 43.7 | 60.8 | 1.39x |
+| Stata load (6 columns: 2 numeric, %td, %tc, labelled, str10) | 1,000 | 264.2 | 328.7 | 1.24x |
+| Stata load (6 columns: 2 numeric, %td, %tc, labelled, str10) | 10,000 | 2,835.5 | 3,156.1 | 1.11x |
+| Stata load, plus a strL column of 20-byte values | 100 | 55.4 | 103.1 | 1.86x |
+| Stata load, plus a strL column of 20-byte values | 1,000 | 359.2 | 690.5 | 1.92x |
+| Stata load, plus a strL column of 20-byte values | 10,000 | 3,698.1 | 6,057.3 | 1.64x |
 | Excel load (5 columns, one of "3.0" text) | 100 | 1,176.8 | 1,178.7 | 1.00x |
 | Excel load (5 columns, one of "3.0" text) | 1,000 | 4,616.5 | 4,554.1 | 0.99x |
 | Excel load (5 columns, one of "3.0" text) | 10,000 | 43,959.6 | 42,545.3 | 0.97x |
@@ -217,7 +219,7 @@ cwd `/dev/shm`); 9 interleaved processes per side, each the median of 2,001 / 30
 Above 1.10x: the Stata load now converts the `%td` and `%tc` columns to dates (two O(n) passes and the
 `<formats>` and `<value_labels>` sections; about 40 ns per date cell, 17 µs fixed), and the strL variant
 reads the file's string table and looks up every cell, where v0.5.0 wrote a constant placeholder and
-read no table (1.6-1.8x; the table is read in one pass without per-block system calls and the text is
+read no table (1.6-1.9x; the table is read in one pass without per-block system calls and the text is
 taken over without a copy).
 
 ## Tests
@@ -242,14 +244,17 @@ Tests that do not load `data_readers_values` (byte offsets, decoders, guards) ar
 | `p2a-core::data::stata::tests::test_validate_dataloader_loads_dta_fixture` | `DataLoader::load` of `dta118_haven` = haven |
 | `p2a-core::data::stata::tests::test_validate_stata_k0_n_positive_is_error` | `<K>` = 0 refused for N = 3, 0, 2^40; ReadStat refuses too (DATA-73) |
 | `p2a-core::data::stata::tests::test_stata_column_buffers_respect_the_allocation_ceiling` | column buffers under a 64-byte ceiling are refused (G3) |
-| `p2a-core::data::stata::tests::test_stata_map_and_header_guards` | map offsets past EOF or off their tag, N and K bounds (DATA-22) |
+| `p2a-core::data::stata::tests::test_stata_map_and_header_guards` | map offsets past EOF (including `<value_labels>` and `</stata_dta>`), out of order or off their tag, N and K bounds (DATA-22) |
 | `p2a-core::data::stata::tests::test_stata_pre_117_formats_are_unsupported` | formats 102-116 and release 120 are `UnsupportedVersion` |
 | `p2a-core::data::stata::tests::test_validate_read_dta_strl_117` | `dta117_formats` strL text and byte lengths = haven (DATA-74) |
 | `p2a-core::data::stata::tests::test_validate_read_dta_strl_118` | `dta118_formats` strL text = haven, a 3,000-byte GSO (DATA-74) |
 | `p2a-core::data::stata::tests::test_validate_read_dta_strl_119` | `dta119_formats` strL text = haven (DATA-74) |
 | `p2a-core::data::stata::tests::test_validate_read_dta_strl_119_big_endian` | `dta119_formats_msf` strL text = haven (DATA-74) |
 | `p2a-core::data::stata::tests::test_stata_strl_unresolved_reference_is_an_error` | a reference (7, 99) fails naming `sl` and row 1; (0, 0) is `""` (DATA-74) |
-| `p2a-core::data::stata::tests::test_validate_read_dta_strl_119_stata_split` | a release-119 reference in Stata's 3/5 split resolves (DATA-74) |
+| `p2a-core::data::stata::tests::stata_strl_119_stata_split_resolves` | unit test, not an R pin (haven reads `""` for the rewritten cells): a release-119 file rewritten to Stata's 3/5 split reads the text haven reads from the original (DATA-74) |
+| `p2a-core::data::stata::tests::stata_strl_119_split_is_chosen_once_per_file` | the first non-empty strL cell fixes the file's split: a 3/5 reference to (7, 1) is not read as (7, 256) in a file of 300 rows |
+| `p2a-core::data::stata::tests::stata_strl_copies_are_held_to_the_allocation_ceiling` | five cells sharing the 3,000-byte GSO are refused under an 8,192-byte ceiling, naming "Stata strL cells"; the file as written loads |
+| `p2a-core::data::stata::tests::stata_strl_block_repeated_in_strls_is_an_error` | a (v, o) that appears twice in `<strls>` is refused |
 | `p2a-core::data::stata::tests::test_stata_strl_respects_the_allocation_ceiling` | the 3,000-byte GSO is refused under a 1,024-byte ceiling, naming the strL context (DATA-74) |
 | `p2a-core::data::stata::tests::test_validate_read_dta_formats_117` | `dta117_formats`: dates, datetimes, `%tm` numeric with a note, label codes, text and sets = haven (DATA-75) |
 | `p2a-core::data::stata::tests::test_validate_read_dta_formats_118` | the same for `dta118_formats` (DATA-75) |

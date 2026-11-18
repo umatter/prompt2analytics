@@ -16,8 +16,14 @@
 //! `GSO` block in `<strls>`: `"GSO"`, v u32, o (u32 in 117, u64 after), type u8 (130 text with a
 //! trailing NUL, 129 binary), length u32, bytes. Equal values share one block. (0, 0) is "". A
 //! reference the table does not hold is an error naming the column and row. Release 119
-//! references are read with haven's 2/6 split, and with Stata's 3/5 split when that one does not
-//! resolve. Binary blocks are read as text with invalid UTF-8 replaced, and a note says so.
+//! references come in two splits, haven's 2/6 and Stata's 3/5, and the same bytes can be a valid
+//! reference under both. The split is chosen once per file: the first strL cell in data order
+//! that is not (0, 0) is the first occurrence of its value, so it references its own variable and
+//! row, and the split under which it does is used for every cell. When neither split gives that,
+//! each cell is read with 2/6 and, when that does not resolve, with 3/5. The decoded strL text is
+//! held to the allocation ceiling as the cells are read (equal values share one block in the file
+//! but are copied into each cell). Binary blocks are read as text with invalid UTF-8 replaced,
+//! and a note says so.
 //!
 //! **Formats and value labels.** `%td` (and the legacy `%d`) columns load as `Date` (days since
 //! 1960-01-01 less 3,653) and `%tc`/`%tC` as `Datetime(ms)` (milliseconds since 1960 less
@@ -287,7 +293,24 @@ pub struct StataReader<R: Read + Seek> {
     map: [u64; MAP_SLOTS],
     /// strL contents by (v, o), read before the rows when a strL column exists.
     strls: PlHashMap<(u64, u64), String>,
+    /// How release-119 strL references are split, decided at the first non-empty cell.
+    strl_split: StrlSplit,
+    /// Bytes of strL text (and their cells) copied into the columns so far.
+    strl_held: usize,
+    /// The allocation ceiling in force when the read began (`usize::MAX`: none).
+    ceiling: usize,
     notes: Vec<String>,
+}
+
+/// The split of a release-119 strL reference: bytes of v (the rest are o).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StrlSplit {
+    /// No non-empty cell read yet.
+    Undecided,
+    /// Every reference has `v` in this many bytes.
+    Fixed(usize),
+    /// The first non-empty cell matched neither split: each cell tries 2/6, then 3/5.
+    PerCell,
 }
 
 impl<R: Read + Seek> StataReader<R> {
@@ -435,6 +458,9 @@ impl<R: Read + Seek> StataReader<R> {
             data_len,
             map,
             strls: PlHashMap::new(),
+            strl_split: StrlSplit::Undecided,
+            strl_held: 0,
+            ceiling: usize::MAX,
             notes: Vec::new(),
         })
     }
@@ -449,6 +475,7 @@ impl<R: Read + Seek> StataReader<R> {
     pub fn read_with(mut self, options: &StataOptions) -> Result<StataLoad, StataError> {
         let var_types: Vec<StataType> = self.variables.iter().map(|v| v.dtype.clone()).collect();
         let var_names: Vec<String> = self.variables.iter().map(|v| v.name.clone()).collect();
+        self.ceiling = crate::resource::alloc_ceiling_bytes().unwrap_or(usize::MAX);
 
         if var_types.iter().any(|t| matches!(t, StataType::StrL)) {
             self.strls = self.read_strls()?;
@@ -500,7 +527,13 @@ impl<R: Read + Seek> StataReader<R> {
                 crate::resource::checkpoint().map_err(resource_err)?;
             }
             for (var_idx, dtype) in var_types.iter().enumerate() {
-                self.read_value(dtype, &var_names[var_idx], row, &mut columns[var_idx])?;
+                self.read_value(
+                    dtype,
+                    var_idx,
+                    &var_names[var_idx],
+                    row,
+                    &mut columns[var_idx],
+                )?;
             }
         }
         self.strls = PlHashMap::new();
@@ -555,18 +588,15 @@ impl<R: Read + Seek> StataReader<R> {
 
     /// The `<strls>` section: every GSO block's text by (v, o).
     fn read_strls(&mut self) -> Result<PlHashMap<(u64, u64), String>, StataError> {
+        // `validate_map` holds <strls> <= <value_labels> <= the file's length.
         let start = self.map[MAP_STRLS];
         let end = self.map[MAP_VALUE_LABELS];
-        if end < start {
-            return Err(StataError::InvalidFormat(format!(
-                "<map> places <value_labels> at byte {end}, before <strls> at byte {start}"
-            )));
-        }
         Self::seek_tag(&mut self.reader, start, b"<strls>")?;
         let order = self.byte_order;
         let release = self.release;
         let mut table = PlHashMap::new();
         let mut binary = false;
+        let mut blocks = 0usize;
         // The position is tracked here: `stream_position` on the buffered reader is a system
         // call per block.
         let mut at = self.reader.stream_position()?;
@@ -596,7 +626,7 @@ impl<R: Read + Seek> StataReader<R> {
                      <strls>"
                 )));
             }
-            let len = len as usize; // at most the file's length
+            let len = len as usize; // `end` is at most the file's length
             let mut bytes: Vec<u8> = crate::resource::try_with_capacity(len, "Stata strL contents")
                 .map_err(resource_err)?;
             bytes.resize(len, 0);
@@ -630,9 +660,14 @@ impl<R: Read + Seek> StataReader<R> {
                     )));
                 }
             };
-            table.insert((v, o), text);
+            if table.insert((v, o), text).is_some() {
+                return Err(StataError::InvalidFormat(format!(
+                    "the strL ({v}, {o}) appears twice in <strls>"
+                )));
+            }
             at = here + len as u64;
-            if table.len() % GSOS_PER_CHECKPOINT == 0 {
+            blocks += 1;
+            if blocks.is_multiple_of(GSOS_PER_CHECKPOINT) {
                 crate::resource::checkpoint().map_err(resource_err)?;
             }
         }
@@ -646,13 +681,9 @@ impl<R: Read + Seek> StataReader<R> {
 
     /// The `<value_labels>` section: each label set's (value, label) pairs by its name.
     fn read_value_labels(&mut self) -> Result<HashMap<String, Vec<(f64, String)>>, StataError> {
+        // `validate_map` holds <value_labels> <= </stata_dta> <= the file's length.
         let start = self.map[MAP_VALUE_LABELS];
         let end = self.map[MAP_END];
-        if end < start {
-            return Err(StataError::InvalidFormat(format!(
-                "<map> places </stata_dta> at byte {end}, before <value_labels> at byte {start}"
-            )));
-        }
         Self::seek_tag(&mut self.reader, start, b"<value_labels>")?;
         let order = self.byte_order;
         let release = self.release;
@@ -775,6 +806,8 @@ impl<R: Read + Seek> StataReader<R> {
             (MAP_FORMATS, "<formats>"),
             (MAP_VALUE_LABEL_NAMES, "<value_label_names>"),
             (MAP_VALUE_LABEL_NAMES + 1, "<variable_labels>"),
+            (MAP_VALUE_LABELS, "<value_labels>"),
+            (MAP_END, "</stata_dta>"),
         ] {
             if map[slot] > file_len {
                 return Err(StataError::InvalidFormat(format!(
@@ -786,16 +819,20 @@ impl<R: Read + Seek> StataReader<R> {
         let ordered = map[MAP_VARIABLE_TYPES] < map[MAP_VARNAMES]
             && map[MAP_VARNAMES] < map[MAP_SORTLIST]
             && map[MAP_SORTLIST] <= map[MAP_DATA]
-            && map[MAP_DATA] < map[MAP_STRLS];
+            && map[MAP_DATA] < map[MAP_STRLS]
+            && map[MAP_STRLS] <= map[MAP_VALUE_LABELS]
+            && map[MAP_VALUE_LABELS] <= map[MAP_END];
         if !ordered {
             return Err(StataError::InvalidFormat(format!(
                 "<map> sections are out of order (variable_types {}, varnames {}, sortlist {}, \
-                 data {}, strls {})",
+                 data {}, strls {}, value_labels {}, end {})",
                 map[MAP_VARIABLE_TYPES],
                 map[MAP_VARNAMES],
                 map[MAP_SORTLIST],
                 map[MAP_DATA],
-                map[MAP_STRLS]
+                map[MAP_STRLS],
+                map[MAP_VALUE_LABELS],
+                map[MAP_END]
             )));
         }
         let ordered = map[MAP_SORTLIST] <= map[MAP_FORMATS]
@@ -898,6 +935,7 @@ impl<R: Read + Seek> StataReader<R> {
     fn read_value(
         &mut self,
         dtype: &StataType,
+        var_idx: usize,
         name: &str,
         row: u64,
         buf: &mut ColumnBuf,
@@ -933,7 +971,17 @@ impl<R: Read + Seek> StataReader<R> {
             (StataType::StrL, ColumnBuf::Text(v)) => {
                 let mut b = [0u8; 8];
                 self.reader.read_exact(&mut b)?;
-                v.push(Some(self.strl_text(&b, name, row)?));
+                let text = self.strl_text(&b, var_idx, name, row)?;
+                // Equal values share one block in the file, so the copies are held to the
+                // ceiling here: the file grows by 8 bytes a cell, the columns by the whole text.
+                self.strl_held = self
+                    .strl_held
+                    .saturating_add(text.len() + size_of::<Option<String>>());
+                if self.strl_held > self.ceiling {
+                    crate::resource::check_alloc::<u8>(self.strl_held, "Stata strL cells")
+                        .map_err(resource_err)?;
+                }
+                v.push(Some(text));
             }
             _ => {
                 return Err(StataError::ParseError(format!(
@@ -946,10 +994,18 @@ impl<R: Read + Seek> StataReader<R> {
 }
 
 impl<R: Read + Seek> StataReader<R> {
-    /// The text a strL reference `b` (8 bytes in the file's byte order) points to.
-    fn strl_text(&self, b: &[u8; 8], name: &str, row: u64) -> Result<String, StataError> {
+    /// The text a strL reference `b` (8 bytes in the file's byte order) in variable `var_idx`
+    /// (from 0), row `row` (from 0) points to.
+    fn strl_text(
+        &mut self,
+        b: &[u8; 8],
+        var_idx: usize,
+        name: &str,
+        row: u64,
+    ) -> Result<String, StataError> {
+        let order = self.byte_order;
         let split = |v_width: usize| -> (u64, u64) {
-            let uint = |bytes: &[u8]| match self.byte_order {
+            let uint = |bytes: &[u8]| match order {
                 ByteOrder::LittleEndian => bytes
                     .iter()
                     .rev()
@@ -960,27 +1016,41 @@ impl<R: Read + Seek> StataReader<R> {
             };
             (uint(&b[..v_width]), uint(&b[v_width..]))
         };
-        let (v, o) = split(self.release.strl_v_width());
-        if (v, o) == (0, 0) {
+        // (0, 0) is eight zero bytes under either split.
+        if b == &[0u8; 8] {
             return Ok(String::new());
         }
+        // Stata's own release-119 references are 3/5; haven's are 2/6. The first non-empty cell
+        // references itself under the file's split.
+        if self.release == Release::R119 && self.strl_split == StrlSplit::Undecided {
+            let own = (var_idx as u64 + 1, row + 1);
+            self.strl_split = if split(2) == own {
+                StrlSplit::Fixed(2)
+            } else if split(3) == own {
+                StrlSplit::Fixed(3)
+            } else {
+                StrlSplit::PerCell
+            };
+        }
+        let release_width = [self.release.strl_v_width()];
+        let widths: &[usize] = match (self.release, self.strl_split) {
+            (Release::R119, StrlSplit::Fixed(2)) => &[2],
+            (Release::R119, StrlSplit::Fixed(_)) => &[3],
+            (Release::R119, _) => &[2, 3],
+            _ => &release_width,
+        };
         let resolves = |(v, o): (u64, u64)| {
             (1..=self.n_vars as u64).contains(&v) && (1..=self.n_obs).contains(&o)
         };
-        if resolves((v, o))
-            && let Some(text) = self.strls.get(&(v, o))
-        {
-            return Ok(text.clone());
-        }
-        // Stata's own release-119 references are 3/5; haven's are 2/6.
-        if self.release == Release::R119 {
-            let alt = split(3);
-            if resolves(alt)
-                && let Some(text) = self.strls.get(&alt)
+        for &width in widths {
+            let key = split(width);
+            if resolves(key)
+                && let Some(text) = self.strls.get(&key)
             {
                 return Ok(text.clone());
             }
         }
+        let (v, o) = split(widths[0]);
         Err(StataError::InvalidFormat(format!(
             "strL column '{name}', row {}: reference ({v}, {o}) is not in the file",
             row + 1
@@ -1103,12 +1173,21 @@ fn labels_as_text(column: &Column, labels: &[(f64, String)]) -> Result<Column, S
     let mut text: Vec<Option<String>> =
         crate::resource::try_with_capacity(values.len(), "Stata value labels")
             .map_err(resource_err)?;
-    for v in values.into_iter() {
+    // Stata label values are i32, so their f64 bits are an exact key (`+ 0.0` makes -0.0 the
+    // key of 0.0). The first label of a value wins, as a linear search would find it.
+    let key = |x: f64| (x + 0.0).to_bits();
+    let mut by_value: PlHashMap<u64, &str> = PlHashMap::with_capacity(labels.len());
+    for (value, label) in labels {
+        by_value.entry(key(*value)).or_insert(label.as_str());
+    }
+    for (i, v) in values.into_iter().enumerate() {
+        if (i as u64).is_multiple_of(ROWS_PER_CHECKPOINT) {
+            crate::resource::checkpoint().map_err(resource_err)?;
+        }
         text.push(v.map(|x| {
-            labels
-                .iter()
-                .find(|(value, _)| *value == x)
-                .map(|(_, label)| label.clone())
+            by_value
+                .get(&key(x))
+                .map(|label| (*label).to_string())
                 .unwrap_or_else(|| {
                     if x.fract() == 0.0 && x.abs() < 1e15 {
                         format!("{}", x as i64)
@@ -1563,11 +1642,11 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_read_dta_strl_119_stata_split() {
+    fn stata_strl_119_stata_split_resolves() {
         // Stata describes release 119 references as v in 3 bytes and o in 5 (pandas reads them
         // so); haven writes and reads 2/6. Rewritten to 3/5, every reference still resolves.
         // The text is compared with haven's reading of the original file; haven itself reads ""
-        // for every cell of the rewritten one.
+        // for every cell of the rewritten one, so this is a unit test, not an R pin.
         let case = Case::load("data_readers_formats_values");
         let mut b = fixture_bytes("dta119_formats.dta");
         let (data, row, offsets) = row_layout(&b);
@@ -1583,6 +1662,76 @@ mod tests {
         }
         let df = load(b).unwrap();
         assert_text_matches(&case, "dta119_formats__sl", df.column("sl").unwrap());
+    }
+
+    #[test]
+    fn stata_strl_119_split_is_chosen_once_per_file() {
+        // Stata writes (7, 1) as 3/5: 07 00 00 01 00 00 00 00, which 2/6 reads as (7, 256). In a
+        // file of at least 256 rows whose row 256 holds its own block, a per-cell 2/6-first rule
+        // read every such cell as row 256's text. The first non-empty cell references itself, so
+        // the file's split is 3/5 and every cell resolves to (7, 1).
+        let b = fixture_bytes("dta119_formats.dta");
+        let sl = column_index(&b, "sl");
+        assert_eq!(sl, 6, "sl is variable 7");
+        let mut reader = StataReader::new(Cursor::new(b)).unwrap();
+        reader.n_obs = 300;
+        reader.strls.insert((7, 1), "first".to_string());
+        reader.strls.insert((7, 256), "row 256".to_string());
+        let stata_7_1 = [7, 0, 0, 1, 0, 0, 0, 0];
+        assert_eq!(reader.strl_text(&stata_7_1, sl, "sl", 0).unwrap(), "first");
+        assert_eq!(reader.strl_split, StrlSplit::Fixed(3));
+        assert_eq!(reader.strl_text(&stata_7_1, sl, "sl", 4).unwrap(), "first");
+        // A haven file's first cell references itself under 2/6, and its split stays 2/6.
+        let b = fixture_bytes("dta119_formats.dta");
+        let mut reader = StataReader::new(Cursor::new(b)).unwrap();
+        reader.n_obs = 300;
+        reader.strls.insert((7, 1), "first".to_string());
+        reader.strls.insert((7, 256), "row 256".to_string());
+        let haven_7_1 = [7, 0, 1, 0, 0, 0, 0, 0];
+        assert_eq!(reader.strl_text(&haven_7_1, sl, "sl", 0).unwrap(), "first");
+        assert_eq!(reader.strl_split, StrlSplit::Fixed(2));
+        assert_eq!(
+            reader.strl_text(&stata_7_1, sl, "sl", 255).unwrap(),
+            "row 256"
+        );
+    }
+
+    #[test]
+    fn stata_strl_copies_are_held_to_the_allocation_ceiling() {
+        // dta118_formats.dta: sl's (7, 2) holds 3,000 bytes of text. Every row pointed at it
+        // copies the block 5 times (above 8,192 bytes); the block itself, and the file as written
+        // (each value once), stay under the ceiling.
+        let b = fixture_bytes("dta118_formats.dta");
+        let (data, row, offsets) = row_layout(&b);
+        let sl = offsets[column_index(&b, "sl")];
+        let mut patched = b.clone();
+        for r in 0..5 {
+            put(&mut patched, data + r * row + sl, &[7, 0, 2, 0, 0, 0, 0, 0]);
+        }
+        let ceiling = Some(8192);
+        assert!(crate::resource::with_alloc_ceiling(ceiling, || load(b)).is_ok());
+        let e = crate::resource::with_alloc_ceiling(ceiling, || load(patched.clone()).unwrap_err());
+        match e {
+            StataError::ParseError(m) => assert!(m.contains("Stata strL cells"), "{m}"),
+            other => panic!("expected ParseError, got {other:?}"),
+        }
+        let df = load(patched).unwrap();
+        let sl = df.column("sl").unwrap().str().unwrap().clone();
+        assert!(sl.into_iter().all(|t| t.is_some_and(|t| t.len() == 3000)));
+    }
+
+    #[test]
+    fn stata_strl_block_repeated_in_strls_is_an_error() {
+        // The second block of dta118_formats.dta is (7, 2); renumbered (7, 1) it repeats the first.
+        let mut b = fixture_bytes("dta118_formats.dta");
+        let strls = b.windows(7).position(|w| w == b"<strls>").unwrap() + 7;
+        assert_eq!(&b[strls..strls + 3], b"GSO");
+        let first_len = u32::from_le_bytes(b[strls + 16..strls + 20].try_into().unwrap());
+        let second = strls + 20 + first_len as usize;
+        assert_eq!(&b[second..second + 7], &[b'G', b'S', b'O', 7, 0, 0, 0]);
+        assert_eq!(&b[second + 7..second + 15], &2u64.to_le_bytes());
+        put(&mut b, second + 7, &1u64.to_le_bytes());
+        assert_invalid(load(b), "the strL (7, 1) appears twice in <strls>");
     }
 
     #[test]
@@ -1687,7 +1836,10 @@ mod tests {
         let end = b.len() + n as usize;
         b.resize(end, 0);
         put(&mut b, N118, &n.to_le_bytes());
-        put(&mut b, MAP118 + 8 * 10, &(end as u64).to_le_bytes()); // <strls>, after the rows
+        // <strls>, after the rows, and <value_labels> and </stata_dta>, which follow it
+        for slot in 10..=12 {
+            put(&mut b, MAP118 + 8 * slot, &(end as u64).to_le_bytes());
+        }
         let first_buffer = (1usize << 20) * std::mem::size_of::<Option<String>>();
         let ceiling = 32usize << 20;
         assert!(
@@ -1736,6 +1888,20 @@ mod tests {
             load(b),
             "<map> places <data> at byte 4837, past the end of the 4737-byte file",
         );
+        // <value_labels> (slot 11) and </stata_dta> (slot 12) are bounded too: the GSO and <lbl>
+        // lengths are checked against them before a buffer is sized.
+        for (slot, tag) in [(11, "<value_labels>"), (12, "</stata_dta>")] {
+            let mut b = fixture_bytes("dta118_haven.dta");
+            put(&mut b, MAP118 + 8 * slot, &(len + 1).to_le_bytes());
+            assert_invalid(
+                load(b),
+                &format!("<map> places {tag} at byte 4738, past the end of the 4737-byte file"),
+            );
+        }
+        let mut b = fixture_bytes("dta118_haven.dta");
+        let strls = u64::from_le_bytes(b[MAP118 + 80..MAP118 + 88].try_into().unwrap());
+        put(&mut b, MAP118 + 8 * 11, &(strls - 1).to_le_bytes());
+        assert_invalid(load(b), "<map> sections are out of order");
         let mut b = fixture_bytes("dta118_haven.dta");
         put(&mut b, MAP118 + 8 * 2, &282u64.to_le_bytes()); // <variable_types> is at 281
         assert_invalid(load(b), "expected <variable_types> at byte 282");
