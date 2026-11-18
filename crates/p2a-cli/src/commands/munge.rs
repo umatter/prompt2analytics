@@ -746,7 +746,7 @@ pub fn execute(
             left,
             right,
             on,
-            right_on.as_ref(),
+            right_on.as_deref(),
             join_type,
             suffix,
             name.as_deref(),
@@ -1242,7 +1242,7 @@ fn execute_join(
     left: &str,
     right: &str,
     on: &[String],
-    right_on: Option<&Vec<String>>,
+    right_on: Option<&[String]>,
     join_type: &JoinType,
     suffix: &str,
     output_name: Option<&str>,
@@ -1298,6 +1298,15 @@ fn execute_join(
     }
 }
 
+/// `"1 column"`, `"2 columns"`.
+fn plural(n: usize, noun: &str) -> String {
+    if n == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{n} {noun}s")
+    }
+}
+
 /// The key refusal of `munge join` in the CLI's own terms, or `None` when the
 /// keys are usable.
 ///
@@ -1311,7 +1320,7 @@ fn join_key_refusal(
     right: &str,
     right_ds: &Dataset,
     on: &[String],
-    right_on: Option<&Vec<String>>,
+    right_on: Option<&[String]>,
 ) -> Option<String> {
     let missing = |ds: &Dataset, cols: &[String]| {
         cols.iter()
@@ -1332,9 +1341,9 @@ fn join_key_refusal(
             }
             if on.len() != right_on.len() {
                 return Some(format!(
-                    "Join failed: --on has {} columns but --right-on has {} columns",
-                    on.len(),
-                    right_on.len()
+                    "Join failed: --on has {} but --right-on has {}",
+                    plural(on.len(), "column"),
+                    plural(right_on.len(), "column")
                 ));
             }
         }

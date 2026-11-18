@@ -55,7 +55,9 @@ p2a --session analysis.json data save firms --output firms.dat --file-format csv
 ```
 
 `data load` reads CSV, Parquet, Excel, Stata and SAS files; the format comes from the extension. `data describe`
-prints the row and column counts and each column's name and type.
+prints the row and column counts and each column's name and type; with `-F json` it is one object with `name`, `rows`,
+`columns`, `column_names` and `column_types` (objects with `name`, `dtype`). `data head -F json` prints an array of
+rows whose cells are typed: numbers, booleans, `null` for a missing cell (and for NaN), text and dates as strings.
 
 **Missing values in CSV files.** `data load` reads the field `NA` and the empty field as missing,
 as R's `read.csv(na.strings = c("NA", ""))` does. `--na-strings` replaces that list with its own,
@@ -207,7 +209,7 @@ What each command prints, besides the coefficient table and its `Standard errors
   Var(b_FE) - Var(b_RE) is not positive definite or is singular.
 - `panel hdfe`: HC1 standard errors (fixest `vcov = "hetero"`), the within R-squared labelled
   `R-squared (within):` and `Adj. R-squared (within):` (adjusted with (n-1)/df_resid as plm;
-  fixest's `war2` differs: 0.716833 vs 0.670467 on Grunfeld), the levels of each fixed effect
+  fixest's `war2` is 0.716833 on Grunfeld; p2a prints plm's 0.670467), the levels of each fixed effect
   and the within F test.
 - `panel gmm`: Arellano-Bond difference GMM, as R's `plm::pgmm` (`effect = "individual"`).
   `--lags` (default 1) lags of the dependent variable are added to `-x`; the instruments are the
@@ -341,7 +343,8 @@ or TRUE/FALSE; any other code is an error. Integer times are accepted. `--conf-t
 Lin-Wei sandwich standard errors and `--cluster <col>` clustered ones (implies `--robust`). Rows with a missing
 time, status, group or covariate are dropped and reported (`Note:` line, `missing`).
 
-JSON keys: `survival km` prints one object per group with `n_obs`, `total_events`,
+JSON keys: `survival km` prints one object; with `--group` it has `method`, `group_variable`, `groups` (one
+object per group, with `group` and the keys below), `missing` and `warnings`. Each curve has `n_obs`, `total_events`,
 `total_censored`, `conf_level`, `conf_type`, `median_survival`, `median_ci`, `times`,
 `n_at_risk`, `n_events`, `n_censored`, `survival`, `std_errors`, `ci_lower`, `ci_upper` (a
 value that is not defined, such as the SE where S(t) = 0, is `null`) and `missing`;
@@ -428,7 +431,15 @@ fill the gaps first; `ccf`, `box-test` and `pp-test` refuse them too.
   `Table not shown: ...`. `chisq-indep` states `Continuity correction: Yates` on a 2 x 2 table
   and R's `Warning:` lines (expected counts below 5). `fisher` reports the conditional maximum
   likelihood odds ratio, as R's `fisher.test`, next to the sample odds ratio.
-- `fivenum`'s JSON has `n`, the values used.
+- `fivenum` is Tukey's (R's `fivenum`): `Lower hinge:` and `Upper hinge:` in text, `lower_hinge` and
+  `upper_hinge` in JSON (not the type 7 quartiles), and `n`, the values used.
+- `wilcoxon` prints R's statistic: `V` for the signed-rank test (one sample or `--paired`), `W` for the rank-sum
+  test; JSON `statistic_name`.
+- `chisq-gof` takes a categorical column (`--observed`, tallied) or a column of counts (`--counts`, optionally
+  `--labels`), with `--probs` (and `--rescale-p`) as `chisq.test(p = , rescale.p = )`.
+- `acf`, `pacf` default to R's `lag.max` = floor(10 log10 n) (at most n - 1), `ccf` to floor(10 log10(n / 2));
+  `acf` is R's estimator (denominator n). `box-test --lag` defaults to 1 and `pp-test` to the short truncation lag,
+  as `Box.test` and `PP.test`.
 
 ### Machine learning
 
@@ -516,10 +527,12 @@ finite (an aliased regressor's `NaN`) are `null`.
 | `reg ols` | `adj_r_squared`, `coefficients` (objects with `coefficient`, `name`, `p_value`, `std_error`, `t_value`), `method`, `n_observations`, `r_squared`, `r_squared_type` (`"ordinary"`), `se_type` (`"classical"`, `"HC0"` ... `"HC3"`), `statistic` (`"t"`), `warnings` (only when there are any) |
 | `reg clustered` | as `reg ols`, plus `n_clusters`; `se_type` is `"cluster:<var>"` |
 | `reg hac` | `bandwidth`, `coefficients`, `kernel`, `method`, `n_obs`, `p_values`, `r_squared`, `std_errors`, `t_values` (coefficient / HAC SE), `warnings` (only when there are any) |
-| `panel fe` | as `reg ols`, plus `n_groups`, `f_statistic`, `f_p_value`; `r_squared_type` is `"within"`; `se_type` is `"classical"`, `"cluster:<entity>"`, `"cluster-hc0:<entity>"` or `"cluster-hc1:<entity>"` |
-| `panel re` | as `panel fe`, but the coefficient objects have `z_value` instead of `t_value` and `statistic` is `"z"`; `r_squared_type` is `"cor(y*, X*b)^2 (plm)"`; `f_statistic`/`f_p_value` are the F form W/K of the Wald test; plus `wald_chi2`, `wald_df`, `wald_p_value`, `sigma_u`, `sigma_e`, `theta` (the observation-weighted mean on an unbalanced panel) and, on an unbalanced panel, `theta_min` and `theta_max` |
+| `panel fe` | as `reg ols`, plus `n_groups`, `f_statistic`, `f_p_value`, `f_df1`, `f_df2` (the F test's degrees of freedom: the slopes and the residual df, or G - 1 when clustered), `missing` (only when rows were dropped); `r_squared_type` is `"within"`; `se_type` is `"classical"`, `"cluster:<entity>"`, `"cluster-hc0:<entity>"` or `"cluster-hc1:<entity>"` |
+| `panel re` | as `panel fe`, but the coefficient objects have `z_value` instead of `t_value` and `statistic` is `"z"`; `r_squared_type` is `"cor(y*, X*b)^2 (plm)"`; `f_statistic`/`f_p_value` are the F form W/K of the Wald test (`f_df1` the slopes without the intercept); plus `wald_chi2`, `wald_df`, `wald_p_value`, `sigma_u`, `sigma_e`, `theta` (the observation-weighted mean on an unbalanced panel) and, on an unbalanced panel, `theta_min` and `theta_max` |
 | `panel hdfe` | as `panel fe`, plus `fe_dimensions` (objects with `levels`, `name`, one per `--fe` column); `n_groups` is the number of levels of the first `--fe` column; `se_type` is `"HC1"` |
 | `panel hausman` | `chi2_statistic`, `df`, `p_value`, `recommendation`, `test`, `vcov_method`, `warnings` (always, possibly `[]`) |
+| `discrete logit`, `probit` | `coefficients` (objects with `coefficient`, `name`, `p_value`, `std_error`, `z_value`), `method`, `n_observations`, `pseudo_r_squared` (McFadden), `r_squared_type` (`"McFadden"`), `se_type` (`"classical"`), `statistic` (`"z"`), `log_likelihood`, `log_likelihood_null`, `aic`, `separation`, `aliased`, `converged`, `iterations`, `warnings`, `missing` (only when rows were dropped); no `r_squared` |
+| `causal iv` | as `reg ols` (`se_type` `"HC1"`, or `"classical"` with `--robust false`; `adj_r_squared` is ivreg's 1 - (1 - R²)(n - 1)/df), plus the first-stage and identification diagnostics |
 
 ### Table (`-F table`)
 Printed like `text` in this version; a separate table rendering is not implemented.
@@ -648,7 +661,7 @@ p2a data [OPTIONS] <COMMAND>
 | Command | Aliases | Description |
 |---|---|---|
 | `load` |  | Load a dataset from a file |
-| `list` |  | List all loaded datasets |
+| `list` |  | List the session's datasets; reads every dataset to report those whose file is no longer readable |
 | `describe` |  | Show the row and column counts, column names and types |
 | `head` |  | Show first N rows of a dataset |
 | `generate` |  | Generate random data with specified distributions |
@@ -670,7 +683,7 @@ p2a data load [OPTIONS] <PATH>
 
 #### `p2a data list`
 
-List all loaded datasets
+List the session's datasets; reads every dataset to report those whose file is no longer readable
 
 ```text
 p2a data list [OPTIONS]
@@ -1361,7 +1374,7 @@ p2a panel [OPTIONS] <COMMAND>
 | `pvcm` |  | Panel Variable Coefficients Model (Swamy estimator) |
 | `pmg` |  | Pooled Mean Group estimator |
 | `gls` |  | Panel GLS (Feasible GLS) |
-| `unit-root` |  | Panel unit root tests (LLC, IPS, Hadri) |
+| `unit-root` |  | Panel unit root tests (LLC, IPS, Maddala-Wu, Hadri), as plm::purtest |
 
 #### `p2a panel fe`
 
@@ -1513,7 +1526,7 @@ p2a panel gls [OPTIONS] --dep-var <DEP_VAR> --entity <ENTITY> --time <TIME> <DAT
 
 #### `p2a panel unit-root`
 
-Panel unit root tests (LLC, IPS, Hadri)
+Panel unit root tests (LLC, IPS, Maddala-Wu, Hadri), as plm::purtest
 
 ```text
 p2a panel unit-root [OPTIONS] --var <VAR> --unit <UNIT> --time <TIME> <DATASET>
@@ -1570,6 +1583,7 @@ p2a causal iv [OPTIONS] --dep-var <DEP_VAR> <DATASET>
 | `--exog <EXOG>...` | Exogenous variable columns |
 | `--endog <ENDOG>...` | Endogenous variable columns |
 | `--instruments <INSTRUMENTS>...` | Instrument columns |
+| `--robust [<BOOL>]` | Heteroskedasticity-robust (HC1) standard errors (true/false; default true, as the MCP tool). --robust false gives the classical errors of summary(ivreg) [default: true] [possible values: true, false] |
 
 #### `p2a causal did`
 
@@ -1729,6 +1743,8 @@ p2a causal staggered-did [OPTIONS] --outcome <OUTCOME> --treatment-time <TREATME
 | `--anticipation <ANTICIPATION>` | Periods before treatment in which units may anticipate it (did's anticipation) [default: 0] |
 | `--bootstrap <BOOTSTRAP>` | Unit-bootstrap replications for SEs (at least 50), or 0 for analytic SEs [default: 999] |
 | `--seed <SEED>` | Seed of the bootstrap draws (default: 42) |
+| `--base-period-type <BASE_PERIOD_TYPE>` | Base period of each ATT(g,t), as did's base_period [default: varying] |
+| `--min-obs-per-cell <N>` | Fewest treated and fewest comparison units a cell needs (default 1: did computes every cell that has both sides) [default: 1] |
 
 #### `p2a causal tmle`
 
@@ -1764,8 +1780,9 @@ p2a causal gsynth [OPTIONS] --outcome <OUTCOME> --treatment <TREATMENT> --unit <
 | `--unit <UNIT>` | Unit identifier column |
 | `--time <TIME>` | Time period column |
 | `-x, --covariates [<COVARIATES>...]` | Covariate columns (optional) |
-| `--n-factors <N_FACTORS>` | Number of latent factors (0 = auto-select via cross-validation) [default: 0] |
-| `--force <FORCE>` | Fixed effects (gsynth force): none, unit (also individual), time or two_way (default; also twoway, two-way) [default: two_way] |
+| `--n-factors <N_FACTORS>` | Number of latent factors (0 = choose it by cross-validation over 0..=--r-max, as gsynth's CV = TRUE) [default: 0] |
+| `--r-max <R_MAX>` | Largest number of factors the cross-validation tries (gsynth's r = c(0, r.max); default 5, as gsynth) [default: 5] |
+| `--force <FORCE>` | Fixed effects (gsynth force): unit (default, as gsynth; also individual), none, time or two_way (also twoway, two-way) [default: unit] |
 | `--estimator <ESTIMATOR>` | Estimator: ife (interactive fixed effects, default; also gsynth) or mc (matrix completion; also matrix_completion) [default: ife] |
 | `--bootstrap-se` | Compute bootstrap standard errors |
 | `--n-bootstrap <N_BOOTSTRAP>` | Number of bootstrap replications (default: 200) [default: 200] |
@@ -2032,14 +2049,14 @@ p2a stats [OPTIONS] <COMMAND>
 | `t-test-one` |  | One-sample t-test |
 | `t-test-two` |  | Two-sample t-test (independent samples) |
 | `t-test-paired` |  | Paired t-test |
-| `chisq-gof` |  | Chi-squared goodness-of-fit test |
+| `chisq-gof` |  | Chi-squared goodness-of-fit test: a categorical column tallied (--observed, R's chisq.test(table(x))) or a column of counts (--counts, R's chisq.test(x)) |
 | `chisq-indep` |  | Chi-squared test of independence |
 | `fisher` |  | Fisher's exact test for 2x2 tables |
 | `shapiro` |  | Shapiro-Wilk normality test |
 | `wilcoxon` |  | Wilcoxon rank-sum test (Mann-Whitney U) |
 | `bartlett` |  | Bartlett's test for homogeneity of variances |
 | `kruskal` |  | Kruskal-Wallis rank-sum test |
-| `fivenum` |  | Five-number summary (min, Q1, median, Q3, max) |
+| `fivenum` |  | Tukey's five-number summary (min, lower hinge, median, upper hinge, max), as R's fivenum |
 | `iqr` |  | Interquartile range |
 | `mad` |  | Median Absolute Deviation |
 | `acf` |  | Autocorrelation function |
@@ -2103,16 +2120,20 @@ p2a stats t-test-paired [OPTIONS] --col1 <COL1> --col2 <COL2> <DATASET>
 
 #### `p2a stats chisq-gof`
 
-Chi-squared goodness-of-fit test
+Chi-squared goodness-of-fit test: a categorical column tallied (--observed, R's chisq.test(table(x))) or a column of counts (--counts, R's chisq.test(x))
 
 ```text
-p2a stats chisq-gof [OPTIONS] --observed <OBSERVED> <DATASET>
+p2a stats chisq-gof [OPTIONS] <--observed <OBSERVED>|--counts <COUNTS>> <DATASET>
 ```
 
 | Argument or option | Description |
 |---|---|
 | `<DATASET>` | Dataset name |
-| `-o, --observed <OBSERVED>` | Column with observed counts |
+| `-o, --observed <OBSERVED>` | Categorical column; its values are tallied (R: chisq.test(table(x))). Give exactly one of --observed and --counts |
+| `--counts <COUNTS>` | Column of counts, one category per row (R: chisq.test(x)); a missing, negative or non-finite count is refused |
+| `--labels <LABELS>` | Column naming the category of each row of --counts (default: the row numbers) |
+| `--probs <P1,P2,...>` | Expected probabilities, comma-separated, one per category: in row order with --counts, in the sorted order of the levels with --observed (numbers numerically, text in byte order, as R's factor). Default: equal probabilities |
+| `--rescale-p` | Divide --probs by their sum instead of requiring them to sum to 1 (R: rescale.p) |
 
 #### `p2a stats chisq-indep`
 
@@ -2201,7 +2222,7 @@ p2a stats kruskal [OPTIONS] --col <COL> --group <GROUP> <DATASET>
 
 #### `p2a stats fivenum`
 
-Five-number summary (min, Q1, median, Q3, max)
+Tukey's five-number summary (min, lower hinge, median, upper hinge, max), as R's fivenum
 
 ```text
 p2a stats fivenum [OPTIONS] --col <COL> <DATASET>
@@ -2250,7 +2271,7 @@ p2a stats acf [OPTIONS] --col <COL> <DATASET>
 |---|---|
 | `<DATASET>` | Dataset name |
 | `-c, --col <COL>` | Time series column |
-| `--lag-max <LAG_MAX>` | Maximum lag [default: 20] |
+| `--lag-max <LAG_MAX>` | Maximum lag (default: R's floor(10 log10 n), at most n - 1) |
 | `--partial` | Compute partial ACF instead |
 
 #### `p2a stats anova`
@@ -2326,7 +2347,7 @@ p2a stats pacf [OPTIONS] --col <COL> <DATASET>
 |---|---|
 | `<DATASET>` | Dataset name |
 | `-c, --col <COL>` | Time series column |
-| `--lag-max <LAG_MAX>` | Maximum lag [default: 20] |
+| `--lag-max <LAG_MAX>` | Maximum lag (default: R's floor(10 log10 n), at most n - 1) |
 
 #### `p2a stats ccf`
 
@@ -2341,7 +2362,7 @@ p2a stats ccf [OPTIONS] --x <X> --y <Y> <DATASET>
 | `<DATASET>` | Dataset name |
 | `--x <X>` | First time series column |
 | `--y <Y>` | Second time series column |
-| `--lag-max <LAG_MAX>` | Maximum lag [default: 20] |
+| `--lag-max <LAG_MAX>` | Maximum lag (default: R's ccf, floor(10 log10(n / 2)), at most n - 1) |
 
 #### `p2a stats box-test`
 
@@ -2355,7 +2376,7 @@ p2a stats box-test [OPTIONS] --col <COL> <DATASET>
 |---|---|
 | `<DATASET>` | Dataset name |
 | `-c, --col <COL>` | Time series column |
-| `--lag <LAG>` | Maximum lag to test [default: 10] |
+| `--lag <LAG>` | Number of lags tested (default 1, as R's Box.test) [default: 1] |
 | `--box-pierce` | Use Box-Pierce instead of Ljung-Box |
 | `--fitdf <FITDF>` | Degrees of freedom to subtract (for ARMA residuals) [default: 0] |
 
@@ -2386,7 +2407,7 @@ p2a stats pp-test [OPTIONS] --col <COL> <DATASET>
 |---|---|
 | `<DATASET>` | Dataset name |
 | `-c, --col <COL>` | Time series column |
-| `--lshort` | Use short truncation lag |
+| `--lshort [<BOOL>]` | Short truncation lag trunc(4 (n/100)^0.25) (true/false; default true, as R's PP.test); false uses the long lag trunc(12 (n/100)^0.25) [default: true] [possible values: true, false] |
 
 #### `p2a stats power-t`
 
@@ -2430,7 +2451,7 @@ p2a timeseries [OPTIONS] <COMMAND>
 | `stl` |  | STL decomposition (Seasonal-Trend using LOESS) |
 | `decompose` |  | Classical seasonal decomposition (moving averages) |
 | `struct-ts` |  | Structural time series (state space) model |
-| `causal-impact` |  | Bayesian structural time series causal inference (CausalImpact) |
+| `causal-impact` |  | Causal impact of an intervention from a structural time-series model (as CausalImpact, fitted by maximum likelihood; intervals and tail probabilities from the normal approximation, not a posterior) |
 | `spectrum` |  | Spectral density estimation (periodogram) |
 
 #### `p2a timeseries arima`
@@ -2625,6 +2646,7 @@ p2a timeseries stl [OPTIONS] --col <COL> --period <PERIOD> <DATASET>
 | `--col <COL>` | Time series column |
 | `--period <PERIOD>` | Seasonal period (e.g., 12 for monthly, 4 for quarterly) |
 | `--robust [<BOOL>]` | Robust (outlier-resistant) fitting (true/false; default false) [default: false] [possible values: true, false] |
+| `--s-window <periodic\|N>` | Seasonal smoothing window, as stl's s.window: periodic, or an odd span of at least 3 (default: the next odd number from the period, stlrs' default; R's stl has none) |
 
 #### `p2a timeseries decompose`
 
@@ -2658,7 +2680,7 @@ p2a timeseries struct-ts [OPTIONS] --col <COL> <DATASET>
 
 #### `p2a timeseries causal-impact`
 
-Bayesian structural time series causal inference (CausalImpact)
+Causal impact of an intervention from a structural time-series model (as CausalImpact, fitted by maximum likelihood; intervals and tail probabilities from the normal approximation, not a posterior)
 
 ```text
 p2a timeseries causal-impact [OPTIONS] --response <RESPONSE> --time <TIME> --pre-start <PRE_START> --pre-end <PRE_END> --post-start <POST_START> --post-end <POST_END> <DATASET>
@@ -2875,7 +2897,7 @@ p2a spatial moran [OPTIONS] --variable <VARIABLE> --coord-x <COORD_X> --coord-y 
 | `--coord-y <COORD_Y>` | Coordinate Y column (for building spatial weights) |
 | `-k, --k-neighbors <K_NEIGHBORS>` | Number of nearest neighbors for spatial weights, 1 to n - 1 where n is the number of rows (default: 5) [default: 5] |
 | `--weight-style <WEIGHT_STYLE>` | Weight style, as spdep::nb2listw: W (row-standardised, default), B (binary), C (global), U (unit sum), minmax or S (variance-stabilising); old spellings rowstd, binary accepted [default: W] |
-| `--alternative <ALTERNATIVE>` | Alternative hypothesis, as spdep::moran.test: two.sided (default), greater or less [default: two.sided] |
+| `--alternative <ALTERNATIVE>` | Alternative hypothesis, as spdep::moran.test: greater (default, positive spatial autocorrelation), less or two.sided [default: greater] |
 
 ### `p2a machine-learning` (alias `ml`)
 
@@ -2942,7 +2964,7 @@ p2a machine-learning tsne [OPTIONS] <DATASET>
 | `-n, --n-components <N_COMPONENTS>` | Number of output dimensions (default: 2) [default: 2] |
 | `--perplexity <PERPLEXITY>` | Perplexity parameter (default: 30.0) [default: 30.0] |
 | `--max-iter <MAX_ITER>` | Maximum iterations (default: 1000) [default: 1000] |
-| `--learning-rate <LEARNING_RATE>` | Learning rate (default: 200.0) [default: 200.0] |
+| `--learning-rate <LEARNING_RATE>` | Learning rate, Rtsne's eta (default: 200.0; sklearn's learning_rate is 4 times this) [default: 200.0] |
 | `--seed <SEED>` | Random seed |
 
 #### `p2a machine-learning random-forest`
@@ -3009,7 +3031,7 @@ p2a machine-learning svm [OPTIONS] --target <TARGET> <DATASET>
 | `--cols <COLS>...` | Feature columns |
 | `-y, --target <TARGET>` | Target column (binary classification) |
 | `-c, --c <C>` | Regularization parameter C (default: 1.0) [default: 1.0] |
-| `--max-iter <MAX_ITER>` | Maximum iterations (default: 1000) [default: 1000] |
+| `--max-iter <MAX_ITER>` | Budget of passes, at least 1 (default: 1000): the solver makes at most max_iter × n pair updates, n the number of rows [default: 1000] |
 | `--tolerance <TOLERANCE>` | Convergence tolerance (default: 1e-3) [default: 0.001] |
 
 ### `p2a visualize` (alias `viz`)
@@ -3130,7 +3152,8 @@ p2a visualize coefplot [OPTIONS] --dep-var <DEP_VAR> --file <OUTPUT> <DATASET>
 | `-x, --indep-vars <INDEP_VARS>...` | Independent variable columns |
 | `-f, --file <OUTPUT>` | Output file path |
 | `--conf-level <CONF_LEVEL>` | Confidence level (default: 0.95) [default: 0.95] |
-| `--title <TITLE>` | Chart title |
+| `--se <SE>` | Standard errors of the intervals, as reg ols --robust: hc1 (default, heteroskedasticity-robust), hc0, hc2, hc3, or standard (classical, as R's confint) [default: hc1] [possible values: standard, hc0, hc1, hc2, hc3] |
+| `--title <TITLE>` | Chart title (default: the outcome, the level and the standard errors) |
 
 #### `p2a visualize residuals`
 

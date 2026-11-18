@@ -223,7 +223,9 @@
         "OLS t of gamma",
         "residual variance sigma^2",
         "long-run variance lambda^2",
-        "truncation lag"
+        "truncation lag",
+        "rw_short_* (gamma, t, sigma2, lambda2, lag) for the default run and bare --lshort",
+        "rw_long_* (gamma, t, sigma2, lambda2, lag) for --lshort false"
       ],
       "tolerance": "validation/README.md, n = 200: gamma 1e-8, t, sigma^2 and lambda^2 1e-6 relative; lag exact",
       "deviations": [
@@ -231,11 +233,6 @@
           "finding": "STAT-6",
           "quantity": "Z(tau) statistic and p-value",
           "note": "not pinned: the Z(tau) correction and the lag rule from length(x) are Tier 4 (STAT-6, STAT-35), as in T3-WP40's registry"
-        },
-        {
-          "finding": "CLI-21",
-          "quantity": "default truncation lag",
-          "note": "the CLI defaults to lshort = false (R: TRUE); the test passes --lshort (Tier 4)"
         }
       ],
       "supersedes_legacy": []
@@ -260,6 +257,120 @@
         "OLS coefficients, HC1 SEs, t and p on the filtered subset (year >= 1945), printed, and the replayed script's identical table"
       ],
       "tolerance": "validation/README.md, n = 200: Tol::coef/se/stat/p_value(200); n and sorted rows exact; the printed table of the replay test Tol::printed(6/6/3/4)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "cli_iv_report",
+      "name": "CLI causal iv report: HC1 or classical SEs, R-squared and ivreg adjusted R-squared",
+      "category": "interfaces",
+      "reference": "AER::ivreg + sandwich::vcovHC(type = 'HC1'); summary.ivreg",
+      "doc": "validation/cli/models.md",
+      "cases": [
+        "cli_iv_report"
+      ],
+      "tests": [
+        "p2a-cli::t4_causal::test_validate_cli_iv_report"
+      ],
+      "quantities": [
+        "coefficients",
+        "SE (HC1 and classical)",
+        "t",
+        "p",
+        "R-squared",
+        "adjusted R-squared"
+      ],
+      "tolerance": "Tol::coef/se/stat/p_value(n)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "cli_gsynth_defaults",
+      "name": "CLI causal gsynth defaults: force unit, r up to 5",
+      "category": "interfaces",
+      "reference": "gsynth::gsynth(force = 'unit', CV = FALSE, r = 0 | 1) (fixed-r fits) and gsynth(force = 'unit', CV = TRUE, r = c(0, 5)) (default run)",
+      "doc": "validation/cli/models.md",
+      "cases": [
+        "cli_gsynth_defaults"
+      ],
+      "tests": [
+        "p2a-cli::t4_causal::test_validate_cli_gsynth_defaults"
+      ],
+      "quantities": [
+        "average ATT at r = 0 and r = 1 (force unit)",
+        "force",
+        "r_max"
+      ],
+      "tolerance": "Tol::iterative(5e-4) (p2a's EM stopping rule against R's converged fit, as test_validate_cli_gsynth_r_spellings)",
+      "deviations": [
+        {
+          "finding": "CLI-33",
+          "quantity": "cross-validated r",
+          "note": "on gsynth_staggered.csv core's cross-validation over r = 0..5 chooses r = 1 (ATT 2.967) where gsynth 1.4's deterministic cross-validation chooses r = 0 (ATT 6.948); default_r and default_att_avg are kept out of the Check, and the default run's ATT is pinned at the fixed-r fit for the r core chooses"
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "cli_panel_fe_missing_note",
+      "name": "CLI panel fe/re dropped-rows note and missing JSON",
+      "category": "interfaces",
+      "reference": "plm::plm(model = 'within' | 'random') on complete cases (na.omit)",
+      "doc": "validation/cli/models.md",
+      "cases": [
+        "panel_grunfeld_na"
+      ],
+      "tests": [
+        "p2a-cli::tier2::wp19_dynamic_panel::test_validate_cli_panel_fe_missing_note"
+      ],
+      "quantities": [
+        "rows dropped",
+        "per-column missing counts"
+      ],
+      "tolerance": "exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "cli_staggered_universal_simple",
+      "name": "CLI causal staggered-did universal base period, simple ATT, first-period drops",
+      "category": "interfaces",
+      "reference": "did::att_gt(base_period = 'varying' | 'universal', bstrap = FALSE); aggte(type = 'simple' | 'group')",
+      "doc": "validation/cli/models.md",
+      "cases": [
+        "did_cs_varying",
+        "did_cs_small_cohorts"
+      ],
+      "tests": [
+        "p2a-cli::t4_causal::test_validate_cli_staggered_universal_simple"
+      ],
+      "quantities": [
+        "simple overall ATT and SE",
+        "universal group overall ATT and SE",
+        "n_dropped_first_period"
+      ],
+      "tolerance": "Tol::coef/se(n); counts exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "cli_hurdle_theta_se",
+      "name": "CLI discrete hurdle negbin dispersion and its standard errors",
+      "category": "interfaces",
+      "reference": "pscl::hurdle(dist = 'negbin'): theta, SE(log theta), theta * SE(log theta)",
+      "doc": "validation/cli/models.md",
+      "cases": [
+        "disc_hurdle_t4"
+      ],
+      "tests": [
+        "p2a-cli::tier3::t4_output::test_validate_cli_hurdle_theta_se"
+      ],
+      "quantities": [
+        "theta",
+        "SE of theta",
+        "SE of log theta"
+      ],
+      "tolerance": "Tol::iterative(1e-7) theta, Tol::iterative(1e-5) SEs, as the core hurdle tests",
       "deviations": [],
       "supersedes_legacy": []
     }

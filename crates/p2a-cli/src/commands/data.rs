@@ -7,7 +7,9 @@ use p2a_core::{DataLoader, Dataset};
 use polars::prelude::*;
 use std::path::{Path, PathBuf};
 
-use crate::output::{OutputFormat, format_dataset_summary, print_error, print_message};
+use crate::output::{
+    OutputFormat, any_value_json, format_dataset_summary, print_error, print_json, print_message,
+};
 use crate::progress::Progress;
 use crate::session::SessionManager;
 
@@ -41,7 +43,8 @@ EXAMPLES:
         na_strings: Option<Vec<String>>,
     },
 
-    /// List all loaded datasets
+    /// List the session's datasets; reads every dataset to report those whose file is no
+    /// longer readable
     List,
 
     /// Show the row and column counts, column names and types
@@ -347,10 +350,6 @@ fn execute_describe(
                 .map(|s| s.to_string())
                 .collect();
 
-            let summary = format_dataset_summary(dataset_name, nrows, ncols, &columns, format);
-            println!("{}", summary);
-
-            // Show column types
             match format {
                 OutputFormat::Json => {
                     let col_info: Vec<serde_json::Value> = df
@@ -363,9 +362,20 @@ fn execute_describe(
                             })
                         })
                         .collect();
-                    println!("{}", serde_json::to_string_pretty(&col_info)?);
+                    print_json(&serde_json::json!({
+                        "name": dataset_name,
+                        "rows": nrows,
+                        "columns": ncols,
+                        "column_names": columns,
+                        "column_types": col_info,
+                    }))?;
                 }
                 _ => {
+                    print!(
+                        "{}",
+                        format_dataset_summary(dataset_name, nrows, ncols, &columns, format)
+                    );
+                    println!();
                     println!("\nColumn types:");
                     for col in df.get_columns() {
                         println!("  {}: {:?}", col.name(), col.dtype());
@@ -404,17 +414,19 @@ fn execute_head(
 
             match format {
                 OutputFormat::Json => {
-                    // Convert to JSON
-                    let mut rows = Vec::new();
+                    // One object per row, each cell a typed JSON value.
+                    let mut rows = Vec::with_capacity(head.height());
                     for i in 0..head.height() {
                         let mut row = serde_json::Map::new();
                         for col in head.get_columns() {
-                            let val = col.get(i).map_or("null".to_string(), |v| format!("{}", v));
-                            row.insert(col.name().to_string(), serde_json::Value::String(val));
+                            let val = col
+                                .get(i)
+                                .map_or(serde_json::Value::Null, |v| any_value_json(&v));
+                            row.insert(col.name().to_string(), val);
                         }
                         rows.push(serde_json::Value::Object(row));
                     }
-                    println!("{}", serde_json::to_string_pretty(&rows)?);
+                    print_json(&serde_json::Value::Array(rows))?;
                 }
                 _ => {
                     println!("{}", head);

@@ -53,17 +53,14 @@ use p2a_core::{
 };
 
 use crate::output::{
-    OutputFormat, add_notes, add_result_notes, core_message, format_regression_results,
-    missing_json, parse_core_option, print_error, print_missing_note, print_notes,
-    print_result_notes, result_notes,
+    CoefRow, FitLine, OutputFormat, RegressionReport, StatKind, add_notes, add_result_notes,
+    core_message, format_regression_report, missing_json, parse_core_option, print_error,
+    print_json, print_missing_note, print_notes, print_result_notes, result_notes,
 };
 use crate::session::SessionManager;
 use p2a_core::diagnostics::IdentificationReport;
 use p2a_core::econometrics::matching::{MOrder, MatchMethodKind, MatchOptions, match_it_with};
-
-/// Bootstrap seed for `causal staggered-did` when `--seed` is not given. The core estimator
-/// falls back to an unseeded generator for `seed: None`, so the CLI sets one itself.
-const STAGGERED_DID_DEFAULT_SEED: u64 = 42;
+use p2a_core::econometrics::staggered_did::BasePeriodType;
 
 /// Identification warnings of severity Caution and above, as
 /// `[{"code", "severity", "title", "message"}]`.
@@ -134,6 +131,19 @@ EXAMPLES:
         /// Instrument columns
         #[arg(long, num_args = 1..)]
         instruments: Vec<String>,
+
+        /// Heteroskedasticity-robust (HC1) standard errors (true/false; default true, as the MCP
+        /// tool). --robust false gives the classical errors of summary(ivreg)
+        #[arg(
+            long,
+            value_name = "BOOL",
+            num_args = 0..=1,
+            default_value_t = true,
+            default_missing_value = "true",
+            action = clap::ArgAction::Set,
+            value_parser = clap::builder::BoolishValueParser::new()
+        )]
+        robust: bool,
     },
 
     /// Difference-in-Differences
@@ -529,6 +539,23 @@ EXAMPLES:
         /// Seed of the bootstrap draws (default: 42)
         #[arg(long)]
         seed: Option<u64>,
+
+        /// Base period of each ATT(g,t), as did's base_period.
+        ///
+        /// varying (default): a pre-treatment cell compares t with the period before it;
+        /// universal: every cell of cohort g compares t with g - 1 - anticipation.
+        #[arg(long, default_value = "varying", value_parser = parse_core_option::<BasePeriodType>)]
+        base_period_type: BasePeriodType,
+
+        /// Fewest treated and fewest comparison units a cell needs (default 1: did computes
+        /// every cell that has both sides).
+        #[arg(
+            long,
+            default_value_t = 1,
+            value_name = "N",
+            value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..)
+        )]
+        min_obs_per_cell: usize,
     },
 
     /// Targeted Maximum Likelihood Estimation (TMLE)
@@ -605,13 +632,19 @@ EXAMPLES:
         #[arg(short = 'x', long, num_args = 0..)]
         covariates: Vec<String>,
 
-        /// Number of latent factors (0 = auto-select via cross-validation)
+        /// Number of latent factors (0 = choose it by cross-validation over 0..=--r-max, as
+        /// gsynth's CV = TRUE)
         #[arg(long, default_value = "0")]
         n_factors: usize,
 
-        /// Fixed effects (gsynth force): none, unit (also individual), time or two_way (default;
-        /// also twoway, two-way)
-        #[arg(long, default_value = "two_way", value_parser = parse_core_option::<GsynthForce>)]
+        /// Largest number of factors the cross-validation tries (gsynth's r = c(0, r.max);
+        /// default 5, as gsynth)
+        #[arg(long, default_value_t = GSYNTH_DEFAULT_R_MAX)]
+        r_max: usize,
+
+        /// Fixed effects (gsynth force): unit (default, as gsynth; also individual), none, time
+        /// or two_way (also twoway, two-way)
+        #[arg(long, default_value = "unit", value_parser = parse_core_option::<GsynthForce>)]
         force: GsynthForce,
 
         /// Estimator: ife (interactive fixed effects, default; also gsynth) or mc (matrix
@@ -750,7 +783,17 @@ pub fn execute(
             exog,
             endog,
             instruments,
-        } => execute_iv(dataset, dep_var, exog, endog, instruments, format, session),
+            robust,
+        } => execute_iv(
+            dataset,
+            dep_var,
+            exog,
+            endog,
+            instruments,
+            *robust,
+            format,
+            session,
+        ),
         CausalCommands::Did {
             dataset,
             outcome,
@@ -897,6 +940,8 @@ pub fn execute(
             anticipation,
             bootstrap,
             seed,
+            base_period_type,
+            min_obs_per_cell,
         } => execute_staggered_did(
             dataset,
             outcome,
@@ -909,6 +954,8 @@ pub fn execute(
             *anticipation,
             *bootstrap,
             *seed,
+            *base_period_type,
+            *min_obs_per_cell,
             format,
             session,
         ),
@@ -939,6 +986,7 @@ pub fn execute(
             time,
             covariates,
             n_factors,
+            r_max,
             force,
             estimator,
             bootstrap_se,
@@ -951,6 +999,7 @@ pub fn execute(
             time,
             covariates,
             *n_factors,
+            *r_max,
             *force,
             *estimator,
             *bootstrap_se,
@@ -1011,12 +1060,30 @@ pub fn execute(
     }
 }
 
+/// The JSON `diagnostics` of an IV fit: the identification report's warnings, or `null` with
+/// a warning naming the failure when the diagnostics could not be computed.
+fn diagnostics_json(
+    diagnostics: &Result<IdentificationReport, p2a_core::EconError>,
+    warnings: &mut Vec<String>,
+) -> serde_json::Value {
+    match diagnostics {
+        Ok(r) => identification_json(r),
+        Err(e) => {
+            warnings.push(format!(
+                "identification diagnostics could not be computed: {e}"
+            ));
+            serde_json::Value::Null
+        }
+    }
+}
+
 fn execute_iv(
     dataset_name: &str,
     dep_var: &str,
     exog: &[String],
     endog: &[String],
     instruments: &[String],
+    robust: bool,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
@@ -1037,40 +1104,50 @@ fn execute_iv(
             let endog_refs: Vec<&str> = endog.iter().map(|s| s.as_str()).collect();
             let inst_refs: Vec<&str> = instruments.iter().map(|s| s.as_str()).collect();
 
-            match run_iv2sls(ds, dep_var, &exog_refs, &endog_refs, &inst_refs, true) {
+            match run_iv2sls(ds, dep_var, &exog_refs, &endog_refs, &inst_refs, robust) {
                 Ok(result) => {
-                    // IVResult uses fields, not methods
-                    let coeffs = &result.coefficients;
-                    let ses = &result.std_errors;
-                    let p_vals = &result.p_values;
-                    let t_vals = &result.t_stats;
-
-                    let var_names = &result.variables;
-
-                    let coef_table: Vec<(String, f64, f64, f64, f64)> = var_names
-                        .iter()
-                        .enumerate()
-                        .map(|(i, name)| (name.clone(), coeffs[i], ses[i], t_vals[i], p_vals[i]))
-                        .collect();
-
-                    let output = format_regression_results(
-                        "2SLS / IV Regression",
-                        &coef_table,
-                        result.r_squared,
-                        result.r_squared, // IVResult has no adj_r_squared
-                        result.n_obs,
-                        format,
+                    let coefficients = CoefRow::from_slices(
+                        &result.variables,
+                        &result.coefficients,
+                        &result.std_errors,
+                        &result.t_stats,
+                        &result.p_values,
                     );
+                    let (se_text, se_json) = if robust {
+                        ("HC1 (heteroskedasticity-robust)", "HC1")
+                    } else {
+                        ("classical", "classical")
+                    };
+                    // ivreg's adjusted R-squared: 1 - (1 - R2)(n - 1) / df.residual
+                    let adj_r_squared = if result.df > 0 {
+                        1.0 - (1.0 - result.r_squared) * (result.n_obs as f64 - 1.0)
+                            / result.df as f64
+                    } else {
+                        f64::NAN
+                    };
 
                     // Identification diagnostics; a failure is reported as a warning, not
                     // shown as an empty (warning-free) list.
-                    let diagnostics = iv_diagnostics(ds, &result);
                     let mut warnings = result.warnings.clone();
-                    if let Err(e) = &diagnostics {
-                        warnings.push(format!(
-                            "identification diagnostics could not be computed: {e}"
-                        ));
-                    }
+                    let diagnostics = iv_diagnostics(ds, &result);
+                    let diagnostics_value = diagnostics_json(&diagnostics, &mut warnings);
+                    let report = RegressionReport {
+                        method: "2SLS / IV Regression",
+                        coefficients,
+                        statistic: StatKind::T,
+                        fit_lines: vec![
+                            FitLine::r_squared("R-squared", result.r_squared),
+                            FitLine::adj_r_squared("Adj. R-squared", adj_r_squared),
+                        ],
+                        n_obs: result.n_obs,
+                        se_type: se_text,
+                        se_type_json: se_json,
+                        r_squared_type: "ordinary",
+                        extra_json: serde_json::Map::new(),
+                        // printed with the notes below
+                        warnings: &[],
+                    };
+                    let output = format_regression_report(&report, format);
 
                     // Print first-stage diagnostics
                     match format {
@@ -1083,18 +1160,15 @@ fn execute_iv(
                                 "p_values": result.first_stage_p_values,
                                 "strong_instruments": result.strong_instruments,
                             });
-                            json["diagnostics"] = match &diagnostics {
-                                Ok(r) => identification_json(r),
-                                Err(_) => serde_json::Value::Null,
-                            };
+                            json["diagnostics"] = diagnostics_value;
                             add_notes(&mut json, None, &warnings);
                             if let Some(m) = missing_json(&result.missing) {
                                 json["missing"] = m;
                             }
-                            println!("{}", serde_json::to_string_pretty(&json)?);
+                            print_json(&json)?;
                         }
                         _ => {
-                            println!("{}", output);
+                            print!("{output}");
                             if !result.first_stage_f_stats.is_empty() {
                                 println!(
                                     "\nFirst-stage diagnostics ({}):",
@@ -1904,6 +1978,8 @@ fn execute_staggered_did(
     anticipation: usize,
     bootstrap: usize,
     seed: Option<u64>,
+    base_period_type: BasePeriodType,
+    min_obs_per_cell: usize,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
@@ -1929,7 +2005,10 @@ fn execute_staggered_did(
             config.estimation_method = estimation_method;
             config.anticipation = anticipation;
             config.bootstrap = bootstrap;
-            config.seed = Some(seed.unwrap_or(STAGGERED_DID_DEFAULT_SEED));
+            // None: core's default seed (42)
+            config.seed = seed;
+            config.base_period_type = base_period_type;
+            config.min_obs_per_cell = min_obs_per_cell;
 
             match run_staggered_did(
                 ds,
@@ -1953,6 +2032,17 @@ fn execute_staggered_did(
                                 "ci_upper": result.overall_att.ci_upper,
                                 "p_value": result.overall_att.p_value,
                             },
+                            // did's aggte(type = "simple"): the ATT(g,t) of post-treatment
+                            // cells weighted by cohort size
+                            "overall_simple": {
+                                "att": result.overall_simple.att,
+                                "std_error": result.overall_simple.std_error,
+                                "ci_lower": result.overall_simple.ci_lower,
+                                "ci_upper": result.overall_simple.ci_upper,
+                                "p_value": result.overall_simple.p_value,
+                            },
+                            "base_period_type": result.config.base_period_type.to_string(),
+                            "n_dropped_first_period": result.n_dropped_first_period,
                             "event_study": result.event_study.iter().map(|e| {
                                 serde_json::json!({
                                     "relative_time": e.key,
@@ -2099,6 +2189,9 @@ fn execute_tmle(
     Ok(())
 }
 
+/// gsynth's default r.max, the default of `--r-max`.
+const GSYNTH_DEFAULT_R_MAX: usize = 5;
+
 fn execute_gsynth(
     dataset_name: &str,
     outcome: &str,
@@ -2107,6 +2200,7 @@ fn execute_gsynth(
     time_col: &str,
     covariates: &[String],
     n_factors: usize,
+    r_max: usize,
     gsynth_force: GsynthForce,
     gsynth_estimator: GsynthEstimator,
     bootstrap_se: bool,
@@ -2129,10 +2223,22 @@ fn execute_gsynth(
             let mut config = GsynthConfig::default();
             config.n_factors = n_factors;
             config.cross_validate = n_factors == 0;
+            config.max_factors = r_max;
             config.force = gsynth_force;
             config.estimator = gsynth_estimator;
             config.bootstrap_se = bootstrap_se;
             config.n_bootstrap = n_bootstrap;
+
+            // --r-max bounds the cross-validation, which a fixed --n-factors turns off
+            let cli_warnings: Vec<String> = (n_factors > 0 && r_max != GSYNTH_DEFAULT_R_MAX)
+                .then(|| {
+                    format!(
+                        "--r-max {r_max} has no effect: it applies only with --n-factors 0 \
+                         (cross-validation); {n_factors} factors were fitted"
+                    )
+                })
+                .into_iter()
+                .collect();
 
             match run_gsynth(
                 ds, outcome, treatment, unit_col, time_col, &cov_refs, config,
@@ -2150,6 +2256,7 @@ fn execute_gsynth(
                             "n_pre_periods": result.n_pre_periods,
                             "n_post_periods": result.n_post_periods,
                             "n_factors": result.n_factors,
+                            "r_max": (n_factors == 0).then_some(r_max),
                             "estimator": result.estimator.to_string(),
                             "force": result.force.to_string(),
                             "beta": result.beta,
@@ -2174,11 +2281,13 @@ fn execute_gsynth(
                                 })
                             }).collect::<Vec<_>>(),
                         });
+                        add_notes(&mut json, None, &cli_warnings);
                         add_result_notes(&mut json, &result);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
                         println!("{}", result);
+                        print_notes(None, &cli_warnings, format);
                     }
                 },
                 Err(e) => print_error(&format!("gsynth failed: {}", e), format),
@@ -2853,6 +2962,25 @@ mod tests {
             json!([
                 {"code": "B", "severity": "Caution", "title": "t B", "message": "m B"},
                 {"code": "C", "severity": "Critical", "title": "t C", "message": "m C"}])
+        );
+    }
+}
+
+#[cfg(test)]
+mod iv_diagnostics_tests {
+    use super::diagnostics_json;
+    use p2a_core::EconError;
+
+    #[test]
+    fn iv_diagnostics_failure_path() {
+        let mut warnings = vec!["earlier".to_string()];
+        let failed = Err(EconError::Computation("Sargan test failed".into()));
+        assert!(diagnostics_json(&failed, &mut warnings).is_null());
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(
+            warnings[1].starts_with("identification diagnostics could not be computed")
+                && warnings[1].contains("Sargan test failed"),
+            "{warnings:?}"
         );
     }
 }

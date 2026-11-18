@@ -1,0 +1,42 @@
+{
+  "schema": 1,
+  "id": "cli_iv_report",
+  "area": "cli",
+  "method": "ivreg(y ~ x + w | w + z1 + z2): classical and HC1 standard errors, R-squared and adjusted R-squared",
+  "reference": "AER::ivreg; summary (classical); lmtest::coeftest(vcov. = sandwich::vcovHC(type = 'HC1')) (t on df.residual)",
+  "call": "ivreg(y ~ x + w | w + z1 + z2, data = iv_weak_controls)",
+  "dataset": "validation/datasets/generated/iv_weak_controls.csv",
+  "datasets": ["validation/datasets/generated/iv_weak_controls.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "AER": "1.2.17",
+    "sandwich": "3.1.3",
+    "lmtest": "0.9.40"
+  },
+  "values": {
+    "coef": {
+      "names": ["(Intercept)", "x", "w"],
+      "values": [1.0425984384578373, 0.10838033928024544, 1.3271390550714173]
+    },
+    "se_classical": {
+      "names": ["(Intercept)", "x", "w"],
+      "values": [0.083341471514729454, 1.8355768531997416, 3.7517822785945838]
+    },
+    "p_classical": {
+      "names": ["(Intercept)", "x", "w"],
+      "values": [2.0766920558930115e-31, 0.95294056081238898, 0.7236870278080163]
+    },
+    "se_hc1": {
+      "names": ["(Intercept)", "x", "w"],
+      "values": [0.085334611710189454, 1.8351318071923248, 3.7463531763495266]
+    },
+    "p_hc1": {
+      "names": ["(Intercept)", "x", "w"],
+      "values": [3.3492832791439696e-30, 0.95292916150527118, 0.7233030928936508]
+    },
+    "r_squared": 0.45098504940074269,
+    "adj_r_squared": 0.44877573370416624,
+    "df_residual": 497,
+    "n": 500
+  }
+}

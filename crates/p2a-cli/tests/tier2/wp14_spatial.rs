@@ -112,8 +112,15 @@ fn test_cli_spatial_moran_int64_base_r_cross_check() {
         let v = j[key].as_f64().unwrap_or_else(|| panic!("{key} in {j}"));
         assert!(Tol::stat(n).allows(v, r_value), "{key} {v} vs R {r_value}");
     }
-    // two-sided, the CLI default
+    // greater, moran.test's default and the CLI's: pnorm(z, lower.tail = FALSE)
     let p = j["p_value"].as_f64().unwrap();
+    assert!(
+        Tol::p_value(n).allows(p, 6.830_580_379_368_958_4e-5),
+        "p {p}"
+    );
+    let mut two = moran("pts");
+    two.extend(["--alternative", "two.sided"]);
+    let p = ts.json(&two)["p_value"].as_f64().unwrap();
     assert!(
         Tol::p_value(n).allows(p, 0.000_136_611_607_587_379_17),
         "p {p}"

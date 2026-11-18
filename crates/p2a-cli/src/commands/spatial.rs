@@ -191,8 +191,9 @@ EXAMPLES:
         #[arg(long, default_value = "W", value_parser = crate::output::parse_core_option::<WeightStyle>)]
         weight_style: WeightStyle,
 
-        /// Alternative hypothesis, as spdep::moran.test: two.sided (default), greater or less
-        #[arg(long, default_value = "two.sided", value_parser = crate::output::parse_core_option::<MoranAlternative>)]
+        /// Alternative hypothesis, as spdep::moran.test: greater (default, positive spatial
+        /// autocorrelation), less or two.sided
+        #[arg(long, default_value = "greater", value_parser = crate::output::parse_core_option::<MoranAlternative>)]
         alternative: MoranAlternative,
     },
 }
@@ -440,7 +441,7 @@ fn execute_sar(
                         );
                         println!("{}", "-".repeat(60));
                         for i in 0..result.coefficients.len() {
-                            let sig = significance_stars(result.p_values[i]);
+                            let sig = spaced_mark(result.p_values[i]);
                             println!(
                                 "{:<15} {:>12.6} {:>12.6} {:>10.4} {:>10.4}{}",
                                 result.coef_names[i],
@@ -453,7 +454,7 @@ fn execute_sar(
                         }
 
                         println!("\nSpatial autoregressive coefficient (rho):");
-                        let rho_sig = significance_stars(result.rho_p);
+                        let rho_sig = spaced_mark(result.rho_p);
                         println!(
                             "  rho = {:.6} (SE: {:.6}, z: {:.4}, p: {:.4}){}",
                             result.rho, result.rho_se, result.rho_z, result.rho_p, rho_sig
@@ -562,7 +563,7 @@ fn execute_sem(
                         );
                         println!("{}", "-".repeat(60));
                         for i in 0..result.coefficients.len() {
-                            let sig = significance_stars(result.p_values[i]);
+                            let sig = spaced_mark(result.p_values[i]);
                             println!(
                                 "{:<15} {:>12.6} {:>12.6} {:>10.4} {:>10.4}{}",
                                 result.coef_names[i],
@@ -575,7 +576,7 @@ fn execute_sem(
                         }
 
                         println!("\nSpatial error coefficient (lambda):");
-                        let lambda_sig = significance_stars(result.lambda_p);
+                        let lambda_sig = spaced_mark(result.lambda_p);
                         println!(
                             "  lambda = {:.6} (SE: {:.6}, z: {:.4}, p: {:.4}){}",
                             result.lambda,
@@ -685,7 +686,7 @@ fn execute_sac(
                         );
                         println!("{}", "-".repeat(60));
                         for i in 0..result.coefficients.len() {
-                            let sig = significance_stars(result.p_values[i]);
+                            let sig = spaced_mark(result.p_values[i]);
                             println!(
                                 "{:<15} {:>12.6} {:>12.6} {:>10.4} {:>10.4}{}",
                                 result.coef_names[i],
@@ -698,14 +699,14 @@ fn execute_sac(
                         }
 
                         println!("\nSpatial autoregressive coefficient (rho):");
-                        let rho_sig = significance_stars(result.rho_p);
+                        let rho_sig = spaced_mark(result.rho_p);
                         println!(
                             "  rho = {:.6} (SE: {:.6}, z: {:.4}, p: {:.4}){}",
                             result.rho, result.rho_se, result.rho_z, result.rho_p, rho_sig
                         );
 
                         println!("\nSpatial error coefficient (lambda):");
-                        let lambda_sig = significance_stars(result.lambda_p);
+                        let lambda_sig = spaced_mark(result.lambda_p);
                         println!(
                             "  lambda = {:.6} (SE: {:.6}, z: {:.4}, p: {:.4}){}",
                             result.lambda,
@@ -808,7 +809,7 @@ fn execute_moran(
                         println!("Expected I: {:.6}", result.expectation);
                         println!("Variance: {:.6}", result.variance);
                         println!("z-score: {:.4}", result.z_score);
-                        let sig = significance_stars(result.p_value);
+                        let sig = spaced_mark(result.p_value);
                         println!("p-value: {:.4}{}", result.p_value, sig);
                         println!("N: {}", result.n);
 
@@ -843,17 +844,11 @@ fn execute_moran(
 }
 
 /// Helper function to add significance stars
-fn significance_stars(p: f64) -> &'static str {
-    if p < 0.001 {
-        " ***"
-    } else if p < 0.01 {
-        " **"
-    } else if p < 0.05 {
-        " *"
-    } else if p < 0.1 {
-        " ."
-    } else {
-        ""
+/// `output::stars` after a space, nothing when the p-value earns no mark.
+fn spaced_mark(p: f64) -> String {
+    match crate::output::stars(p) {
+        "" => String::new(),
+        s => format!(" {s}"),
     }
 }
 

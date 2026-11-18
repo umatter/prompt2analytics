@@ -26,9 +26,14 @@ The numbers come from the cores; the tests here pin them through the binary agai
 | `test_validate_cli_loess_masspoint_warns` | `smoothers_gcv_periodic_loess` | `loess_masspoint_expected` (first 10 fitted values); the zero-width-neighbourhood warning in text and JSON | `Tol::coef(100)` |
 | `test_validate_cli_hac_aliased_df` | `cli_hac_aliased` | `coef`, `se_nw`, `t_nw`, `p_nw` (identified columns), `df_resid`, `r2` | `Tol::coef/se/stat/p_value(120)`; df exact |
 | `test_validate_cli_nls_expdecay` | `nls_expdecay` | `coef`, `se`, `rss` | `Tol::iterative(1e-6)` coefficients, `1e-5` SEs, `1e-8` RSS |
-| `test_validate_cli_pp_test_internals` | `stat_pp_t3` | `rw_short_gamma`, `rw_short_t`, `rw_short_sigma2`, `rw_short_lambda2`, `rw_short_lag` (Z(tau) and its p-value not pinned: STAT-6, STAT-35) | gamma `Tol::coef(200)`, the rest `Tol::stat(200)`; lag exact |
+| `test_validate_cli_pp_test_internals` | `stat_pp_t3` | `rw_short_gamma`, `rw_short_t`, `rw_short_sigma2`, `rw_short_lambda2`, `rw_short_lag` for the default run and bare `--lshort`; `rw_long_gamma`, `rw_long_t`, `rw_long_sigma2`, `rw_long_lambda2`, `rw_long_lag` for `--lshort false` (Z(tau) and its p-value not pinned: STAT-6, STAT-35) | gamma `Tol::coef(200)`, the rest `Tol::stat(200)`; lag exact |
 | `test_validate_cli_munge_persists_across_invocations`, `test_validate_cli_derived_dataset_names_replacement_and_errors` | `cli_munge_ols_grunfeld` | `sel_coef`, `sel_se_hc1`, `sel_t_hc1`, `sel_p_hc1`, `sel_r2`, `sel_adj_r2`, `sel_n` on the subset `munge select` stored in one invocation and `reg ols` read in the next; `sorted_{inv,firm,year}_head` | `Tol::coef/se/stat/p_value(200)`; n and rows exact |
 | `test_validate_cli_exported_script_with_munge_runs` | `cli_munge_ols_grunfeld` | `post_coef`, `post_se_hc1`, `post_t_hc1`, `post_p_hc1`, `post_rows` on `munge filter` (year >= 1945); the exported script, run with bash from another directory, prints the same table and leaves nothing behind | `Tol::printed(6)` coefficients and SEs, `printed(3)` t, `printed(4)` p; rows exact |
+| `test_validate_cli_iv_report` | `cli_iv_report` | `causal iv` coefficients, HC1 and (`--robust false`) classical SEs, t, p, R-squared, ivreg's adjusted R-squared 1 - (1 - R²)(n - 1)/df | `Tol::coef/se/stat/p_value(n)` |
+| `test_validate_cli_gsynth_defaults` | `cli_gsynth_defaults` | `unit_r0_att_avg` (`--r-max 0`), `unit_r1_att_avg` (`--n-factors 1`); default `force` unit, `r_max` 5; the default run's ATT at the r core chooses | relative 5e-4 (as the r spellings test); deviation CLI-33: gsynth's deterministic CV chooses r = 0 (`default_r`, ATT `default_att_avg` 6.948), core's chooses r = 1 (ATT 2.967); both keys are not compared |
+| `test_validate_cli_panel_fe_missing_note` | `panel_grunfeld_na` | fe and re: the `Note:` line last, not among the warnings; JSON `missing.n_dropped` 5 | exact |
+| `test_validate_cli_staggered_universal_simple` | `did_cs_varying`, `did_cs_small_cohorts` | `never_varying_simple_overall_att/_se` (`overall_simple`), `never_universal_group_overall_att/_se` (`--base-period-type universal`), `n_dropped_first_period` | `Tol::coef/se(n)`; counts exact |
+| `test_validate_cli_hurdle_theta_se` | `disc_hurdle_t4` | `hnb_theta`, `hnb_se_theta`, `hnb_se_log_theta` (JSON `theta`, `theta_std_error`, `log_theta_std_error`; the text line as zinb's) | `Tol::iterative(1e-7)` theta, `1e-5` SEs |
 
 `test_cli_smooth_spline_criterion` loads no case: it checks that `--criterion gcv|cv` gives the core's
 own fit (p2a's smoothing spline is not R's yet), so it is not in the registry.
@@ -38,7 +43,8 @@ Not listed above, because they read no R case: the table tests `test_cli_json_ha
 `test_cli_option_values_parse_aliases_and_reject_unknown` (option values parse through the cores' spellings and
 unknown ones are usage errors), plus `test_cli_smooth_spline_criterion`, `test_cli_munge_bin_and_cast_print_one_json_document`,
 `test_cli_munge_fill_na_mode_and_value_counts_normalize`, `test_cli_data_load_jsonl_persists` and
-`test_cli_data_save_json_round_trip`. Grouped Kaplan-Meier is left out of the table (CLI-38).
+`test_cli_data_save_json_round_trip`. Grouped Kaplan-Meier prints one JSON object, its groups in a `groups`
+array (CLI-38).
 
 ## Persisted datasets
 
@@ -99,8 +105,11 @@ any other method is an error.
 ## Known differences
 
 - `smooth-spline` numbers are not R-pinned (REG-29, REG-30); its default criterion is now GCV, as R's.
-- `data head` and `data describe` JSON shapes (every cell a string, text cells quoted inside it: CLI-15) and grouped
-  Kaplan-Meier (CLI-38) are later work; the tests compare cell text without the quotes.
+- `data head -F json` prints typed cells (numbers, booleans, null, text and dates as strings) and `data describe
+  -F json` one object with `column_types` (CLI-15); grouped Kaplan-Meier prints one object with a `groups` array
+  (CLI-38).
+- `discrete logit/probit` report McFadden's pseudo R-squared (`pseudo_r_squared`) and z statistics (`z_value`,
+  `statistic` `"z"`), as `summary(glm)`; there is no `r_squared` key.
 - `discrete logit/probit` use p2a's default glm control (ECON-60); the probit pins compare at the tight MLE, which
   the default control reaches within 1e-6.
 - `panel unit-root` keeps the core's defaults for lags and the lag rule, which differ from `plm::purtest`'s
@@ -108,7 +117,30 @@ any other method is an error.
 - `reg quantreg` defaults to `--method auto` and `--se nid` at every n (R's `summary.rq` switches to `iid`-based
   rules at small n).
 - `survival cox` now defaults to Efron ties, as `survival::coxph`; before, the CLI used Breslow.
-- `stats pp-test`: Z(tau), its p-value and the default truncation lag are not pinned (STAT-6, STAT-35, CLI-21).
+- `stats pp-test` defaults to `--lshort true`, `PP.test`'s short truncation lag trunc(4 (n/100)^(1/4)) (CLI-21);
+  `--lshort false` is the long lag. Z(tau) and its p-value are not pinned (STAT-6, STAT-35).
+
+
+## Timing
+
+Release builds of `p2a` (`--no-default-features --features spectral-analysis`) at the v0.5.0 base f80b0131 and at the lane head, one process per invocation (`p2a --session s.json <command>`, the session's datasets loaded from CSV each time, so about 20-40 ms of every number is start-up and loading), pinned with `taskset -c 10`, `RAYON_NUM_THREADS=1`; per row and n, 9 rounds per side interleaved, each the median of 21 invocations after 3 warm-ups; the table shows the median of the medians and the 1-minute load average of the (shared, busy) machine. Data: n rows of simulated noise data (head: 5 mixed columns; describe: 20 columns; acf/pacf/ccf/box/pp: AR(1) series; moran: n random points, k = 4; gsynth: n/20 units x 20 periods, at least 5 units; iv: 2 instruments; km: 4 groups; chisq-gof: 6 categories; coefplot and hac: 3 regressors, hac with 4 lags). Lane timing, preliminary until the integration re-times it. The v0.5.2 (90a99318) column of the causal, survival and regression rows is left to the integration.
+
+| Command | n | f80b0131 (ms) | lane head (ms) | head/base | load |
+|---|---:|---:|---:|---:|---:|
+| `causal gsynth default` | 100 | 44.6 | 42.1 | 0.95x | 51 |
+| `causal gsynth default` | 1,000 | 72.1 | 55.3 | 0.77x | 46 |
+| `causal gsynth default` | 10,000 | 98.8 | 76.4 | 0.77x | 43 |
+| `causal iv default` | 100 | 44.0 | 42.1 | 0.96x | 42 |
+| `causal iv default` | 1,000 | 43.2 | 43.0 | 0.99x | 41 |
+| `causal iv default` | 10,000 | 57.3 | 57.0 | 0.99x | 39 |
+| `survival km --group -F json` | 100 | 40.5 | 39.0 | 0.97x | 36 |
+| `survival km --group -F json` | 1,000 | 39.0 | 38.8 | 1.00x | 31 |
+| `survival km --group -F json` | 10,000 | 61.4 | 68.9 | 1.12x | 28 |
+| `reg hac` | 100 | 47.0 | 45.9 | 0.98x | 31 |
+| `reg hac` | 1,000 | 46.5 | 45.9 | 0.99x | 29 |
+| `reg hac` | 10,000 | 56.7 | 54.2 | 0.96x | 28 |
+
+`survival km --group -F json` at n = 10,000 was re-run alone: 78.7 ms base, 86.8 ms head (1.10x). The head prints one JSON document where the base printed one per group; the nested, pretty-printed curves are about 24% more bytes (1.67 MB against 1.35 MB), the likely cause of the difference.
 
 ## Reproduce
 

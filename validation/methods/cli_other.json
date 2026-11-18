@@ -141,6 +141,25 @@
       "tolerance": "validation/README.md for each n (hclust_60 60: 1e-6 / 1e-5; spatial_sim 80: 1e-6 / 1e-5, p 1e-5 + 1e-12; mtcars 32: 1e-6 / 1e-5); ranks and partitions exact",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "cli_stl_s_window",
+      "name": "CLI ts stl --s-window",
+      "category": "interfaces",
+      "reference": "stats::stl(ts(y, frequency = 12), s.window = 'periodic' | 13)",
+      "doc": "validation/cli/flags.md",
+      "cases": [
+        "ts_utils_t4"
+      ],
+      "tests": [
+        "p2a-cli::tier3::wp61_other::test_validate_cli_stl_s_window"
+      ],
+      "quantities": [
+        "first ten seasonal, trend and remainder values"
+      ],
+      "tolerance": "absolute 1e-5 sd(y) (stlrs computes in f32), as the core STL tests",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

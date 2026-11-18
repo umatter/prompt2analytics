@@ -292,35 +292,36 @@ pub fn check_core_option<T: std::str::FromStr<Err = p2a_core::EconError>>(
     parse_core_option::<T>(s).map(|_| s.to_string())
 }
 
-/// The JSON object [`format_regression_results`] prints (`method`, `coefficients` rows
-/// `{name, coefficient, std_error, t_value, p_value}`, `r_squared`, `adj_r_squared`,
-/// `n_observations`), for commands that add keys to it. NaN values serialise as `null`.
-pub fn regression_results_json(
-    method: &str,
-    coefficients: &[(String, f64, f64, f64, f64)],
-    r_squared: f64,
-    adj_r_squared: f64,
-    n_obs: usize,
-) -> serde_json::Value {
-    let coef_json: Vec<_> = coefficients
-        .iter()
-        .map(|(name, coef, se, t, p)| {
-            serde_json::json!({
-                "name": name,
-                "coefficient": coef,
-                "std_error": se,
-                "t_value": t,
-                "p_value": p,
-            })
-        })
-        .collect();
-    serde_json::json!({
-        "method": method,
-        "coefficients": coef_json,
-        "r_squared": r_squared,
-        "adj_r_squared": adj_r_squared,
-        "n_observations": n_obs,
-    })
+/// A polars cell as a typed JSON value: null for a missing cell; booleans and integers as
+/// themselves; finite floats as numbers and NaN or ±Inf as `null` (as in the regression JSON);
+/// text, categorical and enum cells as their string; dates, times and anything else as the
+/// string polars displays (dates in ISO form, `2026-11-17`).
+pub(crate) fn any_value_json(v: &polars::prelude::AnyValue<'_>) -> serde_json::Value {
+    use polars::prelude::AnyValue as A;
+    use serde_json::Value;
+    let float = |x: f64| {
+        serde_json::Number::from_f64(x)
+            .map(Value::Number)
+            .unwrap_or(Value::Null)
+    };
+    match v {
+        A::Null => Value::Null,
+        A::Boolean(b) => Value::Bool(*b),
+        A::Int8(x) => (*x).into(),
+        A::Int16(x) => (*x).into(),
+        A::Int32(x) => (*x).into(),
+        A::Int64(x) => (*x).into(),
+        A::UInt8(x) => (*x).into(),
+        A::UInt16(x) => (*x).into(),
+        A::UInt32(x) => (*x).into(),
+        A::UInt64(x) => (*x).into(),
+        A::Float32(x) => float(f64::from(*x)),
+        A::Float64(x) => float(*x),
+        other => match other.get_str() {
+            Some(s) => Value::String(s.to_string()),
+            None => Value::String(other.to_string()),
+        },
+    }
 }
 
 /// Format dataset summary for display
@@ -345,69 +346,6 @@ pub fn format_dataset_summary(
             out.push_str(&format!("  Rows: {}\n", nrows));
             out.push_str(&format!("  Columns: {}\n", ncols));
             out.push_str(&format!("  Column names: {}\n", columns.join(", ")));
-            out
-        }
-    }
-}
-
-/// Format regression results for display
-pub fn format_regression_results(
-    method: &str,
-    coefficients: &[(String, f64, f64, f64, f64)], // name, coef, se, t, p
-    r_squared: f64,
-    adj_r_squared: f64,
-    n_obs: usize,
-    format: &OutputFormat,
-) -> String {
-    match format {
-        OutputFormat::Json => serde_json::to_string_pretty(&regression_results_json(
-            method,
-            coefficients,
-            r_squared,
-            adj_r_squared,
-            n_obs,
-        ))
-        .unwrap_or_default(),
-        OutputFormat::Table | OutputFormat::Text => {
-            let mut out = String::new();
-            out.push_str(&format!("\n{} Results\n", method));
-            out.push_str(&"=".repeat(60));
-            out.push_str("\n\n");
-
-            // Header
-            out.push_str(&format!(
-                "{:<15} {:>12} {:>12} {:>10} {:>10}\n",
-                "Variable", "Coefficient", "Std. Error", "t-value", "p-value"
-            ));
-            out.push_str(&"-".repeat(60));
-            out.push('\n');
-
-            // Coefficients
-            for (name, coef, se, t, p) in coefficients {
-                let sig = if *p < 0.001 {
-                    "***"
-                } else if *p < 0.01 {
-                    "**"
-                } else if *p < 0.05 {
-                    "*"
-                } else if *p < 0.1 {
-                    "."
-                } else {
-                    ""
-                };
-                out.push_str(&format!(
-                    "{:<15} {:>12.6} {:>12.6} {:>10.3} {:>10.4}{}\n",
-                    name, coef, se, t, p, sig
-                ));
-            }
-
-            out.push_str(&"-".repeat(60));
-            out.push('\n');
-            out.push_str(&format!("R-squared: {:.6}\n", r_squared));
-            out.push_str(&format!("Adj. R-squared: {:.6}\n", adj_r_squared));
-            out.push_str(&format!("Observations: {}\n", n_obs));
-            out.push_str("\nSignif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1\n");
-
             out
         }
     }
@@ -504,6 +442,37 @@ impl From<&p2a_core::regression::OlsCoefficient> for CoefRow {
     }
 }
 
+/// A fit statistic of a [`RegressionReport`]: its text label, its JSON key and its value.
+#[derive(Debug, Clone, Copy)]
+pub struct FitLine<'a> {
+    /// Text label, e.g. `"R-squared (within)"`.
+    pub label: &'a str,
+    /// JSON key, e.g. `"r_squared"`.
+    pub json_key: &'a str,
+    /// The value (`null` in JSON when not finite).
+    pub value: f64,
+}
+
+impl<'a> FitLine<'a> {
+    /// `label: value` in text, JSON `r_squared`.
+    pub fn r_squared(label: &'a str, value: f64) -> Self {
+        FitLine {
+            label,
+            json_key: "r_squared",
+            value,
+        }
+    }
+
+    /// `label: value` in text, JSON `adj_r_squared`.
+    pub fn adj_r_squared(label: &'a str, value: f64) -> Self {
+        FitLine {
+            label,
+            json_key: "adj_r_squared",
+            value,
+        }
+    }
+}
+
 /// A coefficient table that states how it was computed: the statistic, the
 /// R-squared flavour and the standard-error estimator.
 pub struct RegressionReport<'a> {
@@ -513,10 +482,10 @@ pub struct RegressionReport<'a> {
     pub coefficients: Vec<CoefRow>,
     /// t or z.
     pub statistic: StatKind,
-    /// Label and value, `("R-squared", v)` or `("R-squared (within)", v)`.
-    pub r_squared: (&'a str, f64),
-    /// Label and value, `("Adj. R-squared", v)` or `("Adj. R-squared (within)", v)`.
-    pub adj_r_squared: (&'a str, f64),
+    /// The fit statistics, in text order: [`FitLine::r_squared`] and
+    /// [`FitLine::adj_r_squared`] for linear models, McFadden's pseudo R-squared for
+    /// logit and probit.
+    pub fit_lines: Vec<FitLine<'a>>,
     /// Number of observations.
     pub n_obs: usize,
     /// The text after `Standard errors: `.
@@ -531,8 +500,10 @@ pub struct RegressionReport<'a> {
     pub warnings: &'a [String],
 }
 
-/// Significance stars of a p-value; none for NaN.
-fn stars(p: f64) -> &'static str {
+/// R's significance mark of a p-value (`symnum`'s cut points, the legend
+/// `Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1`): `***`, `**`, `*`, `.` or
+/// nothing; nothing for NaN. The one significance function of the CLI.
+pub(crate) fn stars(p: f64) -> &'static str {
     if p < 0.001 {
         "***"
     } else if p < 0.01 {
@@ -546,6 +517,44 @@ fn stars(p: f64) -> &'static str {
     }
 }
 
+/// The JSON document of a [`RegressionReport`], as [`format_regression_report`] prints it,
+/// for commands that add keys before printing it with [`print_json`].
+pub(crate) fn regression_report_json(report: &RegressionReport<'_>) -> serde_json::Value {
+    let stat_key = report.statistic.json_key();
+    let coefficients: Vec<serde_json::Value> = report
+        .coefficients
+        .iter()
+        .map(|c| {
+            sorted_object([
+                ("name".to_string(), c.name.clone().into()),
+                ("coefficient".to_string(), c.estimate.into()),
+                ("std_error".to_string(), c.std_error.into()),
+                (stat_key.to_string(), c.statistic.into()),
+                ("p_value".to_string(), c.p_value.into()),
+            ])
+        })
+        .collect();
+    let mut pairs: Vec<(String, serde_json::Value)> = vec![
+        ("method".to_string(), report.method.into()),
+        ("coefficients".to_string(), coefficients.into()),
+        ("n_observations".to_string(), report.n_obs.into()),
+        ("se_type".to_string(), report.se_type_json.into()),
+        ("r_squared_type".to_string(), report.r_squared_type.into()),
+        ("statistic".to_string(), report.statistic.json_name().into()),
+    ];
+    pairs.extend(
+        report
+            .fit_lines
+            .iter()
+            .map(|f| (f.json_key.to_string(), f.value.into())),
+    );
+    if !report.warnings.is_empty() {
+        pairs.push(("warnings".to_string(), report.warnings.to_vec().into()));
+    }
+    pairs.extend(report.extra_json.clone());
+    sorted_object(pairs)
+}
+
 /// Format a [`RegressionReport`].
 ///
 /// Text and Table: the coefficient table (`t-value` or `z-value` column), the
@@ -557,38 +566,8 @@ fn stars(p: f64) -> &'static str {
 /// clash); non-finite numbers are `null`.
 pub fn format_regression_report(report: &RegressionReport<'_>, format: &OutputFormat) -> String {
     match format {
-        OutputFormat::Json => {
-            let stat_key = report.statistic.json_key();
-            let coefficients: Vec<serde_json::Value> = report
-                .coefficients
-                .iter()
-                .map(|c| {
-                    sorted_object([
-                        ("name".to_string(), c.name.clone().into()),
-                        ("coefficient".to_string(), c.estimate.into()),
-                        ("std_error".to_string(), c.std_error.into()),
-                        (stat_key.to_string(), c.statistic.into()),
-                        ("p_value".to_string(), c.p_value.into()),
-                    ])
-                })
-                .collect();
-            let mut pairs: Vec<(String, serde_json::Value)> = vec![
-                ("method".to_string(), report.method.into()),
-                ("coefficients".to_string(), coefficients.into()),
-                ("r_squared".to_string(), report.r_squared.1.into()),
-                ("adj_r_squared".to_string(), report.adj_r_squared.1.into()),
-                ("n_observations".to_string(), report.n_obs.into()),
-                ("se_type".to_string(), report.se_type_json.into()),
-                ("r_squared_type".to_string(), report.r_squared_type.into()),
-                ("statistic".to_string(), report.statistic.json_name().into()),
-            ];
-            if !report.warnings.is_empty() {
-                pairs.push(("warnings".to_string(), report.warnings.to_vec().into()));
-            }
-            pairs.extend(report.extra_json.clone());
-            serde_json::to_string_pretty(&sorted_object(pairs))
-                .unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}"))
-        }
+        OutputFormat::Json => serde_json::to_string_pretty(&regression_report_json(report))
+            .unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}")),
         OutputFormat::Table | OutputFormat::Text => {
             let rule = "-".repeat(60);
             let mut out = String::new();
@@ -618,26 +597,44 @@ pub fn format_regression_report(report: &RegressionReport<'_>, format: &OutputFo
             }
             out.push_str(&rule);
             out.push('\n');
-            out.push_str(&format!(
-                "{}: {:.6}\n",
-                report.r_squared.0, report.r_squared.1
-            ));
-            out.push_str(&format!(
-                "{}: {:.6}\n",
-                report.adj_r_squared.0, report.adj_r_squared.1
-            ));
+            for f in &report.fit_lines {
+                out.push_str(&format!("{}: {:.6}\n", f.label, f.value));
+            }
             out.push_str(&format!("Observations: {}\n", report.n_obs));
             out.push_str(&format!("Standard errors: {}\n", report.se_type));
             out.push_str("\nSignif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1\n");
-            if !report.warnings.is_empty() {
-                out.push_str("\nWarnings:\n");
-                for w in report.warnings {
-                    out.push_str(&format!("  - {w}\n"));
-                }
-            }
+            out.push_str(&format_warnings(report.warnings));
             out
         }
     }
+}
+
+/// A `Warnings:` block: a blank line, `Warnings:`, then `  - <warning>` per warning, each
+/// line ending in a newline; `""` when there are none. The one form of the CLI's
+/// `Warnings:` blocks (the `Warning: <w>` lines of [`note_lines`] are the other, per-note
+/// convention).
+pub(crate) fn format_warnings(warnings: &[String]) -> String {
+    if warnings.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("\nWarnings:\n");
+    for w in warnings {
+        out.push_str("  - ");
+        out.push_str(w);
+        out.push('\n');
+    }
+    out
+}
+
+/// Prints [`format_warnings`] to stdout (nothing when there are no warnings).
+pub(crate) fn print_warnings(warnings: &[String]) {
+    print!("{}", format_warnings(warnings));
+}
+
+/// Prints `value` as the one pretty-printed JSON document of a command.
+pub(crate) fn print_json(value: &serde_json::Value) -> anyhow::Result<()> {
+    println!("{}", serde_json::to_string_pretty(value)?);
+    Ok(())
 }
 
 /// The `Standard errors:` text of an OLS covariance type: `"classical"` for
@@ -880,7 +877,8 @@ mod shell_quote_tests {
 #[cfg(test)]
 mod report_tests {
     use super::{
-        CoefRow, OutputFormat, RegressionReport, StatKind, format_regression_report, se_label,
+        CoefRow, FitLine, OutputFormat, RegressionReport, StatKind, any_value_json,
+        format_regression_report, format_warnings, se_label, stars,
     };
     use p2a_core::regression::CovarianceType;
 
@@ -899,8 +897,10 @@ mod report_tests {
             method: "M",
             coefficients: rows(),
             statistic: StatKind::Z,
-            r_squared: ("R-squared (within)", 0.5),
-            adj_r_squared: ("Adj. R-squared (within)", 0.4),
+            fit_lines: vec![
+                FitLine::r_squared("R-squared (within)", 0.5),
+                FitLine::adj_r_squared("Adj. R-squared (within)", 0.4),
+            ],
             n_obs: 10,
             se_type: "classical",
             se_type_json: "classical",
@@ -944,6 +944,54 @@ mod report_tests {
             &OutputFormat::Table,
         );
         assert_eq!(table, expected);
+    }
+
+    #[test]
+    fn any_value_json_types() {
+        use polars::prelude::*;
+        use serde_json::json;
+        assert_eq!(any_value_json(&AnyValue::Int64(3)), json!(3));
+        assert_eq!(any_value_json(&AnyValue::UInt8(7)), json!(7));
+        assert_eq!(any_value_json(&AnyValue::Float64(2.5)), json!(2.5));
+        assert_eq!(any_value_json(&AnyValue::Float64(f64::NAN)), json!(null));
+        assert_eq!(
+            any_value_json(&AnyValue::Float64(f64::INFINITY)),
+            json!(null)
+        );
+        assert_eq!(
+            any_value_json(&AnyValue::Float32(f32::NEG_INFINITY)),
+            json!(null)
+        );
+        assert_eq!(any_value_json(&AnyValue::Null), json!(null));
+        assert_eq!(any_value_json(&AnyValue::Boolean(true)), json!(true));
+        assert_eq!(any_value_json(&AnyValue::String("3")), json!("3"));
+        let date = Series::new("d".into(), ["2026-11-17"])
+            .cast(&DataType::Date)
+            .unwrap();
+        assert_eq!(any_value_json(&date.get(0).unwrap()), json!("2026-11-17"));
+        let cat = Series::new("c".into(), ["lo", "hi"])
+            .cast(&DataType::from_categories(Categories::global()))
+            .unwrap();
+        assert_eq!(any_value_json(&cat.get(1).unwrap()), json!("hi"));
+    }
+
+    #[test]
+    fn format_warnings_matches_regression_report_lines() {
+        assert_eq!(
+            format_warnings(&["a".to_string(), "b".to_string()]),
+            "\nWarnings:\n  - a\n  - b\n"
+        );
+        assert_eq!(format_warnings(&[]), "");
+    }
+
+    #[test]
+    fn stars_thresholds() {
+        assert_eq!(stars(0.0009), "***");
+        assert_eq!(stars(0.009), "**");
+        assert_eq!(stars(0.049), "*");
+        assert_eq!(stars(0.09), ".");
+        assert_eq!(stars(0.2), "");
+        assert_eq!(stars(f64::NAN), "");
     }
 
     #[test]
@@ -1220,24 +1268,5 @@ mod notes_helper_tests {
             check_core_option::<TiesMethod>("Efron"),
             Ok("Efron".to_string())
         );
-    }
-
-    #[test]
-    fn regression_results_json_is_what_format_regression_results_prints() {
-        let rows = vec![
-            ("(Intercept)".to_string(), 1.5, 0.5, 3.0, 0.004),
-            ("x".to_string(), f64::NAN, f64::NAN, f64::NAN, f64::NAN),
-        ];
-        let printed: Value = serde_json::from_str(&format_regression_results(
-            "M",
-            &rows,
-            0.4,
-            0.3,
-            50,
-            &OutputFormat::Json,
-        ))
-        .unwrap();
-        assert_eq!(printed, regression_results_json("M", &rows, 0.4, 0.3, 50));
-        assert!(printed["coefficients"][1]["coefficient"].is_null());
     }
 }

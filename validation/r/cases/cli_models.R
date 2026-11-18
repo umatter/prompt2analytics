@@ -116,3 +116,43 @@ case("cli_munge_ols_grunfeld", "cli", "lm(HC1) on munge-derived Grunfeld dataset
   list(values = v, reference = "stats::lm on g[, c('inv','value')] and g[g$year >= 1945, ]; sandwich::vcovHC(type = 'HC1'); t-based p on df.residual; order(g$inv)",
        call = "lm(inv ~ value + capital, data = subset(grunfeld, year >= 1945))", packages = "sandwich")
 })
+
+# ivreg's summary with classical and HC1 standard errors (the CLI's `causal iv` default is HC1, as
+# the MCP tool's) and its adjusted R-squared 1 - (1 - R2)(n - 1) / df.residual.
+case("cli_iv_report", "cli", "ivreg(y ~ x + w | w + z1 + z2): classical and HC1 standard errors, R-squared and adjusted R-squared", function(ctx) {
+  suppressPackageStartupMessages({library(AER); library(sandwich); library(lmtest)})
+  d <- ctx$dataset("datasets/generated/iv_weak_controls.csv")
+  m <- ivreg(y ~ x + w | w + z1 + z2, data = d)
+  s <- summary(m)
+  hc1 <- coeftest(m, vcov. = vcovHC(m, type = "HC1"))
+  list(values = list(coef = named(coef(m)),
+    se_classical = named(s$coefficients[, 2]), p_classical = named(s$coefficients[, 4]),
+    se_hc1 = named(hc1[, 2]), p_hc1 = named(hc1[, 4]),
+    r_squared = s$r.squared, adj_r_squared = s$adj.r.squared, df_residual = m$df.residual, n = m$n),
+    reference = "AER::ivreg; summary (classical); lmtest::coeftest(vcov. = sandwich::vcovHC(type = 'HC1')) (t on df.residual)",
+    call = "ivreg(y ~ x + w | w + z1 + z2, data = iv_weak_controls)", packages = c("AER", "sandwich", "lmtest"))
+})
+
+# gsynth's default fixed effects (force = "unit") against the CLI's earlier two-way default, at fixed
+# numbers of factors (CV = FALSE), plus gsynth's own default run (CV over r = 0..5). gsynth 1.4's
+# cross-validation is deterministic (no sample() call; the same r.cv under any seed): it chooses r = 0
+# on this panel, where core's cross-validation chooses r = 1 (a recorded deviation of the CLI entry).
+case("cli_gsynth_defaults", "cli", "gsynth(Y ~ D + X) with unit and two-way effects at r = 0 and r = 1 (no CV), and the default CV run", function(ctx) {
+  suppressPackageStartupMessages(library(gsynth))
+  d <- ctx$dataset("datasets/generated/gsynth_staggered.csv")
+  fit <- function(force, r) {
+    out <- utils::capture.output(g <- suppressWarnings(suppressMessages(
+      gsynth(Y ~ D + X, data = d, index = c("id", "time"), force = force, CV = FALSE, r = r, se = FALSE))))
+    g$att.avg
+  }
+  set.seed(20261117)
+  out <- utils::capture.output(g <- suppressWarnings(suppressMessages(
+    gsynth(Y ~ D + X, data = d, index = c("id", "time"), force = "unit", CV = TRUE, r = c(0, 5), se = FALSE))))
+  list(values = list(
+    unit_r0_att_avg = fit("unit", 0), unit_r1_att_avg = fit("unit", 1),
+    twoway_r0_att_avg = fit("two-way", 0), twoway_r1_att_avg = fit("two-way", 1),
+    default_r = g$r.cv, default_att_avg = g$att.avg),
+    reference = "gsynth::gsynth(se = FALSE, CV = FALSE) with force 'unit' / 'two-way' and r = 0 / 1; gsynth(force = 'unit', CV = TRUE, r = c(0, 5), se = FALSE)",
+    call = "gsynth(Y ~ D + X, data = gsynth_staggered, index = c('id', 'time'), force = 'unit', CV = FALSE, r = 0, se = FALSE)",
+    packages = "gsynth")
+})

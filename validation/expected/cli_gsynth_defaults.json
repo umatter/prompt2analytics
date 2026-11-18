@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "id": "cli_gsynth_defaults",
+  "area": "cli",
+  "method": "gsynth(Y ~ D + X) with unit and two-way effects at r = 0 and r = 1 (no CV), and the default CV run",
+  "reference": "gsynth::gsynth(se = FALSE, CV = FALSE) with force 'unit' / 'two-way' and r = 0 / 1; gsynth(force = 'unit', CV = TRUE, r = c(0, 5), se = FALSE)",
+  "call": "gsynth(Y ~ D + X, data = gsynth_staggered, index = c('id', 'time'), force = 'unit', CV = FALSE, r = 0, se = FALSE)",
+  "dataset": "validation/datasets/generated/gsynth_staggered.csv",
+  "datasets": ["validation/datasets/generated/gsynth_staggered.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "gsynth": "1.4.0"
+  },
+  "values": {
+    "unit_r0_att_avg": 6.9480222584541371,
+    "unit_r1_att_avg": 2.9672225814036941,
+    "twoway_r0_att_avg": 4.4003883055046407,
+    "twoway_r1_att_avg": 2.5895506834653479,
+    "default_r": 0,
+    "default_att_avg": 6.9480222584541371
+  }
+}

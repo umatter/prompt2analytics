@@ -254,9 +254,28 @@ fn test_validate_cli_panel_missing_notes() {
     let t = s.ok(&hdfe_args.iter().map(String::as_str).collect::<Vec<_>>());
     assert!(
         t.lines()
-            .any(|l| l.starts_with("Note: 7 of 200 rows dropped because of missing values")),
-        "{t}"
+            .last()
+            .is_some_and(|l| l.starts_with("Note: 7 of 200 rows dropped because of missing values")),
+        "the note is the last line\n{t}"
     );
+    // feglm, pmg and pvcm print the note in text too
+    for (cmd, extra) in [
+        (
+            "feglm",
+            &["--fe", "firm_name", "year", "--family", "gaussian"][..],
+        ),
+        ("pmg", &["--entity", "firm_name"][..]),
+        ("pvcm", &["--entity", "firm_name"][..]),
+    ] {
+        let args = argv(cmd, extra);
+        let t = s.ok(&args.iter().map(String::as_str).collect::<Vec<_>>());
+        assert!(
+            t.lines()
+                .any(|l| l.starts_with("Note: ")
+                    && l.contains("rows dropped because of missing values")),
+            "{cmd}\n{t}"
+        );
+    }
     let hdfe = run_json("hdfe", &hdfe_flags);
     let feglm = run_json(
         "feglm",
@@ -317,11 +336,160 @@ fn test_validate_cli_panel_missing_notes() {
         "year",
     ];
     let t = s.ok(&gls);
-    assert!(
-        t.lines().any(|l| l
-            == "Note: 4 of 101 rows dropped because of missing values (inv: 2, year: 2)"),
-        "{t}"
+    assert_eq!(
+        t.lines().last(),
+        Some("Note: 4 of 101 rows dropped because of missing values (inv: 2, year: 2)"),
+        "the note is the last line\n{t}"
     );
     let j = s.json(&gls);
     assert_eq!(j["missing"]["n_dropped"].as_u64(), Some(4), "{j}");
+}
+
+/// panel fe and re print the dropped rows as the `Note:` line other commands print (last), not
+/// under "Warnings:", put their warnings after the F, Wald and sigma lines, and carry `missing`
+/// and the F test's degrees of freedom in JSON (case panel_grunfeld_na).
+#[test]
+fn test_validate_cli_panel_fe_missing_note() {
+    let s = temp_session();
+    let case = Case::load("panel_grunfeld_na");
+    assert_eq!(s.load(&case), "grunfeld_na");
+    let note = "Note: 5 of 200 rows dropped because of missing values (inv: 2, value: 1, \
+                firm_name: 2)";
+    for cmd in ["fe", "re"] {
+        let args = [
+            "panel",
+            cmd,
+            "grunfeld_na",
+            "-y",
+            "inv",
+            "-x",
+            "value",
+            "capital",
+            "--entity",
+            "firm_name",
+        ];
+        let t = s.ok(&args);
+        assert_eq!(t.lines().last(), Some(note), "{cmd}\n{t}");
+        assert!(
+            !t.contains(&format!("  - {}", &note[6..])),
+            "{cmd}: note among warnings\n{t}"
+        );
+        let j = s.json(&args);
+        assert_eq!(j["missing"]["n_dropped"], 5, "{j}");
+        let ws: Vec<&str> = j["warnings"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|w| w.as_str()).collect())
+            .unwrap_or_default();
+        assert!(
+            !ws.iter()
+                .any(|w| w.contains("rows dropped because of missing values")),
+            "{ws:?}"
+        );
+    }
+    // with a warning: `value2 = 2 * value` is collinear with value, so fe and re drop it and
+    // warn; the Warnings block follows the F line (re: the sigma line) and precedes the Note
+    let src = std::fs::read_to_string(case.dataset_path()).unwrap();
+    let mut csv = String::new();
+    for (i, line) in src.lines().enumerate() {
+        let value = line.split(',').nth(5).unwrap();
+        let extra = if i == 0 {
+            "\"value2\"".to_string()
+        } else if value.is_empty() || value == "NA" {
+            String::new()
+        } else {
+            format!("{}", 2.0 * value.parse::<f64>().unwrap())
+        };
+        csv.push_str(&format!("{line},{extra}\n"));
+    }
+    let p = s.dir().join("grunfeld_na_collinear.csv");
+    std::fs::write(&p, csv).unwrap();
+    s.load_as(&p, "gc", &[]);
+    for (cmd, before) in [("fe", "F-statistic"), ("re", "sigma_u")] {
+        let t = s.ok(&[
+            "panel",
+            cmd,
+            "gc",
+            "-y",
+            "inv",
+            "-x",
+            "value",
+            "capital",
+            "value2",
+            "--entity",
+            "firm_name",
+        ]);
+        let lines: Vec<&str> = t.lines().collect();
+        let at = |pred: &dyn Fn(&str) -> bool| lines.iter().position(|l| pred(l));
+        let w = at(&|l| l == "Warnings:").unwrap_or_else(|| panic!("{cmd}: no Warnings\n{t}"));
+        let stat = at(&|l| l.starts_with(before))
+            .unwrap_or_else(|| panic!("{cmd}: no {before} line\n{t}"));
+        assert!(stat < w, "{cmd}: Warnings before the {before} line\n{t}");
+        assert!(
+            lines[w + 1..]
+                .iter()
+                .any(|l| l.contains("'value2' dropped")),
+            "{cmd}\n{t}"
+        );
+        assert!(
+            lines.last().unwrap().starts_with("Note: "),
+            "{cmd}: the Note is not last\n{t}"
+        );
+        assert!(w < lines.len() - 1, "{cmd}\n{t}");
+    }
+}
+
+/// panel fe/re JSON carry the F test's degrees of freedom, as core's PanelResult::f_df: the
+/// slopes and the residual df (fe classical), the slopes and G - 1 (fe clustered by firm, the
+/// df the text prints), the slopes without the intercept (re).
+#[test]
+fn test_cli_panel_f_degrees_of_freedom() {
+    let s = temp_session();
+    s.load_as(&repo_path("validation/datasets/grunfeld.csv"), "g", &[]);
+    let base = [
+        "panel", "fe", "g", "-y", "inv", "-x", "value", "capital", "--entity", "firm",
+    ];
+    // Grunfeld: 200 rows, 10 firms, 2 slopes: residual df 200 - 10 - 2 = 188
+    let fe = s.json(&base);
+    assert_eq!(
+        (fe["f_df1"].clone(), fe["f_df2"].clone()),
+        (2.into(), 188.into()),
+        "{fe}"
+    );
+    let mut cl = base.to_vec();
+    cl.extend(["--vcov", "cluster"]);
+    let fe_cl = s.json(&cl);
+    assert_eq!(
+        (fe_cl["f_df1"].clone(), fe_cl["f_df2"].clone()),
+        (2.into(), 9.into()),
+        "{fe_cl}"
+    );
+    let text = s.ok(&cl);
+    assert!(text.contains("on 2 and 9 DF"), "{text}");
+    let mut re = base.to_vec();
+    re[1] = "re";
+    let re = s.json(&re);
+    assert_eq!(re["f_df1"], 2, "{re}");
+}
+
+/// `panel unit-root --help` states each test's null, how gaps and missing rows are handled and
+/// the default lag rule against plm's.
+#[test]
+fn test_cli_panel_unit_root_help() {
+    let out = p2a()
+        .args(["panel", "unit-root", "--help"])
+        .output()
+        .unwrap();
+    let help = String::from_utf8_lossy(&out.stdout).to_lowercase();
+    for want in [
+        "stationarity",
+        "common",
+        "heterogeneous",
+        "floor(t^(1/3))",
+        "sic",
+        "dfcor",
+        "gaps",
+        "missing",
+    ] {
+        assert!(help.contains(want), "{want:?} not in\n{help}");
+    }
 }

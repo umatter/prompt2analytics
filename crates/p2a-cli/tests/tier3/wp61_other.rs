@@ -448,6 +448,8 @@ fn test_cli_staggered_short_help_lists_flags() {
         "--method <",
         "--bootstrap <",
         "--anticipation <",
+        "--base-period-type <",
+        "--min-obs-per-cell <",
     ] {
         let i = lines
             .iter()
@@ -1729,6 +1731,10 @@ fn test_validate_cli_moran_alternative() {
     ];
     let two = s.json(&argv(&m, &["--alternative", "two.sided"]));
     let gt = s.json(&argv(&m, &["--alternative", "greater"]));
+    // CLI-33: no --alternative is moran.test's default, greater
+    let default = s.json(&m);
+    assert_eq!(field(&default, "alternative"), "greater");
+    assert_eq!(field(&default, "p_value"), field(&gt, "p_value"));
     Check::new(&case)
         .named_subset(
             "moran",
@@ -2033,5 +2039,217 @@ fn test_cli_dendrogram_refuses_one_row() {
         e.contains("need at least 2 observations")
             && e.contains("viz dendrogram, columns 'a', 'b'"),
         "{e}"
+    );
+}
+
+/// `ml svm` on a 0/1 target counts the predictions by the target's labels (the old count
+/// compared with 0 and called every 0 positive), and svm and tsne carry their notes in JSON
+/// and text; their help states the solver budget and Rtsne's eta.
+#[test]
+fn test_cli_svm_counts_by_label_and_ml_notes() {
+    let s = temp_session();
+    s.load_as(
+        &repo_path("validation/datasets/employee_training.csv"),
+        "emp",
+        &[],
+    );
+    let args = [
+        "ml",
+        "svm",
+        "emp",
+        "--cols",
+        "tenure",
+        "performance",
+        "-y",
+        "bonus",
+    ];
+    let j = s.json(&args);
+    let preds = j["predictions"].as_array().unwrap();
+    let counts = j["prediction_counts"].as_array().unwrap();
+    assert_eq!(counts[0]["label"], 0, "{j}");
+    assert_eq!(counts[1]["label"], 1, "{j}");
+    for c in counts {
+        let n = preds.iter().filter(|p| **p == c["label"]).count();
+        assert_eq!(c["count"].as_u64(), Some(n as u64), "{j}");
+    }
+    assert!(j.get("converged").is_some(), "{j}");
+    let text = s.ok(&args);
+    let want = format!(
+        "Predicted labels: 0: {}, 1: {}",
+        counts[0]["count"], counts[1]["count"]
+    );
+    assert!(text.contains(&want), "{want}\n{text}");
+
+    let tsne = [
+        "ml",
+        "tsne",
+        "emp",
+        "--cols",
+        "tenure",
+        "performance",
+        "--max-iter",
+        "50",
+        "--seed",
+        "1",
+        "--perplexity",
+        "5",
+    ];
+    let t = s.json(&tsne);
+    // t-SNE has no convergence record; its notes are always a `warnings` array
+    let warnings: Vec<&str> = t["warnings"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no warnings array\n{t}"))
+        .iter()
+        .map(|w| w.as_str().unwrap())
+        .collect();
+    // the text ends with the same notes, one `Warning: <w>` line each (print_notes)
+    let text = s.ok(&tsne);
+    let lines: Vec<&str> = text.lines().filter(|l| !l.is_empty()).collect();
+    let tail: Vec<String> = warnings.iter().map(|w| format!("Warning: {w}")).collect();
+    assert_eq!(lines[lines.len() - tail.len()..], tail[..], "{text}");
+    if warnings.is_empty() {
+        assert!(!text.contains("Warning:"), "{text}");
+    }
+    // a run that warns: 30 exact duplicates cannot reach perplexity 3.9 (their entropy is at
+    // least ln 29), so the bandwidth search reports them, in JSON and as the text's last lines
+    let dup = s.dir().join("dup.csv");
+    let mut csv = String::from("a,b\n");
+    for _ in 0..30 {
+        csv.push_str("0,0\n");
+    }
+    for (a, b) in [
+        (10.0, 10.0),
+        (10.5, 10.2),
+        (9.7, 11.1),
+        (12.3, 9.4),
+        (11.2, 12.6),
+        (8.9, 9.8),
+    ] {
+        csv.push_str(&format!("{a},{b}\n"));
+    }
+    std::fs::write(&dup, csv).unwrap();
+    s.load_as(&dup, "dup", &[]);
+    let tsne_dup = [
+        "ml",
+        "tsne",
+        "dup",
+        "--cols",
+        "a",
+        "b",
+        "--max-iter",
+        "50",
+        "--seed",
+        "1",
+        "--perplexity",
+        "3.9",
+    ];
+    let t = s.json(&tsne_dup);
+    let warnings: Vec<&str> = t["warnings"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no warnings array\n{t}"))
+        .iter()
+        .map(|w| w.as_str().unwrap())
+        .collect();
+    assert!(warnings.iter().any(|w| w.contains("of 36 points")), "{t}");
+    let text = s.ok(&tsne_dup);
+    let lines: Vec<&str> = text.lines().filter(|l| !l.is_empty()).collect();
+    let tail: Vec<String> = warnings.iter().map(|w| format!("Warning: {w}")).collect();
+    assert_eq!(lines[lines.len() - tail.len()..], tail[..], "{text}");
+
+    let help = |cmd: &str| {
+        let out = p2a().args(["ml", cmd, "--help"]).output().unwrap();
+        String::from_utf8_lossy(&out.stdout).to_string()
+    };
+    let h = help("svm");
+    assert!(h.contains("max_iter × n pair updates"), "{h}");
+    let h = help("tsne");
+    assert!(h.contains("Rtsne's eta"), "{h}");
+}
+
+/// `ts stl --s-window` is stl's s.window: `periodic` and 13 give the first ten values of
+/// stl(ts(y, frequency = 12), s.window = ...) (case ts_utils_t4; stlrs computes in f32, so the
+/// core test's tolerance, 1e-5 sd(y) absolute); an even span is refused. The causal-impact
+/// output speaks of a normal approximation, not a posterior.
+#[test]
+fn test_validate_cli_stl_s_window() {
+    let case = Case::load("ts_utils_t4");
+    let s = temp_session();
+    s.load_as(&case.dataset_path(), "ts", &[]);
+    let tol = Tol::new(0.0, 1e-5 * case.scalar("stl_sd"));
+    for (w, prefix) in [("periodic", "stl_periodic"), ("13", "stl_swin13")] {
+        let j = s.json(&[
+            "ts",
+            "stl",
+            "ts",
+            "--col",
+            "y",
+            "--period",
+            "12",
+            "--s-window",
+            w,
+        ]);
+        assert_eq!(j["s_window"], w, "{j}");
+        for part in ["seasonal", "trend", "remainder"] {
+            let got = f64s(&j[format!("{part}_sample")]);
+            let want = case.vector(&format!("{prefix}_{part}"));
+            assert_eq!(got.len(), 10, "{j}");
+            for (i, (g, e)) in got.iter().zip(&want).enumerate() {
+                assert!(tol.allows(*g, *e), "{prefix}_{part}[{i}]: {g} vs {e}");
+            }
+        }
+    }
+    // a usage error (clap, exit 2)
+    let out = s.run(&[
+        "ts",
+        "stl",
+        "ts",
+        "--col",
+        "y",
+        "--period",
+        "12",
+        "--s-window",
+        "12",
+    ]);
+    let e = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{e}");
+    assert!(e.contains("odd"), "{e}");
+
+    let out = p2a()
+        .args(["ts", "causal-impact", "--help"])
+        .output()
+        .unwrap();
+    let h = String::from_utf8_lossy(&out.stdout);
+    assert!(!h.contains("Bayesian"), "{h}");
+    // the inference lines name the normal approximation, not a posterior (y = 2 x + level +
+    // noise with an effect from t = 81; case ts_statespace_t4's generated series)
+    s.load_as(
+        &repo_path("validation/datasets/generated/causal_impact_control_t4.csv"),
+        "ci",
+        &[],
+    );
+    let text = s.ok(&[
+        "ts",
+        "causal-impact",
+        "ci",
+        "--response",
+        "y",
+        "--time",
+        "t",
+        "--pre-start",
+        "1",
+        "--pre-end",
+        "80",
+        "--post-start",
+        "81",
+        "--post-end",
+        "100",
+        "--controls",
+        "x",
+    ]);
+    assert!(!text.contains("Posterior"), "{text}");
+    assert!(
+        text.lines()
+            .any(|l| l.starts_with("P(effect > 0), normal approximation: ")),
+        "{text}"
     );
 }

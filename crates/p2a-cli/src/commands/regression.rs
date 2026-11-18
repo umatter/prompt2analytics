@@ -19,7 +19,7 @@ use p2a_core::{
 use p2a_core::{run_line, run_step, run_supsmu};
 
 use crate::output::{
-    CoefRow, OutputFormat, RegressionReport, StatKind, add_notes, add_result_notes,
+    CoefRow, FitLine, OutputFormat, RegressionReport, StatKind, add_notes, add_result_notes,
     check_core_option, format_regression_report, missing_json, parse_core_option, print_error,
     print_missing_note, print_notes, print_result_notes, se_label, validate_column_exists,
     validate_columns_exist, validate_sample_size,
@@ -776,8 +776,10 @@ fn execute_ols(
                         method: "OLS Regression",
                         coefficients: result.coefficients.iter().map(CoefRow::from).collect(),
                         statistic: StatKind::T,
-                        r_squared: (r2.r_squared, result.r_squared),
-                        adj_r_squared: (r2.adj_r_squared, result.adj_r_squared),
+                        fit_lines: vec![
+                            FitLine::r_squared(r2.r_squared, result.r_squared),
+                            FitLine::adj_r_squared(r2.adj_r_squared, result.adj_r_squared),
+                        ],
                         n_obs: result.n_obs,
                         se_type: &se_type,
                         se_type_json: result.cov_type.short_label(),
@@ -848,8 +850,10 @@ fn execute_clustered(
                         method: &method,
                         coefficients: result.ols.coefficients.iter().map(CoefRow::from).collect(),
                         statistic: StatKind::T,
-                        r_squared: (r2.r_squared, result.ols.r_squared),
-                        adj_r_squared: (r2.adj_r_squared, result.ols.adj_r_squared),
+                        fit_lines: vec![
+                            FitLine::r_squared(r2.r_squared, result.ols.r_squared),
+                            FitLine::adj_r_squared(r2.adj_r_squared, result.ols.adj_r_squared),
+                        ],
                         n_obs: result.ols.n_obs,
                         se_type: &se_type,
                         se_type_json: &se_type_json,
@@ -1093,15 +1097,7 @@ fn execute_quantreg(
                         println!("{}", "-".repeat(60));
 
                         for c in &result.coefficients {
-                            let sig = if c.p_value < 0.001 {
-                                "***"
-                            } else if c.p_value < 0.01 {
-                                "**"
-                            } else if c.p_value < 0.05 {
-                                "*"
-                            } else {
-                                ""
-                            };
+                            let sig = crate::output::stars(c.p_value);
                             println!(
                                 "{:<15} {:>12.6} {:>12.6} {:>10.4} {:>9.4} {}",
                                 c.name, c.estimate, c.std_error, c.t_value, c.p_value, sig
@@ -1425,15 +1421,7 @@ fn execute_gls(
 
                         for (i, name) in var_names.iter().enumerate() {
                             if i < result.coefficients.len() {
-                                let sig = if result.p_values[i] < 0.001 {
-                                    "***"
-                                } else if result.p_values[i] < 0.01 {
-                                    "**"
-                                } else if result.p_values[i] < 0.05 {
-                                    "*"
-                                } else {
-                                    ""
-                                };
+                                let sig = crate::output::stars(result.p_values[i]);
                                 println!(
                                     "{:<15} {:>12.6} {:>12.6} {:>10.4} {:>9.4} {}",
                                     name,
@@ -1879,9 +1867,6 @@ fn execute_hac(
                                 "n_obs": n_obs_display,
                                 "r_squared": r_squared,
                             });
-                            if !hac_result.warnings.is_empty() {
-                                json["warnings"] = serde_json::json!(hac_result.warnings);
-                            }
                             add_result_notes(&mut json, &hac_result);
                             println!("{}", serde_json::to_string_pretty(&json)?);
                         }
@@ -1900,15 +1885,7 @@ fn execute_hac(
 
                             for (i, name) in hac_result.names.iter().enumerate() {
                                 if i < coefficients.len() {
-                                    let sig = if p_values[i] < 0.001 {
-                                        "***"
-                                    } else if p_values[i] < 0.01 {
-                                        "**"
-                                    } else if p_values[i] < 0.05 {
-                                        "*"
-                                    } else {
-                                        ""
-                                    };
+                                    let sig = crate::output::stars(p_values[i]);
                                     println!(
                                         "{:<15} {:>12.6} {:>12.6} {:>10.4} {:>9.4} {}",
                                         name,
@@ -1925,12 +1902,7 @@ fn execute_hac(
                             let uncentered = if intercept { "" } else { " (uncentered)" };
                             println!("R-squared{uncentered}: {:.4}", r_squared);
                             println!("Observations: {}", n_obs_display);
-                            if !hac_result.warnings.is_empty() {
-                                println!("\nWarnings:");
-                                for w in &hac_result.warnings {
-                                    println!("  - {w}");
-                                }
-                            }
+                            crate::output::print_warnings(&hac_result.warnings);
                         }
                     }
                 }

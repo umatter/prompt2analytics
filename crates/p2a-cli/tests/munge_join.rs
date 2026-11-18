@@ -62,7 +62,7 @@ fn join_errors_say_join_failed_once_and_exit_nonzero() {
     let cases: [(&[&str], &str, bool); 5] = [
         (
             &["--on", "id", "--right-on", "id", "z"],
-            "Join failed: --on has 1 columns but --right-on has 2 columns",
+            "Join failed: --on has 1 column but --right-on has 2 columns",
             true,
         ),
         // A missing key names its flag and the dataset that lacks it.

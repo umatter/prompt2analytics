@@ -3,7 +3,10 @@
 use clap::{Subcommand, ValueEnum};
 use p2a_core::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
 use p2a_core::errors::{EconError, EconResult};
-use p2a_core::stats::{SsType, TwoWayAnovaConfig, run_two_way_anova_with};
+use p2a_core::stats::{
+    ChiSquaredResult, GofExpected, SsType, TwoWayAnovaConfig, run_chisq_gof_with,
+    run_two_way_anova_with,
+};
 use p2a_core::{
     AcfType,
     Alternative,
@@ -12,13 +15,13 @@ use p2a_core::{
     WilcoxonConfig,
     // ACF/PACF/CCF (raw data versions)
     acf,
+    // Chi-squared tests
+    chisq_test_gof,
     pacf,
     run_bartlett_test,
     // Box test (Ljung-Box)
     run_box_test,
     run_ccf,
-    // Chi-squared tests
-    run_chisq_gof,
     run_chisq_independence,
     run_fisher_test,
     // Descriptive
@@ -153,19 +156,45 @@ EXAMPLES:
         alternative: TTestAlternative,
     },
 
-    /// Chi-squared goodness-of-fit test
-    #[command(after_help = "\
+    /// Chi-squared goodness-of-fit test: a categorical column tallied (--observed, R's
+    /// chisq.test(table(x))) or a column of counts (--counts, R's chisq.test(x))
+    #[command(
+        group(clap::ArgGroup::new("source").required(true).args(["observed", "counts"])),
+        after_help = "\
 EXAMPLES:
-    # Test if observed frequencies match expected uniform distribution
-    p2a --session s.json stats chisq-gof mydata --observed counts
+    # Are the categories of a column equally frequent?
+    p2a --session s.json stats chisq-gof mydata --observed category
+
+    # A column of counts (one row per category) against given probabilities
+    p2a --session s.json stats chisq-gof tallies --counts n --labels label --probs 0.2,0.3,0.5
 ")]
     ChisqGof {
         /// Dataset name
         dataset: String,
 
-        /// Column with observed counts
+        /// Categorical column; its values are tallied (R: chisq.test(table(x))). Give exactly
+        /// one of --observed and --counts
         #[arg(short, long)]
-        observed: String,
+        observed: Option<String>,
+
+        /// Column of counts, one category per row (R: chisq.test(x)); a missing, negative or
+        /// non-finite count is refused
+        #[arg(long)]
+        counts: Option<String>,
+
+        /// Column naming the category of each row of --counts (default: the row numbers)
+        #[arg(long, requires = "counts")]
+        labels: Option<String>,
+
+        /// Expected probabilities, comma-separated, one per category: in row order with
+        /// --counts, in the sorted order of the levels with --observed (numbers numerically,
+        /// text in byte order, as R's factor). Default: equal probabilities
+        #[arg(long, value_delimiter = ',', value_name = "P1,P2,...")]
+        probs: Option<Vec<f64>>,
+
+        /// Divide --probs by their sum instead of requiring them to sum to 1 (R: rescale.p)
+        #[arg(long, requires = "probs")]
+        rescale_p: bool,
     },
 
     /// Chi-squared test of independence
@@ -289,7 +318,7 @@ EXAMPLES:
         group: String,
     },
 
-    /// Five-number summary (min, Q1, median, Q3, max)
+    /// Tukey's five-number summary (min, lower hinge, median, upper hinge, max), as R's fivenum
     #[command(after_help = "\
 EXAMPLES:
     p2a --session s.json stats fivenum mydata --col income
@@ -348,9 +377,9 @@ EXAMPLES:
         #[arg(short, long)]
         col: String,
 
-        /// Maximum lag
-        #[arg(long, default_value = "20")]
-        lag_max: usize,
+        /// Maximum lag (default: R's floor(10 log10 n), at most n - 1)
+        #[arg(long)]
+        lag_max: Option<usize>,
 
         /// Compute partial ACF instead
         #[arg(long)]
@@ -468,9 +497,9 @@ EXAMPLES:
         #[arg(short, long)]
         col: String,
 
-        /// Maximum lag
-        #[arg(long, default_value = "20")]
-        lag_max: usize,
+        /// Maximum lag (default: R's floor(10 log10 n), at most n - 1)
+        #[arg(long)]
+        lag_max: Option<usize>,
     },
 
     /// Cross-correlation function
@@ -490,9 +519,9 @@ EXAMPLES:
         #[arg(long)]
         y: String,
 
-        /// Maximum lag
-        #[arg(long, default_value = "20")]
-        lag_max: usize,
+        /// Maximum lag (default: R's ccf, floor(10 log10(n / 2)), at most n - 1)
+        #[arg(long)]
+        lag_max: Option<usize>,
     },
 
     /// Ljung-Box or Box-Pierce test for autocorrelation
@@ -512,8 +541,8 @@ EXAMPLES:
         #[arg(short, long)]
         col: String,
 
-        /// Maximum lag to test
-        #[arg(long, default_value = "10")]
+        /// Number of lags tested (default 1, as R's Box.test)
+        #[arg(long, default_value = "1")]
         lag: usize,
 
         /// Use Box-Pierce instead of Ljung-Box
@@ -560,8 +589,17 @@ EXAMPLES:
         #[arg(short, long)]
         col: String,
 
-        /// Use short truncation lag
-        #[arg(long)]
+        /// Short truncation lag trunc(4 (n/100)^0.25) (true/false; default true, as R's
+        /// PP.test); false uses the long lag trunc(12 (n/100)^0.25)
+        #[arg(
+            long,
+            value_name = "BOOL",
+            num_args = 0..=1,
+            default_value_t = true,
+            default_missing_value = "true",
+            action = clap::ArgAction::Set,
+            value_parser = clap::builder::BoolishValueParser::new()
+        )]
         lshort: bool,
     },
 
@@ -661,8 +699,35 @@ pub fn execute(
             col2,
             alternative,
         } => execute_t_test_paired(dataset, col1, col2, alternative.clone(), format, session),
-        StatsCommands::ChisqGof { dataset, observed } => {
-            execute_chisq_gof(dataset, observed, format, session)
+        StatsCommands::ChisqGof {
+            dataset,
+            observed,
+            counts,
+            labels,
+            probs,
+            rescale_p,
+        } => {
+            let source = match (observed, counts) {
+                (Some(col), _) => GofSource::Observed(col),
+                (None, Some(col)) => GofSource::Counts {
+                    column: col,
+                    labels: labels.as_deref(),
+                },
+                // clap's ArgGroup requires one of them; a caller that builds the command
+                // without clap gets the same refusal instead of a panic
+                (None, None) => {
+                    print_error("chisq-gof needs --observed or --counts", format);
+                    return Ok(());
+                }
+            };
+            execute_chisq_gof(
+                dataset,
+                source,
+                probs.as_deref(),
+                *rescale_p,
+                format,
+                session,
+            )
         }
         StatsCommands::ChisqIndep {
             dataset,
@@ -1156,9 +1221,78 @@ fn execute_t_test_paired(
     Ok(())
 }
 
+/// Where `stats chisq-gof` takes its counts from.
+enum GofSource<'a> {
+    /// A categorical column, tallied.
+    Observed(&'a str),
+    /// A column of counts, one category per row, optionally labelled by another column.
+    Counts {
+        column: &'a str,
+        labels: Option<&'a str>,
+    },
+}
+
+/// Core's refusal of probabilities that do not sum to 1 names its own option; the CLI's is
+/// `--rescale-p`.
+fn gof_error_message(e: &EconError) -> String {
+    e.to_string()
+        .replace("use rescale_p = true", "use --rescale-p")
+}
+
+/// The category labels of a `--counts` table: the `--labels` column as text ("NA" for a
+/// missing label), or the row numbers 1..k.
+fn gof_labels(ds: &p2a_core::Dataset, labels: Option<&str>, k: usize) -> EconResult<Vec<String>> {
+    let Some(col) = labels else {
+        return Ok((1..=k).map(|i| i.to_string()).collect());
+    };
+    let column = ds.df().column(col).map_err(|_| EconError::ColumnNotFound {
+        column: col.to_string(),
+        available: ds
+            .df()
+            .get_column_names()
+            .iter()
+            .map(|c| c.to_string())
+            .collect(),
+    })?;
+    if column.dtype().is_float() {
+        // R names a float category as.character() does: 1 and 2, not 1.0 and 2.0
+        let values = column
+            .cast(&polars::prelude::DataType::Float64)
+            .map_err(|e| EconError::Computation(format!("column '{col}' as numbers: {e}")))?;
+        let values = values
+            .f64()
+            .map_err(|e| EconError::Computation(format!("column '{col}' as numbers: {e}")))?;
+        return Ok(values.into_iter().map(float_label).collect());
+    }
+    let text = column
+        .cast(&polars::prelude::DataType::String)
+        .map_err(|e| EconError::Computation(format!("column '{col}' as text: {e}")))?;
+    let text = text
+        .str()
+        .map_err(|e| EconError::Computation(format!("column '{col}' as text: {e}")))?;
+    Ok(text
+        .into_iter()
+        .map(|v| v.map_or_else(|| "NA".to_string(), str::to_string))
+        .collect())
+}
+
+/// A float category label as R's `as.character` prints it for the common cases: a whole number
+/// without a fractional part, `NA` for a missing cell, `NaN`, `Inf`, `-Inf`.
+fn float_label(v: Option<f64>) -> String {
+    match v {
+        None => "NA".to_string(),
+        Some(x) if x.is_nan() => "NaN".to_string(),
+        Some(x) if x.is_infinite() => if x > 0.0 { "Inf" } else { "-Inf" }.to_string(),
+        Some(x) if x.fract() == 0.0 && x.abs() < 1e15 => format!("{:.0}", x + 0.0),
+        Some(x) => x.to_string(),
+    }
+}
+
 fn execute_chisq_gof(
     dataset_name: &str,
-    observed_col: &str,
+    source: GofSource<'_>,
+    probs: Option<&[f64]>,
+    rescale_p: bool,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
@@ -1169,67 +1303,96 @@ fn execute_chisq_gof(
             return Ok(());
         }
     };
-
-    match dataset {
-        Some(ds) => match run_chisq_gof(ds, observed_col, None) {
-            Ok(result) => {
+    let Some(ds) = dataset else {
+        print_error(&format!("Dataset '{}' not found", dataset_name), format);
+        return Ok(());
+    };
+    let fitted: EconResult<(ChiSquaredResult, Vec<String>)> = match source {
+        GofSource::Observed(col) => {
+            let expected = probs.map_or(GofExpected::Uniform, |p| GofExpected::Probs(p.to_vec()));
+            run_chisq_gof_with(ds, col, &expected, rescale_p).map(|r| {
                 // Categories in R's factor order, the order of observed/expected.
-                let categories = result.row_labels.clone().unwrap_or_default();
-                let n: f64 = result.observed.iter().sum();
-                match format {
-                    OutputFormat::Json => {
-                        let json = serde_json::json!({
-                            "test": "Chi-squared goodness-of-fit",
-                            "chi_squared": json_number(result.statistic),
-                            "df": result.df,
-                            "p_value": json_number(result.p_value),
-                            "categories": categories,
-                            "observed": result.observed,
-                            "expected": result.expected.iter().map(|&v| json_number(v)).collect::<Vec<_>>(),
-                            "residuals": result.residuals.iter().map(|&v| json_number(v)).collect::<Vec<_>>(),
-                            "n": n,
-                            "warnings": result.warnings,
-                        });
-                        print_json(json, &result.missing, &result.warnings)?;
-                    }
-                    _ => {
-                        println!("\nChi-squared Goodness-of-Fit Test");
-                        println!("{}", "=".repeat(40));
-                        println!(
-                            "X-squared = {:.4}, df = {}, p-value = {:.6}",
-                            result.statistic, result.df, result.p_value
+                let categories = r.row_labels.clone().unwrap_or_default();
+                (r, categories)
+            })
+        }
+        GofSource::Counts { column, labels } => {
+            // chisq.test(x) refuses a missing count, so the column may hold none
+            column_values(ds, column, NaPolicy::Fail, "chisq-gof").and_then(|(counts, _)| {
+                if let Some(p) = probs
+                    && p.len() != counts.len()
+                {
+                    return Err(EconError::InvalidSpecification {
+                        message: format!(
+                            "--probs has {} value(s) but --counts column '{column}' has {} rows",
+                            p.len(),
+                            counts.len()
+                        ),
+                    });
+                }
+                let categories = gof_labels(ds, labels, counts.len())?;
+                chisq_test_gof(&counts, probs, rescale_p).map(|r| (r, categories))
+            })
+        }
+    };
+    match fitted {
+        Ok((result, categories)) => {
+            let n: f64 = result.observed.iter().sum();
+            match format {
+                OutputFormat::Json => {
+                    let json = serde_json::json!({
+                        "test": "Chi-squared goodness-of-fit",
+                        "chi_squared": json_number(result.statistic),
+                        "df": result.df,
+                        "p_value": json_number(result.p_value),
+                        "categories": categories,
+                        "observed": result.observed,
+                        "expected": result.expected.iter().map(|&v| json_number(v)).collect::<Vec<_>>(),
+                        "residuals": result.residuals.iter().map(|&v| json_number(v)).collect::<Vec<_>>(),
+                        "n": n,
+                        "warnings": result.warnings,
+                    });
+                    print_json(json, &result.missing, &result.warnings)?;
+                }
+                _ => {
+                    println!("\nChi-squared Goodness-of-Fit Test");
+                    println!("{}", "=".repeat(40));
+                    println!(
+                        "X-squared = {:.4}, df = {}, p-value = {:.6}",
+                        result.statistic, result.df, result.p_value
+                    );
+                    println!();
+                    if categories.len() <= MAX_TABLE_ROWS {
+                        let columns = ["Observed".to_string(), "Expected".to_string()];
+                        print!(
+                            "{}",
+                            format_table("Category", &categories, &columns, |i, j| {
+                                let (counts, decimals) = if j == 0 {
+                                    (&result.observed, 0)
+                                } else {
+                                    (&result.expected, 4)
+                                };
+                                fmt_num(counts.get(i).copied().unwrap_or(f64::NAN), decimals)
+                            })
                         );
-                        println!();
-                        if categories.len() <= MAX_TABLE_ROWS {
-                            let columns = ["Observed".to_string(), "Expected".to_string()];
-                            print!(
-                                "{}",
-                                format_table("Category", &categories, &columns, |i, j| {
-                                    let (counts, decimals) = if j == 0 {
-                                        (&result.observed, 0)
-                                    } else {
-                                        (&result.expected, 4)
-                                    };
-                                    fmt_num(counts.get(i).copied().unwrap_or(f64::NAN), decimals)
-                                })
-                            );
-                        } else {
-                            println!(
-                                "Table not shown: {} categories (more than {MAX_TABLE_ROWS}); \
-                                 use -F json for the counts.",
-                                categories.len()
-                            );
-                        }
-                        for warning in &result.warnings {
-                            println!("Warning: {warning}");
-                        }
-                        print_missing_note(&result.missing, format);
+                    } else {
+                        println!(
+                            "Table not shown: {} categories (more than {MAX_TABLE_ROWS}); \
+                             use -F json for the counts.",
+                            categories.len()
+                        );
                     }
+                    for warning in &result.warnings {
+                        println!("Warning: {warning}");
+                    }
+                    print_missing_note(&result.missing, format);
                 }
             }
-            Err(e) => print_error(&format!("Chi-squared test failed: {}", e), format),
-        },
-        None => print_error(&format!("Dataset '{}' not found", dataset_name), format),
+        }
+        Err(e) => print_error(
+            &format!("Chi-squared test failed: {}", gof_error_message(&e)),
+            format,
+        ),
     }
     Ok(())
 }
@@ -1492,16 +1655,18 @@ fn execute_wilcoxon(
             match wilcoxon_test(ds, col1, Some(col2), 0.0, alt, paired, &config) {
                 Ok(res) => {
                     let warnings: Vec<String> = res.warning.iter().cloned().collect();
-                    let test_name = if paired {
-                        "Wilcoxon signed-rank test"
+                    // R's names: V for the signed-rank statistic, W for the rank sum
+                    let (test_name, statistic_name) = if paired {
+                        ("Wilcoxon signed-rank test", "V")
                     } else {
-                        "Wilcoxon rank-sum test"
+                        ("Wilcoxon rank-sum test", "W")
                     };
                     match format {
                         OutputFormat::Json => {
                             let json = serde_json::json!({
                                 "test": test_name,
                                 "statistic": res.statistic,
+                                "statistic_name": statistic_name,
                                 "p_value": res.p_value,
                             });
                             print_json(json, &res.missing, &warnings)?;
@@ -1509,7 +1674,10 @@ fn execute_wilcoxon(
                         _ => {
                             println!("\n{}", test_name);
                             println!("{}", "=".repeat(40));
-                            println!("W = {:.4}, p-value = {:.6}", res.statistic, res.p_value);
+                            println!(
+                                "{statistic_name} = {:.4}, p-value = {:.6}",
+                                res.statistic, res.p_value
+                            );
                             print_notes(None, &warnings, format);
                             if paired {
                                 print_missing_note(&res.missing, format);
@@ -1651,9 +1819,9 @@ fn execute_fivenum(
                     OutputFormat::Json => {
                         let json = serde_json::json!({
                             "min": result.minimum,
-                            "q1": result.lower_hinge,
+                            "lower_hinge": result.lower_hinge,
                             "median": result.median,
-                            "q3": result.upper_hinge,
+                            "upper_hinge": result.upper_hinge,
                             "max": result.maximum,
                             "n": result.n,
                         });
@@ -1662,11 +1830,11 @@ fn execute_fivenum(
                     _ => {
                         println!("\nFive-Number Summary for '{}'", col);
                         println!("{}", "=".repeat(35));
-                        println!("Min:    {:.4}", result.minimum);
-                        println!("Q1:     {:.4}", result.lower_hinge);
-                        println!("Median: {:.4}", result.median);
-                        println!("Q3:     {:.4}", result.upper_hinge);
-                        println!("Max:    {:.4}", result.maximum);
+                        println!("Min:          {:.4}", result.minimum);
+                        println!("Lower hinge:  {:.4}", result.lower_hinge);
+                        println!("Median:       {:.4}", result.median);
+                        println!("Upper hinge:  {:.4}", result.upper_hinge);
+                        println!("Max:          {:.4}", result.maximum);
                         print_missing_note(&missing, format);
                     }
                 },
@@ -1773,7 +1941,7 @@ fn execute_mad(
 fn execute_acf(
     dataset_name: &str,
     col: &str,
-    lag_max: usize,
+    lag_max: Option<usize>,
     partial: bool,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
@@ -1797,7 +1965,7 @@ fn execute_acf(
             };
 
             if partial {
-                match pacf(&data, Some(lag_max)) {
+                match pacf(&data, lag_max) {
                     Ok(result) => match format {
                         OutputFormat::Json => {
                             let json = serde_json::json!({
@@ -1818,9 +1986,10 @@ fn execute_acf(
                     Err(e) => print_error(&format!("PACF failed: {}", e), format),
                 }
             } else {
-                // The sample autocorrelations of the demeaned series (acf type "correlation"); the
-                // series has no missing values (series_column refuses them).
-                match acf(&data, Some(lag_max), AcfType::Correlation, true, true) {
+                // R's acf: the sample autocorrelations of the demeaned series with denominator n
+                // (no n/(n-k) adjustment); the series has no missing values (series_column
+                // refuses them).
+                match acf(&data, lag_max, AcfType::Correlation, true, false) {
                     Ok(result) => match format {
                         OutputFormat::Json => {
                             let json = serde_json::json!({
@@ -2228,7 +2397,7 @@ fn execute_friedman(
 fn execute_pacf(
     dataset_name: &str,
     col: &str,
-    lag_max: usize,
+    lag_max: Option<usize>,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
@@ -2250,7 +2419,7 @@ fn execute_pacf(
                 }
             };
 
-            match pacf(&data, Some(lag_max)) {
+            match pacf(&data, lag_max) {
                 Ok(result) => match format {
                     OutputFormat::Json => {
                         let json = serde_json::json!({
@@ -2286,11 +2455,19 @@ fn execute_pacf(
     Ok(())
 }
 
+/// R's default `lag.max` of `ccf` for two series of `n` values: `floor(10 log10(n / 2))`, at
+/// most `n - 1` (acf's rule with two series).
+fn ccf_default_lag(n: usize) -> usize {
+    let rule = (10.0 * (n as f64 / 2.0).log10()).floor();
+    // a negative rule (n < 2) saturates to 0; core refuses such short series
+    (rule.max(0.0) as usize).min(n.saturating_sub(1))
+}
+
 fn execute_ccf(
     dataset_name: &str,
     x_col: &str,
     y_col: &str,
-    lag_max: usize,
+    lag_max: Option<usize>,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
@@ -2303,7 +2480,13 @@ fn execute_ccf(
     };
 
     match dataset {
-        Some(ds) => match run_ccf(ds, x_col, y_col, Some(lag_max), CcfType::Correlation) {
+        Some(ds) => match run_ccf(
+            ds,
+            x_col,
+            y_col,
+            Some(lag_max.unwrap_or_else(|| ccf_default_lag(ds.nrows()))),
+            CcfType::Correlation,
+        ) {
             Ok(result) => match format {
                 OutputFormat::Json => {
                     let json = serde_json::json!({
@@ -2579,4 +2762,70 @@ fn execute_power_t(
         Err(e) => print_error(&format!("Power analysis failed: {}", e), format),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod ccf_lag_tests {
+    use super::ccf_default_lag;
+
+    #[test]
+    fn ccf_default_lag_follows_r() {
+        // R: ccf(x, y) on 64 values uses lag.max 15; 24 values 10; 10 values 6; capped at n - 1
+        assert_eq!(ccf_default_lag(64), 15);
+        assert_eq!(ccf_default_lag(24), 10);
+        assert_eq!(ccf_default_lag(10), 6);
+        assert_eq!(ccf_default_lag(3), 1);
+        assert_eq!(ccf_default_lag(1), 0);
+        assert_eq!(ccf_default_lag(0), 0);
+    }
+}
+
+#[cfg(test)]
+mod chisq_gof_tests {
+    use super::{OutputFormat, StatsCommands, execute};
+
+    /// A chisq-gof built without clap's ArgGroup (neither --observed nor --counts) is refused
+    /// with an error, not a panic.
+    #[test]
+    fn chisq_gof_without_a_source_is_refused_not_a_panic() {
+        let cmd = StatsCommands::ChisqGof {
+            dataset: "d".to_string(),
+            observed: None,
+            counts: None,
+            labels: None,
+            probs: None,
+            rescale_p: false,
+        };
+        assert!(execute(&cmd, &OutputFormat::Json, true, None).is_ok());
+        // the refusal was reported, so the process exits non-zero (the flag only ever moves
+        // from false to true, so parallel tests cannot unset it)
+        assert!(crate::output::error_was_reported());
+    }
+
+    /// --labels names the categories as R does: an integer column and a whole-number float
+    /// column both give `1`, `2`; a fractional float keeps its digits.
+    #[test]
+    fn chisq_gof_labels_follow_r_names() {
+        use polars::prelude::*;
+        let ds = p2a_core::Dataset::new(
+            df! {
+                "i" => [1i64, 2, 3],
+                "f" => [Some(1.0f64), Some(2.0), None],
+                "h" => [0.5f64, -3.0, 2.25],
+            }
+            .unwrap(),
+        );
+        assert_eq!(
+            super::gof_labels(&ds, Some("i"), 3).unwrap(),
+            ["1", "2", "3"]
+        );
+        assert_eq!(
+            super::gof_labels(&ds, Some("f"), 3).unwrap(),
+            ["1", "2", "NA"]
+        );
+        assert_eq!(
+            super::gof_labels(&ds, Some("h"), 3).unwrap(),
+            ["0.5", "-3", "2.25"]
+        );
+    }
 }

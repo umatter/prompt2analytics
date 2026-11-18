@@ -106,7 +106,8 @@ EXAMPLES:
         #[arg(long, default_value = "1000")]
         max_iter: usize,
 
-        /// Learning rate (default: 200.0)
+        /// Learning rate, Rtsne's eta (default: 200.0; sklearn's learning_rate is 4 times
+        /// this)
         #[arg(long, default_value = "200.0")]
         learning_rate: f64,
 
@@ -234,7 +235,8 @@ EXAMPLES:
         #[arg(short, long, default_value = "1.0")]
         c: f64,
 
-        /// Maximum iterations (default: 1000)
+        /// Budget of passes, at least 1 (default: 1000): the solver makes at most
+        /// max_iter × n pair updates, n the number of rows
         #[arg(long, default_value = "1000")]
         max_iter: usize,
 
@@ -727,7 +729,7 @@ fn execute_tsne(
 
                     match format {
                         OutputFormat::Json => {
-                            let json = serde_json::json!({
+                            let mut json = serde_json::json!({
                                 "method": "t-SNE",
                                 "n_components": result.n_components,
                                 "perplexity": result.perplexity,
@@ -735,6 +737,7 @@ fn execute_tsne(
                                 "kl_divergence": result.kl_divergence,
                                 "embedding": embedding_vec,
                             });
+                            add_result_notes(&mut json, &result);
                             println!("{}", serde_json::to_string_pretty(&json)?);
                         }
                         _ => {
@@ -751,6 +754,7 @@ fn execute_tsne(
                                 result.n_components
                             );
                             println!("(Use JSON output for full embedding data)");
+                            print_result_notes(&result, format);
                         }
                     }
                 }
@@ -1057,9 +1061,10 @@ fn execute_svm(
                 Some(feature_names.clone()),
             ) {
                 Ok(result) => {
-                    // Count predictions per class
-                    let neg_count = result.predictions.iter().filter(|&&p| p < 0).count();
-                    let pos_count = result.predictions.len() - neg_count;
+                    // Predictions are in the target's labels (0/1, or -1/1 without a mapping)
+                    let (neg, pos) = result.class_labels.unwrap_or((-1, 1));
+                    let neg_count = result.predictions.iter().filter(|&&p| p == neg).count();
+                    let pos_count = result.predictions.iter().filter(|&&p| p == pos).count();
 
                     match format {
                         OutputFormat::Json => {
@@ -1074,7 +1079,12 @@ fn execute_svm(
                                 "bias": result.bias,
                                 "class_labels": result.class_labels,
                                 "predictions": result.predictions,
+                                "prediction_counts": [
+                                    {"label": neg, "count": neg_count},
+                                    {"label": pos, "count": pos_count},
+                                ],
                             });
+                            add_result_notes(&mut json, &result);
                             if let Some(m) = missing_json(&missing) {
                                 json["missing"] = m;
                             }
@@ -1106,10 +1116,8 @@ fn execute_svm(
                                 println!("  {}: {:.6}", feature_names[*idx], weight);
                             }
 
-                            println!(
-                                "\nPrediction distribution: {} negative, {} positive",
-                                neg_count, pos_count
-                            );
+                            println!("\nPredicted labels: {neg}: {neg_count}, {pos}: {pos_count}");
+                            print_result_notes(&result, format);
                             print_missing_note(&missing, format);
                         }
                     }

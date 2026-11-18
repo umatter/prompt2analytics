@@ -1,0 +1,46 @@
+{
+  "schema": 1,
+  "id": "cli_viz_coefplot_ci",
+  "area": "cli/stats",
+  "method": "Coefficient intervals of lm(y ~ x + w): confint and coefci with HC1 at 90% and 95%",
+  "reference": "stats::confint(lm, level = 0.9); lmtest::coefci(vcov. = sandwich::vcovHC(type = 'HC1'), level = 0.9 and 0.95)",
+  "call": "lm(y ~ x + w, data = iv_weak_controls)",
+  "dataset": "validation/datasets/generated/iv_weak_controls.csv",
+  "datasets": ["validation/datasets/generated/iv_weak_controls.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "sandwich": "3.1.3",
+    "lmtest": "0.9.40"
+  },
+  "values": {
+    "coef": {
+      "names": ["(Intercept)", "x", "w"],
+      "values": [1.0546871257001036, 1.0362854111490305, -0.56895321833792067]
+    },
+    "ci90_classical_lower": {
+      "names": ["(Intercept)", "x", "w"],
+      "values": [0.96770628872317843, 0.97584996644127697, -0.72272292612153699]
+    },
+    "ci90_classical_upper": {
+      "names": ["(Intercept)", "x", "w"],
+      "values": [1.1416679626770287, 1.096720855856784, -0.41518351055430447]
+    },
+    "ci90_hc1_lower": {
+      "names": ["(Intercept)", "x", "w"],
+      "values": [0.967663479571372, 0.9783868315244082, -0.7249819134657145]
+    },
+    "ci90_hc1_upper": {
+      "names": ["(Intercept)", "x", "w"],
+      "values": [1.1417107718288351, 1.0941839907736528, -0.41292452321012696]
+    },
+    "ci95_hc1_lower": {
+      "names": ["(Intercept)", "x", "w"],
+      "values": [0.95093267386333324, 0.96725549045145409, -0.75497934403993228]
+    },
+    "ci95_hc1_upper": {
+      "names": ["(Intercept)", "x", "w"],
+      "values": [1.1584415775368739, 1.1053153318466069, -0.38292709263590907]
+    },
+    "n": 500
+  }
+}

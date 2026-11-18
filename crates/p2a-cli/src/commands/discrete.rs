@@ -1,7 +1,7 @@
 //! Discrete choice model commands
 
 use clap::{Subcommand, ValueEnum};
-use p2a_core::data::columns::{ColumnRequest, MissingSummary, NaPolicy, is_numeric_dtype};
+use p2a_core::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
 use p2a_core::econometrics::discrete::conditional_logit::{
     MlogitConfig, run_conditional_logit_with,
 };
@@ -18,8 +18,9 @@ use p2a_core::{
 };
 
 use crate::output::{
-    OutputFormat, add_notes, add_result_notes, format_regression_results, missing_json,
-    print_error, print_missing_note, print_notes, print_result_notes, regression_results_json,
+    CoefRow, FitLine, OutputFormat, RegressionReport, StatKind, add_notes, add_result_notes,
+    format_regression_report, missing_json, print_error, print_json, print_missing_note,
+    print_notes, print_result_notes, regression_report_json,
 };
 use crate::session::SessionManager;
 
@@ -476,80 +477,78 @@ pub fn execute(
     }
 }
 
-/// `Converged: Yes|No (k iterations)`, then the warnings, one per line.
+/// `Converged: Yes|No (k iterations)`, then the shared `Warnings:` block.
 fn print_convergence(converged: bool, iterations: usize, warnings: &[String]) {
     println!(
         "Converged: {} ({} iterations)",
         if converged { "Yes" } else { "No" },
         iterations
     );
-    if !warnings.is_empty() {
-        println!("Warnings:");
-        for w in warnings {
-            println!("  - {w}");
-        }
-    }
+    crate::output::print_warnings(warnings);
 }
 
-/// The logit/probit report: the coefficient table (aliased rows `NaN` in text, `null` in JSON),
-/// the log-likelihoods, the convergence line and every core warning, then T2's missing-value note.
-/// JSON adds `log_likelihood`, `log_likelihood_null`, `aic`, `separation`, `aliased`, `missing`
-/// (when rows were dropped) and the notes (`converged`, `iterations`, `warnings`).
+/// The logit/probit report, as `summary(glm)` reads: the coefficient table with z statistics
+/// (aliased rows `NaN` in text, `null` in JSON), McFadden's pseudo R-squared, the
+/// log-likelihoods, the convergence line and every core warning, then T2's missing-value note.
+/// JSON: the [`RegressionReport`] keys (`z_value` per coefficient, `statistic` `"z"`,
+/// `pseudo_r_squared`) plus `log_likelihood`, `log_likelihood_null`, `aic`, `separation`,
+/// `aliased`, `missing` (when rows were dropped) and the notes (`converged`, `iterations`,
+/// `warnings`).
 fn print_binary(
     method: &str,
     result: &DiscreteResult,
     format: &OutputFormat,
 ) -> anyhow::Result<()> {
-    let coef_table: Vec<(String, f64, f64, f64, f64)> = result
+    let at = |v: &[f64], i: usize| v.get(i).copied().unwrap_or(f64::NAN);
+    let coefficients: Vec<CoefRow> = result
         .variables
         .iter()
         .enumerate()
-        .map(|(i, name)| {
-            let at = |v: &[f64]| v.get(i).copied().unwrap_or(f64::NAN);
-            (
-                name.clone(),
-                at(&result.coefficients),
-                at(&result.std_errors),
-                at(&result.z_stats),
-                at(&result.p_values),
-            )
+        .map(|(i, name)| CoefRow {
+            name: name.clone(),
+            estimate: at(&result.coefficients, i),
+            std_error: at(&result.std_errors, i),
+            statistic: at(&result.z_stats, i),
+            p_value: at(&result.p_values, i),
         })
         .collect();
+    let mut extra = serde_json::Map::new();
+    extra.insert("log_likelihood".into(), result.log_likelihood.into());
+    extra.insert(
+        "log_likelihood_null".into(),
+        result.log_likelihood_null.into(),
+    );
+    extra.insert("aic".into(), result.aic.into());
+    extra.insert("separation".into(), result.separation.into());
+    extra.insert("aliased".into(), serde_json::json!(result.aliased));
+    let report = RegressionReport {
+        method,
+        coefficients,
+        statistic: StatKind::Z,
+        fit_lines: vec![FitLine {
+            label: "McFadden pseudo R-squared",
+            json_key: "pseudo_r_squared",
+            value: result.pseudo_r_squared,
+        }],
+        n_obs: result.n_obs,
+        se_type: "model-based (inverse information matrix)",
+        se_type_json: "classical",
+        r_squared_type: "McFadden",
+        extra_json: extra,
+        // the notes carry the warnings (text: after the log-likelihoods; JSON: merged below)
+        warnings: &[],
+    };
     match format {
         OutputFormat::Json => {
-            let mut json = regression_results_json(
-                method,
-                &coef_table,
-                result.pseudo_r_squared,
-                result.pseudo_r_squared,
-                result.n_obs,
-            );
-            if let Some(object) = json.as_object_mut() {
-                object.insert("log_likelihood".into(), result.log_likelihood.into());
-                object.insert(
-                    "log_likelihood_null".into(),
-                    result.log_likelihood_null.into(),
-                );
-                object.insert("aic".into(), result.aic.into());
-                object.insert("separation".into(), result.separation.into());
-                object.insert("aliased".into(), serde_json::json!(result.aliased));
-                if let Some(m) = missing_json(&result.missing) {
-                    object.insert("missing".into(), m);
-                }
+            let mut json = regression_report_json(&report);
+            if let Some(m) = missing_json(&result.missing) {
+                json["missing"] = m;
             }
             add_result_notes(&mut json, result);
-            println!("{}", serde_json::to_string_pretty(&json)?);
+            print_json(&json)?;
         }
         _ => {
-            let output = format_regression_results(
-                method,
-                &coef_table,
-                result.pseudo_r_squared,
-                result.pseudo_r_squared,
-                result.n_obs,
-                format,
-            );
-            println!("{}", output);
+            print!("{}", format_regression_report(&report, format));
             println!("\nLog-likelihood: {:.4}", result.log_likelihood);
             println!("Null log-likelihood: {:.4}", result.log_likelihood_null);
             print_result_notes(result, format);
@@ -637,6 +636,16 @@ fn execute_probit(
     Ok(())
 }
 
+/// Whether a failed ordered fit on an outcome of this type should ask for `--levels`: core
+/// orders numbers, booleans, dates and an Enum's declared categories itself and needs the
+/// order only for a text or categorical outcome.
+fn wants_levels_hint(dtype: &polars::prelude::DataType) -> bool {
+    matches!(
+        dtype,
+        polars::prelude::DataType::String | polars::prelude::DataType::Categorical(..)
+    )
+}
+
 /// o-logit / o-probit: `run_ordered_model_with` with the given link and `--levels`.
 fn execute_ordered(
     dataset_name: &str,
@@ -676,7 +685,7 @@ fn execute_ordered(
                 && ds
                     .df()
                     .column(dep_var)
-                    .is_ok_and(|c| !is_numeric_dtype(c.dtype(), true));
+                    .is_ok_and(|c| wants_levels_hint(c.dtype()));
             if text_outcome {
                 message.push_str(
                     " Give the order with --levels, lowest category first (e.g. --levels \
@@ -725,15 +734,7 @@ fn execute_ordered(
             println!("{}", "-".repeat(60));
 
             for (i, var) in result.variables.iter().enumerate() {
-                let sig = if result.p_values[i] < 0.001 {
-                    "***"
-                } else if result.p_values[i] < 0.01 {
-                    "**"
-                } else if result.p_values[i] < 0.05 {
-                    "*"
-                } else {
-                    ""
-                };
+                let sig = crate::output::stars(result.p_values[i]);
                 println!(
                     "{:<15} {:>12.6} {:>12.6} {:>10.4} {:>9.4} {}",
                     var,
@@ -842,15 +843,7 @@ fn execute_mlogit(
                                         && cat_idx < result.p_values.len()
                                         && i < result.p_values[cat_idx].len()
                                     {
-                                        let sig = if result.p_values[cat_idx][i] < 0.001 {
-                                            "***"
-                                        } else if result.p_values[cat_idx][i] < 0.01 {
-                                            "**"
-                                        } else if result.p_values[cat_idx][i] < 0.05 {
-                                            "*"
-                                        } else {
-                                            ""
-                                        };
+                                        let sig = crate::output::stars(result.p_values[cat_idx][i]);
                                         println!(
                                             "{:<15} {:>12.6} {:>12.6} {:>10.4} {:>9.4} {}",
                                             var,
@@ -938,15 +931,7 @@ fn execute_negbin(
                         println!("{}", "-".repeat(60));
 
                         for (i, var) in result.variables.iter().enumerate() {
-                            let sig = if result.p_values[i] < 0.001 {
-                                "***"
-                            } else if result.p_values[i] < 0.01 {
-                                "**"
-                            } else if result.p_values[i] < 0.05 {
-                                "*"
-                            } else {
-                                ""
-                            };
+                            let sig = crate::output::stars(result.p_values[i]);
                             println!(
                                 "{:<15} {:>12.6} {:>12.6} {:>10.4} {:>9.4} {}",
                                 var,
@@ -1078,15 +1063,7 @@ fn execute_poisson(
             println!("{}", "-".repeat(60));
 
             for (i, var) in variables.iter().enumerate() {
-                let sig = if p[i] < 0.001 {
-                    "***"
-                } else if p[i] < 0.01 {
-                    "**"
-                } else if p[i] < 0.05 {
-                    "*"
-                } else {
-                    ""
-                };
+                let sig = crate::output::stars(p[i]);
                 println!(
                     "{:<15} {:>12.6} {:>12.6} {:>10.4} {:>9.4} {}",
                     var, fit.coefficients[i], fit.std_errors[i], z[i], p[i], sig
@@ -1178,15 +1155,7 @@ fn execute_zip(
                         println!("{}", "-".repeat(60));
 
                         for (i, var) in result.count_variables.iter().enumerate() {
-                            let sig = if result.count_p_values[i] < 0.001 {
-                                "***"
-                            } else if result.count_p_values[i] < 0.01 {
-                                "**"
-                            } else if result.count_p_values[i] < 0.05 {
-                                "*"
-                            } else {
-                                ""
-                            };
+                            let sig = crate::output::stars(result.count_p_values[i]);
                             println!(
                                 "{:<15} {:>12.6} {:>12.6} {:>10.4} {:>9.4} {}",
                                 var,
@@ -1206,15 +1175,7 @@ fn execute_zip(
                         println!("{}", "-".repeat(60));
 
                         for (i, var) in result.zero_variables.iter().enumerate() {
-                            let sig = if result.zero_p_values[i] < 0.001 {
-                                "***"
-                            } else if result.zero_p_values[i] < 0.01 {
-                                "**"
-                            } else if result.zero_p_values[i] < 0.05 {
-                                "*"
-                            } else {
-                                ""
-                            };
+                            let sig = crate::output::stars(result.zero_p_values[i]);
                             println!(
                                 "{:<15} {:>12.6} {:>12.6} {:>10.4} {:>9.4} {}",
                                 var,
@@ -1314,15 +1275,7 @@ fn execute_zinb(
                         println!("{}", "-".repeat(60));
 
                         for (i, var) in result.count_variables.iter().enumerate() {
-                            let sig = if result.count_p_values[i] < 0.001 {
-                                "***"
-                            } else if result.count_p_values[i] < 0.01 {
-                                "**"
-                            } else if result.count_p_values[i] < 0.05 {
-                                "*"
-                            } else {
-                                ""
-                            };
+                            let sig = crate::output::stars(result.count_p_values[i]);
                             println!(
                                 "{:<15} {:>12.6} {:>12.6} {:>10.4} {:>9.4} {}",
                                 var,
@@ -1342,15 +1295,7 @@ fn execute_zinb(
                         println!("{}", "-".repeat(60));
 
                         for (i, var) in result.zero_variables.iter().enumerate() {
-                            let sig = if result.zero_p_values[i] < 0.001 {
-                                "***"
-                            } else if result.zero_p_values[i] < 0.01 {
-                                "**"
-                            } else if result.zero_p_values[i] < 0.05 {
-                                "*"
-                            } else {
-                                ""
-                            };
+                            let sig = crate::output::stars(result.zero_p_values[i]);
                             println!(
                                 "{:<15} {:>12.6} {:>12.6} {:>10.4} {:>9.4} {}",
                                 var,
@@ -1434,6 +1379,8 @@ fn execute_hurdle(
                             "count_z_stats": result.count_z_stats,
                             "count_p_values": result.count_p_values,
                             "theta": result.theta,
+                            "theta_std_error": result.theta_std_error,
+                            "log_theta_std_error": result.log_theta_std_error,
                             "n_obs": result.n_obs,
                             "n_zeros": result.n_zeros,
                             "n_positive": result.n_positive,
@@ -1463,15 +1410,7 @@ fn execute_hurdle(
                         println!("{}", "-".repeat(60));
 
                         for (i, var) in result.binary_variables.iter().enumerate() {
-                            let sig = if result.binary_p_values[i] < 0.001 {
-                                "***"
-                            } else if result.binary_p_values[i] < 0.01 {
-                                "**"
-                            } else if result.binary_p_values[i] < 0.05 {
-                                "*"
-                            } else {
-                                ""
-                            };
+                            let sig = crate::output::stars(result.binary_p_values[i]);
                             println!(
                                 "{:<15} {:>12.6} {:>12.6} {:>10.4} {:>9.4} {}",
                                 var,
@@ -1491,15 +1430,7 @@ fn execute_hurdle(
                         println!("{}", "-".repeat(60));
 
                         for (i, var) in result.count_variables.iter().enumerate() {
-                            let sig = if result.count_p_values[i] < 0.001 {
-                                "***"
-                            } else if result.count_p_values[i] < 0.01 {
-                                "**"
-                            } else if result.count_p_values[i] < 0.05 {
-                                "*"
-                            } else {
-                                ""
-                            };
+                            let sig = crate::output::stars(result.count_p_values[i]);
                             println!(
                                 "{:<15} {:>12.6} {:>12.6} {:>10.4} {:>9.4} {}",
                                 var,
@@ -1512,8 +1443,17 @@ fn execute_hurdle(
                         }
 
                         println!("\n---");
-                        if let Some(theta) = result.theta {
-                            println!("Theta (dispersion): {:.4}", theta);
+                        match (
+                            result.theta,
+                            result.theta_std_error,
+                            result.log_theta_std_error,
+                        ) {
+                            (Some(theta), Some(se), Some(log_se)) => println!(
+                                "Theta (dispersion): {:.6} (SE: {:.6}), log(theta) SE: {:.6}",
+                                theta, se, log_se
+                            ),
+                            (Some(theta), _, _) => println!("Theta (dispersion): {:.6}", theta),
+                            _ => {}
                         }
                         println!("Observations: {}", result.n_obs);
                         println!("Log-likelihood: {:.4}", result.log_likelihood);
@@ -1635,15 +1575,7 @@ fn execute_clogit(
             println!("{}", "-".repeat(65));
 
             for (name, b, se, z, p) in &rows {
-                let sig = if *p < 0.001 {
-                    "***"
-                } else if *p < 0.01 {
-                    "**"
-                } else if *p < 0.05 {
-                    "*"
-                } else {
-                    ""
-                };
+                let sig = crate::output::stars(*p);
                 println!(
                     "{:<20} {:>12.6} {:>12.6} {:>10.4} {:>9.4} {}",
                     name, b, se, z, p, sig
@@ -1794,15 +1726,7 @@ fn execute_mixed_logit(
                                         format!("{:.4}", result.std_dev_std_errors[i]),
                                     )
                                 };
-                            let sig = if result.mean_p_values[i] < 0.001 {
-                                "***"
-                            } else if result.mean_p_values[i] < 0.01 {
-                                "**"
-                            } else if result.mean_p_values[i] < 0.05 {
-                                "*"
-                            } else {
-                                ""
-                            };
+                            let sig = crate::output::stars(result.mean_p_values[i]);
                             println!(
                                 "{:<15} {:>10.4} {:>10.4} {:>10} {:>10} {:>10} {:>9.4} {}",
                                 var,
@@ -1830,4 +1754,23 @@ fn execute_mixed_logit(
         None => print_error(&format!("Dataset '{}' not found", dataset_name), format),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod levels_hint_tests {
+    use super::wants_levels_hint;
+    use polars::prelude::*;
+
+    #[test]
+    fn test_ordered_levels_hint_skips_enum() {
+        assert!(wants_levels_hint(&DataType::String));
+        assert!(wants_levels_hint(&DataType::from_categories(
+            Categories::global()
+        )));
+        let fcats = FrozenCategories::new(["lo", "hi"]).unwrap();
+        assert!(!wants_levels_hint(&DataType::from_frozen_categories(fcats)));
+        assert!(!wants_levels_hint(&DataType::Int64));
+        assert!(!wants_levels_hint(&DataType::Float64));
+        assert!(!wants_levels_hint(&DataType::Boolean));
+    }
 }

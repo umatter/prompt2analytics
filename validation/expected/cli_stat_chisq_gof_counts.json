@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "id": "cli_stat_chisq_gof_counts",
+  "area": "cli/stats",
+  "method": "chisq.test on a counts vector, uniform and with given probabilities",
+  "reference": "stats::chisq.test(x) and chisq.test(x, p = p) on a counts vector",
+  "call": "chisq.test(n); chisq.test(n, p = p)",
+  "dataset": "validation/datasets/generated/cli_chisq_counts.csv",
+  "datasets": ["validation/datasets/generated/cli_chisq_counts.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "counts": [12, 17, 25, 34, 25, 7],
+    "probs": [0.10000000000000001, 0.14999999999999999, 0.20000000000000001, 0.25, 0.20000000000000001, 0.10000000000000001],
+    "uniform_statistic": 24.399999999999999,
+    "uniform_df": 5,
+    "uniform_p": 0.00018186315297023288,
+    "uniform_expected": [20, 20, 20, 20, 20, 20],
+    "uniform_residuals": [-1.7888543819998317, -0.67082039324993692, 1.1180339887498949, 3.1304951684997055, 1.1180339887498949, -2.9068883707497264],
+    "probs_statistic": 2.7555555555555555,
+    "probs_df": 5,
+    "probs_p": 0.73760922734698287,
+    "probs_expected": [12, 18, 24, 30, 24, 12],
+    "probs_residuals": [0, -0.23570226039551587, 0.20412414523193154, 0.73029674334022143, 0.20412414523193154, -1.4433756729740645],
+    "die_statistic": 12,
+    "die_df": 5,
+    "die_p": 0.034787780506241851
+  }
+}

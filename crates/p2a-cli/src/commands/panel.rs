@@ -15,9 +15,9 @@ use p2a_core::{PanelModel, PanelUnitRootConfig, PanelUnitRootTest, run_panel_uni
 use p2a_core::{PvcmType, run_pvcm};
 
 use crate::output::{
-    CoefRow, OutputFormat, RegressionReport, StatKind, add_notes, add_result_notes,
+    CoefRow, FitLine, OutputFormat, RegressionReport, StatKind, add_notes, add_result_notes,
     format_regression_report, missing_json, parse_core_option, print_error, print_missing_note,
-    print_notes, print_result_notes, se_label, sorted_object,
+    print_notes, print_result_notes, print_warnings, se_label, sorted_object,
 };
 use crate::session::SessionManager;
 
@@ -306,8 +306,22 @@ EXAMPLES:
         model: PanelGlsModelArg,
     },
 
-    /// Panel unit root tests (LLC, IPS, Hadri)
+    /// Panel unit root tests (LLC, IPS, Maddala-Wu, Hadri), as plm::purtest
     #[command(after_help = "\
+NOTES:
+    LLC tests a unit root common to every unit; IPS and Maddala-Wu allow heterogeneous roots
+    (the alternative: some units are stationary). Hadri's null is the opposite: stationarity
+    in every unit. Hadri uses no lagged differences (it refuses --lags, --lag-selection and
+    --pmax) and needs model intercept or trend.
+
+    Units may be text or numbers; time must hold whole numbers or dates; a repeated
+    (unit, time) row is an error. Gaps in a unit's time index are joined in time order, as
+    purtest does, with a warning. Rows with a missing value are dropped and reported.
+
+    Lags: without --lags or --lag-selection every unit gets floor(T^(1/3)) lags (T the
+    longest unit's length) and the ADF residual variance uses the degrees-of-freedom
+    correction (dfcor = TRUE); plm::purtest's default is SIC with pmax 10 and dfcor = FALSE.
+
 EXAMPLES:
     # Levin-Lin-Chu test
     p2a --session s.json panel unit-root mydata -v gdp --unit country --time year --test llc
@@ -544,27 +558,33 @@ fn execute_fe(
                     extra_json.insert("f_statistic".to_string(), result.f_stat.into());
                     extra_json.insert("f_p_value".to_string(), result.f_p_value.into());
                     extra_json.insert("dropped".to_string(), result.dropped.clone().into());
+                    insert_f_df_and_missing(&mut extra_json, &result);
+                    // the dropped-rows note is the Note line (JSON: `missing`), not a warning
+                    let warnings = without_missing_note(&result.warnings, &result.missing);
+                    let json = matches!(format, OutputFormat::Json);
                     let report = RegressionReport {
                         method: "Fixed Effects (Within) Estimation",
                         coefficients: panel_rows(&result),
                         statistic: stat_kind(result.test_distribution),
-                        r_squared: ("R-squared (within)", result.r_squared),
-                        adj_r_squared: ("Adj. R-squared (within)", result.adj_r_squared),
+                        fit_lines: vec![
+                            FitLine::r_squared("R-squared (within)", result.r_squared),
+                            FitLine::adj_r_squared("Adj. R-squared (within)", result.adj_r_squared),
+                        ],
                         n_obs: result.n_obs,
                         se_type: &se_type,
                         se_type_json: &se_type_json,
                         r_squared_type: "within",
                         extra_json,
-                        warnings: &result.warnings,
+                        // text: printed after the F line below
+                        warnings: if json { warnings.as_slice() } else { &[] },
                     };
                     println!("{}", format_regression_report(&report, format));
 
-                    match format {
-                        OutputFormat::Json => {}
-                        _ => {
-                            println!("\nNumber of groups: {}", result.n_groups);
-                            print_panel_f_line(&result);
-                        }
+                    if !json {
+                        println!("\nNumber of groups: {}", result.n_groups);
+                        print_panel_f_line(&result);
+                        print_warnings(&warnings);
+                        print_missing_note(&result.missing, format);
                     }
                 }
                 Err(e) => {
@@ -609,7 +629,7 @@ fn execute_re(
                 Ok(result) => {
                     let se_type = result.vcov_type.to_string();
                     let se_type_json = panel_se_json(result.vcov_type, entity);
-                    let theta_range = theta_range(&result);
+                    let theta_span = theta_range(&result);
                     let mut extra_json = serde_json::Map::new();
                     extra_json.insert("n_groups".to_string(), result.n_groups.into());
                     extra_json.insert("f_statistic".to_string(), result.f_stat.into());
@@ -624,26 +644,31 @@ fn execute_re(
                         ("sigma_u", result.sigma_u),
                         ("sigma_e", result.sigma_e),
                         ("theta", result.theta),
-                        ("theta_min", theta_range.map(|(lo, _)| lo)),
-                        ("theta_max", theta_range.map(|(_, hi)| hi)),
+                        ("theta_min", theta_span.map(|(lo, _)| lo)),
+                        ("theta_max", theta_span.map(|(_, hi)| hi)),
                     ];
                     for (key, value) in optional {
                         if let Some(value) = value {
                             extra_json.insert(key.to_string(), value.into());
                         }
                     }
+                    insert_f_df_and_missing(&mut extra_json, &result);
+                    let warnings = without_missing_note(&result.warnings, &result.missing);
+                    let json = matches!(format, OutputFormat::Json);
                     let report = RegressionReport {
                         method: "Random Effects (GLS) Estimation",
                         coefficients: panel_rows(&result),
                         statistic: stat_kind(result.test_distribution),
-                        r_squared: ("R-squared", result.r_squared),
-                        adj_r_squared: ("Adj. R-squared", result.adj_r_squared),
+                        fit_lines: vec![
+                            FitLine::r_squared("R-squared", result.r_squared),
+                            FitLine::adj_r_squared("Adj. R-squared", result.adj_r_squared),
+                        ],
                         n_obs: result.n_obs,
                         se_type: &se_type,
                         se_type_json: &se_type_json,
                         r_squared_type: "cor(y*, X*b)^2 (plm)",
                         extra_json,
-                        warnings: &result.warnings,
+                        warnings: if json { warnings.as_slice() } else { &[] },
                     };
                     println!("{}", format_regression_report(&report, format));
 
@@ -665,7 +690,7 @@ fn execute_re(
                             if let (Some(u), Some(e), Some(theta)) =
                                 (result.sigma_u, result.sigma_e, result.theta)
                             {
-                                match theta_range {
+                                match theta_span {
                                     None => println!(
                                         "sigma_u: {u:.4}, sigma_e: {e:.4}, theta: {theta:.4}"
                                     ),
@@ -675,6 +700,8 @@ fn execute_re(
                                     ),
                                 }
                             }
+                            print_warnings(&warnings);
+                            print_missing_note(&result.missing, format);
                         }
                     }
                 }
@@ -740,12 +767,7 @@ fn execute_hausman(
                         println!("P-value: {:.4}", result.p_value);
                         println!("Covariance: {}", result.vcov_method);
                         println!("\nRecommendation: {}", result.recommendation);
-                        if !result.warnings.is_empty() {
-                            println!("\nWarnings:");
-                            for w in &result.warnings {
-                                println!("  - {w}");
-                            }
-                        }
+                        print_warnings(&result.warnings);
                     }
                 },
                 Err(e) => {
@@ -825,8 +847,13 @@ fn execute_hdfe(
                             &result.p_values,
                         ),
                         statistic: StatKind::T,
-                        r_squared: ("R-squared (within)", result.r_squared_within),
-                        adj_r_squared: ("Adj. R-squared (within)", result.adj_r_squared_within),
+                        fit_lines: vec![
+                            FitLine::r_squared("R-squared (within)", result.r_squared_within),
+                            FitLine::adj_r_squared(
+                                "Adj. R-squared (within)",
+                                result.adj_r_squared_within,
+                            ),
+                        ],
                         n_obs: result.n_obs,
                         se_type: &se_type,
                         se_type_json: result.cov_type.short_label(),
@@ -914,6 +941,20 @@ fn theta_range(result: &PanelResult) -> Option<(f64, f64)> {
     ))
 }
 
+/// The JSON keys fe and re add to their report: the F test's degrees of freedom
+/// (`f_df1`, `f_df2`, as [`PanelResult::f_df`]) and `missing` when rows were dropped.
+fn insert_f_df_and_missing(
+    extra: &mut serde_json::Map<String, serde_json::Value>,
+    result: &PanelResult,
+) {
+    let (df1, df2) = result.f_df();
+    extra.insert("f_df1".to_string(), df1.into());
+    extra.insert("f_df2".to_string(), df2.into());
+    if let Some(m) = missing_json(&result.missing) {
+        extra.insert("missing".to_string(), m);
+    }
+}
+
 /// The F line after a panel table. Classical: `F-statistic: F (p-value: p)`.
 /// Under the entity-clustered covariance the statistic is a Wald F on
 /// (K, G - 1) degrees of freedom, as plm, and the line says so. A NaN F (a
@@ -996,17 +1037,7 @@ fn execute_feglm(
                         println!("{}", "-".repeat(66));
 
                         for (i, var) in result.variables.iter().enumerate() {
-                            let sig = if result.p_values[i] < 0.001 {
-                                "***"
-                            } else if result.p_values[i] < 0.01 {
-                                "**"
-                            } else if result.p_values[i] < 0.05 {
-                                "*"
-                            } else if result.p_values[i] < 0.1 {
-                                "."
-                            } else {
-                                ""
-                            };
+                            let sig = crate::output::stars(result.p_values[i]);
                             println!(
                                 "{:<20} {:>12.6} {:>12.6} {:>10.4} {:>9.4} {}",
                                 var,
@@ -1135,7 +1166,7 @@ fn execute_gmm(
                                 result.std_errors[i],
                                 result.z_stats[i],
                                 result.p_values[i],
-                                significance_mark(result.p_values[i])
+                                crate::output::stars(result.p_values[i])
                             );
                         }
 
@@ -1235,17 +1266,7 @@ fn execute_pvcm(
                         println!("{}", "-".repeat(66));
 
                         for (i, var) in result.variables.iter().enumerate() {
-                            let sig = if result.p_values[i] < 0.001 {
-                                "***"
-                            } else if result.p_values[i] < 0.01 {
-                                "**"
-                            } else if result.p_values[i] < 0.05 {
-                                "*"
-                            } else if result.p_values[i] < 0.1 {
-                                "."
-                            } else {
-                                ""
-                            };
+                            let sig = crate::output::stars(result.p_values[i]);
                             println!(
                                 "{:<20} {:>12.6} {:>12.6} {:>10.4} {:>9.4} {}",
                                 var,
@@ -1332,17 +1353,7 @@ fn execute_pmg(
                         println!("{}", "-".repeat(66));
 
                         for (i, var) in result.variables.iter().enumerate() {
-                            let sig = if result.p_values[i] < 0.001 {
-                                "***"
-                            } else if result.p_values[i] < 0.01 {
-                                "**"
-                            } else if result.p_values[i] < 0.05 {
-                                "*"
-                            } else if result.p_values[i] < 0.1 {
-                                "."
-                            } else {
-                                ""
-                            };
+                            let sig = crate::output::stars(result.p_values[i]);
                             println!(
                                 "{:<20} {:>12.6} {:>12.6} {:>10.4} {:>9.4} {}",
                                 var,
@@ -1429,17 +1440,7 @@ fn execute_gls(
                         println!("{}", "-".repeat(66));
 
                         for (i, var) in result.variables.iter().enumerate() {
-                            let sig = if result.p_values[i] < 0.001 {
-                                "***"
-                            } else if result.p_values[i] < 0.01 {
-                                "**"
-                            } else if result.p_values[i] < 0.05 {
-                                "*"
-                            } else if result.p_values[i] < 0.1 {
-                                "."
-                            } else {
-                                ""
-                            };
+                            let sig = crate::output::stars(result.p_values[i]);
                             println!(
                                 "{:<20} {:>12.6} {:>12.6} {:>10.4} {:>9.4} {}",
                                 var,
@@ -1573,33 +1574,6 @@ fn with_missing(
         json["missing"] = m;
     }
     json
-}
-
-/// A `Warnings:` block (nothing when there are none); the missing-value note is one of
-/// them, as in `panel fe` and `panel re`.
-fn print_warnings(warnings: &[String]) {
-    if warnings.is_empty() {
-        return;
-    }
-    println!("\nWarnings:");
-    for w in warnings {
-        println!("  - {w}");
-    }
-}
-
-/// `***`, `**`, `*`, `.` or nothing for a p-value.
-fn significance_mark(p: f64) -> &'static str {
-    if p < 0.001 {
-        "***"
-    } else if p < 0.01 {
-        "**"
-    } else if p < 0.05 {
-        "*"
-    } else if p < 0.1 {
-        "."
-    } else {
-        ""
-    }
 }
 
 /// `warnings` without the missing-value note, for a caller that prints that note last.

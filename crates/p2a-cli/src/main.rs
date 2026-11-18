@@ -343,30 +343,44 @@ fn run_smoke_test(format: &OutputFormat) -> anyhow::Result<()> {
     use p2a_core::{Dataset, run_ols};
     use polars::prelude::*;
 
-    println!("Running p2a smoke test...");
-    println!();
+    // Progress lines go to stdout in text mode and to stderr in JSON mode, so that JSON
+    // output is one document.
+    let json = matches!(format, OutputFormat::Json);
+    let progress = |line: &str| {
+        if json {
+            eprintln!("{line}");
+        } else {
+            println!("{line}");
+        }
+    };
+
+    progress("Running p2a smoke test...");
+    progress("");
 
     // 1. Create a small test dataset
-    println!("1. Creating test dataset...");
+    progress("1. Creating test dataset...");
     let df = df! {
         "y" => [1.1, 2.2, 2.9, 4.1, 5.0, 5.9, 7.2, 7.8, 9.1, 10.0],
         "x1" => [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0],
         "x2" => [0.5, 1.0, 0.7, 1.2, 0.8, 1.5, 1.1, 1.3, 0.9, 1.4],
     }?;
     let dataset = Dataset::new(df);
-    println!(
+    progress(&format!(
         "   Created dataset: {} rows x {} columns",
         dataset.nrows(),
         dataset.ncols()
-    );
+    ));
 
     // 2. Run OLS regression
-    println!("2. Running OLS regression: y ~ x1 + x2...");
+    progress("2. Running OLS regression: y ~ x1 + x2...");
     let result = run_ols(&dataset, "y", &["x1", "x2"], true, CovarianceType::HC1)?;
-    println!("   N = {}, R² = {:.4}", result.n_obs, result.r_squared);
+    progress(&format!(
+        "   N = {}, R² = {:.4}",
+        result.n_obs, result.r_squared
+    ));
 
     // 3. Verify results
-    println!("3. Verifying results...");
+    progress("3. Verifying results...");
     if result.n_obs != 10 {
         anyhow::bail!(
             "Smoke test FAILED: Expected 10 observations, got {}",
@@ -397,16 +411,16 @@ fn run_smoke_test(format: &OutputFormat) -> anyhow::Result<()> {
         );
     }
 
-    println!();
+    progress("");
     match format {
         OutputFormat::Json => {
-            let json = serde_json::json!({
+            let doc = serde_json::json!({
                 "status": "success",
                 "tests_passed": 4,
                 "n_obs": result.n_obs,
                 "r_squared": result.r_squared,
             });
-            println!("{}", serde_json::to_string_pretty(&json)?);
+            println!("{}", serde_json::to_string_pretty(&doc)?);
         }
         _ => {
             println!("========================================");

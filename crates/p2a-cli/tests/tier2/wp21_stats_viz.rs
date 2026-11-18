@@ -338,7 +338,7 @@ fn test_validate_cli_wilcoxon_na() {
     ];
     let out = s.ok(&paired);
     Check::new(&case)
-        .scalar("paired_v", num_after(&out, "W = "), Tol::exact()) // the CLI's own text line still prints "W = " for V
+        .scalar("paired_v", num_after(&out, "V = "), Tol::exact()) // R's name for the signed-rank statistic
         .scalar(
             "paired_p_exact",
             num_after(&out, "p-value = "),
@@ -350,7 +350,9 @@ fn test_validate_cli_wilcoxon_na() {
         Some("Note: 2 of 10 rows dropped because of missing values (x: 1, y: 1)"),
         "{out}"
     );
+    assert!(!out.contains("W = "), "{out}");
     let j = s.json(&paired);
+    assert_eq!(j["statistic_name"], "V", "{j}");
     Check::new(&case)
         .scalar("paired_v", num(&j, "statistic"), Tol::exact())
         .scalar("paired_p_exact", num(&j, "p_value"), Tol::p_value(8)) // default config: exact for 8 pairs without ties
@@ -370,6 +372,7 @@ fn test_validate_cli_wilcoxon_na() {
     Check::new(&case)
         .scalar("ranksum_w", num(&r, "statistic"), Tol::exact())
         .finish();
+    assert_eq!(r["statistic_name"], "W", "{r}");
     assert_eq!(r["missing"], missing(20, 18, json!({"x": 1, "y": 1}))); // each sample on its own
     let rt = s.ok(&[
         "stats",
@@ -380,6 +383,7 @@ fn test_validate_cli_wilcoxon_na() {
         "--col2",
         "y",
     ]);
+    assert!(rt.contains("W = "), "{rt}");
     assert_eq!(
         note(&rt),
         Some(
@@ -399,10 +403,12 @@ fn test_validate_cli_descriptive_na() {
     let d = s.load(&case);
     let d = d.as_str();
     let out = s.ok(&["stats", "fivenum", d, "--col", "x"]);
-    let five: Vec<f64> = ["Min:", "Q1:", "Median:", "Q3:", "Max:"]
+    // Tukey's hinges, named as R's fivenum documents them (not quartiles)
+    let five: Vec<f64> = ["Min:", "Lower hinge:", "Median:", "Upper hinge:", "Max:"]
         .iter()
-        .map(|l| nums(&row(&out, l))[0])
+        .map(|l| num_after(&out, l))
         .collect();
+    assert!(!out.contains("Q1") && !out.contains("Q3"), "{out}");
     Check::new(&case)
         .vector("fivenum_x", &five, Tol::printed(4))
         .finish();
@@ -416,7 +422,7 @@ fn test_validate_cli_descriptive_na() {
         by.insert(col.to_string(), k.into());
         let want = missing(22, n, Value::Object(by));
         let j = s.json(&["stats", "fivenum", d, "--col", col]);
-        let got = ["min", "q1", "median", "q3", "max"].map(|key| num(&j, key));
+        let got = ["min", "lower_hinge", "median", "upper_hinge", "max"].map(|key| num(&j, key));
         Check::new(&case)
             .vector(&format!("fivenum_{col}"), &got, Tol::coef(n as usize))
             .scalar(&format!("n_{col}"), num(&j, "n"), Tol::exact())
@@ -498,24 +504,25 @@ fn test_validate_cli_acf_pacf_int64() {
     Check::new(&case)
         .vector("pacf", &lag_values(&text), Tol::printed(4))
         .finish();
-    // stats acf (not partial): the CLI passes adjusted = true (n - k denominators, CLI-22,
-    // Tier 4), so its values are R's acf times n / (n - k), derived from the case key `acf`;
-    // lag 0 is 1.
+    // stats acf (not partial): R's acf (denominator n, no n/(n-k) scaling, CLI-22); lag 0 is 1
     let a = s.json(&["stats", "acf", d, "--col", "y", "--lag-max", "5"]);
     let values = num_vec(&a, "values");
     assert_eq!(
         (a["lags"].clone(), values[0]),
         (json!([0, 1, 2, 3, 4, 5]), 1.0)
     );
-    let r_acf = case.vector("acf");
-    for k in 1..=5 {
-        let want = r_acf[k - 1] * 24.0 / (24.0 - k as f64);
-        assert!(
-            Tol::stat(24).allows(values[k], want),
-            "lag {k}: rust={} derived R={want}",
-            values[k]
-        );
-    }
+    Check::new(&case)
+        .vector("acf", &values[1..], Tol::stat(24))
+        .finish();
+    // the n = 64 series at R's default lag.max (18; case stat_ts_acf_spline_t3)
+    let long = Case::load("stat_ts_acf_spline_t3");
+    let l = s.load(&long);
+    let a = s.json(&["stats", "acf", l.as_str(), "--col", "x"]);
+    let values = num_vec(&a, "values");
+    Check::new(&long)
+        .scalar("acf_lag_max", (values.len() - 1) as f64, Tol::exact())
+        .vector("acf", &values, Tol::stat(64)) // R's acf includes lag 0
+        .finish();
 }
 
 /// `data load validation/<rel> --name <file stem>` for tests that compare no R value (and so
@@ -1515,4 +1522,342 @@ fn test_cli_viz_event_study_irf() {
         i.as_str(),
     ]);
     assert!(e.contains("Column 'nope' not found"), "{e}");
+}
+
+/// CLI-20: `--counts` reads a column of counts as chisq.test(x) does, uniform and with --probs;
+/// --labels names the rows (case cli_stat_chisq_gof_counts). Fails before: no --counts flag, and
+/// --observed tallied the counts as categories.
+#[test]
+fn test_validate_cli_chisq_gof_counts() {
+    let case = Case::load("cli_stat_chisq_gof_counts");
+    let s = temp_session();
+    let d = s.load(&case);
+    let base = ["stats", "chisq-gof", d.as_str(), "--counts", "n"];
+    let j = s.json(&base);
+    Check::new(&case)
+        .scalar("uniform_statistic", num(&j, "chi_squared"), Tol::stat(120))
+        .scalar("uniform_df", num(&j, "df"), Tol::exact())
+        .scalar("uniform_p", num(&j, "p_value"), Tol::p_value(120))
+        .vector("counts", &num_vec(&j, "observed"), Tol::exact())
+        .vector("uniform_expected", &num_vec(&j, "expected"), Tol::stat(120))
+        .vector(
+            "uniform_residuals",
+            &num_vec(&j, "residuals"),
+            Tol::stat(120),
+        )
+        .finish();
+    assert_eq!(j["categories"], json!(["1", "2", "3", "4", "5", "6"]));
+    let mut with_p = base.to_vec();
+    with_p.extend(["--labels", "label", "--probs", "0.1,0.15,0.2,0.25,0.2,0.1"]);
+    let j = s.json(&with_p);
+    Check::new(&case)
+        .scalar("probs_statistic", num(&j, "chi_squared"), Tol::stat(120))
+        .scalar("probs_df", num(&j, "df"), Tol::exact())
+        .scalar("probs_p", num(&j, "p_value"), Tol::p_value(120))
+        .vector("probs_expected", &num_vec(&j, "expected"), Tol::stat(120))
+        .vector("probs_residuals", &num_vec(&j, "residuals"), Tol::stat(120))
+        .finish();
+    assert_eq!(j["categories"], json!(["a", "b", "c", "d", "e", "f"]));
+    let out = s.ok(&with_p);
+    Check::new(&case)
+        .scalar(
+            "probs_statistic",
+            num_after(&out, "X-squared = "),
+            Tol::printed(4),
+        )
+        .scalar("probs_p", num_after(&out, "p-value = "), Tol::printed(6))
+        .finish();
+    let f = nums(&row(&out, "f"));
+    assert_eq!(f, vec![7.0, 12.0], "{out}");
+}
+
+/// --observed with --probs: the probabilities in the sorted level order (case stat_chisq_gof,
+/// p1 and p2).
+#[test]
+fn test_validate_cli_chisq_gof_observed_probs() {
+    let case = Case::load("stat_chisq_gof");
+    let s = temp_session();
+    let d = s.load(&case);
+    for (key, probs) in [("p1", "0.1,0.6,0.3"), ("p2", "0.2,0.5,0.3")] {
+        let j = s.json(&[
+            "stats",
+            "chisq-gof",
+            d.as_str(),
+            "--observed",
+            "cat",
+            "--probs",
+            probs,
+        ]);
+        Check::new(&case)
+            .scalar(
+                &format!("{key}_chisq"),
+                num(&j, "chi_squared"),
+                Tol::stat(50),
+            )
+            .scalar(&format!("{key}_p"), num(&j, "p_value"), Tol::p_value(50))
+            .vector(
+                &format!("{key}_expected"),
+                &num_vec(&j, "expected"),
+                Tol::stat(50),
+            )
+            .finish();
+    }
+}
+
+/// The refusals of `chisq-gof`: missing and negative counts, a --probs length that does not
+/// match, probabilities that do not sum to 1, and neither or both of --observed/--counts.
+#[test]
+fn test_cli_chisq_gof_refusals() {
+    let s = temp_session();
+    let p = s.dir().join("bad.csv");
+    std::fs::write(&p, "id,n,neg\n1,1,1\n2,,-1\n3,3,3\n").unwrap();
+    s.load_as(&p, "bad", &[]);
+    fn gof<'a>(extra: &[&'a str]) -> Vec<&'a str> {
+        let mut a = vec!["stats", "chisq-gof", "bad"];
+        a.extend_from_slice(extra);
+        a
+    }
+    let e = s.err(&gof(&["--counts", "n"]));
+    assert!(
+        e.contains("'n'") && e.to_lowercase().contains("missing"),
+        "{e}"
+    );
+    let e = s.err(&gof(&["--counts", "neg"]));
+    assert!(e.contains("non-negative and finite"), "{e}");
+    let e = s.err(&gof(&["--counts", "id", "--probs", "0.5,0.5"]));
+    assert!(
+        e.contains("--probs has 2 value(s)") && e.contains("3 rows"),
+        "{e}"
+    );
+    let e = s.err(&gof(&["--counts", "id", "--probs", "0.2,0.2,0.2"]));
+    assert!(
+        e.contains("must sum to 1") && e.contains("--rescale-p") && !e.contains("rescale_p"),
+        "{e}"
+    );
+    let j = s.json(&gof(&["--counts", "id", "--probs", "1,1,1", "--rescale-p"]));
+    assert!(num(&j, "chi_squared").is_finite(), "{j}");
+    for args in [gof(&[]), gof(&["--counts", "id", "--observed", "id"])] {
+        let out = s.run(&args);
+        assert_eq!(out.status.code(), Some(2), "{out:?}");
+    }
+}
+
+/// CLI-37: acf, pacf and ccf take R's default lag.max when --lag-max is not given: floor(10 log10
+/// n) capped at n - 1, and floor(10 log10(n / 2)) for ccf (case cli_stat_ts_defaults).
+#[test]
+fn test_validate_cli_ts_default_lags() {
+    let case = Case::load("cli_stat_ts_defaults");
+    let s = temp_session();
+    let fq = load_dataset(&s, "datasets/generated/friedman_quade.csv");
+    let short = load_dataset(&s, "datasets/generated/cli_ts_short.csv");
+    let long = load_dataset(&s, "datasets/generated/ts_acf_spline_t3.csv");
+    for (d, n, acf_key, pacf_key) in [
+        (fq.as_str(), 24, "acf24", "pacf24"),
+        (short.as_str(), 10, "acf10", "pacf10"),
+    ] {
+        let a = s.json(&["stats", "acf", d, "--col", "y"]);
+        let p = s.json(&["stats", "pacf", d, "--col", "y"]);
+        let av = num_vec(&a, "values");
+        Check::new(&case)
+            .scalar(
+                &format!("{acf_key}_lag_max"),
+                (av.len() - 1) as f64,
+                Tol::exact(),
+            )
+            .vector(acf_key, &av[1..], Tol::stat(n))
+            .vector(pacf_key, &num_vec(&p, "values"), Tol::stat(n))
+            .finish();
+    }
+    let c = s.json(&["stats", "ccf", long.as_str(), "--x", "x", "--y", "y"]);
+    Check::new(&case)
+        .vector("ccf_lags", &num_vec(&c, "lags"), Tol::exact())
+        .vector("ccf", &num_vec(&c, "values"), Tol::stat(64))
+        .finish();
+    // an explicit --lag-max still wins
+    let a = s.json(&["stats", "acf", fq.as_str(), "--col", "y", "--lag-max", "5"]);
+    assert_eq!(num_vec(&a, "values").len(), 6);
+}
+
+/// CLI-33 (Box part): box-test's default lag is 1, as R's Box.test; --lag 10 still works (case
+/// cli_stat_ts_defaults).
+#[test]
+fn test_validate_cli_box_test_default_lag() {
+    let case = Case::load("cli_stat_ts_defaults");
+    let s = temp_session();
+    let d = load_dataset(&s, "datasets/generated/ts_acf_spline_t3.csv");
+    let lb = s.json(&["stats", "box-test", d.as_str(), "--col", "x"]);
+    let bp = s.json(&[
+        "stats",
+        "box-test",
+        d.as_str(),
+        "--col",
+        "x",
+        "--box-pierce",
+    ]);
+    let lb10 = s.json(&["stats", "box-test", d.as_str(), "--col", "x", "--lag", "10"]);
+    Check::new(&case)
+        .scalar("box_lb_statistic", num(&lb, "statistic"), Tol::stat(64))
+        .scalar("box_lb_df", num(&lb, "df"), Tol::exact())
+        .scalar("box_lb_p", num(&lb, "p_value"), Tol::p_value(64))
+        .scalar("box_bp_statistic", num(&bp, "statistic"), Tol::stat(64))
+        .scalar("box_bp_df", num(&bp, "df"), Tol::exact())
+        .scalar("box_bp_p", num(&bp, "p_value"), Tol::p_value(64))
+        .scalar("box_lb10_statistic", num(&lb10, "statistic"), Tol::stat(64))
+        .scalar("box_lb10_df", num(&lb10, "df"), Tol::exact())
+        .scalar("box_lb10_p", num(&lb10, "p_value"), Tol::p_value(64))
+        .finish();
+}
+
+/// CLI-24: `viz coefplot` states its standard errors and level, and --se selects them as reg
+/// ols does (case cli_viz_coefplot_ci: confint and coefci with HC1). Fails before: no --se flag,
+/// no `se_type` and no intervals in the JSON.
+#[test]
+fn test_validate_cli_viz_coefplot_ci() {
+    let case = Case::load("cli_viz_coefplot_ci");
+    let n = case.scalar("n") as usize;
+    let s = temp_session();
+    s.load_as(&case.dataset_path(), "ivw", &[]);
+    let png = s.dir().join("coef.png");
+    let png = png.to_str().unwrap();
+    let base = [
+        "viz", "coefplot", "ivw", "-y", "y", "-x", "x", "w", "-f", png,
+    ];
+    let limits = |v: &Value| -> (Vec<String>, Vec<f64>, Vec<f64>, Vec<f64>) {
+        let rows = v["coefficients"].as_array().unwrap();
+        (
+            rows.iter()
+                .map(|r| r["name"].as_str().unwrap().to_string())
+                .collect(),
+            rows.iter().map(|r| num(r, "lower")).collect(),
+            rows.iter().map(|r| num(r, "upper")).collect(),
+            rows.iter().map(|r| num(r, "estimate")).collect(),
+        )
+    };
+    for (extra, key, se_type) in [
+        (&["--conf-level", "0.9"][..], "ci90_hc1", "HC1"),
+        (
+            &["--conf-level", "0.9", "--se", "standard"][..],
+            "ci90_classical",
+            "classical",
+        ),
+        (&[][..], "ci95_hc1", "HC1"),
+    ] {
+        let mut a = base.to_vec();
+        a.extend_from_slice(extra);
+        let v = s.json(&a);
+        assert_eq!(v["se_type"], se_type, "{v}");
+        let (names, lo, hi, est) = limits(&v);
+        Check::new(&case)
+            .named("coef", &names, &est, Tol::coef(n))
+            .named(&format!("{key}_lower"), &names, &lo, Tol::se(n))
+            .named(&format!("{key}_upper"), &names, &hi, Tol::se(n))
+            .finish();
+    }
+    let v = s.json(&argv_ext(&base, &["--conf-level", "0.9"]));
+    let title = v["title"].as_str().unwrap();
+    assert!(title.contains("HC1") && title.contains("90%"), "{title}");
+    let text = s.ok(&base);
+    assert!(text.contains("95% intervals, HC1"), "{text}");
+    // the label is the level as typed, not rounded to one decimal (0.9999 was "100%")
+    let v = s.json(&argv_ext(&base, &["--conf-level", "0.9999"]));
+    let title = v["title"].as_str().unwrap();
+    assert!(title.contains("99.99%"), "{title}");
+    // one pretty-printed JSON document, as every other command prints
+    let raw = s.ok(&argv_ext(&["-F", "json"], &base));
+    assert!(raw.trim_end().lines().count() > 1, "{raw}");
+}
+
+/// `base` followed by `extra`.
+fn argv_ext<'a>(base: &[&'a str], extra: &[&'a str]) -> Vec<&'a str> {
+    base.iter().chain(extra).copied().collect()
+}
+
+/// CLI-39: a chart whose directory does not exist fails with a message naming it; a static chart
+/// named with another extension than .png warns that it holds PNG data, and the residual side
+/// plots stay .png and are listed by their real names.
+#[test]
+fn test_cli_viz_paths_and_png_names() {
+    let s = temp_session();
+    s.load_as(
+        &repo_path("validation/datasets/grunfeld.csv"),
+        "grunfeld",
+        &[],
+    );
+    let missing = s.dir().join("missing-dir").join("h.png");
+    let e = s.err(&[
+        "viz",
+        "histogram",
+        "grunfeld",
+        "--col",
+        "inv",
+        "-f",
+        missing.to_str().unwrap(),
+    ]);
+    assert!(
+        e.contains("missing-dir") && e.contains("does not exist"),
+        "{e}"
+    );
+    assert!(!s.dir().join("missing-dir").exists());
+    let jpg = s.dir().join("out.jpg");
+    let out = s.run(&[
+        "-F",
+        "json",
+        "viz",
+        "residuals",
+        "grunfeld",
+        "-y",
+        "inv",
+        "-x",
+        "value",
+        "capital",
+        "-f",
+        jpg.to_str().unwrap(),
+    ]);
+    assert!(out.status.success(), "{out:?}");
+    // -F json: the warning is in the document's `warnings`, not loose on stderr
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!err.contains("PNG"), "{err}");
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let png_warned = |v: &Value| {
+        v["warnings"].as_array().is_some_and(|ws| {
+            ws.iter().any(|w| {
+                w.as_str()
+                    .is_some_and(|w| w.contains(".jpg") && w.contains("PNG"))
+            })
+        })
+    };
+    assert!(png_warned(&v), "{v}");
+    let files: Vec<&str> = v["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f.as_str().unwrap())
+        .collect();
+    assert_eq!(files.len(), 4, "{v}");
+    assert!(files[0].ends_with("out.jpg"), "{v}");
+    for (f, suffix) in files[1..].iter().zip(["qq", "scale_location", "leverage"]) {
+        assert!(f.ends_with(&format!("out_{suffix}.png")), "{f}");
+        assert!(std::path::Path::new(f).exists(), "{f}");
+    }
+    assert!(v["message"].as_str().unwrap().contains("out_qq.png"), "{v}");
+    // a chart printed through the shared saved-message path: JSON warnings, text note line
+    let h = s.dir().join("h.jpg");
+    let hist = [
+        "viz",
+        "histogram",
+        "grunfeld",
+        "--col",
+        "inv",
+        "-f",
+        h.to_str().unwrap(),
+    ];
+    assert!(png_warned(&s.json(&hist)));
+    // text: the shared note line after the saved message (print_notes), on stdout
+    let text = s.ok(&hist);
+    let lines: Vec<&str> = text.lines().collect();
+    assert!(lines[0].starts_with("Histogram saved to: "), "{text}");
+    assert!(
+        lines[1].starts_with("Warning: ") && lines[1].contains("h.jpg holds PNG"),
+        "{text}"
+    );
 }
