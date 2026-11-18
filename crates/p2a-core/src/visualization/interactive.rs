@@ -51,6 +51,9 @@ pub struct InteractivePlotResult {
     pub chart_type: String,
     /// Rows left out because a plotted value is missing
     pub missing: MissingSummary,
+    /// Notes on the drawing: rows left out because a plotted value is infinite (ggplot2's
+    /// "Removed k rows containing non-finite values").
+    pub warnings: Vec<String>,
 }
 
 impl std::fmt::Display for InteractivePlotResult {
@@ -58,6 +61,9 @@ impl std::fmt::Display for InteractivePlotResult {
         writeln!(f, "Interactive {} Plot", self.chart_type)?;
         writeln!(f, "====================")?;
         writeln!(f, "Points: {}", self.n_points)?;
+        for w in &self.warnings {
+            writeln!(f, "Warning: {w}")?;
+        }
         if let Some(note) = self.missing.note() {
             writeln!(f, "Missing values: {note}")?;
         }
@@ -305,6 +311,19 @@ struct Points {
     y: Vec<Vec<Datum>>,
     n_points: usize,
     missing: MissingSummary,
+    /// Rows with no missing plotted value but an infinite one (not drawn).
+    n_infinite: usize,
+}
+
+impl Points {
+    /// The warning on the rows left out because a plotted value is infinite.
+    fn warnings(&self) -> Vec<String> {
+        match self.n_infinite {
+            0 => Vec::new(),
+            1 => vec!["1 row with an infinite value was not drawn".to_string()],
+            k => vec![format!("{k} rows with an infinite value were not drawn")],
+        }
+    }
 }
 
 fn points(
@@ -328,16 +347,23 @@ fn points(
     let mut xs: Vec<Vec<Datum>> = vec![Vec::new(); names.len()];
     let mut ys: Vec<Vec<Datum>> = vec![Vec::new(); names.len()];
     let mut n_points = 0;
+    let mut n_infinite = 0;
     for i in 0..n {
         if i % (1 << 16) == 0 {
             resource::checkpoint().map_err(invalid)?;
         }
+        let y_cell = y.as_ref().map(|y| &y[i]);
+        if matches!(x[i], Cell::Missing) || matches!(y_cell, Some(Cell::Missing)) {
+            continue;
+        }
+        if matches!(x[i], Cell::Infinite) || matches!(y_cell, Some(Cell::Infinite)) {
+            n_infinite += 1;
+            continue;
+        }
         let Cell::Value(xv) = &x[i] else { continue };
-        let yv = match &y {
-            Some(y) => match &y[i] {
-                Cell::Value(v) => Some(v),
-                _ => continue,
-            },
+        let yv = match y_cell {
+            Some(Cell::Value(v)) => Some(v),
+            Some(_) => continue,
             None => None,
         };
         let t = trace_of[i];
@@ -353,6 +379,7 @@ fn points(
             y: ys,
             n_points,
             missing,
+            n_infinite,
         },
         names,
     ))
@@ -385,6 +412,7 @@ pub fn scatter_interactive(
     config: InteractiveConfig,
 ) -> Result<InteractivePlotResult, VisualizationError> {
     let (p, names) = points(df, x_col, Some(y_col), group_col)?;
+    let warnings = p.warnings();
     let grouped = group_col.is_some();
     let mut data = Vec::with_capacity(names.len());
     for (i, (x, y)) in p.x.into_iter().zip(p.y).enumerate() {
@@ -412,6 +440,7 @@ pub fn scatter_interactive(
         n_points: p.n_points,
         chart_type: "Scatter".to_string(),
         missing: p.missing,
+        warnings,
     })
 }
 
@@ -432,6 +461,7 @@ pub fn histogram_interactive(
     config: InteractiveConfig,
 ) -> Result<InteractivePlotResult, VisualizationError> {
     let (p, names) = points(df, col, None, group_col)?;
+    let warnings = p.warnings();
     let grouped = group_col.is_some();
     let mut data = Vec::with_capacity(names.len());
     for (i, x) in p.x.into_iter().enumerate() {
@@ -459,6 +489,7 @@ pub fn histogram_interactive(
         n_points: p.n_points,
         chart_type: "Histogram".to_string(),
         missing: p.missing,
+        warnings,
     })
 }
 
@@ -477,6 +508,7 @@ pub fn line_interactive(
     config: InteractiveConfig,
 ) -> Result<InteractivePlotResult, VisualizationError> {
     let (p, _) = points(df, x_col, Some(y_col), None)?;
+    let warnings = p.warnings();
     let mut data = Vec::with_capacity(1);
     for (i, (x, y)) in p.x.into_iter().zip(p.y).enumerate() {
         let mut s = settings(json!({
@@ -503,6 +535,7 @@ pub fn line_interactive(
         n_points: p.n_points,
         chart_type: "Line".to_string(),
         missing: p.missing,
+        warnings,
     })
 }
 
@@ -766,8 +799,10 @@ mod tests {
         let f = figure(&s.html);
         assert_eq!(numbers(&f["data"][0]["y"]), [1.5, 5.5, 6.5]);
         assert!(!s.html.contains("null"));
+        assert_eq!(s.warnings, ["1 row with an infinite value was not drawn"]);
         let h = histogram_interactive(&df, "y", None, InteractiveConfig::default()).unwrap();
         assert_eq!((h.n_points, h.missing.n_dropped), (4, 1));
+        assert_eq!(h.warnings.len(), 1);
 
         let mut days = df!("d" => [0i32, 19723, 19724], "y" => [1.0, 2.0, 3.0]).unwrap();
         let d = days.column("d").unwrap().cast(&DataType::Date).unwrap();
@@ -776,5 +811,6 @@ mod tests {
         let x = &figure(&l.html)["data"][0]["x"];
         assert_eq!(x, &json!(["1970-01-01", "2024-01-01", "2024-01-02"]));
         assert!(l.missing.is_empty());
+        assert!(l.warnings.is_empty());
     }
 }

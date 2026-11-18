@@ -16,8 +16,8 @@ use p2a_core::{
 use std::path::PathBuf;
 
 use crate::output::{
-    OutputFormat, add_notes, missing_json, print_error, print_json, print_message,
-    print_missing_note, print_notes, se_label,
+    OutputFormat, add_notes, missing_json, print_error, print_json, print_missing_note,
+    print_notes, se_label,
 };
 use crate::output::{add_result_notes, print_result_notes};
 use crate::session::SessionManager;
@@ -323,6 +323,10 @@ EXAMPLES:
     },
 
     /// Create an interactive scatter plot (HTML output with Plotly)
+    ///
+    /// The HTML file loads plotly.js 3.0.1 and MathJax from cdn.plot.ly and cdn.jsdelivr.net
+    /// when it is opened, so viewing it needs network access. Rows with a missing value in a
+    /// plotted column are left out and counted; rows with an infinite value are not drawn.
     #[command(after_help = "\
 EXAMPLES:
     # Interactive scatter with hover
@@ -357,6 +361,10 @@ EXAMPLES:
     },
 
     /// Create an interactive histogram (HTML output with Plotly)
+    ///
+    /// The HTML file loads plotly.js 3.0.1 and MathJax from cdn.plot.ly and cdn.jsdelivr.net
+    /// when it is opened, so viewing it needs network access. Rows with a missing value in a
+    /// plotted column are left out and counted; rows with an infinite value are not drawn.
     #[command(after_help = "\
 EXAMPLES:
     p2a --session s.json viz histogram-interactive mydata --col income -f hist.html
@@ -383,6 +391,10 @@ EXAMPLES:
     },
 
     /// Create an interactive line plot (HTML output with Plotly)
+    ///
+    /// The HTML file loads plotly.js 3.0.1 and MathJax from cdn.plot.ly and cdn.jsdelivr.net
+    /// when it is opened, so viewing it needs network access. Rows with a missing value in a
+    /// plotted column are left out and counted; rows with an infinite value are not drawn.
     #[command(after_help = "\
 EXAMPLES:
     p2a --session s.json viz line-interactive mydata -x date -y price -f line.html
@@ -1112,7 +1124,8 @@ fn execute_heatmap(
             match correlation_heatmap(&corr_matrix, &labels, &labels, title, Some(800), Some(600)) {
                 Ok(result) => match decode_base64_image(&result.image_base64) {
                     Ok(png_data) => {
-                        let png_warnings = write_png_chart(output, &png_data)?;
+                        let mut png_warnings = result.warnings.clone();
+                        png_warnings.extend(write_png_chart(output, &png_data)?);
                         let mut message = format!("Heatmap saved to: {}", output.display());
                         if let Some(note) = na_note(&labels, &constant, missing.n_used) {
                             message.push_str(&format!(" ({note})"));
@@ -1719,8 +1732,10 @@ fn execute_scatter_interactive(
             match scatter_interactive(ds.df(), x_col, y_col, group_col, config) {
                 Ok(result) => {
                     write_chart(output, result.html.as_bytes())?;
-                    print_message(
+                    print_saved(
                         &format!("Interactive scatter plot saved to: {}", output.display()),
+                        &result.missing,
+                        &result.warnings,
                         format,
                     );
                 }
@@ -1764,8 +1779,10 @@ fn execute_histogram_interactive(
             match histogram_interactive(ds.df(), col, group_col, config) {
                 Ok(result) => {
                     write_chart(output, result.html.as_bytes())?;
-                    print_message(
+                    print_saved(
                         &format!("Interactive histogram saved to: {}", output.display()),
+                        &result.missing,
+                        &result.warnings,
                         format,
                     );
                 }
@@ -1809,8 +1826,10 @@ fn execute_line_interactive(
             match line_interactive(ds.df(), x_col, y_col, config) {
                 Ok(result) => {
                     write_chart(output, result.html.as_bytes())?;
-                    print_message(
+                    print_saved(
                         &format!("Interactive line plot saved to: {}", output.display()),
+                        &result.missing,
+                        &result.warnings,
                         format,
                     );
                 }

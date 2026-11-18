@@ -712,6 +712,7 @@ impl AnalyticsServer {
                     result.n_points,
                     result.html.len()
                 );
+                append_notes(&mut description, None, &result.warnings);
                 append_missing_note(&mut description, &result.missing);
                 Ok(CallToolResult::success(vec![
                     Content::text(description),
@@ -766,6 +767,7 @@ impl AnalyticsServer {
                     result.n_points,
                     result.html.len()
                 );
+                append_notes(&mut description, None, &result.warnings);
                 append_missing_note(&mut description, &result.missing);
                 Ok(CallToolResult::success(vec![
                     Content::text(description),
@@ -816,6 +818,7 @@ impl AnalyticsServer {
                     result.n_points,
                     result.html.len()
                 );
+                append_notes(&mut description, None, &result.warnings);
                 append_missing_note(&mut description, &result.missing);
                 Ok(CallToolResult::success(vec![
                     Content::text(description),
