@@ -947,8 +947,9 @@ python3 validation/tools/validation_status.py lint --strict --tests target/*-tes
 
 `run_validation.sh` exits 0 PASS, 1 FAIL (a compile error or zero selected tests is a
 failure), 2 usage error, 3 INCOMPLETE (`Rscript` or `cargo` missing); output goes to
-`validation/reports/<timestamp>-<pid>/` (gitignored). `P2A_VALIDATION_VERBOSE=1` prints every
-comparison a `Check` makes. Use module-path filters as above: they are stable where individual
+`validation/reports/<timestamp>-<pid>/` (gitignored). `P2A_VALIDATION_VERBOSE=1` with
+`-- --show-output` (or `--nocapture`) prints every comparison a `Check` makes; without the flag
+libtest hides a passing test's output. Use module-path filters as above: they are stable where individual
 test names are not, and the paper's Makefile uses them.
 
 **Status page.** `validation/VALIDATION_STATUS.md` is generated
