@@ -28,8 +28,11 @@ pub use config::{ServerConfig, SessionConfig, TransportType};
 pub use server::AnalyticsServer;
 pub use session::SessionManager;
 
-/// Configuration for the embedded server
+/// Configuration for the embedded server. Build it from
+/// [`EmbeddedServerConfig::default`] and the `with_*` methods: it is
+/// `#[non_exhaustive]`, so a field added later does not break callers.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct EmbeddedServerConfig {
     /// Port to listen on (default: 8080)
     pub port: u16,
