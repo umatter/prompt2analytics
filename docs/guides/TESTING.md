@@ -102,7 +102,9 @@ cargo test -p p2a-core -- test_validate       # p2a-core only, default features
 
 Each file in `crates/p2a-mcp/tests/` covers one topic. The servers are built in-process with
 `transport::http::build_app` and driven with `tower::ServiceExt::oneshot`, so almost nothing binds a
-socket.
+socket. The exceptions are the `serve*` files and `body_limit.rs`, which bind loopback sockets;
+`body_limit.rs` also runs each case in a child process of its own test binary, with its own
+environment.
 
 | File | What it covers | Compile gate | Command |
 |---|---|---|---|
@@ -111,9 +113,10 @@ socket.
 | `limits_e2e.rs` | request limits on the HTTP, LLM, websocket and stdio paths, the response-size cap, the audit trail | module `http_paths` needs `http`; module `stdio_path` is ungated | the CI set, and `cargo test -p p2a-mcp --no-default-features --test limits_e2e` for stdio only |
 | `dataset_quotas.rs` | the governor's dataset quotas against what datasets really cost (wide frames, many small frames, categorical labels, parquet files whose decoded size the footer gives before decoding), and the refusal of parquet files polars cannot read | `#![cfg(feature = "http")]` | the CI set |
 | `sessions.rs` | the session registry, conversation ownership, persistence bounds, the DB-path rule | `#![cfg(all(feature = "http", feature = "db"))]` | `--no-default-features --features "http,llm,auth,db"` (not in CI) |
-| `orphan_sweep_memory.rs` | what the orphan sweeps of a RocksDB conversation store read and hold, measured with a counting allocator | `#![cfg(feature = "db")]` | `--features full --test orphan_sweep_memory` (not in CI) |
+| `orphan_sweep_memory.rs` | what the orphan sweeps of an on-disk (SurrealKV) conversation store read and hold, measured with a counting allocator | `#![cfg(feature = "db")]` | `--features full --test orphan_sweep_memory` (not in CI) |
 | `llm_egress.rs` | egress guard, upstream errors and retries, the key rule, the tool allowlist, context budget, chat-loop bounds | `#![cfg(all(feature = "http", feature = "llm"))]`; the conversation test needs `db` | the CI set, plus `--features full` |
 | `isolation.rs` | per-session directories, symbolic links, the disk quota, session export and import, the stale-directory purge | `#![cfg(feature = "http")]` | the CI set |
+| `body_limit.rs` | `P2A_MAX_HTTP_BODY_MB` on request bodies: a declared body above the cap answers 413 before it is read, a body without a declared length is cut off at it, JSON routes parse up to the cap (2 MiB, or the cap when lower, in the hosted profile), on a served socket and on the built app, local and hosted, with the default and a lowered cap | `#![cfg(feature = "http")]` | the CI set |
 | `uploads.rs` | `upload_dataset` decodes an uploaded Parquet file from the request's bytes and stores nothing (not in the session directory, not in the temporary folder) | `#![cfg(feature = "http")]` | the CI set |
 | `serve_limits.rs` | `serve` and `start_http_transport` install the request limits of an open public configuration, overrides included, on a bound socket; while it runs, a start of other limits (`serve`, `start_transport` over HTTP or stdio, `start_embedded_server`, which returns the refusal) or of the same limits with another allocation ceiling or session-directory setting is refused | `#![cfg(feature = "http")]` | the CI set |
 | `tier2/` (`main.rs`, one module per package) | Tier 2 MCP-path tests through `call_tool_with_session`: missing values, integer columns and the R pins of the migrated tools | `#![cfg(feature = "http")]` | the CI set |
@@ -424,7 +427,7 @@ assert nothing, so they carry `#[ignore = "benchmark; run with --release -- --ig
 | Test | File | What it times |
 |------|------|---------------|
 | `benchmark_rust_ml` | `crates/p2a-core/tests/benchmark_ml_rust.rs` | kernel SVM (RBF and linear), CART and ROC/AUC at n = 1,000 to 20,000 |
-| `benchmark_roc_auc_implementations`, `benchmark_svm_implementations`, `benchmark_svm_linear`, `benchmark_xgboost_implementations`, `benchmark_mboost_implementations`, `summary_comparison` | `crates/p2a-core/tests/benchmark_fast_implementations.rs` | fast against original ROC/AUC, SVM, XGBoost and mboost; `summary_comparison` prints notes only |
+| `benchmark_roc_auc_implementations`, `benchmark_svm_implementations`, `benchmark_svm_linear`, `benchmark_xgboost_implementations`, `benchmark_mboost_implementations`, `summary_comparison` | `crates/p2a-core/tests/benchmark_fast_implementations.rs` | `fast_roc_auc` (AUC only) against `roc_auc` (one sort as well, plus the curve and Youden's optimum), and the fast against the original SVM, XGBoost and mboost; `summary_comparison` prints notes only |
 | `test_hdbscan_full_benchmark` | `crates/p2a-core/src/ml/advanced_clustering_mod/hdbscan.rs` | HDBSCAN on large synthetic data |
 
 `verify_fast_roc_accuracy` in `benchmark_fast_implementations.rs` checks the fast AUC against the
