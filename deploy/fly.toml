@@ -30,7 +30,7 @@ primary_region = "fra"          # Frankfurt — EU
   # in-process limits described below exist only in images whose /health
   # response has a "governor" object; older images ignore P2A_LIMITS and the
   # other new variables and run without them.
-  image = "ghcr.io/umatter/prompt2analytics/backend:0.6.0"
+  image = "ghcr.io/umatter/prompt2analytics/backend:0.7.0"
 
 [env]
   P2A_HOST = "0.0.0.0"
@@ -78,16 +78,11 @@ primary_region = "fra"          # Frankfurt — EU
   # "Configuration reference").
   P2A_LIMITS = "hosted"
 
-  # Single limits changed from the hosted values, as comma-separated
-  # key=value pairs. pivot_cells (munge_pivot's output cells, hosted
-  # 1,000,000) is lowered for this 1 GB machine: at the hosted value one
-  # admitted pivot can peak about 350 MiB above the session's data, which
-  # with other sessions' datasets near the 500 MiB total comes close to the
-  # machine's memory. Measured on one CPU, pivots at 700,000 cells peaked at
-  # 0.45 to 0.77 times the same pivots at 1,000,000 (DEPLOYMENT.md, the
-  # pivot calibration note). Never add llm_server_keys=true here (see the
-  # note at the top).
-  P2A_LIMIT_OVERRIDES = "pivot_cells=700000"
+  # No single limit is changed from the hosted values: the hosted pivot
+  # budget is the one this machine was calibrated for (DEPLOYMENT.md, the
+  # pivot calibration note). If one is ever needed, set
+  # P2A_LIMIT_OVERRIDES as comma-separated key=value pairs. Never add
+  # llm_server_keys=true there (see the note at the top).
 
   # One tool call at a time, server-wide. The default is one per vCPU, which
   # is also 1 on shared-cpu-1x; it is pinned so that resizing the VM does not
