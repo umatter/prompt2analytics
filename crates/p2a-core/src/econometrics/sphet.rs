@@ -3792,7 +3792,9 @@ mod tests {
     /// unscaled ones times the scale.
     #[test]
     fn hac_distances_survive_huge_coordinates() {
-        assert_eq!(euclidean(3e160, 4e160), 5e160);
+        // hypot is correctly rounded on some libms and not on others: one ulp either way.
+        let d = euclidean(3e160, 4e160);
+        assert!((d / 5e160 - 1.0).abs() <= 4.0 * f64::EPSILON, "{d}");
         let (ds, w, coords) = sim();
         let big: Vec<[f64; 2]> = coords
             .iter()
