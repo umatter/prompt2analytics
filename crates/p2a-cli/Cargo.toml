@@ -37,7 +37,7 @@ ndarray = "0.16"
 # Serialization
 serde.workspace = true
 serde_json.workspace = true
-base64 = "0.22"
+base64 = "0.23"
 
 # Time handling
 chrono = { version = "0.4", features = ["serde"] }
