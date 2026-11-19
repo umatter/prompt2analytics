@@ -3,3 +3,6 @@
 test_type
 test_name
 test_support
+# Python unittest names of validation/tools/tests/test_status_page.py, cited in validation/README.md
+test_pinned_section_lists_only_registered_methods
+test_registered_tests_are_run
