@@ -677,6 +677,15 @@ fn log_startup(config: &ServerConfig, exec: &ExecConfig) {
              another concurrent call in the same session added and reverts the ones it replaced"
         );
     }
+    // Tool calls run their parallel work on rayon's one global pool. Logged here, once
+    // per start, not in `ServerConfig::validate`, which every start path runs more than once.
+    if let Some(warning) = crate::config::rayon_sharing_warning(
+        exec.concurrency,
+        exec.deadline,
+        crate::config::available_cpus(),
+    ) {
+        tracing::warn!("{warning}");
+    }
     if exec.rss_soft_limit_bytes.is_some() && p2a_core::get_process_memory().is_none() {
         tracing::warn!(
             "--memory-soft-limit-mb (P2A_MEMORY_SOFT_LIMIT_MB) is set, but this platform does \

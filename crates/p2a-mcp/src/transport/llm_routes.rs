@@ -1626,11 +1626,6 @@ impl ToolExecutor for StreamingToolExecutor {
         // Before any ToolStart event, DB tool-call row or governor call.
         let session =
             admit_tool_call(&self.chat, &self.server, &self.audit, name, &arguments).await?;
-        tracing::warn!(
-            ">>> StreamingToolExecutor::execute called for tool: {}",
-            name
-        );
-
         // Send tool start event with arguments
         let _ = self
             .events

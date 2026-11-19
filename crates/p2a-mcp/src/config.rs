@@ -657,17 +657,6 @@ impl ServerConfig {
                 anyhow::bail!("{flag} must be at most {max} {unit}");
             }
         }
-        // Tool calls run their parallel work on rayon's one global pool.
-        // The governor's own resolved concurrency and deadline decide.
-        #[cfg(feature = "http")]
-        if self.transport == TransportType::Http {
-            let exec = crate::exec::ExecConfig::from_config(self);
-            if let Some(warning) =
-                rayon_sharing_warning(exec.concurrency, exec.deadline, available_cpus())
-            {
-                tracing::warn!("{warning}");
-            }
-        }
         Ok(())
     }
 
@@ -1108,5 +1097,46 @@ mod open_mode_tests {
         let mut c = cfg("127.0.0.1:8080", None, false);
         c.exec.max_alloc_mb = Some(64);
         assert_eq!(c.alloc_ceiling_bytes(), Some(64 << 20));
+    }
+
+    /// Validation logs no rayon-sharing warning: every HTTP start path validates the
+    /// configuration more than once, so the desktop app printed it three times. The
+    /// server logs it once, at start-up (`transport::http`).
+    #[test]
+    fn validation_logs_no_rayon_warning() {
+        use std::sync::{Arc, Mutex};
+        #[derive(Clone, Default)]
+        struct Logs(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Logs {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        // A second registered dispatcher, so that the subscriber set on this thread
+        // decides the callsites' interest (see `exec::tests::memory_log_fields_name_mib`).
+        static OTHER: std::sync::OnceLock<tracing::Dispatch> = std::sync::OnceLock::new();
+        OTHER.get_or_init(|| tracing::Dispatch::new(tracing::subscriber::NoSubscriber::new()));
+        let logs = Logs::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer({
+                let logs = logs.clone();
+                move || logs.clone()
+            })
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .finish();
+        let mut c = cfg("127.0.0.1:8080", None, false);
+        c.exec.tool_concurrency = Some(4);
+        assert!(rayon_sharing_warning(4, None, 8).is_some());
+        tracing::subscriber::with_default(subscriber, || {
+            assert!(c.validate().is_ok());
+            assert!(c.validate().is_ok());
+        });
+        let text = String::from_utf8_lossy(&logs.0.lock().unwrap()).into_owned();
+        assert!(!text.contains("rayon pool"), "{text}");
     }
 }
