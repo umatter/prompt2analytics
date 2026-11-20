@@ -17,8 +17,9 @@ inputs. At each node of `n` rows:
    (default 9,999) permutations of the response whose statistic reaches the observed one, unadjusted, as partykit
    does when `testtype = "MonteCarlo"` alone. A permuted statistic counts when it is at least the observed one
    minus `sqrt(eps) max(|observed|, 1)`, so a permutation that ties mathematically is not lost to summation order.
-   Each permutation draws from a ChaCha8 stream derived from the seed (42 when none is given), the node and the
-   permutation index.
+   libcoin uses `sqrt(eps)` as an absolute tolerance, so the two agree for statistics up to 1 and p2a's comparison
+   is looser above that. Each permutation draws from a ChaCha8 stream derived from the seed (42 when none is given),
+   the node and the permutation index.
 4. **Selection and stopping.** The input with the smallest adjusted p-value (on an exact tie the larger statistic,
    then the first). A node is a leaf when no adjusted p-value is below `1 - mincriterion`, when it has fewer than
    `minsplit` rows, or at `maxdepth`. There is no `n <= 2 minbucket` stop.

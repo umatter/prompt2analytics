@@ -92,8 +92,8 @@ Re-timed on 2026-11-13: release builds of v0.5.0 (`f80b0131`) and this version, 
 (`taskset -c 2`, `RAYON_NUM_THREADS=1`), five rounds interleaving the two builds in alternating order;
 each round is one process per build reporting the median of its calls after warm-up calls. Ratios are
 of the medians of the five per-round medians, with the ratio of their minima in brackets (1-minute
-load average 4.3-8.7 at the start of each round, right after the conversation-store benchmarks of the
-round before, and 2.2-3.8 at its end; the alternating order protects the ratios).
+load average 4.3-8.7 at the start of each round (after the calibration step or the previous round's
+conversation-store benchmarks) and 2.2-3.8 at its end; the alternating order protects the ratios).
 Two samples of n each. The exact rows are the default call below 50 per sample (R's rule), the
 interval rows add `conf_int`: exact (Bauer's inversion) below 50, asymptotic from 100, where v0.5.0
 returned no interval, so those base times are the test alone.

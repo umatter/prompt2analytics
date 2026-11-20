@@ -39,8 +39,9 @@ cat("5-committee R²:", 1 - sum((y - pred5)^2) / sum((y - mean(y))^2), "\n")
   `test_cubist_rule_model_is_the_composite`, `test_cubist_committee_target`,
   `test_cubist_smoothing_coefficient_is_validated` (smoothing and committees);
   `test_cubist_usage_counts_cases`, `test_cubist_importance_is_unit_free`,
-  `test_cubist_usage_averages_committees`, `test_cubist_display_without_usage` (attribute usage); `test_cubist_instance_correction_closed_form`,
-  `test_cubist_neighbours_are_scale_free`, `test_cubist_training_metrics_leave_the_row_out`,
+  `test_cubist_usage_averages_committees`, `test_cubist_display_without_usage` (attribute usage);
+  `test_cubist_instance_correction_closed_form`, `test_cubist_neighbours_are_scale_free`,
+  `test_cubist_training_metrics_leave_the_row_out`,
   `test_cubist_neighbors_limit` (instance correction).
 
 ## Splits, smoothing and committees
