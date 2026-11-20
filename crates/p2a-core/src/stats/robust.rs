@@ -913,6 +913,7 @@ pub(crate) fn bw_nrd0(x: &[f64]) -> EconResult<f64> {
 /// The kernel ordinates of [`density_binned`] at kords = seq(0, 2 * span, length 2m), mirrored
 /// above m (R's `kords[(m + 2):(2m)] <- -kords[m:2]`). Every kernel is even, so the ordinates
 /// above m are those below it in reverse order and are copied rather than evaluated again.
+#[cfg(feature = "spectral-analysis")]
 fn density_kernel_ordinates(
     span: f64,
     m: usize,
@@ -1003,6 +1004,7 @@ mod tests {
     /// The mirrored kernel ordinates equal the ones evaluated at -kords, as before, for every
     /// kernel, on the default grid and a larger one, at bandwidths that put the support inside
     /// and outside the grid (noisy spans and bandwidths, not round numbers).
+    #[cfg(feature = "spectral-analysis")]
     #[test]
     fn test_density_kernel_mirroring_matches_direct_evaluation() {
         let kernels = [

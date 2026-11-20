@@ -144,6 +144,13 @@ jobs:
         env:
           RUST_TEST_THREADS: 4
 
+      - name: p2a-core builds without its optional features
+        # Every CI step above enables spectral-analysis, so code that uses an
+        # optional dependency outside its #[cfg(feature = ...)] gate compiles
+        # there and breaks a downstream crate that turns the feature off.
+        # A check (no codegen) of the library and its tests with no features.
+        run: cargo check -p p2a-core --lib --tests --no-default-features
+
       - name: Run doctests
         # The doc examples are the crates' user-facing documentation, so they
         # are gated: an example that no longer compiles is a documentation bug
