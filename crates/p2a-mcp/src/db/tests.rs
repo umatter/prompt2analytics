@@ -1335,7 +1335,15 @@ async fn a_failed_counter_write_is_reported() {
             .await
             .is_err()
     );
+    // The failed update's new content is stored; only the counters are stale.
+    assert_eq!(
+        db.get_message(&kept.id_string()).await.unwrap().content,
+        "changed"
+    );
+    // A clear resets the counters in the transaction that deletes the
+    // messages, so the failed clear deleted none of them.
     assert!(db.clear_messages(&id).await.is_err());
+    assert_eq!(db.count_messages(&id).await.unwrap(), 2);
     assert_eq!(db.store_turns_in_use(), 0);
 }
 
@@ -3902,6 +3910,24 @@ fn a_store_is_not_set_aside_onto_a_taken_name() {
     assert_eq!(dir_contents(&path), before);
     assert!(std::fs::read_dir(&aside).unwrap().next().is_none());
     assert!(super::connection::holds_rocksdb_files(&path));
+}
+
+/// Where the platform cannot take RocksDB's lock (the lock is not
+/// enforced), the store is not set aside: a live process may hold it.
+#[test]
+fn a_store_is_not_set_aside_without_an_enforced_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store");
+    let before = fake_rocksdb_store(&path);
+    let aside = dir.path().join("store.surrealdb2-20261113T000000Z");
+
+    let result = super::connection::move_store_aside(&path, &aside, false);
+    let Err(reason) = result else {
+        panic!("expected a refusal, got {result:?}");
+    };
+    assert!(reason.contains("lock"), "{reason}");
+    assert_eq!(dir_contents(&path), before);
+    assert!(!aside.exists());
 }
 
 /// A real store written by v0.5.0 (SurrealDB 2.4, RocksDB): set aside with

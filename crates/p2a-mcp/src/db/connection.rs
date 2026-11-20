@@ -372,7 +372,8 @@ fn set_aside_name(path: &Path) -> std::path::PathBuf {
 /// Rename the RocksDB store at `path` to `<path>.surrealdb2-<UTC
 /// timestamp>` and return the new path, holding RocksDB's lock on it
 /// meanwhile; the reason when it cannot (a live process holds the store,
-/// the new name is taken, or the rename fails).
+/// the platform cannot take the lock, the new name is taken, or the rename
+/// fails).
 fn set_aside_rocksdb_store(path: &Path) -> Result<std::path::PathBuf, String> {
     set_aside_rocksdb_store_to(path, &set_aside_name(path))
 }
@@ -391,13 +392,33 @@ pub(super) fn set_aside_rocksdb_store_to(
     aside: &Path,
 ) -> Result<std::path::PathBuf, String> {
     let lock = surrealkv_compat_rocksdb::lock_directory(path).map_err(|e| e.to_string())?;
+    let moved = move_store_aside(path, aside, lock.enforced);
+    drop(lock);
+    moved
+}
+
+/// The rename of [`set_aside_rocksdb_store_to`], run while the caller holds
+/// RocksDB's lock on `path`. `lock_enforced` is the lock's `enforced`: where
+/// the platform cannot take the lock, nothing keeps a live RocksDB process
+/// out, so the store is left where it is.
+pub(super) fn move_store_aside(
+    path: &Path,
+    aside: &Path,
+    lock_enforced: bool,
+) -> Result<std::path::PathBuf, String> {
+    if !lock_enforced {
+        return Err(format!(
+            "RocksDB's lock on {} cannot be taken on this platform, so a live \
+             process may hold the store",
+            path.display()
+        ));
+    }
     std::fs::create_dir(aside).map_err(|e| format!("{}: {e}", aside.display()))?;
     if let Err(e) = std::fs::rename(path, aside) {
         // Give back the name claimed above; it is still empty.
         let _ = std::fs::remove_dir(aside);
         return Err(e.to_string());
     }
-    drop(lock);
     Ok(aside.to_path_buf())
 }
 
