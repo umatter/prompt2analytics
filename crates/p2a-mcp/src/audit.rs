@@ -550,7 +550,8 @@ impl Writer {
     /// the size count restarts, so the next attempt waits for another
     /// `max_bytes` instead of shifting the numbered files again on every
     /// entry. Buffered entries stay in a removed file only when no new file
-    /// can be created at the path, which is logged.
+    /// can be created at the path (logged), or when the file disappears
+    /// between the path check and the write of the buffer.
     fn rotate(&mut self) {
         use std::io::ErrorKind::NotFound;
         match std::fs::symlink_metadata(&self.path) {
@@ -1608,8 +1609,10 @@ mod tests {
         };
         let mut writer = writer_at(&path, policy);
         writer.write_entry(&entry(0));
-        writer.flush();
-        // Removed (or moved away) outside the server when a rotation is due.
+        // Removed (or moved away) outside the server when a rotation is due,
+        // with entry 0 still buffered: it goes to the new file, not into the
+        // removed one.
+        assert!(!writer.file.buffer().is_empty());
         std::fs::remove_file(&path).unwrap();
         writer.rotate();
         for i in 1..4 {
@@ -1624,7 +1627,7 @@ mod tests {
                 path.display()
             );
         }
-        assert_eq!(ids_in(&path), [1, 2, 3]);
+        assert_eq!(ids_in(&path), [0, 1, 2, 3]);
     }
 
     #[test]

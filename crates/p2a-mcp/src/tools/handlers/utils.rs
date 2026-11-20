@@ -648,8 +648,8 @@ impl ImportState {
 /// growth slack (vector capacity, hash-map buckets) is not charged, so peak
 /// memory is a small constant multiple of it.
 ///
-/// The input is read only up to `budget` bytes, and a longer input is
-/// refused once the byte past the budget has been read. serde_json buffers
+/// At most `budget + 1` bytes of input are read: reading the byte past the
+/// budget refuses the input as larger than the budget. serde_json buffers
 /// each string token whole before it is charged, so without this cut-off one
 /// long string could outgrow the budget; it also covers a file that grows
 /// after `import_session` has checked its size.
@@ -658,7 +658,6 @@ fn parse_session_json(
     budget: Option<u64>,
 ) -> Result<Vec<(String, ParsedDataset)>, String> {
     use serde::de::DeserializeSeed;
-    use std::io::Read as _;
     let state = ImportState {
         used: std::cell::Cell::new(0),
         budget,

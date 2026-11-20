@@ -531,8 +531,9 @@ fn na_note(cols: &[String], constant: &[usize], n_complete: usize) -> Option<Str
     ))
 }
 
-/// Text: `msg`, then the dropped-rows note; JSON: one line `{"message": msg}`, with a
-/// `"missing"` object when rows were dropped.
+/// Text: `msg`, then a `Warning: <w>` line per warning (`print_notes`), then the
+/// dropped-rows note; JSON: one line `{"message": msg}`, with a `"missing"` object when
+/// rows were dropped and the `"warnings"` array (`add_notes`; empty when there are none).
 fn print_saved(msg: &str, missing: &MissingSummary, warnings: &[String], format: &OutputFormat) {
     match format {
         OutputFormat::Json => {
@@ -583,8 +584,8 @@ fn png_extension_warning(path: &std::path::Path) -> Option<String> {
 }
 
 /// [`write_chart`] for a static chart. Returns its warnings (the extension warning when the
-/// name's extension is not `png`) for the caller's notes: the JSON `warnings` array or the
-/// text `Warnings:` block.
+/// name's extension is not `png`) for the caller's notes: the JSON `warnings` array or, in
+/// text, a `Warning: <w>` line after the saved message (`print_notes`).
 fn write_png_chart(path: &std::path::Path, png: &[u8]) -> anyhow::Result<Vec<String>> {
     write_chart(path, png)?;
     Ok(png_extension_warning(path).into_iter().collect())

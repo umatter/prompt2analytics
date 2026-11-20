@@ -2321,7 +2321,7 @@ impl AnalyticsServer {
 
         let n = request.n.unwrap_or(5);
         let df = dataset.df();
-        let (shown, shown_columns, _) = head_shape(df, n);
+        let (_, shown_columns, _) = head_shape(df, n);
         let capped = if n > HEAD_MAX_ROWS {
             format!("; n = {n} capped at {HEAD_MAX_ROWS}")
         } else {
@@ -2332,8 +2332,9 @@ impl AnalyticsServer {
         } else {
             format!("{} columns", df.width())
         };
-        let table = match render_head(df, n) {
-            Ok(table) => table,
+        // The rows written: fewer than the shape's when the response limit stopped them.
+        let (table, shown) = match render_head_counted(df, n) {
+            Ok(counted) => counted,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
                     "Preview stopped: {e}"
@@ -2376,15 +2377,20 @@ pub(crate) fn head_shape(df: &DataFrame, rows: usize) -> (usize, usize, usize) {
 
 /// One preview cell: control characters (a line break or tab would break the
 /// table) as spaces, cut to [`HEAD_CELL_CHARS`] characters.
+///
+/// A text cell is cut before it is cleaned (a control character becomes one
+/// space, so the cut is the same), so the work is bounded by the shown width
+/// rather than by the cell's length.
 fn head_cell(column: &Column, i: usize) -> String {
-    let text = match column.get(i) {
-        Ok(AnyValue::String(v)) => v.to_string(),
-        Ok(AnyValue::StringOwned(v)) => v.to_string(),
-        Ok(v) => v.to_string(),
-        Err(_) => "?".to_string(),
+    let clean = |text: &str| {
+        p2a_text::ellipsize(text, HEAD_CELL_CHARS).replace(|c: char| c.is_control(), " ")
     };
-    let text = text.replace(|c: char| c.is_control(), " ");
-    p2a_text::ellipsize(&text, HEAD_CELL_CHARS).into_owned()
+    match column.get(i) {
+        Ok(AnyValue::String(v)) => clean(v),
+        Ok(AnyValue::StringOwned(v)) => clean(v.as_str()),
+        Ok(v) => clean(&v.to_string()),
+        Err(_) => "?".to_string(),
+    }
 }
 
 /// The first `rows` rows of `df` as a plain table: the column names, their
@@ -2392,9 +2398,15 @@ fn head_cell(column: &Column, i: usize) -> String {
 /// Cells are cut to [`HEAD_CELL_CHARS`] characters, a missing value prints `null`, and
 /// columns are aligned by characters, not bytes. Rows and columns follow [`head_shape`]
 /// (every column of a frame within the cell cap); a cut, and a stop once the text reaches
-/// the limits' `response_bytes`, is noted on a last line. The cells are formatted twice
+/// the limits' `response_bytes`, is noted on the last lines. The cells are formatted twice
 /// (widths, then rows) rather than held, so the work is bounded by the shown cells.
 pub(crate) fn render_head(df: &DataFrame, rows: usize) -> Result<String, String> {
+    render_head_counted(df, rows).map(|(table, _)| table)
+}
+
+/// [`render_head`], with the number of rows written (fewer than [`head_shape`]'s when the
+/// response limit stopped them).
+fn render_head_counted(df: &DataFrame, rows: usize) -> Result<(String, usize), String> {
     use std::fmt::Write as _;
     let requested = rows.min(HEAD_MAX_ROWS).min(df.height());
     let (rows, n_columns, cap) = head_shape(df, rows);
@@ -2465,6 +2477,14 @@ pub(crate) fn render_head(df: &DataFrame, rows: usize) -> Result<String, String>
              limit of {} bytes)",
             byte_cap.unwrap_or_default()
         );
+        // The rows' cut is noted above; a cut of the columns needs a line of its own.
+        if n_columns < df.width() {
+            let _ = writeln!(
+                out,
+                "({n_columns} of {} columns shown: a preview shows at most {cap} cells)",
+                df.width()
+            );
+        }
     } else if n_columns < df.width() || rows < requested {
         let _ = writeln!(
             out,
@@ -2473,7 +2493,7 @@ pub(crate) fn render_head(df: &DataFrame, rows: usize) -> Result<String, String>
             df.width()
         );
     }
-    Ok(out)
+    Ok((out, written))
 }
 
 /// The most (value, label) pairs `load_dataset` lists per Stata column.
@@ -3403,9 +3423,8 @@ mod tests {
     fn a_chunk_that_declares_a_negative_count_is_not_read() {
         // polars converts a column chunk's footer count to usize as it is
         // (`PageReader::total_num_values`) and, for a nested column,
-        // reserves room for that many values before it decodes the chunk:
-        // for a struct of booleans, two bitmaps of nearly 2^64 bits, a
-        // request the allocator cannot meet, which aborts the process.
+        // reserves room for that many values before it decodes the chunk,
+        // a reservation the allocator cannot meet.
         // Pre-fix the walk counted such a chunk as holding no entries.
         use p2a_core::polars::prelude::{IntoSeries, NamedFrom, Series, StructChunked};
         let flags = Series::new("b".into(), [true, false, true]);
@@ -4357,17 +4376,52 @@ mod tests {
         let mut bytes = Limits::off();
         bytes.response_bytes = Some(2_000);
         let t = limits::with_limits(bytes, || render_head(&df, 1000)).unwrap();
-        // The header lines alone pass 2,000 bytes here, so no row follows them.
-        assert_eq!(t.lines().count(), 3 + 1, "{t}");
-        assert!(
-            t.trim_end()
-                .ends_with("(0 of 600 rows shown: the output reached this server's response limit of 2000 bytes)"),
-            "{}",
-            &t[t.len() - 200..]
+        // The header lines alone pass 2,000 bytes here, so no row follows them;
+        // the columns the cell cap cut are noted on a line of their own.
+        let lines: Vec<&str> = t.lines().collect();
+        assert_eq!(lines.len(), 3 + 2, "{t}");
+        assert_eq!(
+            lines[3],
+            "(0 of 600 rows shown: the output reached this server's response limit of 2000 bytes)"
         );
-        // The header of head_dataset says how many columns are shown.
+        let cols = lines[0].split(" | ").count();
+        assert_eq!(
+            lines[4],
+            format!("({cols} of {width} columns shown: a preview shows at most 100000 cells)")
+        );
+        // Both limits at once: the cell cap cuts the columns and the response
+        // limit then stops the rows. Each cut is noted, and head_dataset's
+        // header counts the rows actually written.
+        let mut both = Limits::off();
+        both.table_cells = Some(100);
+        let full = limits::with_limits(both.clone(), || render_head(&df, 10)).unwrap();
+        let header_bytes: usize = full.lines().take(3).map(|l| l.len() + 1).sum();
+        both.response_bytes = Some(header_bytes as u64 + 1);
+        let t = limits::with_limits(both.clone(), || render_head(&df, 10)).unwrap();
+        let lines: Vec<&str> = t.lines().collect();
+        assert_eq!(lines.len(), 3 + 1 + 2, "{t}");
+        assert_eq!(lines[0].split(" | ").count(), 10, "{t}");
+        assert_eq!(
+            lines[4],
+            format!(
+                "(1 of 10 rows shown: the output reached this server's response limit of {} \
+                 bytes)",
+                header_bytes + 1
+            )
+        );
+        assert_eq!(
+            lines[5],
+            "(10 of 300 columns shown: a preview shows at most 100 cells)"
+        );
         use crate::tools::common::test_support::server_with;
         let (rt, server) = server_with(vec![("d", df.clone())]);
+        let h = limits::with_limits(both, || head(&rt, &server, Some(10)));
+        assert!(
+            h.starts_with("Dataset: d (showing first 1 of 600 rows, 300 columns, first 10 shown)"),
+            "{}",
+            &h[..100]
+        );
+        // The header of head_dataset says how many columns are shown.
         let h = limits::with_limits(Limits::hosted(), || head(&rt, &server, Some(10)));
         assert!(
             h.starts_with("Dataset: d (showing first 10 of 600 rows, 300 columns)"),

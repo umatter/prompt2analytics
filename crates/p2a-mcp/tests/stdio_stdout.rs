@@ -241,10 +241,6 @@ fn tool_text(response: &Value) -> &str {
         .unwrap_or_else(|| panic!("no text content: {response}"))
 }
 
-/// `munge_pivot` (two index columns, a null in `on`, a missing combination)
-/// answers with a JSON-RPC response and the process leaves nothing else on
-/// stdout up to its exit: polars' `pivot` entry point prints a notice to
-/// stdout on every call.
 /// A wait whose deadline has passed ends with a timeout although lines are
 /// queued: a fast writer cannot keep a wait going past its deadline.
 #[test]
@@ -261,6 +257,10 @@ fn a_queued_line_does_not_extend_a_passed_deadline() {
     assert_eq!(recv_before(&rx, later), Ok("line 0\n".to_string()));
 }
 
+/// `munge_pivot` (two index columns, a null in `on`, a missing combination)
+/// answers with a JSON-RPC response and the process leaves nothing else on
+/// stdout up to its exit: polars' `pivot` entry point prints a notice to
+/// stdout on every call.
 #[test]
 fn munge_pivot_writes_only_json_rpc_to_stdout() {
     let root = tempfile::tempdir().expect("tempdir");

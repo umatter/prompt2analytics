@@ -639,8 +639,8 @@ EXAMPLES:
 
         /// Largest number of factors the cross-validation tries (gsynth's r = c(0, r.max);
         /// default 5, as gsynth)
-        #[arg(long, default_value_t = GSYNTH_DEFAULT_R_MAX)]
-        r_max: usize,
+        #[arg(long)]
+        r_max: Option<usize>,
 
         /// Fixed effects (gsynth force): unit (default, as gsynth; also individual), none, time
         /// or two_way (also twoway, two-way)
@@ -2200,7 +2200,7 @@ fn execute_gsynth(
     time_col: &str,
     covariates: &[String],
     n_factors: usize,
-    r_max: usize,
+    r_max: Option<usize>,
     gsynth_force: GsynthForce,
     gsynth_estimator: GsynthEstimator,
     bootstrap_se: bool,
@@ -2223,15 +2223,18 @@ fn execute_gsynth(
             let mut config = GsynthConfig::default();
             config.n_factors = n_factors;
             config.cross_validate = n_factors == 0;
-            config.max_factors = r_max;
+            let config_r_max = r_max.unwrap_or(GSYNTH_DEFAULT_R_MAX);
+            config.max_factors = config_r_max;
             config.force = gsynth_force;
             config.estimator = gsynth_estimator;
             config.bootstrap_se = bootstrap_se;
             config.n_bootstrap = n_bootstrap;
 
-            // --r-max bounds the cross-validation, which a fixed --n-factors turns off
-            let cli_warnings: Vec<String> = (n_factors > 0 && r_max != GSYNTH_DEFAULT_R_MAX)
-                .then(|| {
+            // --r-max bounds the cross-validation, which a fixed --n-factors turns off; a
+            // value given is warned about whatever it is, the default's included
+            let cli_warnings: Vec<String> = r_max
+                .filter(|_| n_factors > 0)
+                .map(|r_max| {
                     format!(
                         "--r-max {r_max} has no effect: it applies only with --n-factors 0 \
                          (cross-validation); {n_factors} factors were fitted"
@@ -2256,7 +2259,7 @@ fn execute_gsynth(
                             "n_pre_periods": result.n_pre_periods,
                             "n_post_periods": result.n_post_periods,
                             "n_factors": result.n_factors,
-                            "r_max": (n_factors == 0).then_some(r_max),
+                            "r_max": (n_factors == 0).then_some(config_r_max),
                             "estimator": result.estimator.to_string(),
                             "force": result.force.to_string(),
                             "beta": result.beta,

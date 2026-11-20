@@ -290,7 +290,7 @@ impl AnalyticsServer {
              Columns: {}\n\
              {}\n\
              Dataset stored as: '{}'{}\n\n\
-             Preview (first {} rows, every column):\n{}",
+             Preview (first {} rows):\n{}",
             result.rows,
             note,
             result.columns.join(", "),
@@ -436,7 +436,7 @@ impl AnalyticsServer {
              Columns: {}\n\
              {}\n\
              Dataset stored as: '{}'{}\n\n\
-             Preview (first {} rows, every column):\n{}",
+             Preview (first {} rows):\n{}",
             result.rows,
             note,
             result.columns.join(", "),
@@ -579,7 +579,7 @@ impl AnalyticsServer {
              Columns: {}\n\
              {}\n\
              Dataset stored as: '{}'{}\n\n\
-             Preview (first {} rows, every column):\n{}",
+             Preview (first {} rows):\n{}",
             // The path as the caller sent it, never the resolved server path.
             request.file_path,
             result.rows,
@@ -954,7 +954,7 @@ mod tests {
         let (result, server) = duckdb_off(&query, "wide");
         let text = text_of(&result);
         assert_ne!(result.is_error, Some(true), "{text}");
-        let preview = text.split("every column):\n").nth(1).unwrap();
+        let preview = text.split("rows):\n").nth(1).unwrap();
         let header = preview.lines().next().unwrap();
         for j in 1..=10 {
             assert!(header.contains(&format!("c{j}")), "c{j}: {text}");

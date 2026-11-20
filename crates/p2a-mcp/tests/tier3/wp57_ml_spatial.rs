@@ -2433,7 +2433,8 @@ fn test_mcp_spatial_probit_effects_add_up() {
 
 /// The same property through the tools (dispatch path, fixed seed, few draws):
 /// sar_probit_model's printed impacts add up (total = direct + indirect within
-/// the printed six decimals) and its rho interval lies in (-1, 1);
+/// the rounding of three six-decimal values, at most 1.5e-6, plus room for
+/// the decimal-to-f64 parse) and its rho interval lies in (-1, 1);
 /// sem_probit_model prints no impacts block (the handler asks for none: an
 /// error model has no spatial multiplier) and its lambda interval lies in (-1, 1).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2466,8 +2467,11 @@ async fn test_mcp_spatial_probit_tools_effects_add_up() {
         let v = row(block, name);
         assert_eq!(v.len(), 6, "{name}: {block}");
         let sum = v[0] + v[2];
+        // Each value is rounded to 6 decimals (at most 5e-7 off), so the
+        // difference of the three is at most 1.5e-6 off; 2e-6 keeps the bound
+        // off that rounding edge.
         assert!(
-            (v[4] - sum).abs() <= 1.5e-6,
+            (v[4] - sum).abs() <= 2e-6,
             "{name}: total {} vs direct + indirect {sum}\n{block}",
             v[4]
         );

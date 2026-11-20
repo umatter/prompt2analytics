@@ -77,11 +77,23 @@ pub(crate) const MAX_HTTP_BODY_VAR: &str = "P2A_MAX_HTTP_BODY_MB";
 /// hosted profile ([`parsed_body_bytes`]).
 pub(crate) fn max_request_body_bytes() -> usize {
     let (cap, warning) = body_cap_setting(std::env::var(MAX_HTTP_BODY_VAR));
-    if let Some(warning) = warning {
+    if let Some(BodyCapWarning { message, value }) = warning {
         static WARNED: std::sync::Once = std::sync::Once::new();
-        WARNED.call_once(|| tracing::warn!("{warning}"));
+        WARNED.call_once(|| match value {
+            Some(value) => tracing::warn!(value, "{message}"),
+            None => tracing::warn!("{message}"),
+        });
     }
     cap
+}
+
+/// The warning [`body_cap_setting`] gives for a value it does not use: the
+/// message, and the value set when it can be shown, logged as a field of its
+/// own (as the audit cap's warning logs `P2A_AUDIT_MAX_MB`'s value).
+#[derive(Debug, PartialEq, Eq)]
+struct BodyCapWarning {
+    message: String,
+    value: Option<String>,
 }
 
 /// The body cap a `P2A_MAX_HTTP_BODY_MB` reading sets, in bytes, and the
@@ -90,7 +102,7 @@ pub(crate) fn max_request_body_bytes() -> usize {
 /// cap is the default 32 MiB when the variable is unset or empty (no
 /// warning), or when it is not a positive whole number, is too large to count
 /// in bytes, or is not valid UTF-8 (with a warning).
-fn body_cap_setting(value: Result<String, std::env::VarError>) -> (usize, Option<String>) {
+fn body_cap_setting(value: Result<String, std::env::VarError>) -> (usize, Option<BodyCapWarning>) {
     const DEFAULT_MB: usize = 32;
     const MIB: usize = 1024 * 1024;
     let value = match value {
@@ -99,9 +111,13 @@ fn body_cap_setting(value: Result<String, std::env::VarError>) -> (usize, Option
         Err(std::env::VarError::NotUnicode(_)) => {
             return (
                 DEFAULT_MB * MIB,
-                Some(format!(
-                    "{MAX_HTTP_BODY_VAR} is not valid UTF-8; using the default {DEFAULT_MB} MiB"
-                )),
+                Some(BodyCapWarning {
+                    message: format!(
+                        "{MAX_HTTP_BODY_VAR} is not valid UTF-8; using the default {DEFAULT_MB} \
+                         MiB"
+                    ),
+                    value: None,
+                }),
             );
         }
     };
@@ -118,11 +134,14 @@ fn body_cap_setting(value: Result<String, std::env::VarError>) -> (usize, Option
         Some(bytes) => (bytes, None),
         None => (
             DEFAULT_MB * MIB,
-            Some(format!(
-                "{MAX_HTTP_BODY_VAR}={value:?} is not a positive whole number of MiB below {} \
-                 MiB; using the default {DEFAULT_MB} MiB",
-                usize::MAX / MIB + 1
-            )),
+            Some(BodyCapWarning {
+                message: format!(
+                    "{MAX_HTTP_BODY_VAR} must be a whole number of MiB from 1 to {}; using the \
+                     default {DEFAULT_MB} MiB",
+                    usize::MAX / MIB
+                ),
+                value: Some(value),
+            }),
         ),
     }
 }
@@ -451,16 +470,26 @@ mod tests {
         for four in ["4", " 4 ", "4\n"] {
             assert_eq!(ok(four), (4 * MIB, None), "{four:?}");
         }
+        let largest = usize::MAX / MIB;
+        // The warning names the accepted range and carries the value set as
+        // a field of its own, as the audit cap's warning does.
         let refused = |v: &str| {
             let (cap, warning) = ok(v);
             assert_eq!(cap, 32 * MIB, "{v:?}");
             let w = warning.unwrap_or_else(|| panic!("no warning for {v:?}"));
-            assert!(w.starts_with("P2A_MAX_HTTP_BODY_MB="), "{w}");
+            assert_eq!(
+                w.message,
+                format!(
+                    "P2A_MAX_HTTP_BODY_MB must be a whole number of MiB from 1 to {largest}; \
+                     using the default 32 MiB"
+                ),
+                "{v:?}"
+            );
+            assert_eq!(w.value.as_deref(), Some(v));
         };
         for invalid in ["0", "-1", "4.5", "lots"] {
             refused(invalid);
         }
-        let largest = usize::MAX / MIB;
         assert_eq!(ok(&largest.to_string()), (largest * MIB, None));
         // One MiB more does not fit in a usize of bytes: the product used to
         // overflow (a panic in a debug build, a wrap in a release build).
@@ -475,10 +504,12 @@ mod tests {
                 body_cap_setting(Err(VarError::NotUnicode(value))),
                 (
                     32 * MIB,
-                    Some(
-                        "P2A_MAX_HTTP_BODY_MB is not valid UTF-8; using the default 32 MiB"
-                            .to_string()
-                    )
+                    Some(BodyCapWarning {
+                        message: "P2A_MAX_HTTP_BODY_MB is not valid UTF-8; using the default \
+                                  32 MiB"
+                            .to_string(),
+                        value: None,
+                    })
                 )
             );
         }

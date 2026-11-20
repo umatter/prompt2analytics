@@ -110,20 +110,28 @@ fn execute_export(
     } else {
         session.commands.len() - failed
     };
-    let skipped = if include_failed || failed == 0 {
-        String::new()
-    } else {
-        format!(" ({failed} failed commands not replayed)")
-    };
-    print_message(
-        &format!(
-            "Exported {replayed} commands to: {}{skipped}",
-            output.display()
-        ),
-        format,
-    );
+    let skipped = if include_failed { 0 } else { failed };
+    print_message(&export_summary(replayed, skipped, output), format);
 
     Ok(())
+}
+
+/// The message `script export` prints: how many commands the script replays, and how many
+/// failed ones it leaves out (`skipped`, nothing when 0), each noun agreeing with its count.
+fn export_summary(replayed: usize, skipped: usize, output: &std::path::Path) -> String {
+    let noun = |n: usize| if n == 1 { "command" } else { "commands" };
+    let mut msg = format!(
+        "Exported {replayed} {} to: {}",
+        noun(replayed),
+        output.display()
+    );
+    if skipped > 0 {
+        msg.push_str(&format!(
+            " ({skipped} failed {} not replayed)",
+            noun(skipped)
+        ));
+    }
+    msg
 }
 
 /// Render the bash script for `session`.
@@ -787,5 +795,19 @@ mod tests {
             serde_json::json!({"dataset": "d\ny"}),
         );
         assert_eq!(reconstruct_command(&r), "'data;touch x;' describe $'d\\ny'");
+    }
+
+    #[test]
+    fn export_summary_agrees_with_its_counts() {
+        let out = std::path::Path::new("s.sh");
+        assert_eq!(
+            export_summary(1, 1, out),
+            "Exported 1 command to: s.sh (1 failed command not replayed)"
+        );
+        assert_eq!(
+            export_summary(3, 2, out),
+            "Exported 3 commands to: s.sh (2 failed commands not replayed)"
+        );
+        assert_eq!(export_summary(0, 0, out), "Exported 0 commands to: s.sh");
     }
 }

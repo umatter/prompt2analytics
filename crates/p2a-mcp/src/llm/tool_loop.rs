@@ -129,7 +129,8 @@ enum Stop {
 
 /// Loop detection: an exact repeat of the previous round (names and arguments), or a tool name
 /// in more than [`MAX_ROUNDS_PER_TOOL`] rounds of the request. Each name counts once per round,
-/// however often the round calls it, so parallel calls of one tool run.
+/// however often the round calls it, so parallel calls of one tool run; a name that appears only
+/// past [`MAX_CALLS_PER_ROUND`] in its round, where its calls do not run, does not count.
 #[derive(Default)]
 struct LoopGuard {
     previous: Option<u64>,
@@ -149,7 +150,7 @@ impl LoopGuard {
         }
         self.previous = Some(hash);
         let mut seen: HashSet<&str> = HashSet::new();
-        for tc in calls {
+        for tc in calls.iter().take(MAX_CALLS_PER_ROUND) {
             if !seen.insert(tc.name.as_str()) {
                 continue;
             }
@@ -553,6 +554,29 @@ mod tests {
             results[16].content,
             "not run: a round may make at most 16 tool calls; make the rest in the next round"
         );
+    }
+
+    /// A tool named only past the round cap does not run in that round, so the round does not
+    /// count toward its [`MAX_ROUNDS_PER_TOOL`]: after three such rounds it still runs.
+    #[tokio::test]
+    async fn a_call_past_the_round_cap_does_not_count_a_round_of_its_tool() {
+        let capped_round = |r: usize| {
+            let mut calls: Vec<(&str, Value)> = (0..MAX_CALLS_PER_ROUND)
+                .map(|i| (["a", "b", "c"][r], json!({"i": i})))
+                .collect();
+            calls.push(("t", json!({"r": r})));
+            turn("", &calls)
+        };
+        let mut turns: Vec<AssistantTurn> = (0..3).map(capped_round).collect();
+        turns.push(turn("", &[("t", json!({"last": true}))]));
+        turns.push(turn("done", &[]));
+        let p = Scripted::new(turns);
+        let tools = Tools::default();
+        let (m, _) = run(&p, &tools, &config(25, true)).await;
+        assert_eq!(m.content, "done");
+        let ran = tools.0.lock().unwrap();
+        assert_eq!(ran.len(), 3 * MAX_CALLS_PER_ROUND + 1);
+        assert_eq!(ran.last().map(String::as_str), Some("t"));
     }
 
     #[tokio::test]
