@@ -377,10 +377,12 @@ pub async fn restore_session(session: Signal<SessionState>) {
 
 /// The session `old_id` ended: forget it everywhere (the gate, the state,
 /// the session header, the stored id), drop its datasets and reset the
-/// conversations, so the next use creates a new session.
+/// conversations and their live transcripts, so the next use creates a new
+/// session.
 pub fn on_session_lost(
     mut session: Signal<SessionState>,
     mut conv: Signal<super::ConversationState>,
+    mut chat: Signal<super::ChatState>,
     old_id: &str,
 ) {
     let gate = session.read().gate.clone();
@@ -396,6 +398,8 @@ pub fn on_session_lost(
         crate::api::set_current_session_id(None);
         forget_stored_session();
         conv.write().reset();
+        // The session's conversations went with it.
+        chat.write().clear_live();
     }
 }
 
@@ -405,15 +409,13 @@ pub fn on_session_lost(
 pub(crate) fn report_conversation_error(
     session: Signal<SessionState>,
     mut conv: Signal<super::ConversationState>,
-    mut chat: Signal<super::ChatState>,
+    chat: Signal<super::ChatState>,
     e: String,
 ) {
     if session_lost_text(&e) {
         let old = session.read().session_id.clone();
         if let Some(old) = old {
-            on_session_lost(session, conv, &old);
-            // The session's conversations went with it.
-            chat.write().clear_live();
+            on_session_lost(session, conv, chat, &old);
         }
         conv.write().set_error(Some(SESSION_ENDED_TEXT.to_string()));
     } else {
@@ -733,6 +735,25 @@ mod tests {
             assert_eq!(conv.read().error.as_deref(), Some(SESSION_ENDED_TEXT));
             assert!(!conv.read().is_operating);
             assert!(!chat.read().has_live("c1"), "the live transcripts went too");
+        });
+    }
+
+    #[test]
+    fn a_lost_session_takes_its_live_transcripts() {
+        with_session_signals(|session, conv, chat| {
+            on_session_lost(session, conv, chat, "s1");
+            assert_eq!(session.read().session_id, None);
+            assert!(conv.read().conversations.is_empty());
+            assert!(!chat.read().has_live("c1"), "the live transcripts went too");
+        });
+    }
+
+    #[test]
+    fn an_older_lost_session_keeps_the_current_live_transcripts() {
+        with_session_signals(|session, conv, chat| {
+            on_session_lost(session, conv, chat, "s0");
+            assert_eq!(session.read().session_id.as_deref(), Some("s1"));
+            assert!(chat.read().has_live("c1"));
         });
     }
 

@@ -846,7 +846,9 @@ fn ordered_factor(
     Ok(ordered)
 }
 
-/// At most 20 labels, each shortened, comma-separated.
+/// At most 20 labels, each shortened, comma-separated. Kept apart from
+/// `panel::utils::label_list`, which quotes five labels in full: the user copies these labels
+/// into `levels`, so more of them are shown, and each is cut at 40 characters.
 fn label_list(labels: &[String]) -> String {
     const SHOWN: usize = 20;
     let mut parts: Vec<String> = labels.iter().take(SHOWN).map(|l| short_label(l)).collect();
@@ -1755,14 +1757,17 @@ mod tests {
                 .filter_map(|a| a.checked_sub(1))
                 .collect();
             assert_eq!(got, want, "{label}");
+            // Which path decided: the normal-equations (Cholesky) test certifies the two
+            // well-conditioned designs and refuses every other one, so the QR decided those.
+            let gram = intercept_gram(dm.view()).unwrap();
+            let certified = normal_inverse_from_gram(gram.view()).unwrap().is_some();
+            assert_eq!(
+                certified,
+                label == "well conditioned" || label == "scaled by 1e6",
+                "{label}: the normal-equations test certified {certified}"
+            );
             if label == "x2 = x1 + 1e-6 noise" {
                 fallback_kept_both = want.is_empty();
-                // the Cholesky path declines this design, so the QR decided
-                let gram = intercept_gram(dm.view()).unwrap();
-                assert!(
-                    normal_inverse_from_gram(gram.view()).unwrap().is_none(),
-                    "{label}: the normal-equations test should refuse the design"
-                );
             }
             if label == "x2 = x1 + 1e-9 noise" || label.starts_with("x2 = 2") {
                 assert_eq!(want, vec![1], "{label}");

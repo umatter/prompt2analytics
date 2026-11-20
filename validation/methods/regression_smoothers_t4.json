@@ -19,6 +19,8 @@
       "quantities": [
         "knots (nknots, distinct x)",
         "lambda, df, fit, leverages, GCV criterion at a given spar or lambda",
+        "ratio (tr(X'WX) / tr(Omega)), with and without all knots",
+        "spline coefficients at a given spar",
         "all-knots fit",
         "predictions inside and outside the data range",
         "spar, lambda, df, cv.crit, fit and leverages after the Brent search (df target, GCV, CV)",

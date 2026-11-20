@@ -7,13 +7,16 @@
 //! (planar coordinates, or unit vectors on the sphere for longitude/latitude), so building
 //! them costs O(n log n + links) for well-spread points instead of visiting all n² pairs.
 //! Coordinates shared by many observations do not make it quadratic, except, for
-//! great-circle bands, when the distance between two such locations lies within the
-//! rounding margin (about 1e-9 relative) of d1 or d2. A k-nearest search also rules a box
-//! out by the lowest index it holds, and a band search skips a box whose points all sit at
-//! the query. In the great-circle exception the box bounds, widened by that margin, cannot
-//! rule the other location out, so every query at one location evaluates every point at
-//! the other; when the distance falls just outside the band none of those evaluations is a
-//! link, so the link cap does not bound the work. Candidates are always judged with the
+//! great-circle bands, when many observations lie at a distance from a location shared by many
+//! others that is within the rounding margin of d1 or d2 (about 1e-9 relative plus about
+//! 6 micrometres, which dominates below about 6 km), as two such locations at that distance
+//! do. A k-nearest search also rules a box out by the lowest index it holds, and a band search
+//! skips a box whose points all sit at the query. In the great-circle exception the box
+//! bounds, widened by that margin, cannot rule the shared location out, so every query within
+//! that margin of it evaluates every point there; when the distance falls just outside the
+//! band none of those evaluations is a link, so the link cap does not bound the work. The
+//! margin also grows with the largest |longitude|, so a longitude outside [-360, 360] is
+//! refused. Candidates are always judged with the
 //! exact distance formula, and ties are broken by the lower index, so the result is the one
 //! an all-pairs search gives. For k nearest neighbours that is
 //! `spdep::knearneigh(x, k, use_kd_tree = FALSE)`; spdep's default kd-tree search (dbscan) can
@@ -267,10 +270,12 @@ impl Neighbors {
     /// great-circle (haversine, R = 6371 km) distances in kilometres.
     ///
     /// Same contract as [`Neighbors::try_from_distance`], and the same complexity except
-    /// when two locations, each shared by many observations, lie at a great-circle distance
-    /// within the rounding margin (about 1e-9 relative) of `d1` or `d2`: every query at one
-    /// then evaluates every point at the other (see the module docs). Additionally a latitude
-    /// outside [-90, 90] is an [`EconError::InvalidSpecification`].
+    /// when many observations lie at a great-circle distance from a location shared by many
+    /// others that is within the rounding margin of `d1` or `d2` (about 1e-9 relative plus
+    /// about 6 micrometres): every such query then evaluates every point at the shared
+    /// location (see the [`spatial`](crate::spatial) module docs). Additionally a latitude
+    /// outside [-90, 90] or a longitude outside [-360, 360] is an
+    /// [`EconError::InvalidSpecification`].
     pub fn try_from_distance_longlat(
         coords: &[(f64, f64)],
         d1: f64,
@@ -615,6 +620,19 @@ fn validate_coords(coords: &[(f64, f64)], metric: Metric) -> EconResult<()> {
     {
         return Err(invalid(format!(
             "latitude of observation {} is outside [-90, 90]: {lat}",
+            i + 1
+        )));
+    }
+    // The band's rounding margin grows with the largest |longitude|: a huge one would stop the
+    // tree from pruning anything.
+    if metric == Metric::GreatCircle
+        && let Some((i, &(lon, _))) = coords
+            .iter()
+            .enumerate()
+            .find(|(_, c)| !(-360.0..=360.0).contains(&c.0))
+    {
+        return Err(invalid(format!(
+            "longitude of observation {} is outside [-360, 360]: {lon}",
             i + 1
         )));
     }
@@ -1212,6 +1230,23 @@ mod tests {
             100.0,
             None
         )));
+        // A longitude beyond one turn either way is refused: the band's rounding margin grows
+        // with the largest |longitude| and would otherwise stop the tree from pruning.
+        for lon in [360.5, -361.0, 1e18] {
+            assert!(
+                invalid(Neighbors::try_from_distance_longlat(
+                    &[(lon, 10.0), (1.0, 1.0)],
+                    0.0,
+                    100.0,
+                    None
+                )),
+                "lon={lon}"
+            );
+        }
+        assert!(
+            Neighbors::try_from_distance_longlat(&[(360.0, 10.0), (-360.0, 10.0)], 0.0, 1.0, None)
+                .is_ok()
+        );
     }
 
     #[test]

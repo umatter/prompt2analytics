@@ -665,15 +665,9 @@ pub struct RdResult {
     pub missing: MissingSummary,
 }
 
-/// The warnings without the missing-value note (which prints on its own line, last).
-pub(crate) fn without_missing_note(warnings: &[String], missing: &MissingSummary) -> Vec<String> {
-    let note = missing.note();
-    warnings
-        .iter()
-        .filter(|w| Some(w.as_str()) != note.as_deref())
-        .cloned()
-        .collect()
-}
+/// The warnings without the missing-value note (which prints on its own line, last): the
+/// panel results' filter.
+pub(crate) use crate::econometrics::panel::types::notes_without_missing as without_missing_note;
 
 /// Warnings already filtered, for `notes_text`.
 struct Shown(Vec<String>);
@@ -703,7 +697,9 @@ impl ResultNotes for RdBandwidth {
 }
 
 /// The notes block of an RD Display: `Warning: <text>` per warning (as `notes_text`), then
-/// `Missing values: <note>` last.
+/// `Missing values: <note>` last. Not `panel::types::write_warnings_then_missing`, which
+/// prints a `Warnings:` header and a `  - ` list: the RD results print their warnings as the
+/// CLI and MCP notes do.
 pub(crate) fn write_warnings_and_missing(
     f: &mut fmt::Formatter<'_>,
     warnings: &[String],

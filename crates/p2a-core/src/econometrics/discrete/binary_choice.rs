@@ -37,7 +37,7 @@ use ndarray::Array2;
 
 use crate::data::Dataset;
 use crate::data::columns::{ColumnRequest, NaPolicy};
-use crate::econometrics::glm::{GlmSpec, fit_glm};
+use crate::econometrics::glm::{GLM_NOT_CONVERGED, GlmSpec, fit_glm};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::solve::aliasing_message;
 use crate::traits::convergence::Convergence;
@@ -227,10 +227,7 @@ pub fn run_discrete_model(
         settings.tolerance,
     );
     // one non-convergence note: glm.fit's own warning, when it gave one
-    if !fit
-        .warnings
-        .iter()
-        .any(|w| w == "glm.fit: algorithm did not converge")
+    if !fit.warnings.iter().any(|w| w == GLM_NOT_CONVERGED)
         && let Some(note) = convergence.note(model_name)
     {
         warnings.push(note);
@@ -688,11 +685,7 @@ mod tests {
         )
         .unwrap();
         assert!(!d.converged);
-        assert!(
-            d.warnings
-                .iter()
-                .any(|w| w == "glm.fit: algorithm did not converge")
-        );
+        assert!(d.warnings.iter().any(|w| w == GLM_NOT_CONVERGED));
         assert!(d.to_string().contains("Converged: no (5 iterations"), "{d}");
         // (c) R's default glm.control(epsilon = 1e-8, maxit = 25): R warns too
         let mut s = MleSettings::default();

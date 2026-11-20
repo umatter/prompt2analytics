@@ -198,7 +198,11 @@ const BOUND_FRACTION: f64 = 1e-6;
 
 /// spatialreg's search interval 1/range(Re(eig)). Refuses an interval that is not finite (W has no
 /// real part below -1e-12 max|Re(eig)| or none above +1e-12 max|Re(eig)|, a test free of the
-/// scale of W), where neither spatialreg's nor any other golden section can start.
+/// scale of W), where neither spatialreg's nor any other golden section can start. The width
+/// check is absolute, as are the search's [`INTERVAL_MARGIN`] and tolerance: weights of a small
+/// scale give a wide interval and are accepted, but weights scaled up until the interval is no
+/// wider than 4 [`INTERVAL_MARGIN`] (real parts of the eigenvalues around 5e7 in magnitude or
+/// more) are refused; rescale such weights.
 fn search_interval(listw: &mut SpatialWeights) -> EconResult<(f64, f64)> {
     let eigs = listw.try_eigenvalues()?;
     let min = eigs.iter().copied().fold(f64::INFINITY, f64::min);
@@ -206,7 +210,17 @@ fn search_interval(listw: &mut SpatialWeights) -> EconResult<(f64, f64)> {
     let scale = min.abs().max(max.abs());
     let (lo, hi) = (1.0 / min, 1.0 / max);
     let width = hi - lo;
-    if !(min < -1e-12 * scale && max > 1e-12 * scale && width > 4.0 * INTERVAL_MARGIN) {
+    if min < -1e-12 * scale && max > 1e-12 * scale && width <= 4.0 * INTERVAL_MARGIN {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "the search interval for the spatial parameter, 1/range(Re(eigenvalues)) = \
+                 ({lo}, {hi}), is no wider than {}: the eigenvalues of W are too large; rescale \
+                 the weights (row standardisation gives the interval (1/min, 1))",
+                4.0 * INTERVAL_MARGIN
+            ),
+        });
+    }
+    if !(min < -1e-12 * scale && max > 1e-12 * scale) {
         return Err(EconError::InvalidSpecification {
             message: format!(
                 "the spatial weights give no finite search interval for the spatial parameter: \
@@ -2522,8 +2536,9 @@ mod tests {
         assert!(!r.warnings.is_empty(), "no non-convergence note");
     }
 
-    /// The interval test is free of the scale of W: weights scaled by 1e-13 give the interval
-    /// scaled by 1e13.
+    /// The interval test accepts weights of a small scale: weights scaled by 1e-13 give the
+    /// interval scaled by 1e13. (Weights scaled up until the interval is narrower than
+    /// 4 INTERVAL_MARGIN are refused; see `search_interval`.)
     #[test]
     fn search_interval_accepts_tiny_weights() {
         let coords: Vec<(f64, f64)> = (0..30)
@@ -2537,6 +2552,16 @@ mod tests {
         let (tlo, thi) = search_interval(&mut tiny).unwrap();
         assert!((tlo / (lo * 1e13) - 1.0).abs() < 1e-9, "{tlo} vs {lo}");
         assert!((thi / (hi * 1e13) - 1.0).abs() < 1e-9, "{thi} vs {hi}");
+        // Scaled up by 1e9 the interval is about 1e-9 wide: refused with a message that says
+        // to rescale, not that the eigenvalues lack a sign.
+        let small: Vec<(f64, f64)> = coords.iter().map(|&(a, b)| (a * 1e-9, b * 1e-9)).collect();
+        let mut huge = SpatialWeights::from_distance_decay(&nb, &small, 1.0, false);
+        match search_interval(&mut huge) {
+            Err(EconError::InvalidSpecification { message }) => {
+                assert!(message.contains("rescale"), "{message}")
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

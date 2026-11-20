@@ -2321,8 +2321,8 @@ fn compute_concordance(
             &built
         }
     };
+    debug_assert_eq!(rs.order.len(), n, "the risk sets must cover every row");
     let order = &rs.order;
-    let groups: Vec<(usize, usize)> = rs.blocks.iter().map(|b| (b.start, b.end)).collect();
 
     // Per-observation counts (c, d, t) over the comparable pairs.
     let mut per = vec![[0u64; 3]; n];
@@ -2337,7 +2337,8 @@ fn compute_concordance(
     let mut bit = FenwickTree::new(m);
     let mut total = 0u64;
     let mut ev: Vec<usize> = Vec::new();
-    for &(gs, ge) in &groups {
+    for b in &rs.blocks {
+        let (gs, ge) = (b.start, b.end);
         checkpoint()?;
         for &i in &order[gs..ge] {
             if !event[i] {
@@ -2391,7 +2392,8 @@ fn compute_concordance(
     // for a censored j, the events of j's own time).
     let mut bit = FenwickTree::new(m);
     let mut total = 0u64;
-    for &(gs, ge) in groups.iter().rev() {
+    for b in rs.blocks.iter().rev() {
+        let (gs, ge) = (b.start, b.end);
         checkpoint()?;
         for &j in &order[gs..ge] {
             if event[j] {

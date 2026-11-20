@@ -259,6 +259,10 @@ pub struct PropensityFit {
     pub fit: GlmFit,
 }
 
+/// glm.fit's non-convergence warning, as [`fit_glm`] writes it into `GlmFit::warnings`;
+/// callers that carry convergence themselves compare against this constant.
+pub(crate) const GLM_NOT_CONVERGED: &str = "glm.fit: algorithm did not converge";
+
 const EPS: f64 = f64::EPSILON;
 /// R's logit-link clamp (`family.c`, THRESH).
 const LOGIT_THRESH: f64 = 30.0;
@@ -1131,7 +1135,7 @@ fn fit_glm_solved(
     let fit = problem.irls(x, init, &mut warnings)?;
 
     if !fit.converged {
-        warnings.push("glm.fit: algorithm did not converge".into());
+        warnings.push(GLM_NOT_CONVERGED.into());
     }
     if fit.boundary {
         warnings.push("glm.fit: algorithm stopped at boundary value".into());

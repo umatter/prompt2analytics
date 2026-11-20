@@ -1670,6 +1670,9 @@ mod tests {
             .vector("r_a_spar05_fit", &r.y, t)
             .vector("a_spar05_lev", r.leverage.as_deref().unwrap(), t)
             .scalar("a_spar05_gcv_crit", r.cv_crit.unwrap(), t)
+            .scalar("a_ratio", r.ratio, t)
+            .scalar("r_a_spar05_ratio", r.ratio, t)
+            .vector("a_spar05_coef", &r.fit.coef, t)
             .vector(
                 "a_spar05_predict",
                 &smooth_spline_predict(&r, &case.vector("a_predict_x")).unwrap(),
@@ -1683,7 +1686,8 @@ mod tests {
         let mut all = SmoothSplineConfig::with_spar(0.5);
         all.all_knots = true;
         let r = smooth_spline(x, y, all).unwrap();
-        c.scalar("a_allknots_spar05_df", r.df, t)
+        c.scalar("a_allknots_ratio", r.ratio, t)
+            .scalar("a_allknots_spar05_df", r.df, t)
             .vector("a_allknots_spar05_fit", &r.y, t);
         c.finish();
         assert_eq!(r.n_knots, 120);

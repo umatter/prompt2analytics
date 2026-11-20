@@ -139,7 +139,7 @@ use crate::linalg::solve::{
 };
 use crate::regression::HacKernel;
 use crate::regression::ols::{NormalInverse, normal_equations_inverse};
-use crate::resource::{checked_len, checkpoint, try_zeros2};
+use crate::resource::{checked_len, checkpoint, checkpoint_stride, try_zeros2};
 use crate::spatial::SpatialWeights;
 use crate::traits::convergence::{Convergence, ResultNotes, notes_text};
 use crate::traits::estimator::{SignificanceLevel, normal_p_value_two_sided};
@@ -927,17 +927,6 @@ fn wald(estimate: f64, se: f64) -> (f64, f64) {
     }
 }
 
-/// The warning for a covariance with a negative diagonal, which a spatial HAC with a kernel that
-/// is not positive semi-definite can produce; rounding around 0 does not count.
-/// About this many elementary operations run between two budget checks of a loop.
-const CHECKPOINT_WORK: usize = 1 << 16;
-
-/// Items between budget checks for a loop whose items cost about `work_per_item` operations
-/// each: [`CHECKPOINT_WORK`] operations per check, at least one item.
-fn checkpoint_stride(work_per_item: usize) -> usize {
-    (CHECKPOINT_WORK / work_per_item.max(1)).max(1)
-}
-
 /// The number of links of W.
 fn n_links(listw: &SpatialWeights) -> usize {
     (0..listw.n())
@@ -955,6 +944,8 @@ fn nonnegative_sqrt(v: f64) -> f64 {
     }
 }
 
+/// The warning for a covariance with a negative diagonal, which a spatial HAC with a kernel that
+/// is not positive semi-definite can produce; rounding around 0 does not count.
 fn negative_variance_warning(vcov: &Array2<f64>) -> Option<String> {
     let largest = vcov.diag().iter().fold(0.0_f64, |m, v| m.max(v.abs()));
     vcov.diag().iter().any(|&v| v < -1e-12 * largest).then(|| {

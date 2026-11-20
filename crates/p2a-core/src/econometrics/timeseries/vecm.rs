@@ -565,6 +565,10 @@ pub fn johansen_vecm(
     let tf = t as f64;
     let (s00, s0k, skk) = concentrated_moments(&effects, k, m, tf)?;
     drop(effects);
+    // Rank guards only: the inverses are discarded. `sym_inverse` reveals the rank and
+    // refuses a singular S00 or S11 with an error that names the matrix, which the plain
+    // Cholesky below does not do reliably on a numerically singular matrix. Each matrix is
+    // p x p, so the second decomposition costs nothing next to the regressions above.
     sym_inverse(
         s00.view(),
         SingularPolicy::Error,

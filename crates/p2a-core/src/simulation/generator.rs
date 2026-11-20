@@ -151,8 +151,9 @@ impl Distribution {
     /// be finite. In addition: a uniform range must be non-empty and
     /// its width representable, normal and exponential scale parameters
     /// positive, a Poisson mean in `(0, 1e13]`, a binomial `n` in `1..=2^53`,
-    /// probabilities in `[0, 1]`, and categorical weights non-negative with
-    /// a finite, positive sum.
+    /// probabilities in `[0, 1]`, a categorical list non-empty (at most
+    /// `IdxSize::MAX` categories), and categorical weights, when given, one
+    /// per category, non-negative and with a finite, positive sum.
     pub fn validate(&self) -> Result<(), GenerationError> {
         match self {
             Distribution::Uniform { min, max } => {

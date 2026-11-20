@@ -1228,16 +1228,11 @@ fn estimate_propensity(
     design.slice_mut(ndarray::s![.., 1..]).assign(x);
     let fit = fit_propensity(design.view(), treat.view(), link)?;
     // the record of the fit that ran (its max_iter and epsilon); the non-canonical links
-    // also refine until the coefficients settle (fit_propensity)
-    let mut convergence = fit.fit.notes_convergence().ok_or_else(|| {
+    // also refine until the coefficients settle, and the record's criterion names that
+    // rule (fit_propensity sets coef_tol, which GlmFit::notes_convergence reports)
+    let convergence = fit.fit.notes_convergence().ok_or_else(|| {
         EconError::Computation("propensity glm returned no convergence record".into())
     })?;
-    if link != GlmLink::Logit {
-        convergence.criterion = format!(
-            "relative change in deviance, then relative coefficient change < {:e}",
-            crate::econometrics::glm::PROPENSITY_COEF_TOL
-        );
-    }
     let mut warnings: Vec<String> = convergence
         .note("propensity-score glm")
         .into_iter()
@@ -1246,7 +1241,7 @@ fn estimate_propensity(
         fit.fit
             .warnings
             .iter()
-            .filter(|w| w.as_str() != "glm.fit: algorithm did not converge")
+            .filter(|w| w.as_str() != crate::econometrics::glm::GLM_NOT_CONVERGED)
             .map(|w| format!("propensity-score glm: {w}")),
     );
     Ok(PropensityModel {

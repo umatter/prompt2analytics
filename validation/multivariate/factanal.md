@@ -71,6 +71,9 @@ Tests (`p2a-core`, `stats::factanal::tests::`):
 - `test_factanal_refuses_constant_column` (not R-pinned; R stops with an error): a column with zero
   variance is refused with `InvalidSpecification` naming it (it used to get a floored standard
   deviation and a fit of zeros).
+- `test_factanal_refuses_rounding_level_variance` (not R-pinned; R fits the rounding noise): a column
+  whose standard deviation is at or below `64 * eps * max|x|` (a large level plus a few ulps of noise)
+  counts as zero variance and is refused the same way.
 - `test_rotation_and_scores_methods_parse_aliases_and_reject_unknown` (not R-pinned): option spellings
   (`varimax`, `promax`, `none`; scores `none`, `regression`/`thomson`, `bartlett`).
 
