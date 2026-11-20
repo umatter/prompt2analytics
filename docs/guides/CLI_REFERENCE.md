@@ -569,8 +569,9 @@ The generated script can be shared and re-executed for reproducible results.
 
 Parallel invocations on one session file all record their commands: a save locks `<session file>.lock` (an
 empty file left beside the session file), merges its commands into what other invocations wrote meanwhile and
-replaces the file atomically. A command does not see a dataset that a parallel command registers after it
-started. An empty session file (made by `mktemp`, say) starts a new session. Dataset paths are stored absolute,
+replaces the file atomically, so the session file's directory must be writable (a save that cannot create the
+lock file or its temporary file there fails and names the file). A command does not see a dataset that a
+parallel command registers after it started. An empty session file (made by `mktemp`, say) starts a new session. Dataset paths are stored absolute,
 with the file's size and modification time; a later command warns when the file or the data no longer match
 the recording, and uses them anyway.
 
@@ -1799,7 +1800,7 @@ p2a causal gsynth [OPTIONS] --outcome <OUTCOME> --treatment <TREATMENT> --unit <
 | `--time <TIME>` | Time period column |
 | `-x, --covariates [<COVARIATES>...]` | Covariate columns (optional) |
 | `--n-factors <N_FACTORS>` | Number of latent factors (0 = choose it by cross-validation over 0..=--r-max, as gsynth's CV = TRUE) [default: 0] |
-| `--r-max <R_MAX>` | Largest number of factors the cross-validation tries (gsynth's r = c(0, r.max); default 5, as gsynth) [default: 5] |
+| `--r-max <R_MAX>` | Largest number of factors the cross-validation tries (gsynth's r = c(0, r.max); default 5, as gsynth) |
 | `--force <FORCE>` | Fixed effects (gsynth force): unit (default, as gsynth; also individual), none, time or two_way (also twoway, two-way) [default: unit] |
 | `--estimator <ESTIMATOR>` | Estimator: ife (interactive fixed effects, default; also gsynth) or mc (matrix completion; also matrix_completion) [default: ife] |
 | `--bootstrap-se` | Compute bootstrap standard errors |

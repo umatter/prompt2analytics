@@ -290,6 +290,10 @@ fn test_validate_cli_gsynth_defaults() {
     // stay out of the Check. The default run's ATT is pinned at the r core chose, which is
     // still R's fixed-r fit.
     let r = number(&j, "n_factors") as usize;
+    assert_eq!(
+        r, 1,
+        "core's CV choice changed: re-check deviation CLI-33 against default_r = 0"
+    );
     Check::new(&case)
         .scalar(&format!("unit_r{r}_att_avg"), number(&j, "att"), tol)
         .finish();
@@ -327,6 +331,16 @@ fn test_validate_cli_gsynth_defaults() {
     );
     let text = s.ok(&fixed);
     assert!(text.contains("--r-max 3 has no effect"), "{text}");
+    // also when the value given is the default's
+    let j = s.json(&argv(&base, &["--n-factors", "1", "--r-max", "5"]));
+    assert!(
+        j["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| w.as_str().unwrap().contains("--r-max 5 has no effect")),
+        "{j}"
+    );
 }
 
 /// causal staggered-did takes did's base_period (--base-period-type universal), passes
