@@ -173,7 +173,9 @@ pub fn silhouette_optimized(
     crate::ml::cluster_validation::check_silhouette_clusters(labels, n)?;
 
     let distances = try_pairwise_distances_parallel(&data, "silhouette_optimized distance matrix")?;
-    let widths = crate::ml::cluster_validation::silhouette_core(distances.view(), labels).widths;
+    let widths = crate::ml::cluster_validation::silhouette_core(distances.view(), labels)
+        .map_err(|e| e.to_string())?
+        .widths;
     let average = widths.iter().sum::<f64>() / n as f64;
 
     Ok((widths, average))

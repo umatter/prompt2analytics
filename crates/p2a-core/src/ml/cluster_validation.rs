@@ -387,7 +387,7 @@ pub fn silhouette(data: ArrayView2<f64>, labels: &[usize]) -> EconResult<Silhoue
     check_silhouette_clusters(labels, n)
         .map_err(|message| EconError::InvalidSpecification { message })?;
     let d = compute_pairwise_distances(&data)?;
-    Ok(silhouette_result(d.view(), labels))
+    silhouette_result(d.view(), labels)
 }
 
 /// Compute silhouette coefficient from a precomputed distance matrix (R `cluster::silhouette(x,
@@ -422,7 +422,7 @@ pub fn silhouette_from_dist(
         return Err("the dissimilarities contain non-finite values".to_string());
     }
     check_silhouette_clusters(labels, n)?;
-    Ok(silhouette_result(dist_matrix, labels))
+    silhouette_result(dist_matrix, labels).map_err(|e| e.to_string())
 }
 
 /// The silhouette of every observation, as `cluster::silhouette`'s C routine `sildist`.
@@ -442,7 +442,12 @@ pub(crate) struct SilhouetteCore {
 /// The one silhouette (R `cluster::silhouette`, C routine `sildist`): sums over the other members of
 /// every cluster in index order; `s(i) = 0` for a singleton (Rousseeuw 1987) and when `a(i) = b(i)`;
 /// the neighbour is the first minimising cluster. Row i of `dist` gives i's sums.
-pub(crate) fn silhouette_core(dist: ArrayView2<f64>, labels: &[usize]) -> SilhouetteCore {
+///
+/// Checks the budget once per row; `Err(EconError::Cancelled)` when it is cancelled or expires.
+pub(crate) fn silhouette_core(
+    dist: ArrayView2<f64>,
+    labels: &[usize],
+) -> EconResult<SilhouetteCore> {
     let n = labels.len();
     let k = labels.iter().copied().max().map_or(0, |m| m + 1);
     let mut sizes = vec![0usize; k];
@@ -467,24 +472,38 @@ pub(crate) fn silhouette_core(dist: ArrayView2<f64>, labels: &[usize]) -> Silhou
             .zip(b.iter_mut())
             .zip(neighbor.iter_mut())
             .enumerate()
-            .for_each(|row| put(&mut sums, row));
+            .try_for_each(|row| {
+                crate::resource::checkpoint()?;
+                put(&mut sums, row);
+                Ok::<(), EconError>(())
+            })?;
     } else {
         // written in place: no per-row tuple buffer beside the four outputs
+        let budget = crate::resource::current_budget();
         widths
             .par_iter_mut()
             .zip(a.par_iter_mut())
             .zip(b.par_iter_mut())
             .zip(neighbor.par_iter_mut())
             .enumerate()
-            .for_each_init(|| vec![0.0f64; k], put);
+            .try_for_each_init(
+                || vec![0.0f64; k],
+                |sums, row| {
+                    if let Some(budget) = &budget {
+                        budget.check()?;
+                    }
+                    put(sums, row);
+                    Ok::<(), EconError>(())
+                },
+            )?;
     }
-    SilhouetteCore {
+    Ok(SilhouetteCore {
         widths,
         a,
         b,
         neighbor,
         sizes,
-    }
+    })
 }
 
 /// Below this many observations [`silhouette_core`] runs on the calling thread.
@@ -570,9 +589,9 @@ pub(crate) fn check_silhouette_clusters(labels: &[usize], n: usize) -> Result<()
 
 /// The [`SilhouetteResult`] of a dissimilarity matrix: per-cluster means over all members (0 for an
 /// absent label).
-fn silhouette_result(dist: ArrayView2<f64>, labels: &[usize]) -> SilhouetteResult {
+fn silhouette_result(dist: ArrayView2<f64>, labels: &[usize]) -> EconResult<SilhouetteResult> {
     let n = labels.len();
-    let core = silhouette_core(dist, labels);
+    let core = silhouette_core(dist, labels)?;
     let n_ids = core.sizes.len();
     let n_clusters = core.sizes.iter().filter(|&&m| m > 0).count();
     let mut sums = vec![0.0f64; n_ids];
@@ -595,7 +614,7 @@ fn silhouette_result(dist: ArrayView2<f64>, labels: &[usize]) -> SilhouetteResul
         })
         .collect();
     let average_silhouette = core.widths.iter().sum::<f64>() / n as f64;
-    SilhouetteResult {
+    Ok(SilhouetteResult {
         silhouette_widths: core.widths,
         average_silhouette,
         labels: labels.to_vec(),
@@ -603,7 +622,7 @@ fn silhouette_result(dist: ArrayView2<f64>, labels: &[usize]) -> SilhouetteResul
         silhouette_info,
         n_clusters,
         n,
-    }
+    })
 }
 
 /// Convenience wrapper for silhouette.
@@ -1885,11 +1904,42 @@ mod tests {
                 }
             }
             let want = naive(d.view(), &labels);
-            assert_eq!(bits(&silhouette_core(d.view(), &labels).widths), want);
+            assert_eq!(
+                bits(&silhouette_core(d.view(), &labels).unwrap().widths),
+                want
+            );
             if n < 100 {
                 // a transposed (strided) view of the symmetric matrix takes the fallback loop
-                assert_eq!(bits(&silhouette_core(d.t(), &labels).widths), want);
+                assert_eq!(bits(&silhouette_core(d.t(), &labels).unwrap().widths), want);
             }
+        }
+    }
+
+    /// A cancelled budget stops the per-row silhouette loop of a caller-supplied dissimilarity
+    /// matrix, in the sequential branch and in the parallel one.
+    #[test]
+    fn test_silhouette_from_dist_stops_on_a_cancelled_budget() {
+        use crate::resource::{Budget, CancelToken, with_budget};
+        for n in [40, SILHOUETTE_PAR_MIN_N + 3] {
+            let x = Array2::from_shape_fn((n, 2), |(i, j)| {
+                (i % 3) as f64 * 4.0 + ((i * 7 + j * 13) % 11) as f64 * 0.1
+            });
+            let labels: Vec<usize> = (0..n).map(|i| i % 3).collect();
+            let d = compute_pairwise_distances(&x.view()).unwrap();
+            let token = CancelToken::new();
+            token.cancel();
+            let r = with_budget(Budget::new(None, token), || {
+                silhouette_from_dist(d.view(), &labels)
+            });
+            let e = r.err().unwrap_or_else(|| panic!("n = {n}: no error"));
+            assert!(e.contains("cancelled"), "n = {n}: {e}");
+            // the core itself reports the cancellation as EconError::Cancelled
+            let token = CancelToken::new();
+            token.cancel();
+            let r = with_budget(Budget::new(None, token), || {
+                silhouette_core(d.view(), &labels)
+            });
+            assert!(matches!(r, Err(EconError::Cancelled(_))), "n = {n}");
         }
     }
 
