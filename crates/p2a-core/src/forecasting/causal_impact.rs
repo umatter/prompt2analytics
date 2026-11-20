@@ -110,6 +110,52 @@ fn cumulative_z(effect: f64, se: f64) -> f64 {
     }
 }
 
+/// The normal test of the cumulative effect: probabilities of each sign, the two-sided p-value,
+/// and the warning a degenerate standard error needs.
+struct CumulativeTest {
+    prob_positive: f64,
+    prob_negative: f64,
+    p_value: f64,
+    warning: Option<String>,
+}
+
+/// The normal approximation under the fitted model: Phi(z) and Phi(-z) for the sign of the
+/// effect, the two-sided p-value 2 Phi(-|z|), which is below alpha exactly when the 1 - alpha
+/// interval excludes 0 ([`cumulative_z`] keeps this at a zero standard error). A zero or a
+/// non-finite standard error is reported in `warning`; at NaN every number is NaN, so the
+/// effect is not significant.
+fn cumulative_test(effect: f64, se: f64) -> CumulativeTest {
+    let warning = if se == 0.0 {
+        Some(
+            "the cumulative effect's standard error is 0 (the fitted model's forecast \
+             variance is degenerate); its interval is a single point"
+                .to_string(),
+        )
+    } else if se.is_nan() {
+        Some(
+            "the cumulative effect's standard error is not finite (NaN); its p-value and \
+             probabilities are not available"
+                .to_string(),
+        )
+    } else if se.is_infinite() {
+        Some(
+            "the cumulative effect's standard error is not finite (infinite); its interval is \
+             unbounded and its p-value is 1"
+                .to_string(),
+        )
+    } else {
+        None
+    };
+    let z = cumulative_z(effect, se);
+    let normal = Normal::standard();
+    CumulativeTest {
+        prob_positive: normal.cdf(z),
+        prob_negative: normal.cdf(-z),
+        p_value: normal_p_value_two_sided(z),
+        warning,
+    }
+}
+
 /// Summary statistics for causal effect.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CausalImpactSummary {
@@ -629,21 +675,13 @@ fn run_causal_impact_core(
         relative_effect(observed_sum, predicted_sum, cumulative_se, z_alpha);
     warnings.extend(relative_warning);
 
-    // The normal approximation under the fitted model: Phi(z) and Phi(-z) for the sign of
-    // the effect, the two-sided p-value 2 Phi(-|z|), which is below alpha exactly when the
-    // 1 - alpha interval excludes 0 (cumulative_z keeps this at a zero standard error).
-    if cumulative_se == 0.0 {
-        warnings.push(
-            "the cumulative effect's standard error is 0 (the fitted model's forecast \
-             variance is degenerate); its interval is a single point"
-                .to_string(),
-        );
-    }
-    let z_cumulative = cumulative_z(cumulative_effect, cumulative_se);
-    let normal = Normal::standard();
-    let prob_positive = normal.cdf(z_cumulative);
-    let prob_negative = normal.cdf(-z_cumulative);
-    let p_value = normal_p_value_two_sided(z_cumulative);
+    let CumulativeTest {
+        prob_positive,
+        prob_negative,
+        p_value,
+        warning,
+    } = cumulative_test(cumulative_effect, cumulative_se);
+    warnings.extend(warning);
 
     let summary = CausalImpactSummary {
         average_effect,
@@ -1755,6 +1793,40 @@ mod tests {
             assert_eq!(normal.cdf(z), prob_pos, "effect {effect}");
         }
         assert_eq!(cumulative_z(3.0, 2.0), 1.5);
+    }
+
+    /// The summary step at a degenerate standard error: at 0 it warns and the p-value follows
+    /// the point interval; a non-finite one warns that the p-value and the probabilities are
+    /// not available (all NaN, so `p < alpha` is false); a positive one gives no warning.
+    #[test]
+    fn cumulative_test_warns_at_a_zero_or_non_finite_standard_error() {
+        let t = cumulative_test(2.5, 0.0);
+        let w = t.warning.unwrap();
+        assert!(w.contains("standard error is 0"), "{w}");
+        assert_eq!(
+            (t.p_value, t.prob_positive, t.prob_negative),
+            (0.0, 1.0, 0.0)
+        );
+        assert!(t.p_value < 0.05);
+        let t = cumulative_test(0.0, 0.0);
+        assert!(t.warning.is_some());
+        assert_eq!(t.p_value, 1.0);
+        assert!(t.p_value >= 0.05);
+        for se in [f64::NAN, f64::INFINITY] {
+            let t = cumulative_test(2.5, se);
+            let w = t.warning.unwrap_or_default();
+            assert!(w.contains("not finite"), "se {se}: {w:?}");
+            if se.is_nan() {
+                assert!(w.contains("not available"), "{w}");
+                assert!(t.p_value.is_nan() && t.prob_positive.is_nan() && t.prob_negative.is_nan());
+                assert!(!(t.p_value < 0.05));
+            } else {
+                assert_eq!(t.p_value, 1.0);
+            }
+        }
+        let t = cumulative_test(3.0, 2.0);
+        assert!(t.warning.is_none());
+        assert_eq!(t.p_value, normal_p_value_two_sided(1.5));
     }
 
     /// The mean-only passes are the filter, and beta solves the GLS normal equations, for a
