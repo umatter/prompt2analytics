@@ -17,8 +17,13 @@
 //! k-nearest-neighbour and distance-band neighbours are built with a k-d tree in
 //! O(n log n + links) time for well-spread points, with the same result as an all-pairs
 //! search; coordinates shared by many observations do not make it quadratic, except, for
-//! great-circle bands, when the distance between two such locations lies within the
-//! rounding margin (about 1e-9 relative) of d1 or d2. The
+//! great-circle bands, when many observations lie at a distance from a location shared by many
+//! others that is within the rounding margin of d1 or d2 (about 1e-9 relative plus about
+//! 6 micrometres, which dominates below about 6 km), as two such locations at that distance
+//! do: every query within that margin of the shared location evaluates every point there,
+//! and none of those evaluations is a link when the distance falls just outside the band, so
+//! the link cap does not bound the work. The margin also grows with the largest |longitude|,
+//! so `try_from_distance_longlat` refuses a longitude outside [-360, 360]. The
 //! `Neighbors::try_from_knn`, `try_from_distance` and `try_from_distance_longlat`
 //! constructors also validate their input and stop when an installed
 //! [`Budget`](crate::resource::Budget) expires, and the distance-band ones take a cap on
