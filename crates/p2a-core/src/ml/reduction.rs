@@ -1098,11 +1098,19 @@ fn cailliez_constant(d: &[Vec<f64>]) -> Result<f64, String> {
         Default::default(),
     )
     .map_err(|_| "cmdscale additive constant: eigendecomposition failed".to_string())?;
-    Ok(re
+    // f64::max skips NaN, so a spectrum with no finite real part would give -inf (or +inf)
+    let ac = re
         .column_vector()
         .iter()
         .copied()
-        .fold(f64::NEG_INFINITY, f64::max))
+        .fold(f64::NEG_INFINITY, f64::max);
+    if !ac.is_finite() {
+        return Err(
+            "cmdscale additive constant: the eigendecomposition returned no finite eigenvalue"
+                .to_string(),
+        );
+    }
+    Ok(ac)
 }
 
 /// The output dimension: `k` (default 2) clamped to `n - 1`; `k = 0` is refused.
@@ -2169,6 +2177,19 @@ mod tests {
         assert!(with_alloc_ceiling(ceiling, || cmdscale(&d, Some(2), None, None)).is_ok());
         let e = with_budget(cancelled(), || cmdscale(&d, Some(2), None, Some(true))).unwrap_err();
         assert!(e.contains("cancelled"), "{e}");
+    }
+
+    /// Finite distances whose squares overflow make the additive-constant eigenproblem non-finite:
+    /// an error naming the constant, never a non-finite constant shifted into the distances.
+    #[test]
+    fn test_cmdscale_add_refuses_a_non_finite_constant() {
+        let x = [0.0f64, 1.3, 2.1, 4.7, 5.2];
+        let d: Vec<Vec<f64>> = x
+            .iter()
+            .map(|a| x.iter().map(|b| (a - b).abs() * 1e200).collect())
+            .collect();
+        let e = cmdscale(&d, Some(2), None, Some(true)).unwrap_err();
+        assert!(e.contains("cmdscale additive constant"), "{e}");
     }
 
     #[test]
