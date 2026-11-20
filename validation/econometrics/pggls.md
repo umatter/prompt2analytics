@@ -205,7 +205,7 @@ Re-timed on a quiet machine on 2026-11-13: release builds of v0.5.0 (`f80b0131`)
 one P core (`taskset -c 2`, `RAYON_NUM_THREADS=1`), five rounds interleaving the two builds in
 alternating order; each round is one process per build reporting the median of its calls after
 warm-up calls. The table gives the ratio of the medians of the five per-round medians, with the
-ratio of their minima in brackets (1-minute load average 1.7-2.6). Simulated panels of n / 5
+ratio of their minima in brackets (1-minute load average 4.3-8.7 at the start of each round, right after the conversation-store benchmarks of the round before, and 2.2-3.8 at its end; the alternating order protects the ratios). Simulated panels of n / 5
 entities over 5 periods with two regressors, AR(1) errors and entity effects; the unbalanced rows
 drop every tenth row.
 

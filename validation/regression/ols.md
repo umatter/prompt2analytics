@@ -275,7 +275,7 @@ a shared, loaded machine as user-space CPU cycles per call from the hardware cou
 unified OLS_HAC row at n = 100 / 1,000 / 10,000 0.96 / 0.88 / 0.67.
 
 **Variance estimators: lag convention, Quadratic Spectral, VAR(1) prewhitening, Driscoll-Kraay, Wald
-F.** Re-timed on a quiet machine on 2026-11-13 (1-minute load average 1.7-2.6): release builds of
+F.** Re-timed on a quiet machine on 2026-11-13 (1-minute load average 4.3-8.7 at the start of each round, right after the conversation-store benchmarks of the round before, and 2.2-3.8 at its end; the alternating order protects the ratios): release builds of
 this code and of v0.5.0 (`f80b0131`), `RAYON_NUM_THREADS=1`, one P core (`taskset -c 2`), a scratch
 harness that fits from a dataset (three AR(1) regressors and an intercept, AR(1) errors; clusters
 and Driscoll-Kraay with 10 units, so T = n/10, two-way clustering by unit and period; bootstrap B =
