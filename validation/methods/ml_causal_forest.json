@@ -31,7 +31,7 @@
         "p2a-core::ml::causal_forest::tests::test_validate_cf_rct_average_treatment_effect_uses_the_aipw_scores"
       ],
       "quantities": [
-        "AIPW scores, ATE and SE (formula, also on a subset)",
+        "AIPW scores, ATE and SE (formula, also on a subset) and the 95% and 90% ATE intervals",
         "relabeling pseudo-outcomes and node tau",
         "stabilised causal split and regression split (feature, threshold, decrease)",
         "pooled CATE, first stage, little-bags variance components, debiased variance (complete and incomplete groups)",

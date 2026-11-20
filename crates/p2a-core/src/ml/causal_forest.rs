@@ -2789,12 +2789,44 @@ mod tests {
         .unwrap();
         let (est, se) = aipw_ate(&scores).unwrap();
         let (sub_est, sub_se) = aipw_ate(&scores[..15]).unwrap();
+        // the intervals of average_treatment_effect_with at levels 0.95 and 0.90, from a result
+        // that carries the 40 scores
+        let forest = CausalForestResult {
+            predictions: c[4].clone(),
+            variance_estimates: vec![f64::NAN; 40],
+            ate: est,
+            ate_se: se,
+            ate_t_stat: est / se,
+            ate_p_value: f64::NAN,
+            ate_ci_lower: f64::NAN,
+            ate_ci_upper: f64::NAN,
+            ate_significance: SignificanceLevel::from_p_value(1.0),
+            variable_importance: Vec::new(),
+            n_trees: 0,
+            n_obs: 40,
+            oob_error: f64::NAN,
+            covariate_names: Vec::new(),
+            config: CausalForestConfig::default(),
+            y_hat: c[2].clone(),
+            w_hat: c[3].clone(),
+            aipw_scores: scores.clone(),
+            y_hat_trees: 0,
+            w_hat_trees: 0,
+            warnings: Vec::new(),
+            trees: Vec::new(),
+        };
+        let ci95 = average_treatment_effect_with(&forest, None, 0.95).unwrap();
+        let ci90 = average_treatment_effect_with(&forest, None, 0.90).unwrap();
         Check::new(&case)
             .vector("scores", &scores, Tol::coef(40))
             .scalar("estimate", est, Tol::coef(40))
             .scalar("std_err", se, Tol::se(40))
             .scalar("subset_estimate", sub_est, Tol::coef(40))
             .scalar("subset_std_err", sub_se, Tol::se(40))
+            .scalar("ci95_lower", ci95.ci_lower, Tol::se(40))
+            .scalar("ci95_upper", ci95.ci_upper, Tol::se(40))
+            .scalar("ci90_lower", ci90.ci_lower, Tol::se(40))
+            .scalar("ci90_upper", ci90.ci_upper, Tol::se(40))
             .finish();
     }
 
