@@ -1144,7 +1144,10 @@ fn walk_envelope(
 /// The mean absolute deviation of `a + tau b` at every tau of the nondecreasing `grid`,
 /// written to `out`. With c and e the centred `a` and `b`, it is mean |c_i + tau e_i|, linear
 /// between the kinks -c_i / e_i: the kinks are sorted once and the signs flipped as the grid
-/// passes them. `kinks` is workspace.
+/// passes them. `kinks` is workspace. The running sums cancel when the spread is small next
+/// to `|c_i|` and `|tau e_i|` (outcomes on a large scale): the value then differs from the
+/// pointwise mean by at most about `4 n eps (mean|c| + |tau| mean|e|)`, absolute
+/// (`test_spread_on_grid_matches_pointwise_large_offset`).
 fn mad_on_grid(
     a: &[f64],
     b: &[f64],
@@ -2461,6 +2464,37 @@ mod tests {
                 assert!(
                     (mad[j] - m).abs() <= 1e-12 * (1.0 + m),
                     "mad n={n} tau={tau}"
+                );
+            }
+        }
+    }
+
+    /// Outcomes on a large scale with a small spread: `a` is about 2e6 b plus O(1) noise, so
+    /// at tau near -2e6 the values `a + tau b` are nearly constant while `c` and `tau e` are
+    /// of order 1e6. The kink sweep's running sums then cancel; it stays within the bound the
+    /// `mad_on_grid` doc states, `4 n eps (mean|c| + |tau| mean|e|)`, of the pointwise value.
+    #[test]
+    fn test_spread_on_grid_matches_pointwise_large_offset() {
+        for (n, seed) in [(10, 4), (57, 5), (400, 6)] {
+            let (noise, b) = spread_inputs(n, seed);
+            let a: Vec<f64> = noise.iter().zip(&b).map(|(z, y)| 2e6 * y + z).collect();
+            let grid = even_grid(-2e6 - 3.0, -2e6 + 3.0, 151);
+            let (mut kinks, mut mad) = (Vec::new(), vec![0.0; grid.len()]);
+            mad_on_grid(&a, &b, &grid, &mut kinks, &mut mad);
+            let nf = n as f64;
+            let (ma, mb) = (a.iter().sum::<f64>() / nf, b.iter().sum::<f64>() / nf);
+            let mean_c = a.iter().map(|x| (x - ma).abs()).sum::<f64>() / nf;
+            let mean_e = b.iter().map(|y| (y - mb).abs()).sum::<f64>() / nf;
+            let mut buf = Vec::new();
+            for (j, &tau) in grid.iter().enumerate() {
+                let m =
+                    spread_statistic(HetTestStat::MeanAbsDeviation, &a, Some(&b), tau, &mut buf);
+                let bound = 4.0 * nf * f64::EPSILON * (mean_c + tau.abs() * mean_e);
+                assert!(m > 1e3 * bound, "the spread is not small enough to test n={n}");
+                assert!(
+                    (mad[j] - m).abs() <= bound,
+                    "mad n={n} tau={tau}: sweep {} pointwise {m} bound {bound}",
+                    mad[j]
                 );
             }
         }
