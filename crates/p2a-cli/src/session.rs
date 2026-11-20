@@ -223,13 +223,6 @@ impl Session {
         Ok(session)
     }
 
-    /// Read a session file for an invocation: `None` when the file does not exist or holds
-    /// only whitespace (an empty file made by `mktemp`, say), the parsed session otherwise.
-    /// [`Session::load`] keeps refusing an empty file.
-    pub fn read(path: &Path) -> anyhow::Result<Option<Session>> {
-        Ok(read_session_file(path)?.0)
-    }
-
     /// Save the session to a file, atomically ([`write_atomically`]).
     pub fn save(&self, path: &PathBuf) -> anyhow::Result<()> {
         let content = serde_json::to_string_pretty(self)?;
@@ -258,6 +251,9 @@ impl Default for Session {
 
 /// What identifies the contents of a session file between two reads: length,
 /// modification time and, on Unix, device and inode (a rename over the file changes them).
+/// Off Unix it is length and modification time only: on a file system with coarse
+/// modification times (FAT and exFAT, 2 s), two parallel saves that write the same length
+/// within one tick look unchanged, and the later one can drop the other's commands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Fingerprint {
     len: u64,
@@ -318,10 +314,16 @@ fn lock_path(session_path: &Path) -> PathBuf {
 /// existing file's permissions), then a rename over the target. A symbolic link is
 /// followed (the file it points to is replaced, the link stays). The temporary file is
 /// removed on any error. No fsync: the rename is what makes the write atomic for readers.
+/// A dangling link is followed too ([`dangling_link_target`]): the file it names is created.
+/// The target's directory must be writable, even when the target file itself is.
 pub(crate) fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write as _;
     let target = match std::fs::symlink_metadata(path) {
-        Ok(m) if m.file_type().is_symlink() => std::fs::canonicalize(path)?,
+        Ok(m) if m.file_type().is_symlink() => match std::fs::canonicalize(path) {
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => dangling_link_target(path)?,
+            Err(e) => return Err(e),
+        },
         _ => path.to_path_buf(),
     };
     let name = target.file_name().ok_or_else(|| {
@@ -355,6 +357,36 @@ pub(crate) fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()>
         let _ = std::fs::remove_file(&tmp);
     }
     written
+}
+
+/// The most links [`dangling_link_target`] follows, as Linux's limit for one path lookup.
+const MAX_LINK_HOPS: usize = 40;
+
+/// The file a dangling symbolic link at `link` finally names, found as `std::fs::write`
+/// finds it: each link is read in turn (a relative target against the link's own
+/// directory) until a path that does not exist. More than [`MAX_LINK_HOPS`] links is the
+/// loop error the operating system gives.
+fn dangling_link_target(link: &Path) -> std::io::Result<PathBuf> {
+    let mut path = link.to_path_buf();
+    for _ in 0..MAX_LINK_HOPS {
+        match std::fs::symlink_metadata(&path) {
+            Ok(m) if m.file_type().is_symlink() => {
+                let next = std::fs::read_link(&path)?;
+                path = match path.parent() {
+                    Some(dir) if next.is_relative() => dir.join(next),
+                    _ => next,
+                };
+            }
+            _ => return Ok(path),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        format!(
+            "{}: more than {MAX_LINK_HOPS} levels of symbolic links",
+            link.display()
+        ),
+    ))
 }
 
 /// Reload a dataset from its source file, with the missing-value strings it was
@@ -764,21 +796,27 @@ impl SessionManager {
     /// invocation wrote the file since this one read it, this invocation's commands are
     /// appended to the file's and the datasets it registered replace the file's entries
     /// (the file's id, title, creation time, working directory and version are kept). The
-    /// file is replaced atomically. A file system without locking saves without the lock,
-    /// after a warning.
+    /// file is replaced atomically, so the session file's directory must be writable (the
+    /// lock file and the temporary file are created there); an error names the file that
+    /// could not be created. A file system without locking saves without the lock, after a
+    /// warning.
     pub fn save(&self) -> anyhow::Result<()> {
+        let lock_file = lock_path(&self.path);
+        let could_not_lock =
+            |e: std::io::Error| anyhow::anyhow!("could not lock {}: {e}", lock_file.display());
         let lock = std::fs::OpenOptions::new()
             .create(true)
             .truncate(false)
             .write(true)
-            .open(lock_path(&self.path))?;
+            .open(&lock_file)
+            .map_err(could_not_lock)?;
         match lock.lock() {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::Unsupported => eprintln!(
                 "Warning: the file system does not support file locks; saving {} without one",
                 self.path.display()
             ),
-            Err(e) => return Err(e.into()),
+            Err(e) => return Err(could_not_lock(e)),
         }
         let mut state = self.saved.borrow_mut();
         let (on_disk, now) = match std::fs::metadata(&self.path) {
@@ -799,7 +837,9 @@ impl SessionManager {
                 .map(|disk| self.merge_into(disk, &state))
         };
         let content = serde_json::to_string_pretty(merged.as_ref().unwrap_or(&self.session))?;
-        write_atomically(&self.path, content.as_bytes())?;
+        write_atomically(&self.path, content.as_bytes()).map_err(|e| {
+            anyhow::anyhow!("could not save session file {}: {e}", self.path.display())
+        })?;
         state.file = if merged.is_some() {
             Some(None)
         } else {
@@ -1295,7 +1335,7 @@ mod save_tests {
                 Session::load(&path).is_err(),
                 "load keeps refusing {body:?}"
             );
-            assert!(Session::read(&path).unwrap().is_none());
+            assert!(read_session_file(&path).unwrap().0.is_none());
             record_one(&mut m, "a", "da", dir.path());
             m.save().unwrap();
             assert_eq!(commands(&path), ["a"]);
@@ -1347,6 +1387,66 @@ mod save_tests {
         );
         assert_eq!(commands(&real.join("s.json")), ["a", "b"]);
         assert!(dir.path().join("s.json.lock").exists());
+    }
+
+    /// A dangling link is followed as `std::fs::write` follows it: the save creates the
+    /// file the link names, and the link stays. Relative targets resolve against the
+    /// link's directory, through a chain of links.
+    #[cfg(unix)]
+    #[test]
+    fn save_creates_the_target_of_a_dangling_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let link = dir.path().join("s.json");
+        std::os::unix::fs::symlink("hop.json", &link).unwrap();
+        std::os::unix::fs::symlink("real/s.json", dir.path().join("hop.json")).unwrap();
+        let mut m = SessionManager::new(link.clone()).unwrap();
+        record_one(&mut m, "a", "da", dir.path());
+        m.save().unwrap();
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(commands(&real.join("s.json")), ["a"]);
+        assert_eq!(commands(&link), ["a"]);
+    }
+
+    /// A save that cannot create its lock or temporary file names the file it could not
+    /// create, not only the operating system's error.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_save_names_the_file() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let ro = dir.path().join("ro");
+        std::fs::create_dir(&ro).unwrap();
+        let path = ro.join("s.json");
+        let mut m = SessionManager::new(path.clone()).unwrap();
+        record_one(&mut m, "a", "da", dir.path());
+        std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o555)).unwrap();
+        if std::fs::File::create(ro.join("probe")).is_ok() {
+            // running as root: the directory is writable regardless
+            std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o755)).unwrap();
+            return;
+        }
+        let err = m.save().unwrap_err().to_string();
+        std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(err.starts_with("could not lock "), "{err}");
+        assert!(
+            err.contains(&lock_path(&path).display().to_string()),
+            "{err}"
+        );
+
+        // With the lock file in place, the temporary file is what fails.
+        std::fs::write(lock_path(&path), b"").unwrap();
+        std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let err = m.save().unwrap_err().to_string();
+        std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(err.starts_with("could not save session file "), "{err}");
+        assert!(err.contains(&path.display().to_string()), "{err}");
     }
 }
 
