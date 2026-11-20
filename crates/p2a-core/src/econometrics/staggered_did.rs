@@ -5978,6 +5978,27 @@ mod tests {
                 ),
                 (3, 3)
             );
+            // its unweighted difference in means is the no-covariate ATT, R-pinned
+            // (did_cs_covariates, nocov_never_ant0_cell_att[2]), and the covariate
+            // point estimate is a different number
+            let entries = &table.entries[table.starts[2]..table.starts[3]];
+            let mean = |treated: bool| {
+                let (s, w) = entries
+                    .iter()
+                    .filter(|e| e.treated == treated)
+                    .fold((0.0, 0.0), |(s, w), e| (s + e.dy, w + 1.0));
+                s / w
+            };
+            let unconditional = mean(true) - mean(false);
+            assert!(
+                (unconditional - 0.40228412791110424).abs() <= 1e-10,
+                "{m}: unconditional {unconditional}"
+            );
+            let cov_att = point.group_time_atts[2].att;
+            assert!(
+                (cov_att - unconditional).abs() > 1e-3,
+                "{m}: covariate ATT {cov_att} vs unconditional {unconditional}"
+            );
         }
         // the bootstrap keeps the point estimates bitwise
         let c0 = cfg(
