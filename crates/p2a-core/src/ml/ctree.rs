@@ -632,7 +632,9 @@ fn node_tests(
 /// Whether a permuted statistic counts as at least the observed one. A permutation whose statistic
 /// equals the observed one mathematically (a tied or discrete input, a within-group shuffle) can come
 /// out a few ulps lower, because its sums accumulate in another order; the comparison therefore allows
-/// a relative `sqrt(eps)`, as libcoin does.
+/// libcoin's tolerance `sqrt(eps)`, scaled by `max(|observed|, 1)` because rounding error grows with
+/// the statistic. libcoin (`GE` in libcoin_internal.h) uses it as an absolute tolerance, so the two
+/// agree for statistics up to 1 and this comparison is looser above that.
 fn exceeds(permuted: f64, observed: f64) -> bool {
     permuted >= observed - f64::EPSILON.sqrt() * observed.abs().max(1.0)
 }
@@ -1483,8 +1485,13 @@ mod tests {
         assert!(r.root_p_values[0].is_nan(), "{:?}", r.root_p_values);
         let split = r.root.split.as_ref().expect("x is strong");
         assert_eq!(split.feature, 1);
-        // m = 1: the adjusted p is the raw p.
-        assert_eq!(split.p_value.to_bits(), r.root_p_values[1].to_bits());
+        // m = 1: the adjusted p is the raw p, up to the rounding of -expm1(m * ln_1p(-p)).
+        let raw = r.root_p_values[1];
+        assert!(
+            (split.p_value - raw).abs() <= 1e-14 * raw,
+            "{} vs {raw}",
+            split.p_value
+        );
     }
 
     /// The nodes of `root` in preorder (partykit's node numbering).
@@ -1819,7 +1826,12 @@ mod tests {
             },
         ];
         for response in &responses {
-            for teststat in [CtreeTestStat::Quadratic, CtreeTestStat::Maximum] {
+            // LinearTest ignores teststat for classes, and ctree refuses Maximum with them
+            let teststats: &[CtreeTestStat] = match response {
+                Response::Regression(_) => &[CtreeTestStat::Quadratic, CtreeTestStat::Maximum],
+                Response::Classes { .. } => &[CtreeTestStat::Quadratic],
+            };
+            for &teststat in teststats {
                 let test = LinearTest::new(response, &indices, teststat);
                 let input = CentredInput::new(x.iter().copied());
                 assert!(test.testable(&input));
@@ -1830,6 +1842,8 @@ mod tests {
                     test.statistic(&input, Some(&identity), &mut sums),
                     observed
                 ));
+                // and the tolerance stays far below a real difference
+                assert!(!exceeds(observed - 1e-3 * observed.max(1.0), observed));
                 for b in 0..200u64 {
                     let mut rng = ChaCha8Rng::seed_from_u64(b);
                     let mut perm = identity.clone();
