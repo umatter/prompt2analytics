@@ -7,8 +7,8 @@ use crate::api::ApiClient;
 use crate::app::apply_theme;
 use crate::state::settings::{KeySource, Provider, Settings, Theme, model_hint};
 use crate::state::{
-    ConversationState, SESSION_ENDED_TEXT, SessionState, ensure_session, on_session_lost,
-    session_lost_text,
+    ChatState, ConversationState, SESSION_ENDED_TEXT, SessionState, ensure_session,
+    on_session_lost, session_lost_text,
 };
 
 /// Where the API key lives, phrased for the platform the app runs on.
@@ -156,6 +156,7 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
     let mut settings = use_context::<Signal<Settings>>();
     let session_state = use_context::<Signal<SessionState>>();
     let conversation_state = use_context::<Signal<ConversationState>>();
+    let chat_state = use_context::<Signal<ChatState>>();
 
     // Local state for editing
     let mut local_theme = use_signal(|| settings.read().theme);
@@ -488,7 +489,7 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
                     }
                 }
                 Err(e) if session_lost_text(&e) => {
-                    on_session_lost(session, conversation_state, &session_id);
+                    on_session_lost(session, conversation_state, chat_state, &session_id);
                     load_error.set(Some(SESSION_ENDED_TEXT.to_string()));
                     load_status.set(None);
                 }

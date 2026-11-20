@@ -32,11 +32,9 @@ fn recover_lost_session(
     chat.write().end_interrupted("");
     synced_conv_id.set(None);
     synced_messages_len.set(0);
-    on_session_lost(session, conv, old_id);
+    on_session_lost(session, conv, chat, old_id);
     let mut c = chat.write();
     c.clear_messages();
-    // The session's conversations went with it.
-    c.clear_live();
     c.retry_prompt = Some(prompt.to_string());
     c.set_error(Some(SESSION_ENDED_TEXT.to_string()));
 }
@@ -310,9 +308,9 @@ pub fn ChatPanel() -> Element {
                 Ok(id) => id,
                 Err(e) => {
                     tracing::error!("[ChatPanel] Session error: {}", e);
+                    stream_stop.set(None);
                     chat.write()
-                        .set_error(Some(format!("Session error: {}", e)));
-                    chat.write().stop_processing();
+                        .fail_before_turn(&message, format!("Session error: {}", e));
                     return;
                 }
             };
@@ -358,6 +356,7 @@ pub fn ChatPanel() -> Element {
                                 &message,
                             );
                             chat.write().stop_processing();
+                            stream_stop.set(None);
                             return;
                         }
                         Err(e) => {
@@ -406,6 +405,7 @@ pub fn ChatPanel() -> Element {
                             &message,
                         );
                         chat.write().stop_processing();
+                        stream_stop.set(None);
                         return;
                     }
                     Err(e) => {
@@ -414,6 +414,7 @@ pub fn ChatPanel() -> Element {
                         c.end_interrupted("Not sent.");
                         c.set_error(Some(format!("The message was not sent: {e}")));
                         c.stop_processing();
+                        stream_stop.set(None);
                         return;
                     }
                 }
@@ -431,6 +432,7 @@ pub fn ChatPanel() -> Element {
                 c.set_error(Some(text));
                 c.end_interrupted("");
                 c.stop_processing();
+                stream_stop.set(None);
                 return;
             };
             let interpret = settings.read().interpret_results;

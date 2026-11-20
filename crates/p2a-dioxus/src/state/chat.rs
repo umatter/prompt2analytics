@@ -551,6 +551,18 @@ impl ChatState {
         self.active_tool = None;
     }
 
+    /// The send of `prompt` failed before its turn was set up (no session
+    /// could be had): the turn is added and ended as not sent, `error` is
+    /// shown and processing ends, so Retry sends `prompt` again (and takes
+    /// the unsent turn out) rather than the prompt before it.
+    pub fn fail_before_turn(&mut self, prompt: &str, error: String) {
+        self.add_user_message(prompt);
+        self.add_streaming_message();
+        self.end_interrupted("Not sent.");
+        self.set_error(Some(error));
+        self.stop_processing();
+    }
+
     /// Run once after the stream returned, whatever its result: an answer
     /// still streaming is ended as interrupted (its partial text kept), and
     /// when no Done came (`saw_done` false) and no error is shown, the
@@ -1275,6 +1287,27 @@ mod tests {
         chat.retry_prompt = Some("old".into());
         assert_eq!(chat.take_retry_turn().as_deref(), Some("a"));
         assert_eq!(chat.retry_prompt, None);
+    }
+
+    #[test]
+    fn retry_after_a_send_that_had_no_session_sends_that_prompt() {
+        let mut chat = ChatState::new();
+        send(&mut chat, "a");
+        finish(&mut chat, reply("done"));
+        assert!(chat.try_start_processing());
+        chat.fail_before_turn("b", "Session error: HTTP error: 503".into());
+        assert!(!chat.is_processing);
+        assert_eq!(
+            chat.error.as_deref(),
+            Some("Session error: HTTP error: 503")
+        );
+        // Retry sends the prompt that failed, not the one before it, and
+        // the turn it replaces is taken out.
+        assert_eq!(chat.take_retry_turn().as_deref(), Some("b"));
+        assert_eq!(
+            contents(&chat),
+            pairs(&[("user", "a"), ("assistant", "done")])
+        );
     }
 
     /// The tools of an interrupted answer ran on the server: their calls go
