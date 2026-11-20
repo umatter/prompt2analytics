@@ -126,10 +126,8 @@ fn export_summary(replayed: usize, skipped: usize, output: &std::path::Path) -> 
         output.display()
     );
     if skipped > 0 {
-        msg.push_str(&format!(
-            " ({skipped} failed {} not replayed)",
-            noun(skipped)
-        ));
+        use std::fmt::Write as _;
+        let _ = write!(msg, " ({skipped} failed {} not replayed)", noun(skipped));
     }
     msg
 }
