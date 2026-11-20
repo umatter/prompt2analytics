@@ -81,8 +81,11 @@
 //!
 //! The reported impacts are the posterior means and SDs over the draws. A⁻¹ is exact, not a
 //! truncated series: the dense inverse is formed at Chebyshev nodes over the range of the ρ
-//! draws (9, then 17 or 33 until nested interpolants agree to 1e-10) and interpolated
-//! barycentrically to each draw; a warning reports the accuracy when 33 nodes miss it.
+//! draws (9, then 17 or 33) and interpolated barycentrically to each draw. A node count is
+//! accepted when the interpolant agrees to 1e-10 with the next coarser one at the midpoints of
+//! its cells, or else with the dense inverse at the midpoints of its two end cells (where the
+//! error of Chebyshev interpolation peaks; a heuristic, not a bound over the whole range); a
+//! warning reports the accuracy when 33 nodes miss it.
 //!
 //! # References
 //!
@@ -491,12 +494,36 @@ fn run_spatial_probit_internal(
         });
     }
 
+    // The latent full conditional uses H_ii = 1 + rho^2 sum_j w_ji^2, which holds only for a
+    // zero diagonal.
+    if let Some(i) = crate::spatial::first_self_link(listw) {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "spatial probit: unit {} lists itself as a neighbour; W must have a zero diagonal",
+                i + 1
+            ),
+        });
+    }
+
     // Get valid range for spatial parameter
     let (rho_min, rho_max) = listw.try_rho_range()?;
-    let rho_range = (
-        rho_min.max(config.rho_prior_range.0),
-        rho_max.min(config.rho_prior_range.1),
-    );
+    let (prior_lo, prior_hi) = config.rho_prior_range;
+    if prior_lo.is_nan() || prior_hi.is_nan() {
+        return Err(EconError::InvalidSpecification {
+            message: format!("rho_prior_range ({prior_lo}, {prior_hi}) contains NaN"),
+        });
+    }
+    let rho_range = (rho_min.max(prior_lo), rho_max.min(prior_hi));
+    // The rho grid needs a non-empty, finite interval: a reversed prior, or one outside W's
+    // range, would give a decreasing grid and meaningless draws.
+    if !(rho_range.0.is_finite() && rho_range.1.is_finite() && rho_range.0 < rho_range.1) {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "rho_prior_range ({prior_lo}, {prior_hi}) does not overlap the range \
+                 ({rho_min}, {rho_max}) where I - rho W is invertible"
+            ),
+        });
+    }
 
     // Run MCMC estimation
     let mcmc_result = run_mcmc_spatial_probit(&y, &x, listw, model_type, &config, rho_range)?;
@@ -2099,6 +2126,49 @@ mod tests {
             "{e}"
         );
         assert!(run_sar_probit(&d, "y", &[], &mut w, probit_config(10, false)).is_ok());
+    }
+
+    #[test]
+    fn spatial_probit_rejects_an_empty_rho_range() {
+        let (d, mut w) = create_test_spatial_binary_data();
+        for prior in [(0.5, -0.5), (0.3, 0.3), (2.0, 3.0), (f64::NAN, 0.9)] {
+            let mut c = probit_config(10, false);
+            c.rho_prior_range = prior;
+            for run in [run_sar_probit, run_sem_probit] {
+                let e = run(&d, "y", &["x"], &mut w, c.clone()).unwrap_err();
+                assert!(
+                    matches!(&e, EconError::InvalidSpecification { message } if message.contains("rho_prior_range")),
+                    "{prior:?}: {e}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn spatial_probit_rejects_a_self_link() {
+        let (d, _) = create_test_spatial_binary_data();
+        let mut lists: Vec<Vec<usize>> = (0..25)
+            .map(|i| {
+                let mut v = Vec::new();
+                if i % 5 > 0 {
+                    v.push(i - 1);
+                }
+                if i % 5 < 4 {
+                    v.push(i + 1);
+                }
+                v
+            })
+            .collect();
+        lists[3].push(3);
+        let mut w =
+            SpatialWeights::from_neighbors(&Neighbors::from_indices(lists), WeightStyle::RowStd);
+        for run in [run_sar_probit, run_sem_probit] {
+            let e = run(&d, "y", &["x"], &mut w, probit_config(10, false)).unwrap_err();
+            assert!(
+                matches!(&e, EconError::InvalidSpecification { message } if message.contains("unit 4 lists itself")),
+                "{e}"
+            );
+        }
     }
 
     /// Exact CDF of N(mu, 1) truncated to [0, inf) (above) or (-inf, 0] (below), through upper tails.
