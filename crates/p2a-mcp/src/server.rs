@@ -646,9 +646,11 @@ impl AnalyticsServer {
     /// The parameters `tool` declares, for the audit log
     /// (`audit::sanitize_arguments`): the top-level names, the `properties`
     /// of its input schema (empty for an unknown tool), which the log takes
-    /// ahead of the keys a tool ignores, and the nested structs its request
-    /// limits read fields of ([`crate::tools::limits::struct_paths`]), which
-    /// the log replaces by their size when they come as JSON arrays.
+    /// ahead of the keys its schema does not declare (a value sent under a
+    /// serde alias is among those, though the tool reads it), and the nested
+    /// structs its request limits read fields of
+    /// ([`crate::tools::limits::struct_paths`]), which the log replaces by
+    /// their size when they come as JSON arrays.
     pub fn declared_parameters(&self, tool: &str) -> crate::audit::DeclaredParameters<'_> {
         let names = self
             .tool_router
@@ -1601,8 +1603,10 @@ const QUOTE_HEAD_BYTES: usize = MAX_QUOTE_BYTES - QUOTE_TAIL_BYTES;
 /// The text of `message` when it is at most [`MAX_QUOTE_BYTES`] long.
 /// A longer one gives its first [`QUOTE_HEAD_BYTES`] and its last
 /// [`QUOTE_TAIL_BYTES`] (each cut at a char boundary, so possibly fewer)
-/// around a note of how many bytes were left out. The text is written into
-/// a buffer of that size, never built whole.
+/// around a note of how many bytes were left out, so a message only a few
+/// bytes over the limit comes out slightly longer than it went in (the note
+/// is longer than what it replaces); the result is still bounded. The text
+/// is written into a buffer of that size, never built whole.
 #[cfg(feature = "http")]
 pub(crate) fn quote_cut(message: &dyn std::fmt::Display) -> String {
     let mut ends = QuoteEnds::default();
