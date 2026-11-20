@@ -1590,6 +1590,10 @@ fn require_proportion(name: &str, p: f64) -> EconResult<()> {
 /// extended either way; R's warning when the solution leaves [0, 1]), `sig_level` on
 /// [1e-10, 1 - 1e-10] (extended upwards).
 ///
+/// `n` has no upper cap, as in R: proportions close together need a very large `n`, which is
+/// returned as found. The cost stays bounded: each power evaluation is O(1), and the upward
+/// extension doubles its step at most 1,000 times (an unreachable power is then an error).
+///
 /// # Errors
 ///
 /// [`EconError::InvalidSpecification`] for a parameter out of range (`n` below 1, a proportion
