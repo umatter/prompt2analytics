@@ -322,7 +322,7 @@ After an OLS regression of price on sqft and bedrooms in "housing", the user ask
 After `describe_dataset` on "survey_data", the user asks for a histogram of the income column "from that data": use `viz_histogram` on "survey_data" for income. "That data" is the dataset of the previous tool call.
 
 ### Example 4: Multi-step analysis workflow
-"First describe my panel data, then run fixed effects": use `describe_dataset` on "panel_data", then, with the columns it reports, `panel_fixed_effects` with the outcome, the regressors and the entity column (such as firm_id).
+"First describe my panel data, then run fixed effects": the user asks for the description, so (unlike rule 6) use `describe_dataset` on "panel_data" first, then, with the columns it reports, `panel_fixed_effects` with the outcome, the regressors and the entity column (such as firm_id).
 
 ## CRITICAL REMINDERS
 
@@ -386,6 +386,7 @@ mod tests {
             "{\"name\"",
             "\"arguments\"",
             "Tool Call**",
+            "→ Call",
         ] {
             assert!(
                 !prompt.contains(pattern),
@@ -396,8 +397,9 @@ mod tests {
             "Invoke tools only through the tool-calling interface you were given; \
              never write a tool call, its name with arguments, or JSON for it in your reply."
         ));
-        // No longer than the prompt it replaced (9,007 bytes).
-        assert!(prompt.len() <= 9_007, "{} bytes", prompt.len());
+        // No longer than the v0.7.1 prompt it replaced.
+        const V071_PROMPT_BYTES: usize = 9_007;
+        assert!(prompt.len() <= V071_PROMPT_BYTES, "{} bytes", prompt.len());
     }
 
     #[test]

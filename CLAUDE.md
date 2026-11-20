@@ -1271,7 +1271,7 @@ let df = df! {
 - `crates/p2a-mcp/src/db/` - SurrealDB persistence layer
 - `crates/p2a-mcp/src/path_jail.rs` - Filesystem path validation (P2A_DATA_ROOT, per-session directories)
 - `crates/p2a-mcp/src/tools/handlers/search.rs` - Tool search meta-tools for MCP clients (not offered to the LLM chat; see Router Composition)
-- `crates/p2a-mcp/src/llm/tools.rs` - Curated LLM-facing tool subset and few-shot examples
+- `crates/p2a-mcp/src/llm/tools.rs` - Curated LLM-facing tool subset and the chat system prompt (its examples in prose, never as call syntax)
 
 **Dioxus App:**
 - `crates/p2a-dioxus/src/components/chat_panel.rs` - Main chat interface
