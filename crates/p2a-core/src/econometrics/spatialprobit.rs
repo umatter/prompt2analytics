@@ -157,7 +157,9 @@ pub struct SpatialProbitConfig {
     pub prior_beta_mean: Option<Array1<f64>>,
     /// Prior precision for beta (default: 0.01 * I)
     pub prior_beta_precision: Option<f64>,
-    /// Prior for spatial parameter: uniform on (a, b)
+    /// Prior for spatial parameter: uniform on (a, b), intersected with W's admissible range
+    /// (where I - rho W is invertible); a NaN end or an empty intersection is
+    /// `InvalidSpecification`.
     /// Default: (-0.99, 0.99) for row-standardized weights
     pub rho_prior_range: (f64, f64),
     /// Compute marginal effects
@@ -389,6 +391,15 @@ impl std::fmt::Display for SpatialProbitResult {
 ///
 /// Estimation results including posterior means, standard deviations, and impacts
 ///
+/// # Errors
+///
+/// `InvalidSpecification` when, besides the data checks (a binary `y` with both values, one
+/// row per unit of W, no missing values):
+/// * a unit of W lists itself as a neighbour (W must have a zero diagonal);
+/// * `config.rho_prior_range` has a NaN end, or does not overlap the range where
+///   I - rho W is invertible (an empty or non-finite intersection);
+/// * `compute_impacts` is set with no regressor besides the intercept.
+///
 /// # Example
 ///
 /// ```ignore
@@ -435,6 +446,15 @@ pub fn run_sar_probit(
 /// # Returns
 ///
 /// Estimation results including posterior means and spatial error parameter lambda
+///
+/// # Errors
+///
+/// `InvalidSpecification` when, besides the data checks (a binary `y` with both values, one
+/// row per unit of W, no missing values):
+/// * a unit of W lists itself as a neighbour (W must have a zero diagonal);
+/// * `config.rho_prior_range` (the prior of lambda) has a NaN end, or does not overlap the range where
+///   I - lambda W is invertible (an empty or non-finite intersection);
+/// * `compute_impacts` is set with no regressor besides the intercept.
 pub fn run_sem_probit(
     dataset: &Dataset,
     y_col: &str,

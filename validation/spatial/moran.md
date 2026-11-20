@@ -80,8 +80,10 @@ total-randomisation moments. The p-value is two-sided normal, or with `permutati
 conditional-permutation p-value ("Pr(folded) Sim") with each unit's neighbour values drawn without
 repeats (Anselin's scheme, spdep's `no_repeat_in_row = TRUE`), seeded per permutation. A zero variance
 (an island, or z_i = 0 under conditional moments) gives NaN z and p and the cluster "not significant".
-`global_i` is Moran's I, Σ I_i / S0. Non-finite or constant x and `alpha` outside [0, 1] are
-`InvalidSpecification`.
+`global_i` is Moran's I, Σ I_i / S0. It uses m2 over all n units (as `spdep::moran.test(adjust.n = FALSE)` counts n), so when W
+has islands it is n / (n - islands) times `moran_test`'s statistic, which uses the n - islands units with
+neighbours. Non-finite or constant x, `alpha` outside [0, 1] and a unit that lists itself as a neighbour
+are `InvalidSpecification`.
 
 ## Reference values
 
@@ -180,7 +182,9 @@ so the residual Moran, score test and local Moran references are spdep's formula
   `test_validate_mcp_lm_rstests_knn_spatial_sim` (p2a-mcp)
 - `test_validate_localmoran_conditional_spatial_sim`, `test_validate_localmoran_total_spatial_sim`,
   `localmoran_global_i_is_morans_i`, `localmoran_conditional_permutation_converges_to_exact`,
-  `localmoran_seed_changes_permutation_p_only`, `localmoran_zero_variance_is_nan_not_clamped`
+  `localmoran_seed_changes_permutation_p_only`, `localmoran_zero_variance_is_nan_not_clamped`,
+  `localmoran_permutation_count_converges_to_one_sided_limit`,
+  `localmoran_global_i_with_islands_scales_by_n_over_n_adj`, `localmoran_refuses_a_self_link`
 - `geary_refuses_a_degenerate_permutation_distribution`, `geary_variance_guard_is_relative_to_s1_over_s0_squared`
 - `test_moran_and_geary_refuse_degenerate_inputs`, `test_moran_alternative_parses_aliases_and_rejects_unknown`,
   `test_moran_test_residuals_refuses_df_below_one`, `moran_matches_r_reference`
