@@ -1098,7 +1098,9 @@ fn cailliez_constant(d: &[Vec<f64>]) -> Result<f64, String> {
         Default::default(),
     )
     .map_err(|_| "cmdscale additive constant: eigendecomposition failed".to_string())?;
-    // f64::max skips NaN, so a spectrum with no finite real part would give -inf (or +inf)
+    // f64::max skips NaN, so a spectrum with no finite real part would give -inf (or +inf).
+    // Defensive: no input is known to reach this check, since faer refuses a non-finite matrix
+    // above.
     let ac = re
         .column_vector()
         .iter()
@@ -2179,10 +2181,11 @@ mod tests {
         assert!(e.contains("cancelled"), "{e}");
     }
 
-    /// Finite distances whose squares overflow make the additive-constant eigenproblem non-finite:
-    /// an error naming the constant, never a non-finite constant shifted into the distances.
+    /// Finite distances whose squares overflow are refused with an error naming the additive
+    /// constant (the eigendecomposition fails on the overflowing matrix), never a non-finite
+    /// constant shifted into the distances.
     #[test]
-    fn test_cmdscale_add_refuses_a_non_finite_constant() {
+    fn test_cmdscale_add_refuses_overflowing_distances() {
         let x = [0.0f64, 1.3, 2.1, 4.7, 5.2];
         let d: Vec<Vec<f64>> = x
             .iter()

@@ -1151,7 +1151,13 @@ pub fn average_treatment_effect_with(
             &owned
         }
     };
-    let (estimate, std_err) = aipw_ate(picked)?;
+    ate_from_scores(picked, level)
+}
+
+/// The AIPW estimate of [`average_treatment_effect_with`] from the scores it averages: their mean,
+/// its SE and the two-sided normal interval at `level`.
+fn ate_from_scores(scores: &[f64], level: f64) -> EconResult<AteEstimate> {
+    let (estimate, std_err) = aipw_ate(scores)?;
     let crit = z_critical(level)?;
     Ok(AteEstimate {
         estimate,
@@ -1159,7 +1165,7 @@ pub fn average_treatment_effect_with(
         ci_lower: estimate - crit * std_err,
         ci_upper: estimate + crit * std_err,
         level,
-        n: picked.len(),
+        n: scores.len(),
     })
 }
 
@@ -2789,34 +2795,9 @@ mod tests {
         .unwrap();
         let (est, se) = aipw_ate(&scores).unwrap();
         let (sub_est, sub_se) = aipw_ate(&scores[..15]).unwrap();
-        // the intervals of average_treatment_effect_with at levels 0.95 and 0.90, from a result
-        // that carries the 40 scores
-        let forest = CausalForestResult {
-            predictions: c[4].clone(),
-            variance_estimates: vec![f64::NAN; 40],
-            ate: est,
-            ate_se: se,
-            ate_t_stat: est / se,
-            ate_p_value: f64::NAN,
-            ate_ci_lower: f64::NAN,
-            ate_ci_upper: f64::NAN,
-            ate_significance: SignificanceLevel::from_p_value(1.0),
-            variable_importance: Vec::new(),
-            n_trees: 0,
-            n_obs: 40,
-            oob_error: f64::NAN,
-            covariate_names: Vec::new(),
-            config: CausalForestConfig::default(),
-            y_hat: c[2].clone(),
-            w_hat: c[3].clone(),
-            aipw_scores: scores.clone(),
-            y_hat_trees: 0,
-            w_hat_trees: 0,
-            warnings: Vec::new(),
-            trees: Vec::new(),
-        };
-        let ci95 = average_treatment_effect_with(&forest, None, 0.95).unwrap();
-        let ci90 = average_treatment_effect_with(&forest, None, 0.90).unwrap();
+        // the intervals of average_treatment_effect_with at levels 0.95 and 0.90 over the 40 scores
+        let ci95 = ate_from_scores(&scores, 0.95).unwrap();
+        let ci90 = ate_from_scores(&scores, 0.90).unwrap();
         Check::new(&case)
             .vector("scores", &scores, Tol::coef(40))
             .scalar("estimate", est, Tol::coef(40))

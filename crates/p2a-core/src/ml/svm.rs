@@ -888,6 +888,10 @@ pub fn kernel_svm_predict(
 mod tests {
     use super::*;
 
+    use crate::resource::{Budget, CancelToken, with_budget};
+    use ndarray::Array2;
+    use ndarray::array;
+
     /// The linear tool's overflow advice names no gamma, which it does not have, and calls the
     /// solver SVM. Before: "...: FastSVM: the kernel overflows on these data; rescale them or
     /// lower gamma" (the prefix rewrite missed messages that start with the error kind).
@@ -905,9 +909,6 @@ mod tests {
             "{e}"
         );
     }
-    use crate::resource::{Budget, CancelToken, with_budget};
-    use ndarray::Array2;
-    use ndarray::array;
 
     fn cancelled_budget() -> Budget {
         let t = CancelToken::new();
