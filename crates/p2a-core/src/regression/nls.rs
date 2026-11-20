@@ -226,7 +226,7 @@ pub fn nls(
     let k = start.len();
 
     let setup = check_nls_inputs(n, k, param_names, &config)?;
-    let weights = setup.weights.clone();
+    let weights = &setup.weights;
     let bounds = &setup.bounds;
 
     // Initialize parameters inside the bounds
@@ -234,7 +234,7 @@ pub fn nls(
 
     // Compute initial residuals and RSS
     let mut residuals = compute_residuals(x, y, &theta, model, n);
-    let mut rss = compute_rss(&residuals, &weights);
+    let mut rss = compute_rss(&residuals, weights);
 
     let mut iterations = 0;
     let mut converged = false;
@@ -248,7 +248,7 @@ pub fn nls(
         let jacobian = compute_jacobian(x, y, &theta, model, n, k, config.diff_step);
 
         // Compute J'J and J'r, on sqrt(w) r with weights
-        let (jtj, jtr) = normal_terms(jacobian, &residuals, &setup, &theta)?;
+        let (jtj, jtr) = normal_terms(jacobian, &residuals, &setup, &theta);
 
         // Solve for parameter update based on algorithm
         let delta = match config.algorithm {
@@ -273,7 +273,7 @@ pub fn nls(
                             let theta_new = &theta - &d;
                             let theta_bounded = apply_bounds(&theta_new, bounds);
                             let residuals_new = compute_residuals(x, y, &theta_bounded, model, n);
-                            let rss_new = compute_rss(&residuals_new, &weights);
+                            let rss_new = compute_rss(&residuals_new, weights);
 
                             if rss_new < rss {
                                 // Step accepted - decrease lambda
@@ -323,7 +323,7 @@ pub fn nls(
             theta = apply_bounds(&theta_new, bounds);
 
             let residuals_new = compute_residuals(x, y, &theta, model, n);
-            let rss_new = compute_rss(&residuals_new, &weights);
+            let rss_new = compute_rss(&residuals_new, weights);
 
             let rel_change = (rss - rss_new).abs() / (rss + 1e-10);
             residuals = residuals_new;
@@ -452,13 +452,13 @@ pub fn nls_multi(
     }
 
     let setup = check_nls_inputs(n, k, param_names, &config)?;
-    let weights = setup.weights.clone();
+    let weights = &setup.weights;
     let bounds = &setup.bounds;
 
     let mut theta = apply_bounds(start, bounds);
 
     let mut residuals = compute_residuals_multi(x, y, &theta, model);
-    let mut rss = compute_rss(&residuals, &weights);
+    let mut rss = compute_rss(&residuals, weights);
 
     let mut iterations = 0;
     let mut converged = false;
@@ -469,7 +469,7 @@ pub fn nls_multi(
         iterations += 1;
 
         let jacobian = compute_jacobian_multi(x, y, &theta, model, config.diff_step);
-        let (jtj, jtr) = normal_terms(jacobian, &residuals, &setup, &theta)?;
+        let (jtj, jtr) = normal_terms(jacobian, &residuals, &setup, &theta);
 
         match config.algorithm {
             NlsAlgorithm::GaussNewton => match solve_normal_equations(&jtj, &jtr, 0.0) {
@@ -478,7 +478,7 @@ pub fn nls_multi(
                     theta = apply_bounds(&theta_new, bounds);
 
                     let residuals_new = compute_residuals_multi(x, y, &theta, model);
-                    let rss_new = compute_rss(&residuals_new, &weights);
+                    let rss_new = compute_rss(&residuals_new, weights);
 
                     let rel_change = (rss - rss_new).abs() / (rss + 1e-10);
                     residuals = residuals_new;
@@ -507,7 +507,7 @@ pub fn nls_multi(
                             let theta_bounded = apply_bounds(&theta_new, bounds);
                             let residuals_new =
                                 compute_residuals_multi(x, y, &theta_bounded, model);
-                            let rss_new = compute_rss(&residuals_new, &weights);
+                            let rss_new = compute_rss(&residuals_new, weights);
 
                             if rss_new < rss {
                                 lambda *= config.lambda_down;
@@ -967,7 +967,7 @@ fn normal_terms(
     residuals: &Array1<f64>,
     setup: &NlsSetup,
     theta: &Array1<f64>,
-) -> EconResult<(Array2<f64>, Array1<f64>)> {
+) -> (Array2<f64>, Array1<f64>) {
     let (mut jtj, mut jtr) = match &setup.sqrt_w {
         None => (jacobian.t().dot(&jacobian), jacobian.t().dot(residuals)),
         Some(sw) => {
@@ -993,7 +993,7 @@ fn normal_terms(
             }
         }
     }
-    Ok((jtj, jtr))
+    (jtj, jtr)
 }
 
 /// `J'J` at the solution, on `sqrt(w) J` under weights (R's gradient of the weighted model).

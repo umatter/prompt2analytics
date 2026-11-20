@@ -821,7 +821,7 @@ pub fn loess(x: &[f64], y: &[f64], config: LoessConfig) -> EconResult<LoessResul
     }
 
     // Sorted data with R's q and radius rule (refuses non-finite and constant x)
-    let sd = SortedData::new(x, y, config.span)?;
+    let mut sd = SortedData::new(x, y, config.span)?;
 
     // Minimum observations needed for local regression
     let min_obs = config.degree + 1;
@@ -883,16 +883,11 @@ pub fn loess(x: &[f64], y: &[f64], config: LoessConfig) -> EconResult<LoessResul
     let sum_squares = match &robust_weights {
         Some(rw) => {
             let pseudo = pseudovalues(y, &fitted, rw)?;
-            let mut y_sorted = crate::resource::try_with_capacity(n, "LOESS pseudovalues")?;
-            y_sorted.extend(sd.orig_idx.iter().map(|&i| pseudo[i]));
-            let psd = SortedData {
-                x_sorted: sd.x_sorted.clone(),
-                y_sorted,
-                orig_idx: sd.orig_idx.clone(),
-                q: sd.q,
-                radius_mult: sd.radius_mult,
-            };
-            let (zz, _, _, _) = fit_all_points(&psd, config.degree, None, false)?;
+            // The sorted y is not needed after the fits: refit on the pseudovalues in place.
+            for (ys, &i) in sd.y_sorted.iter_mut().zip(&sd.orig_idx) {
+                *ys = pseudo[i];
+            }
+            let (zz, _, _, _) = fit_all_points(&sd, config.degree, None, false)?;
             pseudo.iter().zip(&zz).map(|(p, z)| (p - z) * (p - z)).sum()
         }
         None => rss,

@@ -144,6 +144,8 @@ fn distinct_values(dx: &[f64], eps: f64) -> usize {
 
 /// `Omega_ij = integral of B_i'' B_j''` over the knot range: B'' is linear on each interval, so
 /// the integral of a product is `h (a_i a_j + (e_i a_j + e_j a_i) / 2 + e_i e_j / 3)`.
+/// Kept apart from `smooth_spline::penalty_bands`: that one multiplies by a `third` constant,
+/// while this divides by 3 as ppr.f does, and the two differ in the last bit.
 fn penalty_matrix(t: &[f64], nk: usize) -> Band {
     let mut omega = [[0.0; 4]; NK_MAX];
     for left in 3..nk {
@@ -357,6 +359,8 @@ fn fitted_at(coef: &[f64; NK_MAX], left: usize, b: &[f64; 4]) -> f64 {
 const LSPAR: f64 = 0.0;
 const USPAR: f64 = 1.5;
 const SPAR_TOL: f64 = 1e-2;
+/// ppr.f's relative tolerance `eps` of the Brent step (a single-precision constant there).
+const SPAR_EPS: f64 = 0.000244_f32 as f64;
 const SPAR_MAXIT: usize = 500;
 
 /// Smooths `y` on sorted `dx` in [0, 1] on `knot`, with the spar that minimises `crit`, into `smo`.
@@ -372,8 +376,7 @@ fn fit_spline(
     smo: &mut [f64],
 ) -> EconResult<SplineFit> {
     let problem = Problem::new(dx, eps, y, w, knot, left, basis)?;
-    let eps = 0.000244_f32 as f64;
-    let spar = brent_spar(LSPAR, USPAR, SPAR_TOL, eps, SPAR_MAXIT, |spar| {
+    let spar = brent_spar(LSPAR, USPAR, SPAR_TOL, SPAR_EPS, SPAR_MAXIT, |spar| {
         let solved = problem.solve(problem.lambda(spar))?;
         Ok(problem.criterion(&solved, crit, y, w, left, basis))
     })?;
