@@ -2738,6 +2738,18 @@ struct CountPart {
     iterations: usize,
 }
 
+/// Prefix of the warnings of the NB hurdle's truncated-Poisson start.
+const HURDLE_START_WHAT: &str = "hurdle count part (Poisson start): ";
+
+/// Passes on the warnings of the NB hurdle's truncated-Poisson start only when the NB fit
+/// after it did not converge: a start that stopped early is then part of the explanation,
+/// and otherwise it is not the count part's state.
+fn forward_start_warnings(start: Vec<String>, fit: &NewtonMax, warnings: &mut Vec<String>) {
+    if !fit.converged {
+        warnings.extend(start);
+    }
+}
+
 /// Maximum-likelihood fit of the zero-truncated Poisson or NB count part on the positive
 /// counts `y` with design `x`, by [`maximise_by_newton`] on [`truncated_loglik`]: the
 /// truncated Poisson from `ln(mean y)` in the intercept (its log-likelihood is concave);
@@ -2751,7 +2763,8 @@ struct CountPart {
 /// Standard errors from the inverse of minus the Hessian at the estimate; theta above
 /// `THETA_POISSON` (no overdispersion in the positives) is handled as ZINB handles it:
 /// the coefficient SEs from the coefficient block, the theta SEs NaN, not converged, a
-/// warning. `iterations` adds the NB fit's to the Poisson start's.
+/// warning. `iterations` counts the final fit's Newton steps only (not the NB start's); the
+/// start's stop warnings are reported only when the NB fit does not converge.
 fn fit_truncated_count_part<'a>(
     y: &'a [f64],
     x: ArrayView2<'a, f64>,
@@ -2792,7 +2805,9 @@ fn fit_truncated_count_part<'a>(
         (Array2::zeros((0, 0)), Array2::zeros((0, 0)), Vec::new())
     };
     let (fit, iterations) = if negbin {
-        // the truncated-Poisson start; its iterations are not the count part's
+        // the truncated-Poisson start; its iterations are not the count part's, and its
+        // warnings are passed on only if the NB fit fails (forward_start_warnings)
+        let mut start_warnings = Vec::new();
         let start = maximise_by_newton(
             |p: &[f64], g: Option<&mut [f64]>, h: Option<&mut Array2<f64>>| {
                 truncated_loglik(&poisson, p, g, h)
@@ -2803,8 +2818,8 @@ fn fit_truncated_count_part<'a>(
             &mut p_work,
             None,
             HURDLE_COUNT_MAX_ITER,
-            WHAT,
-            warnings,
+            HURDLE_START_WHAT,
+            &mut start_warnings,
             None,
         )?;
         par[..k].copy_from_slice(&p_par);
@@ -2851,6 +2866,7 @@ fn fit_truncated_count_part<'a>(
             fit.ll = start.ll;
             fit.converged = true;
         }
+        forward_start_warnings(start_warnings, &fit, warnings);
         let iterations = fit.iterations;
         (fit, iterations)
     } else {
@@ -2940,6 +2956,29 @@ mod tests {
     use crate::test_support::load_case;
     use p2a_validation::{Check, Tol};
     use polars::prelude::*;
+
+    /// The truncated-Poisson start of the NB hurdle writes into its own buffer: a start that
+    /// stopped early is reported, under its own prefix, only when the NB fit after it did
+    /// not converge, so it cannot read as the state of a converged count part.
+    #[test]
+    fn test_hurdle_poisson_start_warnings_only_when_the_nb_fit_fails() {
+        let fit = |converged: bool| NewtonMax {
+            ll: -1.0,
+            converged,
+            stopped: !converged,
+            iterations: 3,
+            left: false,
+        };
+        let start = vec![format!(
+            "{HURDLE_START_WHAT}the line search could not increase the log-likelihood"
+        )];
+        let mut warnings = Vec::new();
+        forward_start_warnings(start.clone(), &fit(true), &mut warnings);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        forward_start_warnings(start, &fit(false), &mut warnings);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].starts_with("hurdle count part (Poisson start): "));
+    }
 
     #[test]
     fn test_negbin_rejects_empty_and_single_row() {
