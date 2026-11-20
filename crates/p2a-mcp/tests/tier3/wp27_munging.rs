@@ -218,6 +218,19 @@ async fn mcp_shifts_follow_the_sign_of_periods() {
     )
     .await;
     assert!(!r.success && text(&r).contains("negative"), "{}", text(&r));
+    // i64::MIN has no positive counterpart: an error naming periods, not an overflow
+    for direction in [None, Some("lead")] {
+        let mut args = json!({"dataset": "d", "column": "y", "periods": i64::MIN});
+        if let Some(direction) = direction {
+            args["direction"] = json!(direction);
+        }
+        let r = call(&server, &session, "munge_lag_lead", args).await;
+        assert!(
+            !r.success && text(&r).contains("periods"),
+            "{direction:?}: {}",
+            text(&r)
+        );
+    }
     // differences need periods of at least 1
     for p in [0, -2] {
         let r = call(

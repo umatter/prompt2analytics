@@ -2610,12 +2610,16 @@ mod tests {
             let scaled = y.mapv(|v| v * factor);
             let mean = scaled.mean().unwrap();
             let ss: f64 = scaled.iter().map(|v| (v - mean) * (v - mean)).sum();
-            let shown = format!("({ss:e})");
-            // the value as computed by the tree's own sum (it may differ from this one in the last digits)
-            let exponent = shown.split('e').nth(1).unwrap().trim_end_matches(')');
+            // the value the message shows, as computed by the tree's own sum: it may differ from
+            // this two-pass sum in the last digits (and so in the decimal exponent, near a power
+            // of ten), so it is compared as a number
+            let (_, rest) = e
+                .split_once("about its mean (")
+                .expect("the value is shown");
+            let shown: f64 = rest.split_once(')').unwrap().0.parse().unwrap();
             assert!(
-                e.contains(&format!("e{exponent})")),
-                "{factor}: {shown}: {e}"
+                (shown - ss).abs() <= 1e-12 * ss,
+                "{factor}: {shown:e} vs {ss:e}: {e}"
             );
         }
         // The squares overflow: the root risk is inf.

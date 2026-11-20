@@ -146,6 +146,30 @@ Against `fit_glm` the shared lean logit fit differs by at most 4.5e-9 on a coeff
 2.1e-6 on a covariance entry at the default tolerance (quasi-separated fits of n = 15 to 80 with a rare binary
 covariate; 8.2e-11 and 2.7e-11 on heavy-tailed fits). These gaps are accepted.
 
+## Wall-clock against v0.5.0 (2026-11-13)
+
+Re-timed on 2026-11-13: release builds of v0.5.0 (`f80b0131`) and this version, one P core
+(`taskset -c 2`, `RAYON_NUM_THREADS=1`), five rounds interleaving the two builds in alternating order;
+each round is one process per build reporting the median of its calls after warm-up calls. Ratios are
+of the medians of the five per-round medians, with the ratio of their minima in brackets (1-minute
+load average 4.3-8.7 at the start of each round, right after the conversation-store benchmarks of the
+round before, and 2.2-3.8 at its end; the alternating order protects the ratios).
+Treatment and two covariates, ATE; the bootstrap rows set `bootstrap = 999` (seeded), which is opt-in
+(the default is the analytic SE).
+
+| Call | n | v0.5.0 µs | new µs | new / v0.5.0 [min] |
+|---|---|---|---|---|
+| analytic SE | 100 | 15.0 | 14.9 | 1.00 [1.04] |
+| analytic SE | 1,000 | 98.7 | 98.2 | 0.99 [1.00] |
+| analytic SE | 10,000 | 1,309 | 1,318 | 1.01 [1.00] |
+| bootstrap, B = 999 | 100 | 1,189 | 7,626 | **6.41** [6.32] |
+| bootstrap, B = 999 | 1,000 | 9,995 | 59,505 | **5.95** [5.92] |
+| bootstrap, B = 999 | 10,000 | 164,300 | 747,800 | **4.55** [4.53] |
+
+Each replicate now refits the propensity model and re-applies the trimming (see above), where
+v0.5.0's replicates reused the fitted scores. The bootstrap rows were signed off on 2026-11-13
+(rule 5).
+
 ## References
 
 - Horvitz, D.G. & Thompson, D.J. (1952). "A Generalization of Sampling Without Replacement from a Finite Universe."

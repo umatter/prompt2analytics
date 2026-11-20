@@ -266,7 +266,8 @@ pub struct XGBoostResult {
     /// Feature names (if provided)
     pub feature_names: Option<Vec<String>>,
     /// With early stopping: the number of trees kept, the round (1-based, as R xgboost) with the
-    /// lowest held-out loss; `None` without early stopping
+    /// lowest held-out loss, so at least 1 (a fit whose held-out loss is never finite is
+    /// refused); `None` without early stopping
     pub best_iteration: Option<usize>,
     /// Rows (ascending) held out for early stopping
     #[serde(default)]
@@ -944,7 +945,19 @@ fn xgboost_early_stopping(
         Some((x_val.view(), y_val.view())),
     )?;
 
+    // best_iteration counts the kept trees and is at least 1: a fit in which no round ran, or
+    // no held-out loss was ever finite, has no best round and is refused
     let best = fit.best_round;
+    if best == 0 {
+        return Err(EconError::Computation(if fit.validation_loss.is_empty() {
+            "early stopping needs at least one boosting round (n_estimators >= 1)".to_string()
+        } else {
+            format!(
+                "early stopping: the held-out loss was never finite in {} rounds; rescale y",
+                fit.validation_loss.len()
+            )
+        }));
+    }
     fit.trees.truncate(best);
     fit.train_loss.truncate(best + 1);
     let mut gains: HashMap<usize, f64> = HashMap::new();
@@ -1770,6 +1783,27 @@ mod tests {
         assert_eq!(r.trees.len(), best);
         let again = xgboost_predict(&r, x.view()).unwrap();
         assert_eq!(again, r.predictions);
+    }
+
+    #[test]
+    fn test_xgboost_early_stopping_refuses_a_never_finite_held_out_loss() {
+        // Finite y whose squared errors overflow: the held-out RMSE is +inf from the first round,
+        // so no round improves on it. Before: zero trees were kept, best_iteration was Some(0)
+        // and the final prediction failed with "Model has no fitted trees".
+        let (x, y) = early_stop_data(60);
+        let y = y.mapv(|v| (v + 10.0) * 1e200);
+        let mut c = XGBoostConfig::default();
+        c.n_estimators = 20;
+        c.early_stopping_rounds = 3;
+        c.seed = Some(3);
+        let e = xgboost(x.view(), y.view(), &c).unwrap_err();
+        let m = e.to_string();
+        assert!(m.contains("held-out loss was never finite"), "{m}");
+        // a fit with no rounds at all is refused the same way, not with a prediction error
+        c.n_estimators = 0;
+        let (x, y) = early_stop_data(60);
+        let m = xgboost(x.view(), y.view(), &c).unwrap_err().to_string();
+        assert!(m.contains("early stopping"), "{m}");
     }
 
     #[test]

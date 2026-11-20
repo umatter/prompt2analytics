@@ -96,7 +96,8 @@ pub struct AssociationRule {
 pub struct AprioriResult {
     /// Frequent itemsets found
     pub itemsets: Vec<FrequentItemset>,
-    /// Association rules generated
+    /// Association rules generated, sorted by lift (descending), then lhs, then rhs; `Display`
+    /// prints the first 10 as the top rules
     pub rules: Vec<AssociationRule>,
     /// Number of transactions
     pub n_transactions: usize,
@@ -131,10 +132,8 @@ impl std::fmt::Display for AprioriResult {
             )?;
             writeln!(f, "{:-<56}", "")?;
 
-            let mut sorted_rules = self.rules.clone();
-            sorted_rules.sort_by(|a, b| b.lift.total_cmp(&a.lift));
-
-            for rule in sorted_rules.iter().take(10) {
+            // the rules are already in lift order
+            for rule in self.rules.iter().take(10) {
                 let lhs_str = if rule.lhs.is_empty() {
                     "{}".to_string()
                 } else {
@@ -363,17 +362,39 @@ fn generate_candidates(prev_level: &[Vec<u32>]) -> EconResult<Vec<Vec<u32>>> {
                 frequent.contains(subset.as_slice())
             });
             if valid {
-                candidates.push(candidate);
+                push_fallibly(&mut candidates, candidate, "apriori candidate itemsets")?;
             }
         }
     }
     Ok(candidates)
 }
 
+/// `v.push(x)`, growing the buffer (doubling, as `Vec`) through the per-allocation ceiling.
+fn push_fallibly<T>(v: &mut Vec<T>, x: T, what: &str) -> EconResult<()> {
+    if v.len() == v.capacity() {
+        let cap = v.capacity().saturating_mul(2).max(4);
+        crate::resource::check_alloc::<T>(cap, what)?;
+        v.try_reserve_exact(cap - v.len())
+            .map_err(|_| crate::resource::reserve_failed(what, cap, std::mem::size_of::<T>()))?;
+    }
+    v.push(x);
+    Ok(())
+}
+
 /// Eclat's depth-first search over sorted tid lists.
 fn eclat_itemsets(enc: &Encoded, min_count: usize, max_length: usize) -> EconResult<IdItemsets> {
     let n_items = enc.names.len();
-    let mut tids: Vec<Vec<u32>> = vec![Vec::new(); n_items];
+    // one tid list per item, each allocated at its exact length
+    let mut counts = try_vec(n_items, 0usize, "eclat item counts")?;
+    for t in &enc.transactions {
+        for &i in t {
+            counts[i as usize] += 1;
+        }
+    }
+    let mut tids: Vec<Vec<u32>> = try_with_capacity(n_items, "eclat tid-list table")?;
+    for &c in &counts {
+        tids.push(try_with_capacity(c, "eclat tid list")?);
+    }
     for (tid, t) in enc.transactions.iter().enumerate() {
         for &i in t {
             tids[i as usize].push(tid as u32);
@@ -659,6 +680,40 @@ pub fn eclat(transactions: &[Vec<String>], config: &AprioriConfig) -> EconResult
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The data-sized buffers of both searches are allocated through the per-allocation ceiling:
+    /// eclat's per-item tid-list table and apriori's candidate list.
+    #[test]
+    fn test_itemset_searches_allocate_fallibly() {
+        use crate::resource::with_alloc_ceiling;
+        // 10 transactions of 1,000 distinct items each: 10,000 items, a 240,000-byte tid table
+        let wide: Vec<Vec<String>> = (0..10)
+            .map(|t| (0..1000).map(|i| format!("i{}", t * 1000 + i)).collect())
+            .collect();
+        let mut config = AprioriConfig::default();
+        config.min_support = 0.1;
+        config.max_length = 1;
+        let e = with_alloc_ceiling(Some(200_000), || eclat(&wide, &config)).unwrap_err();
+        assert!(
+            matches!(&e, EconError::ResourceLimit(m) if m.contains("eclat")),
+            "{e}"
+        );
+        assert!(eclat(&wide, &config).is_ok());
+        // 150 items in both transactions: 11,175 candidate pairs, 268,200 bytes of candidates and
+        // 89,400 bytes of counts
+        let dense: Vec<Vec<String>> = (0..2)
+            .map(|_| (0..150).map(|i| format!("i{i:03}")).collect())
+            .collect();
+        config.min_support = 0.5;
+        config.max_length = 2;
+        config.min_confidence = 1.0;
+        config.min_lift = f64::MAX; // no rules: the itemset search alone
+        let e = with_alloc_ceiling(Some(200_000), || apriori(&dense, &config)).unwrap_err();
+        assert!(
+            matches!(&e, EconError::ResourceLimit(m) if m.contains("apriori candidate")),
+            "{e}"
+        );
+    }
 
     #[test]
     fn test_apriori_basic() {

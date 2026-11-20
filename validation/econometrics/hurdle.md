@@ -291,17 +291,16 @@ criterion `new_methods_benchmarks`).
 | Poisson hurdle, one regressor (criterion `hurdle/poisson`) | 100 / 500 / 1,000 / 2,000 | 1.00 / 1.08 / 1.12 / 1.16 |
 | negative binomial hurdle (criterion `hurdle/negbin`) | 100 / 500 / 1,000 / 2,000 | 0.98 / 1.03 / 1.04 / 1.06 |
 
-The Poisson hurdle costs up to 1.25x of base at n = 10,000 and 1.21x at n = 100. This is
-accepted as the cost of fitting the zero part with `glm.fit`'s IRLS (see "Zero part =
-binomial glm"). The zero part's design is built and decomposed once, the aliasing QR runs
-only when the normal-equations test cannot certify full rank, and the zero part's IRLS steps
-take the normal equations with the QR fallback. Measured piece by piece at n = 1,000: the zero
-part, R's `glm.fit` IRLS (working weights and response, the deviance at every step,
-`family$aic`), takes about 170 µs where the old hand-written Newton logit took about 140; the
-count part's Newton steps solve the equilibrated information by Cholesky (about 1.5 µs a step
-over 19 steps) where the old code took a plain inverse. Both loops are bound by the per-row
-`exp`, `ln` and divisions; fusing their passes was measured slower, and no cheaper form gives
-the same values.
+The Poisson hurdle cost up to 1.25x of that base at n = 10,000 and 1.21x at n = 100, accepted
+as the cost of fitting the zero part with `glm.fit`'s IRLS (see "Zero part = binomial glm").
+The zero part's design is built and decomposed once, the aliasing QR runs only when the
+normal-equations test cannot certify full rank, and the zero part's IRLS steps take the normal
+equations with the QR fallback. Measured piece by piece at n = 1,000: the zero part, R's
+`glm.fit` IRLS (working weights and response, the deviance at every step, `family$aic`), takes
+about 170 µs where the old hand-written Newton logit took about 140. Its loop is bound by the
+per-row `exp`, `ln` and divisions; fusing its passes was measured slower, and no cheaper form
+gives the same values. The count part these rows timed has since been replaced by the
+maximum-likelihood fit of "Count part (T4)"; the next subsection times the current code.
 
 ### Maximum-likelihood count parts (Tier 4)
 

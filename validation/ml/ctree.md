@@ -15,8 +15,10 @@ inputs. At each node of `n` rows:
 3. **P-values.** `bonferroni`: partykit's adjustment on the log scale, `1 - (1 - p)^m` over the `m` tested
    inputs (`min(1, m p)` differs from it). `univariate`: no adjustment. `montecarlo`: the share of `nresample`
    (default 9,999) permutations of the response whose statistic reaches the observed one, unadjusted, as partykit
-   does when `testtype = "MonteCarlo"` alone. Each permutation draws from a ChaCha8 stream derived from the seed
-   (42 when none is given), the node and the permutation index.
+   does when `testtype = "MonteCarlo"` alone. A permuted statistic counts when it is at least the observed one
+   minus `sqrt(eps) max(|observed|, 1)`, so a permutation that ties mathematically is not lost to summation order.
+   Each permutation draws from a ChaCha8 stream derived from the seed (42 when none is given), the node and the
+   permutation index.
 4. **Selection and stopping.** The input with the smallest adjusted p-value (on an exact tie the larger statistic,
    then the first). A node is a leaf when no adjusted p-value is below `1 - mincriterion`, when it has fewer than
    `minsplit` rows, or at `maxdepth`. There is no `n <= 2 minbucket` stop.
@@ -51,7 +53,7 @@ Properties: `test_ctree_classification_statistic_is_the_anova_quadratic_form`, `
 `test_ctree_constant_input_is_not_tested`, `test_ctree_splits_a_node_of_twice_minbucket`,
 `test_ctree_minprob_raises_the_node_minimum`, `test_ctree_class_ties_take_the_first_class`,
 `test_ctree_split_matches_naive_reference`, `test_ctree_montecarlo_is_reproducible_and_seeded`,
-`test_ctree_montecarlo_honours_cancellation`, and parameter validation
+`test_ctree_montecarlo_counts_tied_permutations`, `test_ctree_montecarlo_honours_cancellation`, and parameter validation
 (`test_ctree_rejects_minsplit_below_twice_minbucket`, `test_ctree_minbucket_zero_acts_as_one`,
 `test_ctree_options_parse_aliases_and_reject_unknown`, `test_ctree_maximum_teststat_is_not_the_quadratic_one`).
 `minsplit` below `2 * minbucket` is refused, because no node of that size can be split into two children of

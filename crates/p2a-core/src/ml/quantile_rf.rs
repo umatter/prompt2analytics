@@ -252,8 +252,8 @@ impl std::fmt::Display for QuantileRfResult {
 
 /// Deepest tree level (root = 0) the builder grows. A node at this depth
 /// becomes a leaf in every mode, so no input can recurse deep enough to
-/// overflow a 2 MiB worker stack (user decision, Tier 0). Trees that stay
-/// shallower are unchanged.
+/// overflow a 2 MiB worker stack (user decision, Tier 0). A forest whose
+/// trees all stay shallower is unchanged.
 const MAX_TREE_DEPTH: usize = 512;
 
 /// A tree node in the quantile regression forest.
@@ -818,7 +818,9 @@ fn empirical_quantile(values: &mut [f64], quantile: f64) -> f64 {
 /// within rounding (which a response with repeated values such as counts,
 /// integers or Likert scores can produce), either equally good split may be
 /// taken. A tree that those releases grew past depth 512 stops there (see
-/// [`QuantileRfConfig::max_depth`]).
+/// [`QuantileRfConfig::max_depth`]). One random stream feeds the trees in
+/// turn, so once a tree differs for either reason, the bootstrap samples and
+/// feature draws of every later tree differ too.
 ///
 /// # Example
 ///

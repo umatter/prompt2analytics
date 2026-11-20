@@ -112,6 +112,8 @@ are now pinned (above).
 
 ## Performance Comparison
 
+These timings predate Tier 4's two-sided rule; the comparison with v0.5.0 is under "Against v0.5.0" below.
+
 | Test Type | Size | Rust (µs) | R (µs) | Speedup |
 |-----------|------|-----------|--------|---------|
 | One-sample | x=10, t=1 | 0.55 | 90 | ~164x |
@@ -126,6 +128,33 @@ are now pinned (above).
 - One-sample tests are extremely fast in Rust (sub-microsecond), with 160-440x speedup
 - Two-sample tests involve iterative CI calculation, making them slower but still faster than R
 - Rust benchmarks from Criterion (median); R benchmarks from system.time (mean of 100 iterations)
+
+### Against v0.5.0 (2026-11-13)
+
+Re-timed on 2026-11-13: release builds of v0.5.0 (`f80b0131`) and this version, one P core
+(`taskset -c 2`, `RAYON_NUM_THREADS=1`), five rounds interleaving the two builds in alternating order;
+each round is one process per build reporting the median of its calls after warm-up calls. Ratios are
+of the medians of the five per-round medians, with the ratio of their minima in brackets (1-minute
+load average 4.3-8.7 at the start of each round, right after the conversation-store benchmarks of the
+round before, and 2.2-3.8 at its end; the alternating order protects the ratios).
+One sample: a count of n over time 1 against the rate 1.05 n. Two samples: counts n and 1.2 n over
+times 1 and 1.1, rate ratio 1.
+
+| Call | n | v0.5.0 µs | new µs | new / v0.5.0 [min] |
+|---|---|---|---|---|
+| one sample, two-sided | 100 | 0.923 | 1.01 | 1.10 [1.15] |
+| one sample, two-sided | 1,000 | 1.38 | 1.77 | **1.29** [1.30] |
+| one sample, two-sided | 10,000 | 1.86 | 2.72 | **1.47** [1.58] |
+| one sample, greater | 100 | 0.802 | 0.498 | 0.62 [0.60] |
+| one sample, greater | 1,000 | 1.29 | 0.874 | 0.68 [0.67] |
+| one sample, greater | 10,000 | 1.65 | 1.31 | 0.80 [0.79] |
+| two samples, two-sided | 100 | 20.1 | 20.8 | 1.03 [1.01] |
+| two samples, two-sided | 1,000 | 32.9 | 32.6 | 0.99 [1.03] |
+| two samples, two-sided | 10,000 | 45.1 | 45.3 | 1.00 [1.01] |
+
+The one-sample two-sided p-value is now `poisson.test`'s relative-likelihood rule, binary searches
+over the pmf on both sides of the mean, where v0.5.0 doubled one tail. The rows above 1.1x were
+signed off on 2026-11-13 (rule 5).
 
 ## References
 

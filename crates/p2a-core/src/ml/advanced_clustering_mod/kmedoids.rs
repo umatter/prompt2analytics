@@ -108,7 +108,8 @@ impl std::fmt::Display for KMedoidsResult {
 ///   distance matrix exceeds the per-allocation ceiling (or its size
 ///   overflows).
 /// - `"Computation stopped: ..."` when the budget is cancelled or expires;
-///   this is checked once per row of the distance matrix.
+///   this is checked once per row of the distance matrix and once per row of
+///   the silhouette.
 ///
 /// # References
 ///
@@ -191,7 +192,8 @@ pub fn kmedoids(
 
     // Optionally compute silhouette
     let (silhouette_widths, average_silhouette) = if k > 1 {
-        let sil = compute_silhouette_from_distances(&distances, &labels, k);
+        let sil =
+            compute_silhouette_from_distances(&distances, &labels, k).map_err(|e| e.to_string())?;
         let avg = sil.iter().sum::<f64>() / n as f64;
         (Some(sil), Some(avg))
     } else {
@@ -395,8 +397,11 @@ impl std::fmt::Display for ClaraResult {
 ///
 /// - `k == 0` or `k > n`, `samples == 0`, or a `sample_size` (after
 ///   clamping to `n`) below `k`.
-/// - `"Computation stopped: ..."` when the budget is cancelled or expires
-///   between samples.
+/// - `"Computation stopped: ..."` (unprefixed) when the budget is cancelled
+///   or expires between samples or while the best sample's silhouette is
+///   computed (its distance matrix and its widths).
+/// - `"Resource limit: CLARA sample distance matrix ..."` (unprefixed) if
+///   that `sample_size x sample_size` matrix cannot be allocated.
 /// - The [`kmedoids`] errors for a sample (its `sample_size x sample_size`
 ///   distance matrix over the ceiling, or a cancellation while it is
 ///   built), prefixed `"CLARA sample of N rows (sample_size): "`.
@@ -496,7 +501,9 @@ pub fn clara(
         Array2::from_shape_fn((best_sample.len(), d), |(i, j)| data[[best_sample[i], j]]);
     let sample_distances =
         try_distance_matrix(&best_sample_data.view(), "CLARA sample distance matrix")?;
-    let avg_silhouette = Some(compute_silhouette_avg(&sample_labels, &sample_distances, k));
+    let avg_silhouette = Some(
+        compute_silhouette_avg(&sample_labels, &sample_distances, k).map_err(|e| e.to_string())?,
+    );
 
     Ok(ClaraResult {
         labels,
@@ -724,7 +731,8 @@ mod tests {
         let sample = Array2::from_shape_fn((30, 2), |(i, j)| data[[r.best_sample[i], j]]);
         let sample_labels: Vec<usize> = r.best_sample.iter().map(|&i| r.labels[i]).collect();
         let want =
-            compute_silhouette_avg(&sample_labels, &compute_distance_matrix(&sample.view()), 3);
+            compute_silhouette_avg(&sample_labels, &compute_distance_matrix(&sample.view()), 3)
+                .unwrap();
         assert_eq!(r.average_silhouette.map(f64::to_bits), Some(want.to_bits()));
     }
 

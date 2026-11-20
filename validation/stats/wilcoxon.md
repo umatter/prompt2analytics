@@ -276,7 +276,7 @@ Re-timed on a quiet machine on 2026-11-13: release builds of v0.5.0 (`f80b0131`)
 one P core (`taskset -c 2`, `RAYON_NUM_THREADS=1`), five rounds interleaving the two builds in
 alternating order; each round is one process per build reporting the median of its calls after
 warm-up calls. The table gives the ratio of the medians of the five per-round medians, with the
-ratio of their minima in brackets (1-minute load average 1.7-2.6). Two samples of n each (signed
+ratio of their minima in brackets (1-minute load average 4.3-8.7 at the start of each round, right after the conversation-store benchmarks of the round before, and 2.2-3.8 at its end; the alternating order protects the ratios). Two samples of n each (signed
 rank: n pairs); the exact rows are the default call at sizes where R's rule picks the exact
 distribution, which v0.5.0 approximated, so they are slower by construction; the interval rows
 select the order statistics they need (see above) where v0.5.0 built every pairwise difference or
@@ -311,6 +311,8 @@ Walsh average.
 | pairwise, exact | 15 | 3.16 | 11.2 | 3.53 [3.61] |
 | pairwise, exact | 30 | 6.18 | 68.0 | 11.00 [11.73] |
 | pairwise, exact | 49 | 8.21 | 277 | 33.77 [32.81] |
+
+The exact rows above 1.1x were signed off on 2026-11-13 (rule 5).
 
 ## References
 

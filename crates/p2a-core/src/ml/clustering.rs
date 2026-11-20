@@ -35,7 +35,7 @@ pub struct KMeansResult {
     pub cluster_sizes: Vec<usize>,
     /// Convergence of the Lloyd iterations (the reported run)
     pub convergence: Convergence,
-    /// Warnings (the iteration limit reached; a cluster emptied by a centroid update, R's
+    /// Warnings (the iteration limit reached; a run that ends with an empty cluster, R's
     /// "empty cluster: try a better set of initial centers")
     pub warnings: Vec<String>,
 }
@@ -138,8 +138,9 @@ pub const KMEANS_DEFAULT_SEED: u64 = 42;
 /// labels those of the returned centroids. Either way the result does not depend on the scale
 /// of the data. A run that reaches `max_iterations` is reported with `convergence.converged ==
 /// false` and a warning. The best of `n_init` runs (smallest inertia, the first on ties) is
-/// returned; a run whose centroid update leaves a cluster without points keeps that centroid and
-/// carries R's warning "empty cluster: try a better set of initial centers".
+/// returned. A centroid update that leaves a cluster without points keeps that centroid; a run
+/// that ends with an empty cluster carries R's warning "empty cluster: try a better set of
+/// initial centers".
 ///
 /// `k` above the number of distinct rows is an error ("more cluster centers than distinct data
 /// points.", as R), and so are finite data whose squared distances overflow.
@@ -430,7 +431,6 @@ fn kmeans_single(
     let mut n_iterations = 0;
     let mut reassigned = n_samples;
     let mut converged = false;
-    let mut emptied = false;
     // relative squared centroid shift of the last update (tolerance runs)
     let mut last_shift = f64::INFINITY;
 
@@ -452,11 +452,8 @@ fn kmeans_single(
 
         let old_centroids = (tol_abs > 0.0).then(|| centroids.clone());
         let counts = update_centroids(data, &labels, &mut centroids);
-        if counts.contains(&0) {
-            if refuse_empty {
-                return Err("empty cluster: try a better set of initial centers".to_string());
-            }
-            emptied = true;
+        if refuse_empty && counts.contains(&0) {
+            return Err("empty cluster: try a better set of initial centers".to_string());
         }
         if let Some(old) = old_centroids {
             let shift: f64 = (0..k)
@@ -507,7 +504,9 @@ fn kmeans_single(
         )
     };
     let mut warnings: Vec<String> = convergence.note("k-means (Lloyd)").into_iter().collect();
-    if emptied {
+    // R's kmeans (Lloyd): warn when the final counts contain a zero, not when an update once
+    // emptied a cluster that later regained points
+    if cluster_sizes.contains(&0) {
         warnings.push("empty cluster: try a better set of initial centers".to_string());
     }
 
@@ -1454,6 +1453,25 @@ mod tests {
             r.warnings
         );
         assert_eq!(r.cluster_sizes[2], 0);
+    }
+
+    #[test]
+    fn test_kmeans_cluster_emptied_then_refilled_does_not_warn() {
+        // The third centre gets no point in the first pass and keeps its place; after the update
+        // the point at 2.01 is nearest to it, and the run ends with every cluster populated. R's
+        // kmeans (Lloyd) warns only when the final counts contain a zero. Before: the warning was
+        // attached because an update had once emptied a cluster.
+        let x = array![[0.03], [2.01], [3.97], [6.02]];
+        let start = array![[-1.0], [2.5], [1.2]];
+        let r = kmeans_single(&x.view(), start, 50, KmTol { abs: 0.0, rel: 0.0 }, false).unwrap();
+        assert_eq!(r.labels, vec![0, 2, 1, 1]);
+        assert_eq!(r.cluster_sizes, vec![1, 2, 1]);
+        assert!(r.convergence.converged);
+        assert!(
+            !r.warnings.iter().any(|w| w.contains("empty cluster")),
+            "{:?}",
+            r.warnings
+        );
     }
 
     #[test]

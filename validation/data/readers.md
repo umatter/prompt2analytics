@@ -98,7 +98,9 @@ All integers follow the file's byte order (`dta119_formats_msf` is the big-endia
 reference (0, 0) is `""`; any other reference must be in the `<strls>` table, else the load fails naming
 the column and the row. GSO type 130 is text (the trailing NUL dropped, decoded as the release's text),
 129 binary (decoded lossily, with a note). Each GSO's length goes through the allocation ceiling
-("Stata strL contents") and the reader checks the call's budget every 4,096 GSOs.
+("Stata strL contents") and the reader checks the call's budget every 4,096 GSOs. The text copied into
+the cells ("Stata strL cells") is held to the same ceiling for all strL columns of the file together,
+since equal values share one GSO but are copied into each cell.
 
 Formats are applied after the rows are read: `%td` (and the legacy `%d`) columns become Date (days since
 1960-01-01 shifted by 3,653 days to 1970), `%tc` and `%tC` Datetime in milliseconds (shifted by

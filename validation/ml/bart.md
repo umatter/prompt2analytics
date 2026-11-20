@@ -68,6 +68,17 @@ Without kept trees it says how to keep them. Intervals in both modes are percent
 | Single leaf: posterior mean probability | 0.3515426 | |
 | Single leaf: posterior SD of the probability | 0.0735486 | |
 
+Prior calibration (`ml_bart_wbart_calibration`, `generated/bart_friedman.csv`; closed forms, no Monte Carlo):
+
+| Quantity | R |
+|---|---:|
+| fmean (the offset, mean of y) | 114.2389759 |
+| sigest (residual SD of `lm(y ~ x1 + ... + x6)`) | 2.5953739 |
+| `qchisq(0.1, 3)` | 0.5843744 |
+| lambda = sigest^2 qchisq(0.1, 3) / 3 | 1.3121086 |
+| tau, m = 50 | 0.8285653 |
+| tau, m = 200 | 0.4142826 |
+
 ## Tests
 
 - `ml_bart_regression` (`validation/methods/ml_bart_t4.json`): `test_validate_bart_wbart_calibration`,
@@ -149,3 +160,8 @@ No other difference remains. The other summaries, the split shares among them, a
 
 The posterior summaries are distributional pins of one chain, not of the draws. The leaf values, latent draws and
 the RNG are p2a's own.
+
+The tree prior is truncated at `max_depth` (default 10): a node at that depth cannot split, which removes less
+than 1e-6 of the prior's mass at depth 10; wbart has no depth cap. When the linear fit that calibrates sigma is
+exact (sigest 0), p2a calibrates on sd(y) instead, where wbart's chain would start at sigma 0; no case pins that
+fallback.

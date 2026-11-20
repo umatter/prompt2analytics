@@ -1379,9 +1379,13 @@ pub(crate) mod tests {
         )
         .unwrap();
         let shown = rf_variable_importance(&rf, None).to_string();
-        if rf.oob_score.is_some() {
-            assert!(shown.contains("Out-of-bag R²:"), "{shown}");
-        }
+        // this forest reports an out-of-bag score, so the out-of-bag branch is the one shown
+        assert!(rf.oob_score.is_some());
+        assert!(shown.contains("Out-of-bag R²:"), "{shown}");
+        assert!(
+            !shown.contains("Baseline") && !shown.contains("Permutation"),
+            "{shown}"
+        );
         let mut no_oob = rf.clone();
         no_oob.oob_score = None;
         let shown = rf_variable_importance(&no_oob, None).to_string();

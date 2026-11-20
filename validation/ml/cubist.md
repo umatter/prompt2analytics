@@ -36,9 +36,10 @@ cat("5-committee R²:", 1 - sum((y - pred5)^2) / sum((y - mean(y))^2), "\n")
 - `crates/p2a-core/src/ml/cubist.rs`: `test_cubist_min_improvement_stops_splits`,
   `test_cubist_split_rule_is_ssd_share`, `test_cubist_min_improvement_is_a_share` (split rule);
   `test_cubist_smoothing_reaches_the_root`, `test_cubist_smoothing_coefficient_direction`,
-  `test_cubist_rule_model_is_the_composite`, `test_cubist_committee_target` (smoothing and committees);
+  `test_cubist_rule_model_is_the_composite`, `test_cubist_committee_target`,
+  `test_cubist_smoothing_coefficient_is_validated` (smoothing and committees);
   `test_cubist_usage_counts_cases`, `test_cubist_importance_is_unit_free`,
-  `test_cubist_usage_averages_committees` (attribute usage); `test_cubist_instance_correction_closed_form`,
+  `test_cubist_usage_averages_committees`, `test_cubist_display_without_usage` (attribute usage); `test_cubist_instance_correction_closed_form`,
   `test_cubist_neighbours_are_scale_free`, `test_cubist_training_metrics_leave_the_row_out`,
   `test_cubist_neighbors_limit` (instance correction).
 
@@ -55,7 +56,8 @@ from the leaf up to the root (Quinlan 1992):
 per ancestor, with `p` the model so far, `q` the ancestor's model, `n` the training cases of the child
 on the path and `k = smoothing_coefficient` (default 15). Each step is linear in the models, so the
 composite is one linear model, stored per rule: prediction evaluates it, and the rules print it.
-`k = 0` keeps the leaf model; a large `k` approaches the root model.
+`k = 0` keeps the leaf model; a large `k` approaches the root model. `smoothing_coefficient` must be
+finite and non-negative (otherwise `InvalidSpecification`).
 
 With `committees > 1`, member `m + 1` is fitted to `2y - pred_m`, `pred_m` the prediction of member
 `m`, as R's Cubist ("if the first model over-predicted by 2, the next model's target is y - 2"); the

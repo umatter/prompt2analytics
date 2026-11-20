@@ -170,6 +170,31 @@ R: twang is not installed here; the missing-value refusals are not verified agai
 Tests: `test_validate_na_twang_columns` (case `causal_mediation_na`, registry
 `validation/methods/causal_na.json`, id `weighting_na_refusal`).
 
+## Wall-clock against v0.5.0 (2026-11-13)
+
+Re-timed on 2026-11-13: release builds of v0.5.0 (`f80b0131`) and this version, one P core
+(`taskset -c 2`, `RAYON_NUM_THREADS=1`), five rounds interleaving the two builds in alternating order;
+each round is one process per build reporting the median of its calls after warm-up calls. Ratios are
+of the medians of the five per-round medians, with the ratio of their minima in brackets (1-minute
+load average 4.3-8.7 at the start of each round, right after the conversation-store benchmarks of the
+round before, and 2.2-3.8 at its end; the alternating order protects the ratios).
+Treatment and two covariates; each build's own defaults (ES mean) unless marked.
+
+| Call | n | v0.5.0 ms | new ms | new / v0.5.0 [min] |
+|---|---|---|---|---|
+| defaults | 100 | 5.06 | 6.68 | **1.32** [1.27] |
+| defaults | 1,000 | 86.9 | 57.0 | 0.66 [0.65] |
+| defaults | 10,000 | 1,516.0 | 628.9 | 0.41 [0.40] |
+| KS max | 100 | 20.8 | 7.44 | 0.36 [0.36] |
+| KS max | 1,000 | 37.8 | 80.3 | **2.12** [2.12] |
+| KS max | 10,000 | 230.3 | 1,117.4 | **4.85** [4.73] |
+
+The new code evaluates the criterion at every iteration and takes the global optimum (see "Key
+Differences from R twang"), where v0.5.0 stopped at the first iteration after 100 whose criterion
+fell below 0.1. `interaction_depth = 3`
+(this version only; v0.5.0 ignored it) takes 18.0 / 132.0 / 1,293.9 ms at n = 100 / 1,000 / 10,000. The
+rows above 1.1x were signed off on 2026-11-13 (rule 5).
+
 ## References
 
 - Ridgeway, G., McCaffrey, D., Morral, A., Burgette, L., & Griffin, B.A. (2017).

@@ -296,7 +296,11 @@ pub(crate) fn lcg_random(state: &mut u64) -> usize {
 /// its FMA `exp`/`ln` variants only when FMA and AVX2 are usable,
 /// matrixmultiply's `KernelFmaAvx2` needs AVX2 (it falls back to `KernelFma`
 /// without it), nano-gemm's f64 kernels need AVX2 and pulp's x86-v3 path
-/// needs both. Elsewhere the golden tests compare to a tolerance instead.
+/// needs both. pulp's x86-v3 path also needs BMI1, BMI2 and LZCNT (and
+/// POPCNT, which x86-v2 already requires), which every AVX2+FMA CPU has but a
+/// virtual machine can mask; without them pulp falls back to its x86-v2
+/// kernels, so the gate checks them too. Elsewhere the golden tests compare to
+/// a tolerance instead.
 ///
 /// AVX-512 hosts pass this gate because they run the same x86-v3 kernels:
 /// pulp's `nightly-x86-v4` and gemm's and nano-gemm's `nightly` features are
@@ -306,7 +310,12 @@ pub(crate) fn lcg_random(state: &mut u64) -> usize {
 pub(crate) fn golden_bits_platform() -> bool {
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     {
-        std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma")
+        std::arch::is_x86_feature_detected!("avx2")
+            && std::arch::is_x86_feature_detected!("fma")
+            && std::arch::is_x86_feature_detected!("bmi1")
+            && std::arch::is_x86_feature_detected!("bmi2")
+            && std::arch::is_x86_feature_detected!("lzcnt")
+            && std::arch::is_x86_feature_detected!("popcnt")
     }
     #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
     {

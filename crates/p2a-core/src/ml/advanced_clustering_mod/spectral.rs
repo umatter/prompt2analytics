@@ -298,8 +298,9 @@ fn build_knn_affinity(data: &ArrayView2<f64>, k: usize) -> Result<Array2<f64>, S
 const DENSE_COMPONENT: usize = 128;
 
 /// The k largest eigenvalues of M = D^-1/2 A D^-1/2 (overwriting `affinity`) and their
-/// eigenvectors (n x k, zero outside their component). Returns L_sym's eigenvalues 1 - mu,
-/// ascending, and the eigenvectors in the same order.
+/// eigenvectors (n x k, zero outside their component). Returns L_sym's eigenvalues 1 - mu and the
+/// eigenvectors in the same order: the leading eigenvalue (0 up to rounding) of each connected
+/// component first, in component order, then the others ascending.
 fn compute_laplacian_eigenvectors(
     mut affinity: Array2<f64>,
     k: usize,
@@ -385,8 +386,18 @@ fn compute_laplacian_eigenvectors(
             candidates.push((rank == 0 && connected, mu, c, v));
         }
     }
-    // Leading eigenvalues (1) of the components first, in component order; then by mu.
-    candidates.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.total_cmp(&a.1)));
+    // Leading eigenvalues (1 up to rounding) of the components first, in component order, so
+    // that their last bits choose neither the order nor, for k below the number of components,
+    // which components are kept; then the rest by mu, descending.
+    candidates.sort_by(|a, b| {
+        b.0.cmp(&a.0).then_with(|| {
+            if a.0 && b.0 {
+                a.2.cmp(&b.2)
+            } else {
+                b.1.total_cmp(&a.1)
+            }
+        })
+    });
     candidates.truncate(k);
 
     let mut eigenvectors = try_zeros2(n, k, "spectral clustering embedding").map_err(to_string)?;
@@ -635,6 +646,41 @@ mod tests {
 
     use ndarray::array;
 
+    /// With several components, each leading eigenvalue is 1 up to rounding; the components'
+    /// leading eigenvectors come first in component order, whatever their last bits.
+    #[test]
+    fn test_spectral_leading_eigenvectors_in_component_order() {
+        // 8 components of 3 to 10 points, dense, with irregular positive weights
+        let sizes = [5usize, 3, 9, 4, 7, 10, 6, 8];
+        let n: usize = sizes.iter().sum();
+        let mut a = Array2::<f64>::zeros((n, n));
+        let mut start = 0;
+        let mut comp = vec![0usize; n];
+        for (c, &m) in sizes.iter().enumerate() {
+            for i in start..start + m {
+                comp[i] = c;
+                for j in start..start + m {
+                    if i != j {
+                        let w = 0.2 + ((i * 37 + j * 37 + i * j * 11) % 101) as f64 / 101.0;
+                        a[[i, j]] = w;
+                    }
+                }
+            }
+            start += m;
+        }
+        let k = sizes.len();
+        let (vals, vecs) = compute_laplacian_eigenvectors(a, k).unwrap();
+        for col in 0..k {
+            assert!(vals[col].abs() < 1e-12, "{vals:?}");
+            let support: Vec<usize> = (0..n).filter(|&i| vecs[[i, col]] != 0.0).collect();
+            assert!(
+                !support.is_empty() && support.iter().all(|&i| comp[i] == col),
+                "column {col} lies on components {:?}",
+                support.iter().map(|&i| comp[i]).collect::<Vec<_>>()
+            );
+        }
+    }
+
     #[test]
     fn test_spectral_rejects_bad_parameters_and_default_seed_is_fixed() {
         let x = Array2::from_shape_fn((12, 2), |(i, j)| {
@@ -726,15 +772,11 @@ mod tests {
         for k in [2usize, 3] {
             let r = spectral_clustering(x.view(), k, Some(AffinityType::Rbf { gamma: 0.5 }), None)
                 .unwrap();
-            let lsym: Vec<f64> = case
-                .vector(&format!("pair_k{k}_mu"))
-                .iter()
-                .map(|m| 1.0 - m)
-                .collect();
-            for (a, b) in r.eigenvalues.iter().zip(&lsym) {
-                // Tol::coef(42): 1e-6 relative, 1e-12 absolute
-                assert!((a - b).abs() <= 1e-6 * b.abs() + 1e-12, "{a} vs {b}");
-            }
+            // R's eigenvalues mu of M; L_sym's are 1 - mu. The absolute 1e-12 is the bound that
+            // Tol::coef(42) (1e-6 relative to 1 - mu, 1e-12 absolute) gives the leading pair,
+            // whose 1 - mu is 0 up to rounding, and tighter for the third.
+            let mu: Vec<f64> = r.eigenvalues.iter().map(|l| 1.0 - l).collect();
+            check.vector(&format!("pair_k{k}_mu"), &mu, Tol::new(0.0, 1e-12));
             check.vector(
                 &format!("pair_k{k}_cluster"),
                 &by_first_appearance(&r.labels),

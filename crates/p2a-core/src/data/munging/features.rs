@@ -85,11 +85,6 @@ fn shift_expr(
     check_shift_columns(df, column, opts)?;
     let groups = opts.group_by.filter(|g| !g.is_empty());
     if let Some(time) = opts.time {
-        if df.column(SHIFTED).is_ok() {
-            return Err(MungeError::InvalidExpression(format!(
-                "a time-indexed shift uses the column name '{SHIFTED}' internally; rename that column first"
-            )));
-        }
         let shifted = shifted_column_by_time(df, column, periods, groups.unwrap_or(&[]), time)?;
         return Ok((Some(shifted.with_name(SHIFTED.into())), col(SHIFTED)));
     }
@@ -166,6 +161,12 @@ fn with_shifted(
     let (extra, shifted) = shift_expr(df, column, periods, opts)?;
     let mut base = df.clone();
     if let Some(extra) = extra {
+        // Only this path adds the computed column to the frame; `shift_within` returns it.
+        if df.column(SHIFTED).is_ok() {
+            return Err(MungeError::InvalidExpression(format!(
+                "a time-indexed shift uses the column name '{SHIFTED}' internally; rename that column first"
+            )));
+        }
         base.with_column(extra)?;
     }
     let mut result = base
@@ -2214,7 +2215,7 @@ mod tests {
     }
 
     /// The direct path of a positional shift and of normalize gives what the expressions give,
-    /// on noisy Float64, Int64 and Float32 columns with nulls and NaN.
+    /// on noisy Float64, Int64, Float32, UInt32, Int32 and Date columns with nulls and NaN.
     #[test]
     fn direct_shift_and_normalize_match_the_expressions() {
         let mut rng = rand::rngs::StdRng::seed_from_u64(31);
@@ -2232,10 +2233,18 @@ mod tests {
         let h: Vec<Option<f32>> = (0..n)
             .map(|i| (i % 11 != 2).then(|| rng.gen_range(0.5f32..9.5)))
             .collect();
+        let u: Vec<Option<u32>> = (0..n)
+            .map(|i| (i % 7 != 1).then(|| rng.gen_range(0u32..60)))
+            .collect();
+        let w: Vec<Option<i32>> = (0..n)
+            .map(|i| (i % 9 != 6).then(|| rng.gen_range(-30i32..30)))
+            .collect();
         let df = DataFrame::new(vec![
             Column::new("f".into(), f),
             Column::new("k".into(), k),
             Column::new("h".into(), h),
+            Column::new("u".into(), u),
+            Column::new("w".into(), w),
             Column::new("d".into(), (0..n as i32).collect::<Vec<_>>())
                 .cast(&DataType::Date)
                 .unwrap(),
@@ -2261,7 +2270,7 @@ mod tests {
                 "{name}"
             );
         };
-        for c in ["f", "k", "h", "d"] {
+        for c in ["f", "k", "h", "u", "w", "d"] {
             for p in [1usize, 3] {
                 let shifted = col(c).shift(lit(p as i64));
                 same(
@@ -2290,8 +2299,8 @@ mod tests {
                 }
             }
         }
-        let normalized = normalize(&ds, &["f", "k", "h"]).unwrap();
-        for c in ["f", "k", "h"] {
+        let normalized = normalize(&ds, &["f", "k", "h", "u", "w"]).unwrap();
+        for c in ["f", "k", "h", "u", "w"] {
             let e = col(c).cast(DataType::Float64);
             let (lo, hi) = (e.clone().min(), e.clone().max());
             same(
@@ -2847,6 +2856,13 @@ mod tests {
             Err(MungeError::InvalidExpression(m)) => assert!(m.contains(SHIFTED), "{m}"),
             other => panic!("{:?}", other.map(|d| d.df().get_column_names_str().len())),
         }
+        // the shared shift step never adds the internal column, so the same frame is fine there
+        let within = shift_within(clash.df(), "v", 1, &one_series).unwrap();
+        assert_eq!(within.name().as_str(), "v");
+        assert_eq!(
+            within.f64().unwrap().into_iter().collect::<Vec<_>>(),
+            [None, Some(1.5), Some(2.5)]
+        );
 
         // without groups, the time column indexes one series
         let one =

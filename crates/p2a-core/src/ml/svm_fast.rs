@@ -887,8 +887,15 @@ fn train(
         *slot = kernel_value(row, row, config.kernel);
     }
     let overflow = || EconError::InvalidSpecification {
-        message: "FastSVM: the kernel overflows on these data; rescale them or lower gamma"
-            .to_string(),
+        message: match config.kernel {
+            FastKernel::Linear => {
+                "FastSVM: the inner products overflow on these data; rescale the features"
+            }
+            FastKernel::Rbf { .. } | FastKernel::Polynomial { .. } => {
+                "FastSVM: the kernel overflows on these data; rescale them or lower gamma"
+            }
+        }
+        .to_string(),
     };
     if qd.iter().any(|v| !v.is_finite()) {
         return Err(overflow());

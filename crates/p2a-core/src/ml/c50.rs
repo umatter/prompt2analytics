@@ -150,6 +150,9 @@ impl std::fmt::Display for ComparisonOp {
     }
 }
 
+/// Prints the 0-based feature index as `X[i]`, not the feature's name: a condition does not know
+/// the names. [`C50Result::condition_text`] gives the named form that [`C50Result`]'s `Display`
+/// prints.
 impl std::fmt::Display for C50RuleCondition {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -160,6 +163,10 @@ impl std::fmt::Display for C50RuleCondition {
     }
 }
 
+/// Prints the conditions as `X[i]` (see [`C50RuleCondition`]) and the dense class code, not the
+/// class label: a rule knows neither the feature names nor the labels.
+/// [`C50Result::condition_text`] and [`C50Result::class_text`] give the named forms that
+/// [`C50Result`]'s `Display` prints.
 impl std::fmt::Display for C50Rule {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let conditions_str: Vec<String> = self.conditions.iter().map(|c| c.to_string()).collect();
@@ -1849,6 +1856,17 @@ mod tests {
     #[test]
     fn test_c50_importance_counts_only_kept_splits() {
         // ML-124. Importance was added when a split was found, before its subtree could be pruned.
+        // A 20-row case where every split keeps class 0 the majority on both sides, so pruning
+        // makes the root a leaf; the root's split counted as importance 1 all the same.
+        let x1 = Array2::from_shape_fn((20, 1), |(i, _)| (i + 1) as f64);
+        let y1 = Array1::from_shape_fn(20, |i| {
+            f64::from(u8::from([3, 8, 13, 18].contains(&(i + 1))))
+        });
+        let pruned = c50(x1.view(), y1.view(), &C50Config::default()).unwrap();
+        assert!(pruned.trees[0].split.is_none());
+        assert_eq!(pruned.variable_importance, vec![0.0]);
+
+        // 120 rows, pruned hard: a feature has importance exactly when a kept split uses it.
         let mut u = lcg_uniforms(5);
         let x = Array2::from_shape_fn((120, 3), |_| u());
         let y = Array1::from_shape_fn(120, |i| {
@@ -1860,15 +1878,6 @@ mod tests {
             ..Default::default()
         };
         let r = c50(x.view(), y.view(), &cfg).unwrap();
-        // Every split keeps class 0 the majority on both sides, so pruning makes the root a leaf; the
-        // root's split counted as importance 1 all the same.
-        let x1 = Array2::from_shape_fn((20, 1), |(i, _)| (i + 1) as f64);
-        let y1 = Array1::from_shape_fn(20, |i| {
-            f64::from(u8::from([3, 8, 13, 18].contains(&(i + 1))))
-        });
-        let pruned = c50(x1.view(), y1.view(), &C50Config::default()).unwrap();
-        assert!(pruned.trees[0].split.is_none());
-        assert_eq!(pruned.variable_importance, vec![0.0]);
         for j in 0..3 {
             let used = r.trees.iter().any(|t| uses_feature(t, j));
             assert_eq!(
@@ -2091,7 +2100,6 @@ mod tests {
         assert!(c50(x.view(), y.view(), &cfg).is_ok());
     }
 
-    /// x = 0, 1, 2, ...; y alternates 0/1: every best split peels one row off an end.
     /// `blocks` blocks of 12 cases with one x value each and alternating classes. Peeling the
     /// first block is the largest gain at every node, and its gain, about 12 ln 2 / W, beats the
     /// MDL cost ln(blocks - 1) / W, so the tree is a chain of `blocks - 1` splits.

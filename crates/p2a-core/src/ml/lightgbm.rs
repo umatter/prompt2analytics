@@ -843,6 +843,12 @@ fn find_best_split(
     best_split.map(|(f, b)| (f, b, best_gain))
 }
 
+/// The depth a tree grows to: `max_depth` (negative: no limit of its own), capped at
+/// [`MAX_TREE_DEPTH`] in every case.
+fn effective_max_depth(max_depth: i32) -> usize {
+    usize::try_from(max_depth).map_or(MAX_TREE_DEPTH, |d| d.min(MAX_TREE_DEPTH))
+}
+
 /// Fit a single LightGBM tree using leaf-wise growth.
 fn fit_tree(
     binned_data: &Array2<usize>,
@@ -865,11 +871,7 @@ fn fit_tree(
         }
         None => compute_leaf_value(grad_sum, hess_sum, config.lambda_l1, config.lambda_l2),
     };
-    let max_depth = if config.max_depth < 0 {
-        MAX_TREE_DEPTH
-    } else {
-        (config.max_depth as usize).min(MAX_TREE_DEPTH)
-    };
+    let max_depth = effective_max_depth(config.max_depth);
 
     if sample_indices.is_empty() {
         return tree;
@@ -2238,5 +2240,12 @@ mod tests {
             }
         }
         assert!(max <= MAX_TREE_DEPTH, "depth {max}");
+        // the cap binds whatever max_depth asks for
+        assert_eq!(effective_max_depth(-1), MAX_TREE_DEPTH);
+        assert_eq!(effective_max_depth(i32::MIN), MAX_TREE_DEPTH);
+        assert_eq!(effective_max_depth(10_000), MAX_TREE_DEPTH);
+        assert_eq!(effective_max_depth(i32::MAX), MAX_TREE_DEPTH);
+        assert_eq!(effective_max_depth(7), 7);
+        assert_eq!(effective_max_depth(0), 0);
     }
 }

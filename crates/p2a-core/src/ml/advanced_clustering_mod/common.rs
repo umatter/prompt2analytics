@@ -149,21 +149,27 @@ pub(crate) fn compute_silhouette_from_distances(
     distances: &Array2<f64>,
     labels: &[usize],
     _n_clusters: usize,
-) -> Vec<f64> {
-    crate::ml::cluster_validation::silhouette_core(distances.view(), labels).widths
+) -> EconResult<Vec<f64>> {
+    Ok(crate::ml::cluster_validation::silhouette_core(distances.view(), labels)?.widths)
 }
 
 /// Average silhouette width (CLARA's `silinfo$avg.width`); 0 when n < 2 or k < 2.
-pub(crate) fn compute_silhouette_avg(labels: &[usize], distances: &Array2<f64>, k: usize) -> f64 {
+pub(crate) fn compute_silhouette_avg(
+    labels: &[usize],
+    distances: &Array2<f64>,
+    k: usize,
+) -> EconResult<f64> {
     let n = labels.len();
     if n < 2 || k < 2 {
-        return 0.0;
+        return Ok(0.0);
     }
-    crate::ml::cluster_validation::silhouette_core(distances.view(), labels)
-        .widths
-        .iter()
-        .sum::<f64>()
-        / n as f64
+    Ok(
+        crate::ml::cluster_validation::silhouette_core(distances.view(), labels)?
+            .widths
+            .iter()
+            .sum::<f64>()
+            / n as f64,
+    )
 }
 
 /// Refuse data the distance-based clusterings cannot use: zero columns, non-finite values, and
@@ -450,7 +456,7 @@ pub fn cluster_stats(
 
     // Silhouette
     let (average_silhouette, cluster_silhouette) =
-        compute_silhouette_details(labels, &distances, k);
+        compute_silhouette_details(labels, &distances, k).map_err(|e| e.to_string())?;
 
     // Dunn index
     let dunn_index = if max_diameter > 0.0 {
@@ -503,12 +509,12 @@ fn compute_silhouette_details(
     labels: &[usize],
     distances: &Array2<f64>,
     k: usize,
-) -> (f64, Vec<f64>) {
+) -> EconResult<(f64, Vec<f64>)> {
     let n = labels.len();
     if n < 2 || k < 2 {
-        return (0.0, vec![0.0; k]);
+        return Ok((0.0, vec![0.0; k]));
     }
-    let widths = crate::ml::cluster_validation::silhouette_core(distances.view(), labels).widths;
+    let widths = crate::ml::cluster_validation::silhouette_core(distances.view(), labels)?.widths;
     let mut sum = vec![0.0; k];
     let mut count = vec![0usize; k];
     for (&l, &w) in labels.iter().zip(&widths) {
@@ -523,7 +529,7 @@ fn compute_silhouette_details(
         .zip(&count)
         .map(|(&s, &c)| if c > 0 { s / c as f64 } else { 0.0 })
         .collect();
-    (avg, per)
+    Ok((avg, per))
 }
 
 /// Convenience wrapper for cluster_stats.
@@ -594,17 +600,17 @@ mod tests {
             .map(|&v| v as usize - 1)
             .collect();
         let d = compute_distance_matrix(&x.view());
-        let (avg_details, cluster_details) = compute_silhouette_details(&labels, &d, 6);
+        let (avg_details, cluster_details) = compute_silhouette_details(&labels, &d, 6).unwrap();
         let stats = cluster_stats(x.view(), &labels).unwrap();
         Check::new(&case)
             .vector(
                 "sil_width",
-                &compute_silhouette_from_distances(&d, &labels, 6),
+                &compute_silhouette_from_distances(&d, &labels, 6).unwrap(),
                 Tol::coef(n),
             )
             .scalar(
                 "avg_width",
-                compute_silhouette_avg(&labels, &d, 6),
+                compute_silhouette_avg(&labels, &d, 6).unwrap(),
                 Tol::stat(n),
             )
             .vector("cluster_avg", &cluster_details, Tol::stat(n))
@@ -633,7 +639,9 @@ mod tests {
         ];
         let labels = vec![0, 0, 1, 1, 0, 2, 2, 0, 1, 2, 0, 1];
         let d = compute_distance_matrix(&x.view());
-        assert!((compute_silhouette_avg(&labels, &d, 3) - 0.617882355558917).abs() < 1e-12);
+        assert!(
+            (compute_silhouette_avg(&labels, &d, 3).unwrap() - 0.617882355558917).abs() < 1e-12
+        );
     }
 
     #[test]

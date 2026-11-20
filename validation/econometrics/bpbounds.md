@@ -85,6 +85,16 @@ Table 2 by hand: p = 0.30, 0.25, 0.20, 0.25 | 0.15, 0.10, 0.25, 0.50.
 - `econometrics::bpbounds::tests::test_bpbounds_inequality_fails_without_crossing`: a table with uncrossed bounds
   [0.2, 0.6] that violates the inequality (d = 1: 1.2 > 1) warns, in both monotonicity modes and on both paths.
 
+## Wall-clock
+
+Bootstrap interval, B = 1000 (seeded), on simulated binary Z, D and Y; release builds of v0.5.0
+(`f80b0131`) and this version, one P core (`taskset -c 2`, one rayon thread), five rounds interleaving the
+builds in rotating order, each process reporting the median of its calls (1-minute load average 1.3-3.5;
+2026-11-15). New / v0.5.0 as the ratio of the medians of the per-round medians, the ratio of their minima in
+brackets: 0.84 [0.84] at n = 100 (5.34 -> 4.50 ms), 0.83 [0.83] at n = 1,000 (47.0 -> 38.8 ms) and
+0.87 [0.87] at n = 10,000 (632 -> 550 ms). The binary-input check this version adds is a constant-time test per
+value where the cell counts are built.
+
 ## References
 
 - Balke, A., & Pearl, J. (1997). Bounds on treatment effects from studies with imperfect compliance. *JASA*,
