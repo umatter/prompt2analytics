@@ -20,9 +20,10 @@
 //! reference under both. The split is chosen once per file: the first strL cell in data order
 //! that is not (0, 0) is the first occurrence of its value, so it references its own variable and
 //! row, and the split under which it does is used for every cell. When neither split gives that,
-//! each cell is read with 2/6 and, when that does not resolve, with 3/5. The decoded strL text is
-//! held to the allocation ceiling as the cells are read (equal values share one block in the file
-//! but are copied into each cell). Binary blocks are read as text with invalid UTF-8 replaced,
+//! each cell is read with 2/6 and, when that does not resolve, with 3/5, and a note says the split
+//! could not be determined. The decoded strL text of all strL columns together is held to the
+//! allocation ceiling as the cells are read (equal values share one block in the file but are
+//! copied into each cell), so several strL columns each under the ceiling can be refused together. Binary blocks are read as text with invalid UTF-8 replaced,
 //! and a note says so.
 //!
 //! **Formats and value labels.** `%td` (and the legacy `%d`) columns load as `Date` (days since
@@ -295,7 +296,8 @@ pub struct StataReader<R: Read + Seek> {
     strls: PlHashMap<(u64, u64), String>,
     /// How release-119 strL references are split, decided at the first non-empty cell.
     strl_split: StrlSplit,
-    /// Bytes of strL text (and their cells) copied into the columns so far.
+    /// Bytes of strL text (and their cells) copied into the columns so far, all strL columns
+    /// together: one budget per file, checked against the allocation ceiling.
     strl_held: usize,
     /// The allocation ceiling in force when the read began (`usize::MAX`: none).
     ceiling: usize,
@@ -978,8 +980,11 @@ impl<R: Read + Seek> StataReader<R> {
                     .strl_held
                     .saturating_add(text.len() + size_of::<Option<String>>());
                 if self.strl_held > self.ceiling {
-                    crate::resource::check_alloc::<u8>(self.strl_held, "Stata strL cells")
-                        .map_err(resource_err)?;
+                    crate::resource::check_alloc::<u8>(
+                        self.strl_held,
+                        "Stata strL cells (the text of all strL columns together)",
+                    )
+                    .map_err(resource_err)?;
                 }
                 v.push(Some(text));
             }
@@ -1029,13 +1034,21 @@ impl<R: Read + Seek> StataReader<R> {
             } else if split(3) == own {
                 StrlSplit::Fixed(3)
             } else {
+                self.notes.push(format!(
+                    "strL column '{name}': the release-119 reference split could not be determined \
+                     from the first non-empty cell; each reference is read as 2/6 and, if that does \
+                     not resolve, as 3/5"
+                ));
                 StrlSplit::PerCell
             };
         }
         let release_width = [self.release.strl_v_width()];
+        let fixed_width;
         let widths: &[usize] = match (self.release, self.strl_split) {
-            (Release::R119, StrlSplit::Fixed(2)) => &[2],
-            (Release::R119, StrlSplit::Fixed(_)) => &[3],
+            (Release::R119, StrlSplit::Fixed(width)) => {
+                fixed_width = [width];
+                &fixed_width
+            }
             (Release::R119, _) => &[2, 3],
             _ => &release_width,
         };
@@ -1694,6 +1707,27 @@ mod tests {
             reader.strl_text(&stata_7_1, sl, "sl", 255).unwrap(),
             "row 256"
         );
+        assert!(reader.notes.is_empty(), "{:?}", reader.notes);
+        // A first cell that references neither its own (7, row) under 2/6 nor under 3/5 leaves
+        // the split undetermined: each cell is read per cell, and a note says so, once.
+        let b = fixture_bytes("dta119_formats.dta");
+        let mut reader = StataReader::new(Cursor::new(b)).unwrap();
+        reader.n_obs = 300;
+        reader.strls.insert((7, 1), "first".to_string());
+        reader.strls.insert((7, 256), "row 256".to_string());
+        assert_eq!(reader.strl_text(&haven_7_1, sl, "sl", 4).unwrap(), "first");
+        assert_eq!(reader.strl_split, StrlSplit::PerCell);
+        assert_eq!(
+            reader.strl_text(&stata_7_1, sl, "sl", 5).unwrap(),
+            "row 256"
+        );
+        assert_eq!(reader.notes.len(), 1, "{:?}", reader.notes);
+        assert!(
+            reader.notes[0].contains("strL column 'sl'")
+                && reader.notes[0].contains("could not be determined"),
+            "{:?}",
+            reader.notes
+        );
     }
 
     #[test]
@@ -1712,7 +1746,11 @@ mod tests {
         assert!(crate::resource::with_alloc_ceiling(ceiling, || load(b)).is_ok());
         let e = crate::resource::with_alloc_ceiling(ceiling, || load(patched.clone()).unwrap_err());
         match e {
-            StataError::ParseError(m) => assert!(m.contains("Stata strL cells"), "{m}"),
+            // one budget for the strL text of every strL column, and the message says so
+            StataError::ParseError(m) => assert!(
+                m.contains("Stata strL cells") && m.contains("all strL columns together"),
+                "{m}"
+            ),
             other => panic!("expected ParseError, got {other:?}"),
         }
         let df = load(patched).unwrap();
