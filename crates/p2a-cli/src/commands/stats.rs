@@ -707,16 +707,14 @@ pub fn execute(
             probs,
             rescale_p,
         } => {
-            let source = match (observed, counts) {
-                (Some(col), _) => GofSource::Observed(col),
-                (None, Some(col)) => GofSource::Counts {
-                    column: col,
-                    labels: labels.as_deref(),
-                },
-                // clap's ArgGroup requires one of them; a caller that builds the command
-                // without clap gets the same refusal instead of a panic
-                (None, None) => {
-                    print_error("chisq-gof needs --observed or --counts", format);
+            let source = match GofSource::from_flags(
+                observed.as_deref(),
+                counts.as_deref(),
+                labels.as_deref(),
+            ) {
+                Ok(source) => source,
+                Err(msg) => {
+                    print_error(msg, format);
                     return Ok(());
                 }
             };
@@ -1232,6 +1230,26 @@ enum GofSource<'a> {
     },
 }
 
+impl<'a> GofSource<'a> {
+    /// The source `--observed` / `--counts` (with `--labels`) name; `--observed` wins. clap's
+    /// ArgGroup requires one of them; a caller that builds the command without clap gets
+    /// this refusal instead of a panic.
+    fn from_flags(
+        observed: Option<&'a str>,
+        counts: Option<&'a str>,
+        labels: Option<&'a str>,
+    ) -> Result<Self, &'static str> {
+        match (observed, counts) {
+            (Some(col), _) => Ok(GofSource::Observed(col)),
+            (None, Some(col)) => Ok(GofSource::Counts {
+                column: col,
+                labels,
+            }),
+            (None, None) => Err("chisq-gof needs --observed or --counts"),
+        }
+    }
+}
+
 /// Core's refusal of probabilities that do not sum to 1 names its own option; the CLI's is
 /// `--rescale-p`.
 fn gof_error_message(e: &EconError) -> String {
@@ -1277,7 +1295,11 @@ fn gof_labels(ds: &p2a_core::Dataset, labels: Option<&str>, k: usize) -> EconRes
 }
 
 /// A float category label as R's `as.character` prints it for the common cases: a whole number
-/// without a fractional part, `NA` for a missing cell, `NaN`, `Inf`, `-Inf`.
+/// without a fractional part, `NA` for a missing cell, `NaN`, `Inf`, `-Inf`. Two cases differ
+/// from R: a fractional value prints in Rust's shortest round-trip form, so a value that needs
+/// more than 15 significant digits keeps them (`0.1 + 0.2` gives `0.30000000000000004`, R's
+/// `0.3`), and a whole number of magnitude 1e15 or more prints in Rust's fixed form
+/// (`1000000000000000`, R's `1e+15`).
 fn float_label(v: Option<f64>) -> String {
     match v {
         None => "NA".to_string(),
@@ -2782,7 +2804,7 @@ mod ccf_lag_tests {
 
 #[cfg(test)]
 mod chisq_gof_tests {
-    use super::{OutputFormat, StatsCommands, execute};
+    use super::{GofSource, OutputFormat, StatsCommands, execute};
 
     /// A chisq-gof built without clap's ArgGroup (neither --observed nor --counts) is refused
     /// with an error, not a panic.
@@ -2796,9 +2818,25 @@ mod chisq_gof_tests {
             probs: None,
             rescale_p: false,
         };
+        // the refusal itself, local to this call
+        assert!(matches!(
+            GofSource::from_flags(None, None, None),
+            Err("chisq-gof needs --observed or --counts")
+        ));
+        assert!(matches!(
+            GofSource::from_flags(Some("o"), Some("c"), None),
+            Ok(GofSource::Observed("o"))
+        ));
+        assert!(matches!(
+            GofSource::from_flags(None, Some("c"), Some("l")),
+            Ok(GofSource::Counts {
+                column: "c",
+                labels: Some("l")
+            })
+        ));
         assert!(execute(&cmd, &OutputFormat::Json, true, None).is_ok());
-        // the refusal was reported, so the process exits non-zero (the flag only ever moves
-        // from false to true, so parallel tests cannot unset it)
+        // an extra check only: the flag is process-global and only ever moves from false
+        // to true, so another test's error can set it as well
         assert!(crate::output::error_was_reported());
     }
 
