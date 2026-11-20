@@ -3080,7 +3080,7 @@ mod schema_tests {
                 "flat": {"type": "object", "allOf": [{"$ref": "#/$defs/Closed"}],
                          "unevaluatedProperties": {"type": "integer"}},
                 // a variant below a typed schema is constrained by it
-                "narrowed": {"type": "object", "anyOf": [{"required": ["k"]}, true],
+                "narrowed": {"type": "object", "anyOf": [{"required": ["k"]}, {}],
                              "properties": {"k": {"type": "integer"}}},
                 "never": false
             },
@@ -3233,6 +3233,64 @@ mod schema_tests {
         assert!(!classified(&[&exempt], path, Kind::TooDeep));
     }
 
+    #[test]
+    fn walker_reports_integer_keyed_maps_and_an_any_json_arm_below_a_typed_schema() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                // integer-keyed maps, as schemars writes them, by their values
+                "keyed": {"type": "object",
+                          "patternProperties": {"^-?\\d+$": {"type": "number"}}},
+                "keyed_names": {"type": "object",
+                                "patternProperties": {"^-?\\d+$": {"type": "string"}}},
+                // `patternProperties` alone says what the value is
+                "keyed_variant": {"anyOf": [
+                    {"patternProperties": {"^-?\\d+$": {"type": "integer"}}}]},
+                // a `true` arm is any JSON whatever lies above it: the shape of a flattened
+                // untagged enum with a `Value` arm (an `{}` arm is narrowed, as `narrowed` shows)
+                "flattened": {"type": "object", "anyOf": [{"required": ["k"]}, true],
+                              "properties": {"k": {"type": "string"}}}
+            }
+        });
+        let mut found = cost_properties(&schema);
+        found.sort_by(|a, b| a.0.cmp(&b.0));
+        let found: Vec<(&str, Kind)> = found.iter().map(|(p, k)| (p.as_str(), *k)).collect();
+        assert_eq!(
+            found,
+            [
+                ("flattened", Kind::Untyped),
+                ("keyed", Kind::MapValues),
+                ("keyed_variant", Kind::MapValues),
+            ]
+        );
+        // a flattened integer-keyed map at the root
+        let root = json!({"type": "object",
+                          "patternProperties": {"^-?\\d+$": {"type": "string"}}});
+        assert_eq!(cost_properties(&root), [(String::new(), Kind::MapValues)]);
+    }
+
+    #[test]
+    fn walker_follows_a_reference_to_the_root() {
+        // A self-recursive request type refers to the root as `#`.
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "reps": {"type": "integer"},
+                "child": {"anyOf": [{"$ref": "#"}, {"type": "null"}]}
+            }
+        });
+        let found = cost_properties(&schema);
+        assert!(!found.iter().any(|(_, k)| *k == Kind::Untyped), "{found:?}");
+        assert!(found.contains(&("child.reps".to_string(), Kind::Integer)));
+        let last = format!("{}.", ["child"; MAX_DEPTH + 1].join("."));
+        assert!(found.contains(&(format!("{last}reps"), Kind::TooDeep)));
+        // a root that refers to itself is a cycle
+        assert_eq!(
+            cost_properties(&json!({"$ref": "#"})),
+            [(String::new(), Kind::TooDeep)]
+        );
+    }
+
     /// Most `$ref` hops followed from one schema.
     const MAX_REF_HOPS: usize = 16;
     /// Deepest nesting of objects and arrays walked. Each object property and each array level
@@ -3245,9 +3303,9 @@ mod schema_tests {
         /// The schema, its `$ref` targets and its `anyOf` / `oneOf` / `allOf` variants.
         all: Vec<&'a Value>,
         /// True when a leaf (a variant with no `anyOf`, `oneOf` or `allOf` and no `$ref` that
-        /// resolves) says nothing about its value, and nothing above it does ([`says_what`]), or
-        /// when a `$ref` does not resolve: any JSON can reach the value that way, whatever the
-        /// other variants say.
+        /// resolves) says nothing about its value, and nothing above it does ([`says_what`]),
+        /// when a variant is `true`, or when a `$ref` does not resolve: any JSON can reach the
+        /// value that way, whatever the other variants say.
         untyped: bool,
         /// True when the walk stopped after [`MAX_REF_HOPS`], so variants may be missing.
         too_deep: bool,
@@ -3257,7 +3315,7 @@ mod schema_tests {
     /// lists properties, elements or map values (which [`record`] then walks), or it is `false`
     /// (no value at all). `true`, `{}` and a schema with only a description accept any JSON.
     fn says_what(schema: &Value) -> bool {
-        const KEYS: [&str; 8] = [
+        const KEYS: [&str; 9] = [
             "type",
             "enum",
             "const",
@@ -3265,6 +3323,7 @@ mod schema_tests {
             "items",
             "prefixItems",
             "additionalProperties",
+            "patternProperties",
             "unevaluatedProperties",
         ];
         match schema {
@@ -3274,9 +3333,13 @@ mod schema_tests {
         }
     }
 
-    /// The target of a `$ref` (`#/definitions/...` or `#/$defs/...`, resolved against `root`).
+    /// The target of a `$ref` (`#/definitions/...` or `#/$defs/...`, resolved against `root`,
+    /// or `#`, the root itself, which a self-recursive type refers to).
     fn resolve<'a>(root: &'a Value, reference: &Value) -> Option<&'a Value> {
         let reference = reference.as_str()?;
+        if reference == "#" {
+            return Some(root);
+        }
         let (defs, name) = if let Some(name) = reference.strip_prefix("#/definitions/") {
             ("definitions", name)
         } else {
@@ -3293,7 +3356,9 @@ mod schema_tests {
     }
 
     /// Adds `schema` and the schemas it stands for to `out`. `typed_above` is true when a schema
-    /// that leads here says what the value is, which then constrains this one as well.
+    /// that leads here says what the value is, which then constrains this one as well; a `true`
+    /// variant is any JSON all the same, because that is how schemars writes a `Value` arm of a
+    /// flattened untagged enum, whose parent is an object.
     fn variants<'a>(
         root: &'a Value,
         schema: &'a Value,
@@ -3306,6 +3371,10 @@ mod schema_tests {
             return;
         }
         out.all.push(schema);
+        if matches!(schema, Value::Bool(true)) {
+            out.untyped = true;
+            return;
+        }
         let typed = typed_above || says_what(schema);
         let mut leaf = true;
         if let Some(reference) = schema.get("$ref") {
@@ -3355,16 +3424,25 @@ mod schema_tests {
                 .any(|v| v.get("items").is_some() || v.get("prefixItems").is_some())
     }
 
-    /// The schemas a map's values must match: `additionalProperties`, or the
+    /// The schemas a map's values must match: `additionalProperties`, the
     /// `unevaluatedProperties` that schemars writes for a flattened map next to subschemas,
-    /// unless it is `false` (no keys beyond the listed properties).
+    /// unless it is `false` (no keys beyond the listed properties), and each schema of
+    /// `patternProperties`, which schemars writes for a map with integer keys.
     fn map_value_schemas<'a>(variants_of: &[&'a Value]) -> Vec<&'a Value> {
-        variants_of
+        let mut out: Vec<&'a Value> = variants_of
             .iter()
             .flat_map(|v| ["additionalProperties", "unevaluatedProperties"].map(|k| v.get(k)))
             .flatten()
             .filter(|values| !matches!(values, Value::Bool(false)))
-            .collect()
+            .collect();
+        out.extend(
+            variants_of
+                .iter()
+                .filter_map(|v| v.get("patternProperties").and_then(Value::as_object))
+                .flat_map(|patterns| patterns.values())
+                .filter(|values| !matches!(values, Value::Bool(false))),
+        );
+        out
     }
 
     fn push(out: &mut Vec<(String, Kind)>, path: &str, kind: Kind) {
