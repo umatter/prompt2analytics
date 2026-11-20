@@ -51,8 +51,9 @@ search, so the pins hold to rounding).
 
 ## Tests
 
-- `test_validate_smooth_spline_spar_fixed`: knots, lambda, df, fit, leverages, GCV at spar 0.5;
-  lambda 1e-4; all knots; predictions inside and outside the range.
+- `test_validate_smooth_spline_spar_fixed`: knots, lambda, df, fit, leverages, GCV, `ratio` and
+  the spline coefficients at spar 0.5; lambda 1e-4; all knots (with its `ratio`); predictions
+  inside and outside the range.
 - `test_validate_smooth_spline_searched`: df 6, GCV, CV on A; GCV and df 5 with weights and ties
   on B (merged x, residuals); df 6 on C.
 - `test_validate_smooth_spline_gcv_cv_t3`: GCV, CV and df 6 of the t3 case.
