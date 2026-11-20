@@ -223,7 +223,8 @@ impl Session {
         Ok(session)
     }
 
-    /// Save the session to a file, atomically ([`write_atomically`]).
+    /// Save the session to a file, atomically ([`write_atomically`]): the file's directory
+    /// must be writable, even when the file itself is.
     pub fn save(&self, path: &PathBuf) -> anyhow::Result<()> {
         let content = serde_json::to_string_pretty(self)?;
         write_atomically(path, content.as_bytes())?;
@@ -364,8 +365,9 @@ const MAX_LINK_HOPS: usize = 40;
 
 /// The file a dangling symbolic link at `link` finally names, found as `std::fs::write`
 /// finds it: each link is read in turn (a relative target against the link's own
-/// directory) until a path that does not exist. More than [`MAX_LINK_HOPS`] links is the
-/// loop error the operating system gives.
+/// directory) until a path that does not exist. More than [`MAX_LINK_HOPS`] links is
+/// refused with an [`InvalidInput`](std::io::ErrorKind::InvalidInput) error that names the
+/// link, as the operating system refuses a loop.
 fn dangling_link_target(link: &Path) -> std::io::Result<PathBuf> {
     let mut path = link.to_path_buf();
     for _ in 0..MAX_LINK_HOPS {

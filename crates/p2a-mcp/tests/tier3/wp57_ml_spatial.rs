@@ -2468,8 +2468,11 @@ async fn test_mcp_spatial_probit_tools_effects_add_up() {
         assert_eq!(v.len(), 6, "{name}: {block}");
         let sum = v[0] + v[2];
         // Each value is rounded to 6 decimals (at most 5e-7 off), so the
-        // difference of the three is at most 1.5e-6 off; 2e-6 keeps the bound
-        // off that rounding edge.
+        // difference of the three is at most 1.5e-6 off. Parsing the three
+        // printed values back to f64 adds at most half an ulp each, about
+        // 1e-16 for values of this size, so any bound from 1.5e-6 plus a few
+        // ulps upward is safe: 2e-6 is a margin, not a value tuned to a
+        // failure.
         assert!(
             (v[4] - sum).abs() <= 2e-6,
             "{name}: total {} vs direct + indirect {sum}\n{block}",

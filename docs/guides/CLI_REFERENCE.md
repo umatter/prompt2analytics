@@ -567,13 +567,13 @@ p2a script export my_analysis.json -o my_analysis.sh
 
 The generated script can be shared and re-executed for reproducible results.
 
-Parallel invocations on one session file all record their commands: a save locks `<session file>.lock` (an
-empty file left beside the session file), merges its commands into what other invocations wrote meanwhile and
-replaces the file atomically, so the session file's directory must be writable (a save that cannot create the
-lock file or its temporary file there fails and names the file). A command does not see a dataset that a
-parallel command registers after it started. An empty session file (made by `mktemp`, say) starts a new session. Dataset paths are stored absolute,
-with the file's size and modification time; a later command warns when the file or the data no longer match
-the recording, and uses them anyway.
+Parallel invocations on one session file all record their commands: a save locks `<session file>.lock` (an empty
+file left beside the session file), merges its commands into what other invocations wrote meanwhile and replaces
+the file atomically, so the session file's directory must be writable (a save that cannot create the lock file or
+its temporary file there fails and names the file). A command does not see a dataset that a parallel command
+registers after it started. An empty session file (made by `mktemp`, say) starts a new session. Dataset paths are
+stored absolute, with the file's size and modification time; a later command warns when the file or the data no
+longer match the recording, and uses them anyway.
 
 The exported script replays the commands that succeeded, in the directory they ran in (set `P2A_WORKDIR` to
 replay a copy elsewhere), with the p2a binary in `$P2A` (default `p2a`). Commands that failed when recorded

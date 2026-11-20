@@ -392,6 +392,9 @@ pub(super) fn set_aside_rocksdb_store_to(
     aside: &Path,
 ) -> Result<std::path::PathBuf, String> {
     let lock = surrealkv_compat_rocksdb::lock_directory(path).map_err(|e| e.to_string())?;
+    // `a_store_is_not_set_aside_without_an_enforced_lock` covers the helper
+    // only: on Linux the real lock is always enforced, so nothing checks
+    // cheaply that `lock.enforced` is the value passed here.
     let moved = move_store_aside(path, aside, lock.enforced);
     drop(lock);
     moved
@@ -907,6 +910,7 @@ impl DbConnection {
             DEFINE FIELD IF NOT EXISTS loaded_at ON dataset_meta TYPE datetime;
             DEFINE FIELD IF NOT EXISTS file_size_bytes ON dataset_meta TYPE option<int>;
             DEFINE FIELD IF NOT EXISTS na_strings ON dataset_meta TYPE option<array<string>>;
+            DEFINE FIELD IF NOT EXISTS value_labels ON dataset_meta TYPE option<string>;
             DEFINE INDEX IF NOT EXISTS idx_dataset_meta_session ON dataset_meta COLUMNS session_id;
             DEFINE INDEX IF NOT EXISTS idx_dataset_meta_id ON dataset_meta COLUMNS id UNIQUE;
             DEFINE INDEX IF NOT EXISTS idx_dataset_meta_session_name ON dataset_meta COLUMNS session_id, name UNIQUE;

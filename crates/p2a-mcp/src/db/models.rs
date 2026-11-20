@@ -387,6 +387,11 @@ pub struct DatasetMeta {
     /// the field existed read as `None`.
     #[serde(default)]
     pub na_strings: Option<Vec<String>>,
+    /// The `value_labels` a Stata file was loaded with (`"codes"` or `"text"`; `None`:
+    /// not given, codes), so that a reload reads labelled columns the same way. Rows
+    /// stored before the field existed read as `None`.
+    #[serde(default)]
+    pub value_labels: Option<String>,
 }
 
 impl DatasetMeta {
@@ -412,6 +417,7 @@ impl DatasetMeta {
             loaded_at: Datetime::now(),
             file_size_bytes: None,
             na_strings: None,
+            value_labels: None,
         }
     }
 

@@ -988,6 +988,99 @@ async fn reload_reads_a_dataset_with_its_na_strings() {
     );
 }
 
+/// A Stata file loaded with `value_labels: "text"` is reloaded with its labels
+/// as text: its stored row keeps the option, and a reload does not bring the
+/// labelled column back as its numeric codes. A file loaded without the option
+/// keeps none and reloads with its codes.
+#[cfg(feature = "llm")]
+#[tokio::test]
+async fn reload_reads_a_stata_file_with_its_value_labels() {
+    let (r, state) = app(ServerConfig::default()).await;
+    let sid = new_session(&r).await;
+    let root = allowed_data_root().unwrap();
+    let dir = tempfile::Builder::new()
+        .prefix(".p2a-labels-reload-")
+        .tempdir_in(&root)
+        .unwrap();
+    std::fs::copy(
+        p2a_validation::repo_path("validation/datasets/files/dta118_formats.dta"),
+        dir.path().join("f.dta"),
+    )
+    .unwrap();
+    let file = dir
+        .path()
+        .strip_prefix(&root)
+        .unwrap()
+        .join("f.dta")
+        .to_string_lossy()
+        .into_owned();
+    for arguments in [
+        json!({"path": file, "name": "text", "value_labels": "Text"}),
+        json!({"path": file, "name": "codes"}),
+    ] {
+        let (st, body) = call(
+            &r,
+            "POST",
+            "/api/tools/load_dataset",
+            Some(&sid),
+            Some(json!({"session_id": sid, "arguments": arguments})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        assert_eq!(body["data"]["success"], true, "{body}");
+    }
+
+    let (st, body) = call(
+        &r,
+        "GET",
+        &format!("/api/sessions/{sid}/datasets"),
+        Some(&sid),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let stored = |name: &str| {
+        body["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["name"] == name)
+            .map(|d| d["value_labels"].clone())
+    };
+    assert_eq!(stored("text"), Some(json!("text")), "{body}");
+    assert_eq!(stored("codes"), Some(Value::Null), "{body}");
+
+    let session = state.session_manager.get_session(&sid).await.unwrap();
+    async fn dtypes(
+        session: &p2a_mcp::session::Session,
+    ) -> (
+        p2a_core::polars::prelude::DataType,
+        p2a_core::polars::prelude::DataType,
+    ) {
+        let datasets = session.datasets.read().await;
+        let gl = |name: &str| datasets[name].df().column("gl").unwrap().dtype().clone();
+        (gl("text"), gl("codes"))
+    }
+    let before = dtypes(&session).await;
+    assert_eq!(before.0, p2a_core::polars::prelude::DataType::String);
+    assert_ne!(before.1, p2a_core::polars::prelude::DataType::String);
+
+    // The live datasets go, as when the server restarts; the reload reads the
+    // file again.
+    session.datasets.write().await.clear();
+    session.refresh_data_bytes().await;
+    let body = reload(&r, &sid).await;
+    let mut succeeded: Vec<&str> = body["data"]["succeeded"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|s| s.as_str())
+        .collect();
+    succeeded.sort_unstable();
+    assert_eq!(succeeded, ["codes", "text"], "{body}");
+    assert_eq!(dtypes(&session).await, before);
+}
+
 /// A reload is admitted like a tool call: above the memory soft limit it is
 /// refused with the governor's 503.
 #[tokio::test]
@@ -1233,6 +1326,7 @@ async fn conversation_routes_answer_404_to_other_sessions() {
         ("DELETE", format!("/api/conversations/{c1}/messages"), None),
         ("GET", format!("/api/conversations/{c1}/tool-calls"), None),
         ("GET", format!("/api/messages/{m1}/tool-calls"), None),
+        ("DELETE", format!("/api/messages/{m1}"), None),
         ("DELETE", format!("/api/conversations/{c1}"), None),
     ];
     for (method, uri, body) in requests {
@@ -1330,6 +1424,60 @@ async fn conversation_routes_answer_404_to_other_sessions() {
         (st, body["code"].as_str()),
         (StatusCode::BAD_REQUEST, Some("invalid_arguments"))
     );
+}
+
+/// `DELETE /api/messages/{id}` removes one message of a conversation the
+/// caller's session owns (Retry takes an interrupted turn out with it): 204,
+/// the other messages stay and the conversation is recounted; a second
+/// delete, and a delete without a session, find nothing to delete.
+#[tokio::test]
+async fn deleting_one_message_of_an_owned_conversation() {
+    let (r, state) = app(ServerConfig::default()).await;
+    let sid = new_session(&r).await;
+    let conv = new_conversation(&r, &sid, "retry").await;
+    let mut ids = Vec::new();
+    for content in ["kept question", "asked twice"] {
+        let (st, body) = add_msg(&r, &sid, &conv, content).await;
+        assert_eq!(st, StatusCode::CREATED, "{body}");
+        ids.push(body["data"]["id"].as_str().unwrap().to_string());
+    }
+    let (st, body) = call(
+        &r,
+        "DELETE",
+        &format!("/api/messages/{}", ids[1]),
+        Some(&sid),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::NO_CONTENT, "{body}");
+    let msgs = pm(&state).db().get_messages(&conv).await.unwrap();
+    assert_eq!(
+        msgs.iter().map(|m| m.content.as_str()).collect::<Vec<_>>(),
+        ["kept question"]
+    );
+    let c = pm(&state).db().get_conversation(&conv).await.unwrap();
+    assert_eq!(c.message_count, 1);
+    assert_eq!(c.last_message_preview.as_deref(), Some("kept question"));
+
+    let (st, body) = call(
+        &r,
+        "DELETE",
+        &format!("/api/messages/{}", ids[1]),
+        Some(&sid),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::NOT_FOUND, "{body}");
+    let (st, _) = call(
+        &r,
+        "DELETE",
+        &format!("/api/messages/{}", ids[0]),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    assert_eq!(pm(&state).db().get_messages(&conv).await.unwrap().len(), 1);
 }
 
 /// Settings rows are created only for live sessions, and the path id is the

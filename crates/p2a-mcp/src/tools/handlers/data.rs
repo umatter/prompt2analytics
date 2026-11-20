@@ -1915,14 +1915,7 @@ impl AnalyticsServer {
                 "value_labels applies only to Stata (.dta) files. Nothing was loaded.",
             )]));
         }
-        let loaded = if is_stata && request.na_strings.is_none() {
-            let mut options = p2a_core::data::StataOptions::default();
-            options.value_labels = value_labels;
-            DataLoader::load_stata_dataset(&path, &options)
-        } else {
-            load_with_request_na(&path, request.na_strings.as_deref())
-                .map(|ds| (ds, Vec::new(), Vec::new()))
-        };
+        let loaded = load_dataset_file(&path, request.na_strings.as_deref(), value_labels);
         let (dataset, labels, notes) = match loaded {
             Ok(loaded) => loaded,
             Err(e) => {
@@ -2548,6 +2541,28 @@ fn stata_notes(notes: &[String]) -> String {
         out.push_str(&format!("\n  - {n}"));
     }
     out
+}
+
+/// Load `path` as `load_dataset` reads it once its options are checked: a Stata file
+/// without `na_strings` with its `value_labels` (also returning the label sets and the
+/// reader's notes), any other file with [`load_with_request_na`]. A dataset reload
+/// (`persistent_session::load_reload_source`) reads a stored source the same way.
+pub(crate) fn load_dataset_file(
+    path: &Path,
+    na_strings: Option<&[String]>,
+    value_labels: p2a_core::data::ValueLabels,
+) -> Result<(Dataset, Vec<p2a_core::data::ColumnLabels>, Vec<String>), LoadError> {
+    let is_stata = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("dta"));
+    if is_stata && na_strings.is_none() {
+        let mut options = p2a_core::data::StataOptions::default();
+        options.value_labels = value_labels;
+        DataLoader::load_stata_dataset(path, &options)
+    } else {
+        load_with_request_na(path, na_strings).map(|ds| (ds, Vec::new(), Vec::new()))
+    }
 }
 
 /// Load `path` as `load_dataset` does: [`DataLoader::load`] without `na_strings`, or

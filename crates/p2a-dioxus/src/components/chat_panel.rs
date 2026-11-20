@@ -13,8 +13,32 @@ use crate::state::settings::Theme;
 use crate::state::{
     ChatMessage, ChatState, ConversationState, SESSION_ENDED_TEXT, SessionState, Settings,
     SyncAction, SyncInput, ToolCallInfo, busy_tracking, decide_sync, ensure_session, needs_title,
-    on_session_lost, session_lost, session_lost_text, turn_persistence,
+    on_session_lost, session_lost, session_lost_text, stale_rows, turn_persistence,
 };
+
+/// Delete the stored rows of the turns Retry took out (the prompts
+/// `prompt_ids` and the replies stored after them, [`stale_rows`]) from
+/// conversation `conversation_id`, so the store, and the history the server
+/// sends the model, holds the prompt once. A failure is logged and the send
+/// goes on: the store then keeps the duplicate, as before the route existed.
+async fn delete_stale_turns(conversation_id: &str, prompt_ids: &[String]) {
+    let client = api();
+    let stored = match client.get_messages(conversation_id).await {
+        Ok(stored) => stored,
+        Err(e) => {
+            tracing::warn!(
+                "[ChatPanel] Could not list the stored turn to replace: {}",
+                e
+            );
+            return;
+        }
+    };
+    for id in stale_rows(&stored, prompt_ids) {
+        if let Err(e) = client.delete_message(&id).await {
+            tracing::warn!("[ChatPanel] Could not delete a replaced message: {}", e);
+        }
+    }
+}
 
 /// The session `old_id` ended during a send of `prompt`: the turn is ended,
 /// the transcript and the conversations are reset (the sync tracking first,
@@ -376,6 +400,13 @@ pub fn ChatPanel() -> Element {
                 "[ChatPanel] Messages added, count: {}",
                 chat.read().messages.len()
             );
+
+            // A Retry took an interrupted turn out: its stored rows go before
+            // the prompt is stored again.
+            let stale = chat.write().take_stale_turns();
+            if !stale.is_empty() && !conversation_id.is_empty() {
+                delete_stale_turns(&conversation_id, &stale).await;
+            }
 
             // Store the user's row before the stream starts, so it precedes the
             // reply the server stores; the server stores the reply itself

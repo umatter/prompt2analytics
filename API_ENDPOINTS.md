@@ -41,6 +41,7 @@ Examples in this document marked "captured" are real responses of a sandboxed se
 | DELETE | `/api/conversations/{id}/messages` | `db` | with the session database | `X-P2A-Session-Id` |
 | POST | `/api/conversations/{id}/messages/clear` | `db` | with the session database; answers as `DELETE /api/conversations/{id}/messages` | `X-P2A-Session-Id` |
 | GET | `/api/conversations/{id}/tool-calls` | `db` | with the session database | `X-P2A-Session-Id` |
+| DELETE | `/api/messages/{id}` | `db` | with the session database | `X-P2A-Session-Id` |
 | GET | `/api/messages/{id}/tool-calls` | `db` | with the session database | `X-P2A-Session-Id` |
 | GET | `/api/sessions/{session_id}/settings` | `db` | with the session database | path id |
 | PUT | `/api/sessions/{session_id}/settings` | `db` | with the session database | path id |
@@ -144,7 +145,7 @@ A directory listing inside the server's data root. Registered as `GET /api/sessi
 GET /api/sessions/{session_id}/datasets
 ```
 
-The path id is the caller; it must be a live session (404 otherwise), and a `X-P2A-Session-Id` header that names another session answers 404. `column_names` holds the dataset's first column names, at most 1,000 of them and 64 KiB; `column_count` is its full width. A dataset loaded with `na_strings` lists them as `na_strings`. Every dataset a tool call on `POST /api/tools/{name}` or in the chat's tool loop puts in the session is listed, not only those of `load_dataset`, `upload_dataset` and `create_dataset`: after each such call the server records each dataset with no row, updates a row whose counts or column names changed, and removes the row of a dataset the call removed. A dataset a tool made in the session has no `source_path` and the `source_type` `generated` (`generate_random_data`) or `derived` (any other tool: a filter, a join, an import); so has a loaded dataset that a tool other than a loader changed in place. Where one session's calls can overlap (several calls at a time per session, as with limits off), a call during which a loader (`load_dataset`, `upload_dataset`, `create_dataset`) also ran takes no source away and deletes no loaded dataset's row, so a loaded dataset it changed in place keeps its source until a later call changes it again; a row another call wrote after this call read the list is left as that call wrote it. The rows count against the session's `session_db_bytes`, and under that budget a session keeps at most 1,000 rows; a dataset whose row would pass either has no row here. Rows of generated and derived datasets count as loaded ones do, so a session that makes many intermediate datasets can leave a later `load_dataset` unlisted, and not reloaded after a restart, and leaves less of the budget to its conversations. Tool calls over the WebSocket (`/ws`) neither write nor update rows: a dataset only such a call made or changed is not listed, or keeps the row it had.
+The path id is the caller; it must be a live session (404 otherwise), and a `X-P2A-Session-Id` header that names another session answers 404. `column_names` holds the dataset's first column names, at most 1,000 of them and 64 KiB; `column_count` is its full width. A dataset loaded with `na_strings` lists them as `na_strings`, and a Stata file loaded with `value_labels` lists the option (`codes` or `text`) as `value_labels`. Every dataset a tool call on `POST /api/tools/{name}` or in the chat's tool loop puts in the session is listed, not only those of `load_dataset`, `upload_dataset` and `create_dataset`: after each such call the server records each dataset with no row, updates a row whose counts or column names changed, and removes the row of a dataset the call removed. A dataset a tool made in the session has no `source_path` and the `source_type` `generated` (`generate_random_data`) or `derived` (any other tool: a filter, a join, an import); so has a loaded dataset that a tool other than a loader changed in place. Where one session's calls can overlap (several calls at a time per session, as with limits off), a call during which a loader (`load_dataset`, `upload_dataset`, `create_dataset`) also ran takes no source away and deletes no loaded dataset's row, so a loaded dataset it changed in place keeps its source until a later call changes it again; a row another call wrote after this call read the list is left as that call wrote it. The rows count against the session's `session_db_bytes`, and under that budget a session keeps at most 1,000 rows; a dataset whose row would pass either has no row here. Rows of generated and derived datasets count as loaded ones do, so a session that makes many intermediate datasets can leave a later `load_dataset` unlisted, and not reloaded after a restart, and leaves less of the budget to its conversations. Tool calls over the WebSocket (`/ws`) neither write nor update rows: a dataset only such a call made or changed is not listed, or keeps the row it had.
 
 **Response** (captured):
 ```json
@@ -156,7 +157,7 @@ The path id is the caller; it must be a live session (404 otherwise), and a `X-P
 POST /api/sessions/{session_id}/datasets/reload
 ```
 
-The reload runs as one governed call (memory admission, the session's slot, the deadline) inside the session's data directory. Each source file is checked before parsing as `load_dataset` checks it: it must fit `load_file_bytes`, and a Parquet file whose decoded dataset would exceed the dataset quotas is refused before it is decoded, with `load_dataset`'s refusal. Each reloaded dataset must also fit the dataset quotas once loaded. A dataset refused by any of these checks is reported in `failed`. A `failed` entry's `error` is the `load_file_bytes` refusal (as in the example below), a dataset-quota refusal, `path is not inside this session's data directory` or `the file could not be loaded`, the text for any file the loader fails on and for a file whose size cannot be read (followed by `: ` and the reason only for a Parquet file the check will not read, or a check the call's deadline stopped); none of them holds a server path. A dataset loaded with `na_strings` is read with them again. Only a dataset loaded with `load_dataset` has a source path to reload; uploaded and inline (`create_dataset`) datasets are reported in `skipped` with the reason `no source path stored`, and datasets a tool made in the session (`source_type` `generated` or `derived`) with `made in the session by a tool, not loaded from a file; run that step again to rebuild it`. A governor refusal answers like a refused tool call (see [Errors](#errors-status-codes-and-retries)).
+The reload runs as one governed call (memory admission, the session's slot, the deadline) inside the session's data directory. Each source file is checked before parsing as `load_dataset` checks it: it must fit `load_file_bytes`, and a Parquet file whose decoded dataset would exceed the dataset quotas is refused before it is decoded, with `load_dataset`'s refusal. Each reloaded dataset must also fit the dataset quotas once loaded. A dataset refused by any of these checks is reported in `failed`. A `failed` entry's `error` is the `load_file_bytes` refusal (as in the example below), a dataset-quota refusal, `path is not inside this session's data directory` or `the file could not be loaded`, the text for any file the loader fails on and for a file whose size cannot be read (followed by `: ` and the reason only for a Parquet file the check will not read, or a check the call's deadline stopped); none of them holds a server path. A dataset loaded with `na_strings` is read with them again, and a Stata file loaded with `value_labels` is read with that option again (so `text` does not come back as the codes). Only a dataset loaded with `load_dataset` has a source path to reload; uploaded and inline (`create_dataset`) datasets are reported in `skipped` with the reason `no source path stored`, and datasets a tool made in the session (`source_type` `generated` or `derived`) with `made in the session by a tool, not loaded from a file; run that step again to rebuild it`. A governor refusal answers like a refused tool call (see [Errors](#errors-status-codes-and-retries)).
 
 **Request:** (empty body)
 ```json
@@ -528,7 +529,7 @@ POST /api/llm/generate-title
 
 ## Conversation Management
 
-Every `/api/conversations/{id}*` and `/api/messages/{id}/tool-calls` request names the caller's session in the `X-P2A-Session-Id: <session id>` header; the `?session_id=` query parameter is accepted as a fallback. Without either the answer is 400 `invalid_arguments` (captured):
+Every `/api/conversations/{id}*` and `/api/messages/{id}*` request names the caller's session in the `X-P2A-Session-Id: <session id>` header; the `?session_id=` query parameter is accepted as a fallback. Without either the answer is 400 `invalid_arguments` (captured):
 
 ```json
 {"success":false,"error":"send the session id in the X-P2A-Session-Id header","code":"invalid_arguments"}
@@ -546,7 +547,7 @@ Limits on what a session stores (hosted values; [DEPLOYMENT.md](docs/guides/DEPL
 
 - a message, title or settings string longer than `message_bytes` (262,144 bytes) answers 413 `payload_too_large`;
 - more than `conversations_per_session` (50) conversations or `messages_per_conversation` (1,000) messages answers 422 `quota_exceeded`;
-- `session_db_bytes` (16 MiB hosted, no limit when limits are off) caps the bytes one session's history holds (titles, message contents, tool-call arguments, results and errors) together with its dataset metadata rows (each row's texts, kept column names included, plus 128 bytes): a client write past it answers 422 `quota_exceeded`, text the server produces is truncated to the room left, a dataset whose row would pass it is loaded but not listed in `GET /api/sessions/{id}/datasets`, and deleting a conversation frees its bytes;
+- `session_db_bytes` (16 MiB hosted, no limit when limits are off) caps the bytes one session's history holds (titles, message contents, tool-call arguments, results and errors) together with its dataset metadata rows (each row's texts, kept column names included, plus 128 bytes): a client write past it answers 422 `quota_exceeded`, text the server produces is truncated to the room left, a dataset whose row would pass it is loaded but not listed in `GET /api/sessions/{id}/datasets`, and deleting a conversation or a message frees its bytes;
 - while the server is low on memory, writes answer 503 `memory_pressure` with `Retry-After: 15`.
 
 Captured from an open public server:
@@ -702,6 +703,13 @@ Answers exactly as `DELETE /api/conversations/{conversation_id}/messages`, an al
 ```json
 {"success":true,"data":{"deleted_count":10}}
 ```
+
+### Delete a Message
+```
+DELETE /api/messages/{message_id}
+```
+
+Deletes one message and its tool calls in one transaction and recounts its conversation: `message_count`, and `last_message_preview` from the message now last (null when none is left). Answers 204; a message that does not exist, or that belongs to another session's conversation, answers 404 `not_found`. The web client's Retry deletes the stored prompt of an interrupted turn and the reply stored after it before it asks again, so a reloaded transcript (and the history the server sends to the model) holds the prompt once.
 
 ### Get Tool Calls of a Conversation
 ```

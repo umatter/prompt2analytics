@@ -84,6 +84,7 @@ pub fn conversation_routes(state: ConversationState, mode: DeploymentMode) -> Ro
             "/conversations/{id}/tool-calls",
             get(get_conversation_tool_calls),
         )
+        .route("/messages/{id}", delete(delete_message))
         .route("/messages/{id}/tool-calls", get(get_message_tool_calls))
         // Settings
         .route("/sessions/{session_id}/settings", get(get_settings))
@@ -266,6 +267,9 @@ pub struct DatasetMetaResponse {
     /// The `na_strings` the dataset was loaded with, when it was.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub na_strings: Option<Vec<String>>,
+    /// The `value_labels` a Stata file was loaded with, when it was.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value_labels: Option<String>,
 }
 
 impl From<DatasetMeta> for DatasetMetaResponse {
@@ -282,6 +286,7 @@ impl From<DatasetMeta> for DatasetMetaResponse {
             loaded_at: chrono::DateTime::<chrono::Utc>::from(meta.loaded_at).to_rfc3339(),
             file_size_bytes: meta.file_size_bytes,
             na_strings: meta.na_strings,
+            value_labels: meta.value_labels,
         }
     }
 }
@@ -693,6 +698,21 @@ async fn clear_messages(
     respond(StatusCode::OK, result)
 }
 
+/// Delete one message of a conversation the caller's session owns, with its
+/// tool calls (Retry takes an interrupted turn out with it). 204; 404 for a
+/// message that does not exist or belongs to another session's conversation.
+async fn delete_message(
+    State(state): State<ConversationState>,
+    CallerSession(caller): CallerSession,
+    Path(id): Path<String>,
+) -> Response {
+    let pm = &state.session_manager;
+    if let Err(e) = pm.authorize_message(&caller, &id).await {
+        return error_response(e);
+    }
+    respond(StatusCode::NO_CONTENT, pm.delete_message(&id).await)
+}
+
 /// Get settings for a session; the path id is the caller and must be live.
 async fn get_settings(
     State(state): State<ConversationState>,
@@ -963,6 +983,7 @@ mod tests {
                 name: (*name).to_string(),
                 source_path: format!("{name}.parquet"),
                 na_strings: None,
+                value_labels: None,
             })
             .collect()
     }

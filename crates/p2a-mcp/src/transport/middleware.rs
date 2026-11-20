@@ -140,7 +140,7 @@ fn body_cap_setting(value: Result<String, std::env::VarError>) -> (usize, Option
                      default {DEFAULT_MB} MiB",
                     usize::MAX / MIB
                 ),
-                value: Some(value),
+                value: Some(trimmed.to_string()),
             }),
         ),
     }
@@ -485,9 +485,10 @@ mod tests {
                 ),
                 "{v:?}"
             );
-            assert_eq!(w.value.as_deref(), Some(v));
+            assert_eq!(w.value.as_deref(), Some(v.trim()));
         };
-        for invalid in ["0", "-1", "4.5", "lots"] {
+        // The value is logged trimmed, as the audit cap logs its own.
+        for invalid in ["0", "-1", "4.5", "lots", "4.5\n", " lots "] {
             refused(invalid);
         }
         assert_eq!(ok(&largest.to_string()), (largest * MIB, None));
