@@ -359,12 +359,15 @@ fn validate_options(opts: &BwSelectOptions) -> EconResult<usize> {
 }
 
 /// `(num / den)^rate`; NaN (R's `min()` would propagate it) and a zero bandwidth are errors.
+/// +Inf (a zero denominator) is not an error: every caller caps the value with
+/// `.min(range)` or `.min(bw_max)`, as rdbwselect does.
 fn pw(num: f64, den: f64, rate: f64, method: &str, what: &str) -> EconResult<f64> {
     nonzero(pw_finite(num, den, rate, method, what)?, method, what)
 }
 
 /// `(num / den)^rate` with only the NaN check: the pilot stage d is checked for zero after
-/// rdbwselect's bwcheck has raised it to the minimum bandwidth.
+/// rdbwselect's bwcheck has raised it to the minimum bandwidth. +Inf passes through: the
+/// caller caps it with `.min(range)` or `.min(bw_max)`, as rdbwselect does.
 fn pw_finite(num: f64, den: f64, rate: f64, method: &str, what: &str) -> EconResult<f64> {
     let v = (num / den).powf(rate);
     if v.is_nan() {
