@@ -2490,7 +2490,10 @@ mod tests {
                 let m =
                     spread_statistic(HetTestStat::MeanAbsDeviation, &a, Some(&b), tau, &mut buf);
                 let bound = 4.0 * nf * f64::EPSILON * (mean_c + tau.abs() * mean_e);
-                assert!(m > 1e3 * bound, "the spread is not small enough to test n={n}");
+                assert!(
+                    m > 1e3 * bound,
+                    "the spread is not small enough to test n={n}"
+                );
                 assert!(
                     (mad[j] - m).abs() <= bound,
                     "mad n={n} tau={tau}: sweep {} pointwise {m} bound {bound}",

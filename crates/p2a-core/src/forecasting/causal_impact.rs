@@ -1713,15 +1713,33 @@ mod tests {
         // The counterfactual is that of no control: the aliased control adds nothing.
         let none = run_causal_impact(&d, "y", "time", (0, 49), (50, 69), None).unwrap();
         let close = |a: f64, b: f64| (a - b).abs() <= 1e-6 * (1.0 + b.abs());
-        for (i, (p, q)) in r.series.predicted.iter().zip(&none.series.predicted).enumerate() {
-            assert!(close(*p, *q), "predicted[{i}]: {p} with the control, {q} without");
+        for (i, (p, q)) in r
+            .series
+            .predicted
+            .iter()
+            .zip(&none.series.predicted)
+            .enumerate()
+        {
+            assert!(
+                close(*p, *q),
+                "predicted[{i}]: {p} with the control, {q} without"
+            );
         }
         for (with, without) in [
             (r.summary.cumulative_effect, none.summary.cumulative_effect),
-            (r.summary.cumulative_effect_lower, none.summary.cumulative_effect_lower),
-            (r.summary.cumulative_effect_upper, none.summary.cumulative_effect_upper),
+            (
+                r.summary.cumulative_effect_lower,
+                none.summary.cumulative_effect_lower,
+            ),
+            (
+                r.summary.cumulative_effect_upper,
+                none.summary.cumulative_effect_upper,
+            ),
         ] {
-            assert!(close(with, without), "{with} with the control, {without} without");
+            assert!(
+                close(with, without),
+                "{with} with the control, {without} without"
+            );
         }
     }
 
