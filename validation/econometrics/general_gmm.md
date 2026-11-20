@@ -143,11 +143,14 @@ which summed `z z' e^2`, the MDS form.
 | CUE HAC | 1,000 | 2,691 | 1,566 | 1,574 | 0.58 [0.58] | 1.00 [1.00] |
 | CUE HAC | 10,000 | 36,091 | 23,214 | 23,189 | 0.64 [0.65] | 1.00 [1.00] |
 
-Quiet re-time against v0.5.0 alone (2026-11-13; `ff8e7559` was not rebuilt). Release builds of
-v0.5.0 (`f80b0131`) and this version, one P core (`taskset -c 2`, `RAYON_NUM_THREADS=1`), five
-rounds interleaving the two builds in alternating order; each round is one process per build
-reporting the median of its calls after warm-up calls. The table gives the ratio of the medians of
-the five per-round medians, with the ratio of their minima in brackets (1-minute load average 4.3-8.7 at the start of each round, right after the conversation-store benchmarks of the round before, and 2.2-3.8 at its end; the alternating order protects the ratios). Linear IV, q = 5 instruments and k = 4 coefficients:
+Re-time against v0.5.0 alone (2026-11-13; `ff8e7559` was not rebuilt). Release builds of v0.5.0
+(`f80b0131`) and this version, one P core (`taskset -c 2`, `RAYON_NUM_THREADS=1`), five rounds
+interleaving the two builds in alternating order; each round is one process per build reporting the
+median of its calls after warm-up calls. The table gives the ratio of the medians of the five
+per-round medians, with the ratio of their minima in brackets (1-minute load average 4.3-8.7 at the
+start of each round (after the calibration step or the previous round's conversation-store
+benchmarks) and 2.2-3.8 at its end; the alternating order protects the ratios). Linear IV, q = 5
+instruments and k = 4 coefficients:
 
 | Fit | n | v0.5.0 µs | new µs | new / v0.5.0 [min] |
 |---|---|---|---|---|

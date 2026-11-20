@@ -158,15 +158,16 @@ fn with_shifted(
             return Ok(Dataset::new(result));
         }
     }
+    // Only the time-indexed path adds the computed column to the frame (`shift_within` returns
+    // it), so only that path refuses a user column of the same name, before any of its work.
+    if opts.time.is_some() && df.column(SHIFTED).is_ok() {
+        return Err(MungeError::InvalidExpression(format!(
+            "a time-indexed shift uses the column name '{SHIFTED}' internally; rename that column first"
+        )));
+    }
     let (extra, shifted) = shift_expr(df, column, periods, opts)?;
     let mut base = df.clone();
     if let Some(extra) = extra {
-        // Only this path adds the computed column to the frame; `shift_within` returns it.
-        if df.column(SHIFTED).is_ok() {
-            return Err(MungeError::InvalidExpression(format!(
-                "a time-indexed shift uses the column name '{SHIFTED}' internally; rename that column first"
-            )));
-        }
         base.with_column(extra)?;
     }
     let mut result = base
@@ -2215,7 +2216,8 @@ mod tests {
     }
 
     /// The direct path of a positional shift and of normalize gives what the expressions give,
-    /// on noisy Float64, Int64, Float32, UInt32, Int32 and Date columns with nulls and NaN.
+    /// on noisy Float64, Int64, Float32, UInt32 and Int32 columns with nulls (NaN in the float
+    /// ones), and a Date column.
     #[test]
     fn direct_shift_and_normalize_match_the_expressions() {
         let mut rng = rand::rngs::StdRng::seed_from_u64(31);
@@ -2855,6 +2857,16 @@ mod tests {
         match lag_with(&clash, "v", 1, &one_series) {
             Err(MungeError::InvalidExpression(m)) => assert!(m.contains(SHIFTED), "{m}"),
             other => panic!("{:?}", other.map(|d| d.df().get_column_names_str().len())),
+        }
+        // the clash is refused before the time-indexed work: a frame whose time column would be
+        // refused later gets the clash error, not the time column's
+        let clash_float_time = Dataset::new(
+            df!("t" => [1.5, 2.5, 3.5], "v" => [1.5, 2.5, 3.5], SHIFTED => [7.5, 8.5, 9.5])
+                .unwrap(),
+        );
+        match lag_with(&clash_float_time, "v", 1, &one_series) {
+            Err(MungeError::InvalidExpression(m)) => assert!(m.contains(SHIFTED), "{m}"),
+            other => panic!("{:?}", other.err()),
         }
         // the shared shift step never adds the internal column, so the same frame is fine there
         let within = shift_within(clash.df(), "v", 1, &one_series).unwrap();

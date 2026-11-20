@@ -949,14 +949,21 @@ fn xgboost_early_stopping(
     // no held-out loss was ever finite, has no best round and is refused
     let best = fit.best_round;
     if best == 0 {
-        return Err(EconError::Computation(if fit.validation_loss.is_empty() {
-            "early stopping needs at least one boosting round (n_estimators >= 1)".to_string()
-        } else {
-            format!(
-                "early stopping: the held-out loss was never finite in {} rounds; rescale y",
-                fit.validation_loss.len()
-            )
-        }));
+        if fit.validation_loss.is_empty() {
+            return Err(EconError::InvalidSpecification {
+                message: "early stopping needs at least one boosting round (n_estimators >= 1)"
+                    .to_string(),
+            });
+        }
+        // Only the squared-error loss grows with the scale of y.
+        let advice = match config.objective {
+            XGBoostObjective::RegSquaredError => "; rescale y",
+            XGBoostObjective::BinaryLogistic | XGBoostObjective::RegLogistic => "",
+        };
+        return Err(EconError::Computation(format!(
+            "early stopping: the held-out loss was never finite in {} rounds{advice}",
+            fit.validation_loss.len()
+        )));
     }
     fit.trees.truncate(best);
     fit.train_loss.truncate(best + 1);
@@ -1799,11 +1806,16 @@ mod tests {
         let e = xgboost(x.view(), y.view(), &c).unwrap_err();
         let m = e.to_string();
         assert!(m.contains("held-out loss was never finite"), "{m}");
-        // a fit with no rounds at all is refused the same way, not with a prediction error
+        // squared-error loss overflows with the scale of y, so the advice names it
+        assert!(m.contains("rescale y"), "{m}");
+        assert!(matches!(e, EconError::Computation(_)), "{e:?}");
+        // a fit with no rounds at all is a parameter the call cannot support, not a failed
+        // numerical step, and not a prediction error
         c.n_estimators = 0;
         let (x, y) = early_stop_data(60);
-        let m = xgboost(x.view(), y.view(), &c).unwrap_err().to_string();
-        assert!(m.contains("early stopping"), "{m}");
+        let e = xgboost(x.view(), y.view(), &c).unwrap_err();
+        assert!(matches!(e, EconError::InvalidSpecification { .. }), "{e:?}");
+        assert!(e.to_string().contains("n_estimators >= 1"), "{e}");
     }
 
     #[test]

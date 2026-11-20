@@ -272,15 +272,16 @@ below 50, as R). The current comparison with v0.5.0 follows.
 
 ### Against v0.5.0 (2026-11-13)
 
-Re-timed on a quiet machine on 2026-11-13: release builds of v0.5.0 (`f80b0131`) and this version,
-one P core (`taskset -c 2`, `RAYON_NUM_THREADS=1`), five rounds interleaving the two builds in
-alternating order; each round is one process per build reporting the median of its calls after
-warm-up calls. The table gives the ratio of the medians of the five per-round medians, with the
-ratio of their minima in brackets (1-minute load average 4.3-8.7 at the start of each round, right after the conversation-store benchmarks of the round before, and 2.2-3.8 at its end; the alternating order protects the ratios). Two samples of n each (signed
-rank: n pairs); the exact rows are the default call at sizes where R's rule picks the exact
-distribution, which v0.5.0 approximated, so they are slower by construction; the interval rows
-select the order statistics they need (see above) where v0.5.0 built every pairwise difference or
-Walsh average.
+Re-timed on 2026-11-13: release builds of v0.5.0 (`f80b0131`) and this version, one P core
+(`taskset -c 2`, `RAYON_NUM_THREADS=1`), five rounds interleaving the two builds in alternating
+order; each round is one process per build reporting the median of its calls after warm-up calls.
+The table gives the ratio of the medians of the five per-round medians, with the ratio of their
+minima in brackets (1-minute load average 4.3-8.7 at the start of each round (after the calibration
+step or the previous round's conversation-store benchmarks) and 2.2-3.8 at its end; the alternating
+order protects the ratios). Two samples of n each (signed rank: n pairs); the exact rows are the
+default call at sizes where R's rule picks the exact distribution, which v0.5.0 approximated, so
+they are slower by construction; the interval rows select the order statistics they need (see above)
+where v0.5.0 built every pairwise difference or Walsh average.
 
 | Call | n | v0.5.0 µs | new µs | new / v0.5.0 [min] |
 |---|---|---|---|---|

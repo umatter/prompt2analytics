@@ -205,17 +205,17 @@ pub struct IceSpread {
     /// Interquartile range at each grid point.
     pub iqr: Vec<f64>,
 
-    /// Heterogeneity index `H = sqrt(SS_het / SS_tot)`: each curve is anchored on its value at
-    /// the first grid point and centred on its own mean over the grid, `SS_tot` is the sum of
-    /// squares of the centred curves and `SS_het` that of their deviations from the mean centred
-    /// curve. `H^2` is the share of the curves' variation along the feature that differs
-    /// between observations: 0 for parallel curves (no interaction involving the feature), 1
-    /// when the mean curve is flat. Unchanged by adding a constant to the predictions or by
-    /// `center`, except that the rounding floor below scales with the absolute predictions, so a
-    /// large enough constant can bring a small non-zero `H` to exactly 0. Exactly 0 when every curve is flat, and when the centred curves' root mean
-    /// square is at most `64 * f64::EPSILON` times the largest absolute prediction at the
-    /// first or last grid point (flat up to rounding); NaN when a prediction is NaN or the
-    /// sums of squares overflow.
+    /// Heterogeneity index `H = sqrt(SS_het / SS_tot)`: each curve is anchored on its value at the
+    /// first grid point and centred on its own mean over the grid, `SS_tot` is the sum of squares
+    /// of the centred curves and `SS_het` that of their deviations from the mean centred curve.
+    /// `H^2` is the share of the curves' variation along the feature that differs between
+    /// observations: 0 for parallel curves (no interaction involving the feature), 1 when the mean
+    /// curve is flat. Unchanged by adding a constant to the predictions or by `center`, except that
+    /// the rounding floor below scales with the absolute predictions, so a large enough constant
+    /// can bring a small non-zero `H` to exactly 0. Exactly 0 when every curve is flat, and when
+    /// the centred curves' root mean square is at most `64 * f64::EPSILON` times the largest
+    /// absolute prediction at the first or last grid point (flat up to rounding); NaN when a
+    /// prediction is NaN or the sums of squares overflow.
     pub heterogeneity_index: f64,
 }
 

@@ -146,9 +146,8 @@ Property tests against exact enumeration in Rust (not registered: they load no c
 `release`, p2a-core with the `ci` features, against `f80b0131` (v0.5.0), five rounds with the sides interleaved per
 row (order alternating per round), one core (`taskset -c 2`), one rayon thread, 2026-11-14. Not re-timed on a quiet
 machine: the load average was 33-70 during the runs (other builds on the machine), so ratios within about 0.05 of
-1 are noise. The quiet re-time of 2026-11-15 did not include these rows; the TreeSHAP code is the same in both
-trees and every row is within 1.1x. Cells are
-the median of the round medians (each the median of 1-21 calls after a warm-up); "ratio" is this tree over the base,
+1 are noise. The quiet re-time of 2026-11-15 did not include these rows; every row is within 1.1x. Cells are the
+median of the round medians (each the median of 1-21 calls after a warm-up); "ratio" is this tree over the base,
 "min ratio" the ratio of the minima. Friedman-1 data, p = 5, noise sd 1. Exact path-dependent TreeSHAP of a 50-tree random forest fitted on 1,000 rows (`mtry` default), single
 thread; n is the number of explained rows. The TreeSHAP code is the same in both trees, so the ratio only checks the
 measurement. Faster variants (FastTreeSHAP, Linear TreeSHAP) were not implemented; the exact kernel's cost is

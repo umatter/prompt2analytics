@@ -23,8 +23,8 @@
 //! each cell is read with 2/6 and, when that does not resolve, with 3/5, and a note says the split
 //! could not be determined. The decoded strL text of all strL columns together is held to the
 //! allocation ceiling as the cells are read (equal values share one block in the file but are
-//! copied into each cell), so several strL columns each under the ceiling can be refused together. Binary blocks are read as text with invalid UTF-8 replaced,
-//! and a note says so.
+//! copied into each cell), so several strL columns each under the ceiling can be refused together.
+//! Binary blocks are read as text with invalid UTF-8 replaced, and a note says so.
 //!
 //! **Formats and value labels.** `%td` (and the legacy `%d`) columns load as `Date` (days since
 //! 1960-01-01 less 3,653) and `%tc`/`%tC` as `Datetime(ms)` (milliseconds since 1960 less
@@ -982,7 +982,7 @@ impl<R: Read + Seek> StataReader<R> {
                 if self.strl_held > self.ceiling {
                     crate::resource::check_alloc::<u8>(
                         self.strl_held,
-                        "Stata strL cells (the text of all strL columns together)",
+                        "Stata strL cells (one budget for the text of all strL columns of the file)",
                     )
                     .map_err(resource_err)?;
                 }
@@ -1748,7 +1748,7 @@ mod tests {
         match e {
             // one budget for the strL text of every strL column, and the message says so
             StataError::ParseError(m) => assert!(
-                m.contains("Stata strL cells") && m.contains("all strL columns together"),
+                m.contains("Stata strL cells") && m.contains("all strL columns of the file"),
                 "{m}"
             ),
             other => panic!("expected ParseError, got {other:?}"),

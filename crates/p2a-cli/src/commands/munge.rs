@@ -3,12 +3,12 @@
 use clap::{Subcommand, ValueEnum};
 use p2a_core::Dataset;
 use p2a_core::data::munging::aggregate::value_counts_with;
-use p2a_core::data::munging::clean::fill_na_with;
 use p2a_core::data::munging::{
     AggFn, AggSpec, ArithOp, BinOptions, BinStrategy, CastOptions, FillStrategy, MungeError,
-    MutateExpr, bin_with, cast_with, concat, deduplicate, diff, drop_columns, drop_na, filter,
-    full_join, group_by, inner_join, lag, lead, left_join, melt, mutate, normalize, one_hot_encode,
-    pct_change, pivot, rename, right_join, sample, select, sort, standardize,
+    MutateExpr, ShiftOptions, bin_with, cast_with, concat, deduplicate, diff_with, drop_columns,
+    drop_na, fill_na_by, filter, full_join, group_by, inner_join, lag_with, lead_with, left_join,
+    melt, mutate, normalize, one_hot_encode, pct_change_with, pivot, rename, right_join, sample,
+    select, sort, standardize,
 };
 
 use crate::output::{OutputFormat, print_error};
@@ -409,6 +409,9 @@ EXAMPLES:
 
     # Forward fill specific columns
     p2a --session s.json munge fill-na mydata --method forward --columns price volume
+
+    # Forward fill within each country (panel data), in row order
+    p2a --session s.json munge fill-na mydata --method forward --columns gdp --group-by country
 ")]
     FillNa {
         /// Dataset name
@@ -425,6 +428,11 @@ EXAMPLES:
         /// Fill value for --method constant; typed to the column, as text for String columns
         #[arg(long)]
         value: Option<String>,
+
+        /// Group columns (panel data): a forward or backward fill stays within each group, in row
+        /// order; the other methods do not take groups
+        #[arg(short, long, num_args = 1..)]
+        group_by: Option<Vec<String>>,
 
         /// Name for the resulting dataset
         #[arg(short, long)]
@@ -463,8 +471,11 @@ EXAMPLES:
     # Lag by 1 period
     p2a --session s.json munge lag mydata --column price
 
-    # Panel data lag by entity
+    # Panel data lag by entity, by row position within each country
     p2a --session s.json munge lag mydata --column gdp --periods 2 --group-by country
+
+    # Panel data lag by the year column: missing where year - 2 is not in the data
+    p2a --session s.json munge lag mydata --column gdp --periods 2 --group-by country --time year
 ")]
     Lag {
         /// Dataset name
@@ -482,6 +493,12 @@ EXAMPLES:
         #[arg(short, long, num_args = 1..)]
         group_by: Option<Vec<String>>,
 
+        /// Integer time column (a year, a period number): the lag of period t is period t - k of
+        /// the same group, missing when that period is not in the data, instead of the value k
+        /// rows back; rows keep their order
+        #[arg(long)]
+        time: Option<String>,
+
         /// Name for the resulting dataset
         #[arg(short, long)]
         name: Option<String>,
@@ -491,6 +508,9 @@ EXAMPLES:
     #[command(after_help = "\
 EXAMPLES:
     p2a --session s.json munge lead mydata --column price --periods 1
+
+    # Panel data lead by the year column
+    p2a --session s.json munge lead mydata --column gdp --group-by country --time year
 ")]
     Lead {
         /// Dataset name
@@ -508,6 +528,12 @@ EXAMPLES:
         #[arg(short, long, num_args = 1..)]
         group_by: Option<Vec<String>>,
 
+        /// Integer time column (a year, a period number): the lead of period t is period t + k of
+        /// the same group, missing when that period is not in the data, instead of the value k
+        /// rows ahead; rows keep their order
+        #[arg(long)]
+        time: Option<String>,
+
         /// Name for the resulting dataset
         #[arg(short, long)]
         name: Option<String>,
@@ -521,6 +547,9 @@ EXAMPLES:
 
     # Percentage change
     p2a --session s.json munge diff mydata --column price --pct
+
+    # First difference within each country, by the year column
+    p2a --session s.json munge diff mydata --column gdp --group-by country --time year
 ")]
     Diff {
         /// Dataset name
@@ -537,6 +566,16 @@ EXAMPLES:
         /// Compute percentage change instead
         #[arg(long)]
         pct: bool,
+
+        /// Group by columns (panel data): the difference stays within each group
+        #[arg(short, long, num_args = 1..)]
+        group_by: Option<Vec<String>>,
+
+        /// Integer time column (a year, a period number): period t is compared with period t - k
+        /// of the same group, missing when that period is not in the data, instead of with the
+        /// value k rows back; rows keep their order
+        #[arg(long)]
+        time: Option<String>,
 
         /// Name for the resulting dataset
         #[arg(short, long)]
@@ -817,12 +856,14 @@ pub fn execute(
             method,
             columns,
             value,
+            group_by,
             name,
         } => execute_fill_na(
             dataset,
             method,
             columns.as_ref(),
             value.as_deref(),
+            group_by.as_deref(),
             name.as_deref(),
             format,
             session,
@@ -845,12 +886,14 @@ pub fn execute(
             column,
             periods,
             group_by,
+            time,
             name,
         } => execute_lag(
             dataset,
             column,
             *periods,
-            group_by.as_ref(),
+            group_by.as_deref(),
+            time.as_deref(),
             name.as_deref(),
             format,
             session,
@@ -860,12 +903,14 @@ pub fn execute(
             column,
             periods,
             group_by,
+            time,
             name,
         } => execute_lead(
             dataset,
             column,
             *periods,
-            group_by.as_ref(),
+            group_by.as_deref(),
+            time.as_deref(),
             name.as_deref(),
             format,
             session,
@@ -875,12 +920,16 @@ pub fn execute(
             column,
             periods,
             pct,
+            group_by,
+            time,
             name,
         } => execute_diff(
             dataset,
             column,
             *periods,
             *pct,
+            group_by.as_deref(),
+            time.as_deref(),
             name.as_deref(),
             format,
             session,
@@ -1540,6 +1589,7 @@ fn execute_fill_na(
     method: &FillMethod,
     columns: Option<&Vec<String>>,
     value: Option<&str>,
+    group_by_cols: Option<&[String]>,
     output_name: Option<&str>,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
@@ -1566,7 +1616,14 @@ fn execute_fill_na(
     let cols: Option<Vec<&str>> = columns.map(|v| v.iter().map(|s| s.as_str()).collect());
     let cols_ref: Option<&[&str]> = cols.as_deref();
 
-    match fill_na_with(&ds, cols_ref, &strategy) {
+    let groups: Vec<&str> = group_by_cols
+        .unwrap_or_default()
+        .iter()
+        .map(String::as_str)
+        .collect();
+
+    // An empty group list is the ungrouped fill.
+    match fill_na_by(&ds, cols_ref, &strategy, &groups) {
         Ok(outcome) => {
             let summary = outcome.summary();
             store_result_with(
@@ -1609,21 +1666,30 @@ fn execute_deduplicate(
     }
 }
 
+/// The borrowed form of an optional list of column names.
+fn str_list(cols: Option<&[String]>) -> Option<Vec<&str>> {
+    cols.map(|v| v.iter().map(String::as_str).collect())
+}
+
 fn execute_lag(
     dataset: &str,
     column: &str,
     periods: usize,
-    group_by_cols: Option<&Vec<String>>,
+    group_by_cols: Option<&[String]>,
+    time: Option<&str>,
     output_name: Option<&str>,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
     let ds = get_dataset_clone!(dataset, session, format);
 
-    let groups: Option<Vec<&str>> = group_by_cols.map(|v| v.iter().map(|s| s.as_str()).collect());
-    let groups_ref: Option<&[&str]> = groups.as_deref();
+    let groups = str_list(group_by_cols);
+    let opts = ShiftOptions {
+        group_by: groups.as_deref(),
+        time,
+    };
 
-    match lag(&ds, column, periods, groups_ref) {
+    match lag_with(&ds, column, periods, &opts) {
         Ok(result) => store_result(result, output_name, dataset, "lagged", session, format),
         Err(e) => {
             print_error(&format!("Lag failed: {}", e), format);
@@ -1636,17 +1702,21 @@ fn execute_lead(
     dataset: &str,
     column: &str,
     periods: usize,
-    group_by_cols: Option<&Vec<String>>,
+    group_by_cols: Option<&[String]>,
+    time: Option<&str>,
     output_name: Option<&str>,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
     let ds = get_dataset_clone!(dataset, session, format);
 
-    let groups: Option<Vec<&str>> = group_by_cols.map(|v| v.iter().map(|s| s.as_str()).collect());
-    let groups_ref: Option<&[&str]> = groups.as_deref();
+    let groups = str_list(group_by_cols);
+    let opts = ShiftOptions {
+        group_by: groups.as_deref(),
+        time,
+    };
 
-    match lead(&ds, column, periods, groups_ref) {
+    match lead_with(&ds, column, periods, &opts) {
         Ok(result) => store_result(result, output_name, dataset, "lead", session, format),
         Err(e) => {
             print_error(&format!("Lead failed: {}", e), format);
@@ -1660,16 +1730,23 @@ fn execute_diff(
     column: &str,
     periods: usize,
     pct: bool,
+    group_by_cols: Option<&[String]>,
+    time: Option<&str>,
     output_name: Option<&str>,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
     let ds = get_dataset_clone!(dataset, session, format);
 
+    let groups = str_list(group_by_cols);
+    let opts = ShiftOptions {
+        group_by: groups.as_deref(),
+        time,
+    };
     let result = if pct {
-        pct_change(&ds, column, periods)
+        pct_change_with(&ds, column, periods, &opts)
     } else {
-        diff(&ds, column, periods)
+        diff_with(&ds, column, periods, &opts)
     };
 
     match result {

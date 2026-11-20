@@ -46,15 +46,15 @@ NaN for all three.
 
 Heterogeneity index (no pdp equivalent): each ICE curve is anchored on its first grid value, `d_ig = ICE_i(g) -
 ICE_i(g_0)`, which is exactly 0 on a flat curve, and centred on its own mean over the grid, `c_ig = d_ig - mean_g d_ig`;
-with `SS_tot = sum c_ig^2` and `SS_het = sum (c_ig - mean_i c_ig)^2`, `H = sqrt(SS_het / SS_tot)`.
-`H^2` is the share of the curves' variation along the feature that differs between observations: 0 when the curves
-are parallel (no interaction involving the feature), whatever the model adds that does not depend on it; adding a
-constant or centring the curves leaves it unchanged, except that the rounding floor below scales with the absolute
-predictions, so a large enough constant can bring a small non-zero H to exactly 0. It is exactly 0 for flat curves, and when the root mean square of
-the centred curves is at most `64 * f64::EPSILON` times the largest absolute prediction at the first or last grid
-point (flat up to rounding: without the anchor and this floor, curves constant at 0.1, 0.2, 0.7, 1.1, 0.3 on 20 grid
-points gave H = 0.99 from rounding residues alone); NaN when a prediction is NaN or the sums of squares overflow. No
-other threshold is applied to it.
+with `SS_tot = sum c_ig^2` and `SS_het = sum (c_ig - mean_i c_ig)^2`, `H = sqrt(SS_het / SS_tot)`. `H^2` is the share of
+the curves' variation along the feature that differs between observations: 0 when the curves are parallel (no
+interaction involving the feature), whatever the model adds that does not depend on it; adding a constant or centring
+the curves leaves it unchanged, except that the rounding floor below scales with the absolute predictions, so a large
+enough constant can bring a small non-zero H to exactly 0. It is exactly 0 for flat curves, and when the root mean
+square of the centred curves is at most `64 * f64::EPSILON` times the largest absolute prediction at the first or last
+grid point (flat up to rounding: without the anchor and this floor, curves constant at 0.1, 0.2, 0.7, 1.1, 0.3 on 20
+grid points gave H = 0.99 from rounding residues alone); NaN when a prediction is NaN or the sums of squares overflow.
+No other threshold is applied to it.
 Tests: `test_ice_heterogeneity_closed_form` (the module example, `H = 1/3`), `test_ice_heterogeneity_additive_is_zero`,
 `test_ice_heterogeneity_location_free`, `test_ice_flat_curves`, `test_ice_flat_curves_inexact_means`,
 `test_ice_cart_unused_feature_is_flat`, `test_ice_heterogeneity_overflow_is_nan`.

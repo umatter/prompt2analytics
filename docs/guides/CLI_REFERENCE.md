@@ -82,6 +82,9 @@ p2a --session analysis.json munge cast firms -c year --dtype int --strict
 # Fill missing values
 p2a --session analysis.json munge fill-na firms -m mean -c revenue employees
 p2a --session analysis.json munge fill-na firms -m constant --value 0 -c capital
+
+# Panel data: first difference of revenue within each firm, by the year column
+p2a --session analysis.json munge diff firms -c revenue --group-by firm --time year
 ```
 
 - `munge bin`: intervals are closed on the right, `(a, b]`, as `cut()`; `--left-closed` closes
@@ -91,7 +94,13 @@ p2a --session analysis.json munge fill-na firms -m constant --value 0 -c capital
   `-m custom`. A missing value, or one outside the edges, is binned as missing.
 - `munge cast`: values that cannot be converted become missing, and the command reports how
   many; `--strict` refuses the cast instead.
-- `munge fill-na`: every strategy fills NaN cells as well as nulls.
+- `munge fill-na`: every strategy fills NaN cells as well as nulls. `--group-by` keeps a forward
+  or backward fill within each group, in row order (`tidyr::fill` on a grouped frame); the other
+  methods refuse it.
+- `munge lag`, `lead` and `diff`: `--group-by` shifts by row position within each group, in row
+  order (`dplyr::lag`); `--time` names an integer time column, and the value of period t is then
+  taken from period t - k (t + k for a lead) of the same group, missing when that period is not
+  in the data (`plm::lag`). Rows keep their order either way.
 
 ### Regression
 
@@ -1023,6 +1032,7 @@ p2a munge fill-na [OPTIONS] --method <METHOD> <DATASET>
 | `-m, --method <METHOD>` | Fill method [possible values: mean, median, mode, constant, forward, backward, zero] |
 | `-c, --columns <COLUMNS>...` | Columns to fill (all if not specified) |
 | `--value <VALUE>` | Fill value for --method constant; typed to the column, as text for String columns |
+| `-g, --group-by <GROUP_BY>...` | Group columns (panel data): a forward or backward fill stays within each group, in row order; the other methods do not take groups |
 | `-n, --name <NAME>` | Name for the resulting dataset |
 
 #### `p2a munge deduplicate`
@@ -1054,6 +1064,7 @@ p2a munge lag [OPTIONS] --column <COLUMN> <DATASET>
 | `-c, --column <COLUMN>` | Column to lag |
 | `-p, --periods <PERIODS>` | Number of periods to lag [default: 1] |
 | `-g, --group-by <GROUP_BY>...` | Group by columns (for panel data) |
+| `--time <TIME>` | Integer time column (a year, a period number): the lag of period t is period t - k of the same group, missing when that period is not in the data, instead of the value k rows back; rows keep their order |
 | `-n, --name <NAME>` | Name for the resulting dataset |
 
 #### `p2a munge lead`
@@ -1070,6 +1081,7 @@ p2a munge lead [OPTIONS] --column <COLUMN> <DATASET>
 | `-c, --column <COLUMN>` | Column to lead |
 | `-p, --periods <PERIODS>` | Number of periods to lead [default: 1] |
 | `-g, --group-by <GROUP_BY>...` | Group by columns (for panel data) |
+| `--time <TIME>` | Integer time column (a year, a period number): the lead of period t is period t + k of the same group, missing when that period is not in the data, instead of the value k rows ahead; rows keep their order |
 | `-n, --name <NAME>` | Name for the resulting dataset |
 
 #### `p2a munge diff`
@@ -1086,6 +1098,8 @@ p2a munge diff [OPTIONS] --column <COLUMN> <DATASET>
 | `-c, --column <COLUMN>` | Column to difference |
 | `-p, --periods <PERIODS>` | Number of periods [default: 1] |
 | `--pct` | Compute percentage change instead |
+| `-g, --group-by <GROUP_BY>...` | Group by columns (panel data): the difference stays within each group |
+| `--time <TIME>` | Integer time column (a year, a period number): period t is compared with period t - k of the same group, missing when that period is not in the data, instead of with the value k rows back; rows keep their order |
 | `-n, --name <NAME>` | Name for the resulting dataset |
 
 #### `p2a munge standardize`
