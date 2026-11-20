@@ -211,8 +211,8 @@ pub fn factanal_with_config(
     if let Some(j) = zero_variance_column(data) {
         return Err(EconError::InvalidSpecification {
             message: format!(
-                "column {j} (0-based) has zero variance; factor analysis needs every variable \
-                 to vary"
+                "column {j} (0-based) has zero variance (or varies only at rounding level, \
+                 sd <= 64 * eps * max|x|); factor analysis needs every variable to vary"
             ),
         });
     }
@@ -1188,8 +1188,9 @@ fn compute_factor_scores(
     if let Some(j) = zero_variance_column(data) {
         return Err(EconError::InvalidSpecification {
             message: format!(
-                "column {j} (0-based) of the data for the scores has zero variance; factor \
-                 scores need every variable to vary"
+                "column {j} (0-based) of the data for the scores has zero variance (or varies \
+                 only at rounding level, sd <= 64 * eps * max|x|); factor scores need every \
+                 variable to vary"
             ),
         });
     }
@@ -1436,7 +1437,8 @@ pub fn run_factanal(
     if let Some(j) = zero_variance_column(&data.view()) {
         return Err(EconError::InvalidSpecification {
             message: format!(
-                "column '{}' has zero variance; factor analysis needs every variable to vary",
+                "column '{}' has zero variance (or varies only at rounding level, \
+                 sd <= 64 * eps * max|x|); factor analysis needs every variable to vary",
                 columns[j]
             ),
         });
@@ -1894,6 +1896,8 @@ mod tests {
             matches!(&e, EconError::InvalidSpecification { message } if message.contains("column 6") && message.contains("zero variance")),
             "{e}"
         );
+        // the message names the rounding-level rule, since this column does vary
+        assert!(e.to_string().contains("rounding level"), "{e}");
         // The scores and run_factanal share the helper.
         assert_eq!(zero_variance_column(&xc.view()), Some(6));
 

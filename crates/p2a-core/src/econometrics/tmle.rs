@@ -664,7 +664,7 @@ impl NuisanceFit {
             .warnings
             .into_iter()
             .filter(|w| {
-                w != "glm.fit: algorithm did not converge"
+                w != crate::econometrics::glm::GLM_NOT_CONVERGED
                     && w != "observations with zero weight not used for calculating dispersion"
             })
             .collect();

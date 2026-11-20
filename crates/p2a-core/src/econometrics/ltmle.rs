@@ -4267,7 +4267,9 @@ mod tests {
         let fast = run_ltmle(&data, LtmleConfig::default()).unwrap();
         // The node after the re-solve stays on the lean path from glm.fit's start; a warm start
         // built from the re-solved epsilon would start deep in the link's clamp and leave it
-        // for the shared GLM.
+        // for the shared GLM. The fallback recovers the fit, so the comparisons below need not
+        // tell the two apart; this assertion does: with the warm start after a re-solve put
+        // back, it fails with 1 fallback.
         let fallbacks = GLM_FALLBACKS.with(|c| c.get());
         assert_eq!(fallbacks, 0, "shared-GLM fallbacks on the fast path");
         let cold = run_ltmle_with(

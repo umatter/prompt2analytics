@@ -332,9 +332,9 @@ pub fn ChatPanel() -> Element {
                 Ok(id) => id,
                 Err(e) => {
                     tracing::error!("[ChatPanel] Session error: {}", e);
-                    stream_stop.set(None);
                     chat.write()
                         .fail_before_turn(&message, format!("Session error: {}", e));
+                    stream_stop.set(None);
                     return;
                 }
             };

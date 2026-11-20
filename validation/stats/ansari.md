@@ -113,3 +113,16 @@ returned no interval, so those base times are the test alone.
 | asymptotic interval (new) | 10,000 | 558 | 821,300 | **1,472** [1,479] |
 
 The interval rows above 1.1x were signed off on 2026-11-13 (rule 5).
+
+On tied data each AB evaluation of the asymptotic interval's root search ranked the pooled sample twice
+(once for AB, once for the tie-corrected SIGMA); since 2026-11-20 the squared scores come from the first
+ranking, with bit-identical results (`test_ab_normalize_from_one_ranking_matches_ranking_twice`). Timed
+on one evaluation (statistic plus z) on tied samples (values rounded to 0.1), n/2 per sample, both
+versions in one test binary of the lanes' dev profile (opt-level 1, not a release build), the minimum of
+five rounds:
+
+| AB evaluation, tied | n | two rankings µs | one ranking µs | one / two |
+|---|---|---|---|---|
+| statistic + z | 100 | 8 | 4 | 0.51 |
+| statistic + z | 1,000 | 66 | 34 | 0.52 |
+| statistic + z | 10,000 | 558 | 290 | 0.52 |

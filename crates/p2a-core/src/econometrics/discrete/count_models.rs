@@ -2866,6 +2866,9 @@ fn fit_truncated_count_part<'a>(
             fit.ll = start.ll;
             fit.converged = true;
         }
+        // After the Poisson-limit override above, a start whose warnings are forwarded can
+        // only come from an NB fit that did not converge; no input reaching this path is
+        // known (the helper is tested directly).
         forward_start_warnings(start_warnings, &fit, warnings);
         let iterations = fit.iterations;
         (fit, iterations)

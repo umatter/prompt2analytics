@@ -134,9 +134,12 @@ case("cli_iv_report", "cli", "ivreg(y ~ x + w | w + z1 + z2): classical and HC1 
 })
 
 # gsynth's default fixed effects (force = "unit") against the CLI's earlier two-way default, at fixed
-# numbers of factors (CV = FALSE), plus gsynth's own default run (CV over r = 0..5). gsynth 1.4's
-# cross-validation is deterministic (no sample() call; the same r.cv under any seed): it chooses r = 0
-# on this panel, where core's cross-validation chooses r = 1 (a recorded deviation of the CLI entry).
+# numbers of factors (CV = FALSE), plus gsynth's own default run (CV over r = 0..5). gsynth 1.4 (fect
+# 2.4.5) cross-validates on random folds and then applies cv.rule = '1se': under this seed the fold
+# MSPE is lowest at r = 1 and the 1-SE band moves the choice to r = 0; under seeds 1..20 it chooses
+# r = 1 (17 times) or r = 2, never 0. fect's leave-one-out CV (cv.method = 'loo', core's scheme)
+# chooses r = 1 under each of its rules (min, 1pct, 1se), as core does (a recorded deviation of the
+# CLI entry).
 case("cli_gsynth_defaults", "cli", "gsynth(Y ~ D + X) with unit and two-way effects at r = 0 and r = 1 (no CV), and the default CV run", function(ctx) {
   suppressPackageStartupMessages(library(gsynth))
   d <- ctx$dataset("datasets/generated/gsynth_staggered.csv")

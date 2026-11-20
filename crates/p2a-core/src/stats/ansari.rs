@@ -215,7 +215,8 @@ pub fn ansari_test_with(
             context: "Both samples must have at least one finite observation".to_string(),
         });
     }
-    let (ab_stat, has_ties) = ab_statistic(&xs, &ys, 1.0)?;
+    let stat = ab_statistic(&xs, &ys, 1.0)?;
+    let (ab_stat, has_ties) = (stat.s, stat.ties);
     let want_exact = exact.unwrap_or(m < 50 && n < 50);
     let use_exact = want_exact && !has_ties;
     let mut warnings: Vec<&'static str> = Vec::new();
@@ -257,7 +258,7 @@ pub fn ansari_test_with(
             interval = bauer_exact_interval(&xs, &ys, &dist, level, alternative, &mut warnings)?;
         }
     } else {
-        let z = ab_normalize(m, n, ab_stat, &xs, &ys, 1.0, has_ties)?;
+        let z = ab_normalize(m, n, &stat);
         p_value = match alternative {
             Alternative::TwoSided => normal_p_value_two_sided(z),
             Alternative::Less => normal_cdf(-z),
@@ -297,13 +298,39 @@ pub fn ansari_test_with(
     })
 }
 
-/// AB of `x / sig` against `y` (scores `min(r, N + 1 - r)` of the midranks) and whether the
-/// pooled sample has ties.
-fn ab_statistic(x: &[f64], y: &[f64], sig: f64) -> EconResult<(f64, bool)> {
+/// AB of `x / sig` against `y`, from one ranking of the pooled sample.
+#[derive(Clone, Copy)]
+struct AbStat {
+    /// AB: the sum over `x / sig` of the scores `min(r, N + 1 - r)` of the midranks.
+    s: f64,
+    /// Whether the pooled sample has ties.
+    ties: bool,
+    /// With ties, the sum of the squared scores over the pooled sample (R's
+    /// `sum(rle(sort(a))$lengths * rle(sort(a))$values^2)`), which [`ab_normalize`]'s
+    /// tie-corrected SIGMA needs; 0 without ties.
+    sq: f64,
+}
+
+/// AB of `x / sig` against `y` (scores `min(r, N + 1 - r)` of the midranks), whether the
+/// pooled sample has ties and, with ties, the pooled sum of squared scores.
+fn ab_statistic(x: &[f64], y: &[f64], sig: f64) -> EconResult<AbStat> {
     let (ranks, sizes) = ab_ranks(x, y, sig)?;
     let nt = (x.len() + y.len()) as f64;
-    let s = ranks[..x.len()].iter().map(|&r| r.min(nt + 1.0 - r)).sum();
-    Ok((s, sizes.iter().any(|&t| t > 1)))
+    let score = |r: f64| r.min(nt + 1.0 - r);
+    let s = ranks[..x.len()].iter().map(|&r| score(r)).sum();
+    let ties = sizes.iter().any(|&t| t > 1);
+    let sq = if ties {
+        ranks
+            .iter()
+            .map(|&r| {
+                let a = score(r);
+                a * a
+            })
+            .sum()
+    } else {
+        0.0
+    };
+    Ok(AbStat { s, ties, sq })
 }
 
 /// Midranks of `c(x / sig, y)` and the tie-group sizes. The samples are finite, so `x / sig` is
@@ -336,16 +363,10 @@ fn ab_ranks(x: &[f64], y: &[f64], sig: f64) -> EconResult<(Vec<f64>, Vec<usize>)
 }
 
 /// R's `normalize`: the standardised AB of `x / sig` against `y`, with the tie-corrected
-/// SIGMA from the scores of the pooled sample when it has ties.
-fn ab_normalize(
-    m: usize,
-    n: usize,
-    s: f64,
-    x: &[f64],
-    y: &[f64],
-    sig: f64,
-    ties: bool,
-) -> EconResult<f64> {
+/// SIGMA from the scores of the pooled sample when it has ties (from the ranking
+/// [`ab_statistic`] already did, not a second one).
+fn ab_normalize(m: usize, n: usize, stat: &AbStat) -> f64 {
+    let AbStat { s, ties, sq } = *stat;
     let (mf, nf) = (m as f64, n as f64);
     let nt = mf + nf;
     let even = (m + n).is_multiple_of(2);
@@ -360,23 +381,12 @@ fn ab_normalize(
         } else {
             (mf * nf * (nt + 1.0) * (3.0 + nt * nt) / (48.0 * nt * nt)).sqrt()
         }
+    } else if even {
+        (mf * nf * (16.0 * sq - nt * (nt + 2.0).powi(2)) / (16.0 * nt * (nt - 1.0))).sqrt()
     } else {
-        let (ranks, _) = ab_ranks(x, y, sig)?;
-        // sum over the pooled scores of score^2 (rle of the sorted scores, lengths * values^2)
-        let sq: f64 = ranks
-            .iter()
-            .map(|&r| {
-                let a = r.min(nt + 1.0 - r);
-                a * a
-            })
-            .sum();
-        if even {
-            (mf * nf * (16.0 * sq - nt * (nt + 2.0).powi(2)) / (16.0 * nt * (nt - 1.0))).sqrt()
-        } else {
-            (mf * nf * (16.0 * nt * sq - (nt + 1.0).powi(4)) / (16.0 * nt * nt * (nt - 1.0))).sqrt()
-        }
+        (mf * nf * (16.0 * nt * sq - (nt + 1.0).powi(4)) / (16.0 * nt * nt * (nt - 1.0))).sqrt()
     };
-    Ok(z / sigma)
+    z / sigma
 }
 
 /// Exact null distribution of AB (sizes `m`, `n`): the counts of the subset sums of `m` of
@@ -513,7 +523,7 @@ fn bauer_exact_interval(
         } else {
             sigma[k - 1] * 1.01
         };
-        absigma.push(ab_statistic(xs, ys, at)?.0);
+        absigma.push(ab_statistic(xs, ys, at)?.s);
     }
     let alpha = 1.0 - level;
     let cci = |alpha: f64, warnings: &mut Vec<&'static str>| -> (Option<f64>, Option<f64>) {
@@ -699,8 +709,7 @@ fn bauer_asymptotic_interval(
 ) -> EconResult<Bounds> {
     let (m, n) = (xs.len(), ys.len());
     let ab2 = |sig: f64, zq: f64| -> EconResult<f64> {
-        let (s, ties) = ab_statistic(xs, ys, sig)?;
-        Ok(ab_normalize(m, n, s, xs, ys, sig, ties)? - zq)
+        Ok(ab_normalize(m, n, &ab_statistic(xs, ys, sig)?) - zq)
     };
     // R's srange from the positive and the non-positive parts
     let pos = |v: &[f64]| v.iter().copied().filter(|&a| a > 0.0).collect::<Vec<_>>();
@@ -826,6 +835,62 @@ mod tests {
             Some(0.95),
         );
         assert!(ok.unwrap().exact);
+    }
+
+    /// The tie-corrected z as it was computed before the ranks were shared: the pooled sample
+    /// ranked once for AB and again for the squared scores.
+    fn z_ranking_twice(x: &[f64], y: &[f64], sig: f64) -> f64 {
+        let (m, n) = (x.len(), y.len());
+        let (ranks, sizes) = ab_ranks(x, y, sig).unwrap();
+        let nt = (m + n) as f64;
+        let s: f64 = ranks[..m].iter().map(|&r| r.min(nt + 1.0 - r)).sum();
+        let ties = sizes.iter().any(|&t| t > 1);
+        let sq = if ties {
+            let (again, _) = ab_ranks(x, y, sig).unwrap();
+            again
+                .iter()
+                .map(|&r| {
+                    let a = r.min(nt + 1.0 - r);
+                    a * a
+                })
+                .sum()
+        } else {
+            0.0
+        };
+        ab_normalize(m, n, &AbStat { s, ties, sq })
+    }
+
+    #[test]
+    fn test_ab_normalize_from_one_ranking_matches_ranking_twice() {
+        // tied pooled samples (rounded noise), even and odd N, a zero x at a zero scale (the
+        // NaN ranks) and the untied case
+        let noisy = |k: usize, scale: f64, seed: u64| -> Vec<f64> {
+            let mut st = seed;
+            (0..k)
+                .map(|_| {
+                    st = st
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
+                    let u = (st >> 11) as f64 / (1u64 << 53) as f64;
+                    ((u - 0.5) * scale * 10.0).round() / 10.0
+                })
+                .collect()
+        };
+        let cases = [
+            (noisy(40, 3.0, 1), noisy(37, 1.0, 2)),
+            (noisy(51, 2.0, 3), noisy(51, 2.5, 4)),
+            (vec![0.0, 0.0, 1.0, 2.0, 2.0], vec![-1.0, 0.5, 1.0, 1.0]),
+            (vec![0.13, 1.71, 2.9], vec![-1.37, 0.52, 1.04, 3.3]),
+        ];
+        for (x, y) in &cases {
+            for sig in [1.0, 0.37, 2.5, 0.0] {
+                let one = ab_normalize(x.len(), y.len(), &ab_statistic(x, y, sig).unwrap());
+                let two = z_ranking_twice(x, y, sig);
+                assert_eq!(one.to_bits(), two.to_bits(), "sig {sig}: {one} vs {two}");
+            }
+        }
+        assert!(ab_statistic(&cases[0].0, &cases[0].1, 1.0).unwrap().ties);
+        assert!(!ab_statistic(&cases[3].0, &cases[3].1, 1.0).unwrap().ties);
     }
 
     #[test]

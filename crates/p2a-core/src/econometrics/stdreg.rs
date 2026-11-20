@@ -1131,7 +1131,7 @@ fn fit_outcome_model(
                 warnings: fit
                     .warnings
                     .iter()
-                    .filter(|w| w.as_str() != "glm.fit: algorithm did not converge")
+                    .filter(|w| w.as_str() != crate::econometrics::glm::GLM_NOT_CONVERGED)
                     .cloned()
                     .collect(),
                 coefficients: fit.coefficients,

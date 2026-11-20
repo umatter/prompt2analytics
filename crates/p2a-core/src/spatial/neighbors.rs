@@ -594,7 +594,8 @@ fn invalid(message: String) -> EconError {
 }
 
 /// The checks every `try_*` constructor makes first: at least 2 observations, finite
-/// coordinates and, for longitude/latitude, latitudes in [-90, 90].
+/// coordinates and, for longitude/latitude, latitudes in [-90, 90] and longitudes in
+/// [-360, 360].
 fn validate_coords(coords: &[(f64, f64)], metric: Metric) -> EconResult<()> {
     let n = coords.len();
     if n < 2 {
