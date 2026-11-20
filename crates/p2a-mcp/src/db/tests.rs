@@ -2859,11 +2859,11 @@ async fn full_orphan_sweep_finds_orphans_between_the_owners_that_exist() {
 /// What `tracing` writes while a subscriber made with it is the thread's
 /// default.
 #[derive(Clone, Default)]
-pub(super) struct Logs(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+pub(crate) struct Logs(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
 
 impl Logs {
     /// A subscriber that writes WARN and above to these logs.
-    pub(super) fn subscriber(&self) -> impl tracing::Subscriber + Send + Sync + use<> {
+    pub(crate) fn subscriber(&self) -> impl tracing::Subscriber + Send + Sync + use<> {
         share_callsite_interest();
         tracing_subscriber::fmt()
             .with_writer(self.clone())
@@ -2872,7 +2872,7 @@ impl Logs {
             .finish()
     }
 
-    pub(super) fn text(&self) -> String {
+    pub(crate) fn text(&self) -> String {
         String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
     }
 }

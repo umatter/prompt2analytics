@@ -40,7 +40,7 @@ mod sessions;
 mod tool_calls;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 pub use connection::{DbConnection, DbError, DbStats, PersistenceLimits};
 pub(crate) use dataset_meta::stored_column_names;

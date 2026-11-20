@@ -514,8 +514,8 @@ impl PersistentSessionManager {
     /// A failed write stops the loop, but the rows written before it still
     /// get that check before the write's error is returned, so a failed row
     /// write cannot leave a departed session with an adoptable row; a failed
-    /// delete is reported (logged with its session's id when the write's
-    /// error is the one returned).
+    /// delete is logged with its session's id, and returned when no write
+    /// failed.
     async fn write_missing_rows(
         &self,
         missing: Vec<(SessionId, chrono::DateTime<chrono::Utc>)>,
@@ -536,18 +536,14 @@ impl PersistentSessionManager {
                 }
             }
         }
+        // A failed delete is logged with its session's id where it happens
+        // (`delete_each_session`); the write's error, if any, is the one
+        // returned.
         let checked = self.delete_departed_rows(created, stats).await;
-        let Some(e) = failed else {
-            return checked.map_err(|(_, e)| e.into());
-        };
-        if let Err((id, also)) = checked {
-            tracing::warn!(
-                session_id = %id,
-                error = %also,
-                "Failed to delete a row the sweep wrote for a departed session"
-            );
+        match failed {
+            Some(e) => Err(e.into()),
+            None => checked.map_err(|(_, e)| e.into()),
         }
-        Err(e.into())
     }
 
     /// Of the sessions in `created`, whose rows the sweep has just written,
@@ -556,9 +552,10 @@ impl PersistentSessionManager {
     /// refreshed. A session still live now has any later removal's delete
     /// run after the write.
     ///
-    /// A failed delete does not stop the others: the first error is
-    /// returned once every departed session's delete was tried (later ones
-    /// are logged), and `departed_deleted` counts the deletes that succeeded.
+    /// A failed delete does not stop the others: each is logged with its
+    /// session's id, the first error is returned once every departed
+    /// session's delete was tried, and `departed_deleted` counts the deletes
+    /// that succeeded.
     async fn delete_rows_unless_live(
         &self,
         created: Vec<SessionId>,
@@ -592,10 +589,10 @@ impl PersistentSessionManager {
     }
 
     /// Delete the rows of each session in `ids`, adding the deletes that
-    /// succeed to `deleted`. A failed delete does not stop the others: the
-    /// first failure is returned, with its session's id, once every delete
-    /// was tried, and each later one is logged as `failed` with its
-    /// session's id.
+    /// succeed to `deleted`. A failed delete does not stop the others: each
+    /// failure is logged as `failed` with its session's id, the first too,
+    /// since callers return its error without the id, and the first is
+    /// returned, with its session's id, once every delete was tried.
     async fn delete_each_session(
         &self,
         ids: impl IntoIterator<Item = SessionId>,
@@ -606,8 +603,12 @@ impl PersistentSessionManager {
         for id in ids {
             match self.db.delete_session(&id).await {
                 Ok(()) => *deleted += 1,
-                Err(e) if first_err.is_none() => first_err = Some((id, e)),
-                Err(e) => tracing::warn!(session_id = %id, error = %e, "{failed}"),
+                Err(e) => {
+                    tracing::warn!(session_id = %id, error = %e, "{failed}");
+                    if first_err.is_none() {
+                        first_err = Some((id, e));
+                    }
+                }
             }
         }
         first_err.map_or(Ok(()), Err)
@@ -1148,6 +1149,7 @@ pub enum PersistentSessionError {
 mod tests {
     use super::*;
     use crate::config::SessionConfig;
+    use crate::db::tests::Logs;
 
     fn registry(ttl_minutes: u64) -> Arc<SessionManager> {
         Arc::new(SessionManager::new(SessionConfig {
@@ -1715,45 +1717,6 @@ mod tests {
         assert!(pm.db().get_session(&refused).await.unwrap().is_none());
     }
 
-    /// What `tracing` writes at WARN and above while [`Logs::capture`]'s
-    /// guard is held.
-    #[derive(Clone, Default)]
-    struct Logs(Arc<std::sync::Mutex<Vec<u8>>>);
-
-    impl Logs {
-        /// Make these logs the thread's default subscriber until the guard
-        /// is dropped. A second registered dispatcher that wants no event
-        /// makes the callsites' interest combine every dispatcher's, so a
-        /// callsite another test reached first without a subscriber still
-        /// logs here (see the `Logs` of `db::tests`).
-        fn capture(&self) -> tracing::subscriber::DefaultGuard {
-            static OTHER: std::sync::OnceLock<tracing::Dispatch> = std::sync::OnceLock::new();
-            OTHER.get_or_init(|| tracing::Dispatch::new(tracing::subscriber::NoSubscriber::new()));
-            let logs = self.clone();
-            let subscriber = tracing_subscriber::fmt()
-                .with_writer(move || logs.clone())
-                .with_max_level(tracing::Level::WARN)
-                .with_ansi(false)
-                .finish();
-            tracing::subscriber::set_default(subscriber)
-        }
-
-        fn text(&self) -> String {
-            String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
-        }
-    }
-
-    impl std::io::Write for Logs {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
     /// Make every delete of `session`'s dataset metadata fail inside the
     /// store, so that deleting the session's rows fails there.
     async fn refuse_rows_delete(db: &DbConnection, session: &str) {
@@ -1803,7 +1766,7 @@ mod tests {
         let mut stats = SweepStats::default();
         let logs = Logs::default();
         let written = {
-            let _guard = logs.capture();
+            let _guard = tracing::subscriber::set_default(logs.subscriber());
             pm.write_missing_rows(
                 vec![(departed.clone(), now), (refused.clone(), now)],
                 &live,
@@ -1823,7 +1786,8 @@ mod tests {
 
     /// A failed delete of one expired session's rows does not stop the
     /// sweep from deleting the other expired sessions' rows; the error is
-    /// reported.
+    /// reported, and the failure is logged with the id of the session whose
+    /// rows stay.
     #[tokio::test]
     async fn a_failed_expired_delete_still_deletes_the_others() {
         let pm = manager().await;
@@ -1831,7 +1795,11 @@ mod tests {
         let (first, _) = stored_only(pm.db(), stale).await;
         let (second, second_conv) = stored_only(pm.db(), stale).await;
         // Whichever the store lists first fails, so the other comes after
-        // the failure.
+        // the failure. This relies on the sweep's own listing coming back
+        // in the same order as this one: the query has no ORDER BY, and the
+        // store (kv-mem) lists rows in record-key order. If the orders ever
+        // differed the test would still pass, but no longer prove that one
+        // failure does not stop the deletes after it.
         let listed = pm
             .db()
             .session_ids_last_accessed_before(chrono::Utc::now())
@@ -1845,7 +1813,18 @@ mod tests {
         };
         refuse_rows_delete(pm.db(), &refused).await;
 
-        assert!(pm.sweep().await.is_err());
+        let logs = Logs::default();
+        let swept = {
+            let _guard = tracing::subscriber::set_default(logs.subscriber());
+            pm.sweep().await
+        };
+        assert!(swept.is_err());
+        let text = logs.text();
+        assert!(
+            text.lines().any(|line| line.contains("expired session")
+                && line.contains(&format!("session_id={refused}"))),
+            "{text}"
+        );
         assert!(pm.db().get_session(&refused).await.unwrap().is_some());
         assert!(pm.db().get_session(&other).await.unwrap().is_none());
         assert!(pm.db().get_conversation(&other_conv).await.is_err());
