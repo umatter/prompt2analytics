@@ -107,7 +107,9 @@ pub struct MultinomResult {
     pub aic: f64,
     /// BIC
     pub bic: f64,
-    /// Number of iterations
+    /// Newton steps taken, the final full step and the polish step included when they are
+    /// taken, so a fit that meets the decrement rule in the last of the 100 loop passes
+    /// reports 101 (the convergence record's `max_iterations` is the loop's 100).
     pub iterations: usize,
     /// Whether converged
     pub converged: bool,
@@ -239,7 +241,8 @@ fn nan_absorbing_max(acc: f64, r: f64) -> f64 {
 /// approximates by BFGS. The step is solved on the equilibrated information (Cholesky
 /// first); the iteration stops when the Newton decrement on `glm.fit`'s
 /// relative-deviance scale is below 1e-10, then takes that last full step (at most 100
-/// iterations), and one more full step to polish. A line search that finds no increase
+/// iterations), and one more full step to polish; both count in `iterations`, which can
+/// therefore exceed the limit of 100 by one. A line search that finds no increase
 /// stops it as not converged. When some observation's fitted probability of its own
 /// category is numerically 0 or 1 (separation: no MLE exists), the fit is
 /// flagged (`separation`), warned and reported as not converged. When the decrement rule
