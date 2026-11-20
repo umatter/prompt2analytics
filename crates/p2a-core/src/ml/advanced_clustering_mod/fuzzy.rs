@@ -230,7 +230,7 @@ pub fn fuzzy_cmeans_from_centers(
     let sorted = FcmSorted::new(&data, cfg.metric)?;
     let mut distances = try_zeros2(n, k, "fuzzy c-means distances")?;
     let centers = centers.to_owned();
-    fcm_distances(&data, &centers, cfg.metric, &mut distances);
+    fcm_distances(&data, &centers, cfg.metric, &mut distances)?;
     let mut membership = try_zeros2(n, k, "fuzzy c-means memberships")?;
     update_fcm_memberships(&distances, cfg.m, &mut membership);
     let mut centers = centers;
@@ -324,7 +324,7 @@ fn fcm_iterate(
         if iter > 0 {
             update_fcm_centers(data, &membership, cfg.m, sorted, &mut centers);
         }
-        fcm_distances(data, &centers, cfg.metric, &mut distances);
+        fcm_distances(data, &centers, cfg.metric, &mut distances)?;
         update_fcm_memberships(&distances, cfg.m, &mut membership);
         withinerror = fcm_objective(&distances, &membership, cfg.m);
         if relative_change(withinerror, prev_error) < cfg.tol {
@@ -360,16 +360,30 @@ fn fcm_iterate(
     })
 }
 
+/// Distances of every row to every centre into `out`; refuses distances that overflow (finite
+/// data of about 1e154 or more), whose ratios would turn the memberships into NaN.
 fn fcm_distances(
     data: &ArrayView2<f64>,
     centers: &Array2<f64>,
     metric: FcmDistance,
     out: &mut Array2<f64>,
-) {
+) -> Result<(), String> {
+    let mut finite = true;
     for i in 0..data.nrows() {
         for j in 0..centers.nrows() {
-            out[[i, j]] = compute_fcm_distance(&data.row(i), &centers.row(j), metric);
+            let d = compute_fcm_distance(&data.row(i), &centers.row(j), metric);
+            finite &= d.is_finite();
+            out[[i, j]] = d;
         }
+    }
+    if finite {
+        Ok(())
+    } else {
+        Err(match metric {
+            FcmDistance::Euclidean => "fuzzy c-means: squared distances overflow; rescale the data",
+            FcmDistance::Manhattan => "fuzzy c-means: distances overflow; rescale the data",
+        }
+        .to_string())
     }
 }
 
@@ -615,6 +629,13 @@ pub fn fanny(
     crate::ml::extract::require_finite(&data, "FANNY")?;
 
     let distances = try_distance_matrix(&data, "FANNY distance matrix")?;
+    // the column-range bound of check_points clears almost every data set in O(n p); only data it
+    // flags are scanned
+    if super::common::check_points(&data, "FANNY").is_err()
+        && distances.iter().any(|v| !v.is_finite())
+    {
+        return Err("FANNY: distances overflow; rescale the data".to_string());
+    }
 
     let mut membership = try_zeros2(n, k, "FANNY memberships")?;
     match seed {
@@ -1478,6 +1499,40 @@ mod tests {
             "{obj} vs {}",
             r.objective
         );
+    }
+
+    #[test]
+    fn test_fuzzy_methods_name_overflowing_distances() {
+        // finite data whose squared distances overflow: before, the memberships became NaN, every
+        // label 0 and converged false, with no error
+        let x = ndarray::Array2::from_shape_fn((30, 2), |(i, j)| {
+            (1.0 + (i % 3) as f64 + 0.01 * i as f64 + 0.3 * j as f64) * 1e200
+        });
+        let e = fuzzy_cmeans(x.view(), 3, None, None, None, None, Some(1)).unwrap_err();
+        assert!(
+            e.contains("fuzzy c-means: squared distances overflow"),
+            "{e}"
+        );
+        let c = x.select(ndarray::Axis(0), &[0, 1, 2]);
+        let e = fuzzy_cmeans_from_centers(x.view(), c.view(), None, None, None, None).unwrap_err();
+        assert!(
+            e.contains("fuzzy c-means: squared distances overflow"),
+            "{e}"
+        );
+        let e = fanny(x.view(), 3, None, None, None, None).unwrap_err();
+        assert!(e.contains("FANNY: distances overflow"), "{e}");
+        // Manhattan distances of these data stay finite and the fit runs
+        let r = fuzzy_cmeans(
+            x.view(),
+            3,
+            None,
+            None,
+            None,
+            Some(FcmDistance::Manhattan),
+            Some(1),
+        )
+        .unwrap();
+        assert!(r.membership.iter().all(|u| u.is_finite()));
     }
 
     #[test]
