@@ -4668,12 +4668,54 @@ mod tests {
                     .munge_sample(Parameters(req(200_000, Some(1), "big"))),
             ),
         );
+        // The refusal comes from the check of the result without its text,
+        // made before any row is drawn, and nothing is stored.
         assert!(
             message.contains("200000 sampled rows (`n`)")
+                && message.contains("without its text")
                 && message.contains("select fewer columns first (munge_select)")
                 && !message.contains("sample fewer columns"),
             "{message}"
         );
+        assert!(!qs.has("big"));
+    }
+
+    /// The second stage of a bootstrap's bound: the result without its text
+    /// fits the quota, the drawn rows' text does not, and the final check
+    /// refuses the result before it is built.
+    #[test]
+    fn munge_sample_refuses_a_bootstrap_whose_drawn_text_does_not_fit() {
+        let n = 200;
+        let note: Vec<String> = (0..n)
+            .map(|i| format!("{i:03}{}", "w".repeat(1_997)))
+            .collect();
+        let df = df!("x" => noise(n), "note" => note).unwrap();
+        let seed = 11;
+        let drawn = sample_rows(n, n, true, seed).unwrap();
+        let without_text = bound::sample_without_text(&df, n as u64);
+        let with_text = bound::sample_drawn(&df, &drawn).unwrap();
+        assert!(
+            with_text > without_text + 100_000,
+            "{without_text} {with_text}"
+        );
+        let qs = QuotaSession::new(vec![("d", df)]);
+        let quota = qs.held() + without_text + (with_text - without_text) / 2;
+        let message = refused_before_building(qs.call(
+            Some(quota),
+            qs.server.munge_sample(Parameters(SampleDatasetRequest {
+                dataset: "d".into(),
+                n,
+                replace: Some(true),
+                seed: Some(seed),
+                result_name: Some("drawn".into()),
+            })),
+        ));
+        assert!(
+            message.contains("200 sampled rows (`n`)") && !message.contains("without its text"),
+            "{message}"
+        );
+        assert!(!qs.has("drawn"));
+        assert_eq!(qs.session.datasets.blocking_read().len(), 1);
     }
 
     #[test]

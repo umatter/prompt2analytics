@@ -769,3 +769,53 @@ async fn a_tools_error_result_is_an_error_to_the_model_and_the_client() {
         );
     }
 }
+
+// ---------- the prompt sent once, through the routes ----------
+
+/// MCP-20 through both chat routes: a history that ends with the posted prompt sends it to the
+/// provider once (one user turn), and a history whose last turn is the assistant's sends the
+/// prompt after it (two user turns). The provider is an Ollama stub that records each request.
+#[tokio::test]
+async fn the_chat_routes_send_a_prompt_the_history_ends_with_once() {
+    let (app, _) = http_app().await;
+    let answer = format!(
+        "{}\n",
+        json!({"message": {"role": "assistant", "content": "ok"}, "done": true})
+    );
+    let user = json!({"role": "user", "content": "q"});
+    let assistant = json!({"role": "assistant", "content": "a"});
+    for (history, user_turns) in [
+        (json!([user.clone()]), 1),
+        (json!([user.clone(), assistant.clone()]), 2),
+    ] {
+        for streaming in [false, true] {
+            let (addr, bodies) =
+                chunked_stub("/api/chat", vec![vec![answer.clone().into_bytes()]]).await;
+            let sid = new_session(&app).await;
+            let body = json!({"session_id": sid, "message": "q", "history": history,
+                              "provider": provider_json(ProviderType::Ollama, addr)});
+            if streaming {
+                let events = stream_events(&app, body).await;
+                assert_eq!(events.last().unwrap()["type"], "done", "{events:?}");
+            } else {
+                let (status, reply) = post_json(&app, "/api/llm/chat", body).await;
+                assert!(status.is_success(), "{status} {reply}");
+            }
+            let bodies = bodies.lock().unwrap();
+            assert_eq!(bodies.len(), 1, "streaming={streaming}");
+            let users: Vec<&Value> = bodies[0]["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|m| m["role"] == "user")
+                .collect();
+            assert_eq!(
+                users.len(),
+                user_turns,
+                "streaming={streaming}, history {history}: {}",
+                bodies[0]
+            );
+            assert!(users.iter().all(|m| m["content"] == "q"), "{}", bodies[0]);
+        }
+    }
+}
