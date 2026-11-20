@@ -1899,7 +1899,10 @@ mod tests {
 
     /// The tree prior's split count by rejection: a tree grown from the CGM prior (split with
     /// probability alpha (1 + d)^-beta while a variable has cutpoints left, variable uniform among
-    /// those, cutpoint uniform in its range), kept only when every child holds 5 rows.
+    /// those, cutpoint uniform in its range), kept only when every child holds 5 rows. This
+    /// reference draws among the variables still available; the chain draws among all of them
+    /// and rejects an exhausted one, as wbart does, which differs only when a variable is
+    /// exhausted (rare on this design).
     fn prior_tree_splits(
         x: &Array2<f64>,
         cuts: &[Vec<f64>],
@@ -2973,10 +2976,10 @@ mod tests {
         };
         // With no split ever made the importance is all zeros; at the default the
         // sampler does split these data.
-        let uniform = bits(&[0.0; 3]);
-        assert_ne!(bits(&fit(5).variable_importance), uniform);
+        let zeros = bits(&[0.0; 3]);
+        assert_ne!(bits(&fit(5).variable_importance), zeros);
         let want = fit(40);
-        assert_eq!(bits(&want.variable_importance), uniform);
+        assert_eq!(bits(&want.variable_importance), zeros);
         for min_node_size in [usize::MAX / 2 + 1, usize::MAX - 1, usize::MAX] {
             assert_eq!(
                 summary(&fit(min_node_size)),
@@ -3000,7 +3003,7 @@ mod tests {
             ..tiny()
         };
         let got = bart(&ds, "y", &["x1", "x2", "x3"], cfg).unwrap();
-        assert_eq!(bits(&got.variable_importance), uniform);
+        assert_eq!(bits(&got.variable_importance), zeros);
 
         // The rule itself: the product saturates above `usize::MAX / 2` and is
         // exact up to it.

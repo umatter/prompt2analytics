@@ -526,7 +526,9 @@ pub struct AdaBoostResult {
     pub n_estimators: usize,
     /// Training accuracy (for classification)
     pub train_accuracy: Option<f64>,
-    /// Training error rate per iteration
+    /// Training error rate per iteration. Records every round run, including rounds discarded
+    /// when a later AdaBoost.R2 learner fits exactly (the model is then that one learner), so its
+    /// length can exceed `n_estimators`.
     pub train_error: Vec<f64>,
     /// Estimator weights (alpha values)
     pub estimator_weights: Vec<f64>,
@@ -535,7 +537,8 @@ pub struct AdaBoostResult {
     /// Feature names (if provided)
     pub feature_names: Option<Vec<String>>,
     /// Weighted error of each weak learner (M1, SAMME) or its weighted average loss (R2), in
-    /// round order.
+    /// round order. Records every round run, including rounds discarded when a later
+    /// AdaBoost.R2 learner fits exactly, so its length can exceed `n_estimators`.
     #[serde(default)]
     pub learner_errors: Vec<f64>,
     /// Sorted distinct class labels: [-1, 1] for M1, the class codes for SAMME, None for R2.
