@@ -1921,7 +1921,7 @@ pub(crate) fn glm_fit_notes(
     out.extend(
         fit.warnings
             .iter()
-            .filter(|w| w.as_str() != "glm.fit: algorithm did not converge")
+            .filter(|w| w.as_str() != crate::econometrics::glm::GLM_NOT_CONVERGED)
             .map(|w| format!("{model}: {w}")),
     );
     out.extend(aliasing_message(&fit.aliased, names).map(|m| format!("{model}: {m}")));
