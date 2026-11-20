@@ -1838,10 +1838,6 @@ mod tests {
                 .expect_err("a cancelled budget must stop binary segmentation");
             assert!(err.contains("cancelled"), "{cost:?}: {err}");
         }
-        let err =
-            cancelled(|| binary_segmentation(&data, Some(5), None, None, CostFunction::MeanChange))
-                .expect_err("a cancelled budget must stop binary segmentation");
-        assert!(err.contains("cancelled"), "{err}");
     }
 
     #[test]
