@@ -61,3 +61,24 @@ checked as properties (`test_could_explain_away_at_the_evalue`): a confounder wi
 at the E-value explains the observed RR away, B(E, E) = E^2 / (2E - 1) = RR (RR 3.9 and 0.6), B(8, 8) =
 4.27 explains RR 3.9 away while B(3, 3) = 1.8 does not, and `bias_factor(evalue_rr(x)) = x` within
 1e-12 for x = 1.2, 2.5, 3.9.
+
+## Wall-clock against v0.5.0 (2026-11-13)
+
+Re-timed on 2026-11-13: release builds of v0.5.0 (`f80b0131`) and this version, one P core
+(`taskset -c 2`, `RAYON_NUM_THREADS=1`), five rounds interleaving the two builds in alternating order;
+each round is one process per build reporting the median of its calls after warm-up calls. Ratios are
+of the medians of the five per-round medians, with the ratio of their minima in brackets (1-minute
+load average 4.3-8.7 at the start of each round, right after the conversation-store benchmarks of the
+round before, and 2.2-3.8 at its end; the alternating order protects the ratios).
+`evalue_hr(hr, lo, hi, rare = false)`, one call per hazard ratio over a grid of n ratios from 1.05 to
+3.05, limits at 0.8 and 1.25 times the ratio:
+
+| calls | v0.5.0 µs | new µs | new / v0.5.0 [min] |
+|---|---|---|---|
+| 100 | 0.62 | 3.53 | **5.70** [5.48] |
+| 1,000 | 5.97 | 35.6 | **5.97** [6.32] |
+| 10,000 | 62.2 | 361 | **5.80** [5.78] |
+
+About 36 ns a call against 6 ns: the common-outcome conversion is now VanderWeele's
+`(1 - 0.5^sqrt(HR)) / (1 - 0.5^sqrt(1/HR))` (EValue's), where v0.5.0's was approximate. The unified
+`E_Value` risk-ratio row is 0.93-1.00x. The rows above 1.1x were signed off on 2026-11-13 (rule 5).

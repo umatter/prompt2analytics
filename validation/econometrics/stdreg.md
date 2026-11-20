@@ -213,6 +213,32 @@ logistic model, two covariates; ratio is this tree over ff8e7559.
 Replicates with a row past `|eta| = 15` are refitted by the shared GLM, which takes the far-row
 design back to about the base's time.
 
+## Wall-clock against v0.5.0 (2026-11-13)
+
+Re-timed on 2026-11-13: release builds of v0.5.0 (`f80b0131`) and this version, one P core
+(`taskset -c 2`, `RAYON_NUM_THREADS=1`), five rounds interleaving the two builds in alternating order;
+each round is one process per build reporting the median of its calls after warm-up calls. Ratios are
+of the medians of the five per-round medians, with the ratio of their minima in brackets (1-minute
+load average 4.3-8.7 at the start of each round, right after the conversation-store benchmarks of the
+round before, and 2.2-3.8 at its end; the alternating order protects the ratios).
+Linear or logistic outcome model, two covariates, with or without the treatment interactions; the
+bootstrap row has 999 replicates (seeded). Each cell is new / v0.5.0 [min].
+
+| SE | n = 100 | 1,000 | 10,000 | v0.5.0 µs at 10,000 |
+|---|---|---|---|---|
+| bootstrap, linear | 1.04 [1.04] | 1.01 [1.02] | 1.01 [1.00] | 203,500 |
+| delta, linear | **1.22** [1.27] | **1.22** [1.23] | **1.11** [1.10] | 884 |
+| delta, linear with interactions | **1.21** [1.23] | **1.21** [1.22] | 1.09 [1.08] | 1,124 |
+| delta, logistic | **1.12** [1.11] | **1.18** [1.16] | 1.08 [1.08] | 2,598 |
+| delta, logistic with interactions | **1.12** [1.13] | **1.15** [1.15] | **1.15** [1.11] | 3,084 |
+| sandwich, linear | **1.15** [1.11] | 1.03 [1.03] | 1.03 [1.02] | 1,023 |
+| sandwich, linear with interactions | 0.98 [1.00] | 0.92 [0.91] | 0.92 [0.92] | 1,410 |
+| sandwich, logistic | **1.13** [1.10] | **1.12** [1.12] | 1.05 [1.06] | 2,765 |
+| sandwich, logistic with interactions | 1.06 [1.06] | 1.06 [1.07] | 1.04 [1.06] | 3,476 |
+
+The delta and sandwich standard errors were corrected in Tier 4 (v0.5.0's were wrong); the rows above
+1.1x were signed off on 2026-11-13 (rule 5).
+
 ## References
 
 1. Robins, J.M. (1986). "A new approach to causal inference in mortality studies with a

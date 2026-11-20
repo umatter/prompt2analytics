@@ -154,6 +154,9 @@ after all tied observations are processed.
 
 ## Performance Comparison
 
+These timings predate the exact distributions of Tier 4; the comparison with v0.5.0 follows the two
+tables.
+
 ### Two-Sample KS Test
 
 | Dataset Size | Rust (µs) | R (µs) | Speedup |
@@ -173,6 +176,33 @@ after all tied observations are processed.
 | n=100,000 | 7,000 | 17,300 | ~2.5x |
 
 *Benchmarks run on Linux with Rust Criterion (100 samples) and R microbenchmark/system.time (50 iterations). Speedup decreases at large n due to O(n log n) sorting dominating both implementations.*
+
+### Against v0.5.0 (2026-11-13)
+
+Re-timed on 2026-11-13: release builds of v0.5.0 (`f80b0131`) and this version, one P core
+(`taskset -c 2`, `RAYON_NUM_THREADS=1`), five rounds interleaving the two builds in alternating order;
+each round is one process per build reporting the median of its calls after warm-up calls. Ratios are
+of the medians of the five per-round medians, with the ratio of their minima in brackets (1-minute
+load average 4.3-8.7 at the start of each round, right after the conversation-store benchmarks of the
+round before, and 2.2-3.8 at its end; the alternating order protects the ratios).
+Two samples of n each. The exact rows are the default call at sizes where R's rule picks the exact
+distribution (one sample below 100, two samples with m n below 10,000), which v0.5.0 approximated, so
+they are slower by construction.
+
+| Call | n | v0.5.0 µs | new µs | new / v0.5.0 [min] |
+|---|---|---|---|---|
+| one sample, asymptotic | 100 | 1.72 | 1.74 | 1.01 [1.03] |
+| one sample, asymptotic | 1,000 | 19.5 | 18.7 | 0.96 [0.97] |
+| one sample, asymptotic | 10,000 | 245 | 244 | 1.00 [0.99] |
+| one sample, exact | 30 | 0.53 | 3.12 | **5.89** [6.02] |
+| one sample, exact | 99 | 1.62 | 24.8 | **15.31** [15.21] |
+| two samples, asymptotic | 100 | 2.36 | 2.32 | 0.98 [1.01] |
+| two samples, asymptotic | 1,000 | 30.7 | 32.0 | 1.04 [0.99] |
+| two samples, asymptotic | 10,000 | 562 | 574 | 1.02 [1.02] |
+| two samples, exact | 50 | 1.19 | 9.33 | **7.84** [8.21] |
+| two samples, exact | 99 | 2.28 | 32.3 | **14.16** [14.52] |
+
+The exact rows above 1.1x were signed off on 2026-11-13 (rule 5).
 
 ## MCP tool: missing values and integer columns
 

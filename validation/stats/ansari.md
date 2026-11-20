@@ -85,3 +85,31 @@ There are no registry deviations left for the Ansari-Bradley test.
 `conf_level` must lie strictly between 0 and 1 (`validate_level`, NaN included) and is checked
 before any computation: before, 1.5 or NaN panicked in the normal quantile on the
 normal-approximation path. Test: `stats::ansari::tests::test_ansari_rejects_invalid_conf_level`.
+
+## Wall-clock against v0.5.0 (2026-11-13)
+
+Re-timed on 2026-11-13: release builds of v0.5.0 (`f80b0131`) and this version, one P core
+(`taskset -c 2`, `RAYON_NUM_THREADS=1`), five rounds interleaving the two builds in alternating order;
+each round is one process per build reporting the median of its calls after warm-up calls. Ratios are
+of the medians of the five per-round medians, with the ratio of their minima in brackets (1-minute
+load average 4.3-8.7 at the start of each round, right after the conversation-store benchmarks of the
+round before, and 2.2-3.8 at its end; the alternating order protects the ratios).
+Two samples of n each. The exact rows are the default call below 50 per sample (R's rule), the
+interval rows add `conf_int`: exact (Bauer's inversion) below 50, asymptotic from 100, where v0.5.0
+returned no interval, so those base times are the test alone.
+
+| Call | n | v0.5.0 µs | new µs | new / v0.5.0 [min] |
+|---|---|---|---|---|
+| test, asymptotic | 100 | 2.29 | 2.38 | 1.04 [1.02] |
+| test, asymptotic | 1,000 | 29.2 | 29.0 | 0.99 [1.03] |
+| test, asymptotic | 10,000 | 496 | 528 | 1.06 [1.07] |
+| test, exact | 15 | 25.4 | 26.8 | 1.05 [1.03] |
+| test, exact | 30 | 352 | 327 | 0.93 [0.90] |
+| test, exact | 49 | 2,612 | 2,608 | 1.00 [1.02] |
+| exact interval | 30 | 362 | 673 | **1.86** [1.89] |
+| exact interval | 49 | 2,582 | 4,153 | **1.61** [1.56] |
+| asymptotic interval (new) | 100 | 2.38 | 1,139 | **478** [516] |
+| asymptotic interval (new) | 1,000 | 24.6 | 27,560 | **1,119** [1,159] |
+| asymptotic interval (new) | 10,000 | 558 | 821,300 | **1,472** [1,479] |
+
+The interval rows above 1.1x were signed off on 2026-11-13 (rule 5).

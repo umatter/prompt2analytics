@@ -312,6 +312,8 @@ Walsh average.
 | pairwise, exact | 30 | 6.18 | 68.0 | 11.00 [11.73] |
 | pairwise, exact | 49 | 8.21 | 277 | 33.77 [32.81] |
 
+The exact rows above 1.1x were signed off on 2026-11-13 (rule 5).
+
 ## References
 
 - Wilcoxon, F. (1945). "Individual Comparisons by Ranking Methods".

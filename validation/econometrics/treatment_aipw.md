@@ -108,6 +108,34 @@ Against `fit_glm` the shared lean logit fit differs by at most 4.5e-9 on a coeff
 2.1e-6 on a covariance entry at the default tolerance (quasi-separated fits of n = 15 to 80 with a rare binary
 covariate; 8.2e-11 and 2.7e-11 on heavy-tailed fits). These gaps are accepted.
 
+## Wall-clock against v0.5.0 (2026-11-13)
+
+Re-timed on 2026-11-13: release builds of v0.5.0 (`f80b0131`) and this version, one P core
+(`taskset -c 2`, `RAYON_NUM_THREADS=1`), five rounds interleaving the two builds in alternating order;
+each round is one process per build reporting the median of its calls after warm-up calls. Ratios are
+of the medians of the five per-round medians, with the ratio of their minima in brackets (1-minute
+load average 4.3-8.7 at the start of each round, right after the conversation-store benchmarks of the
+round before, and 2.2-3.8 at its end; the alternating order protects the ratios).
+Treatment and two covariates, ATE; the bootstrap rows set `bootstrap = 999` (seeded). That was the
+default of methods `IPW` and `Regression` when these rows were measured; the default is now the
+analytic SE (0 replicates), which takes 16.6 / 108 / 1,248 µs (`IPW`) and 17.2 / 122 / 1,337 µs
+(`Regression`) at n = 100 / 1,000 / 10,000, 0.01-0.02x of v0.5.0's 999 replicates.
+
+| Call | n | v0.5.0 µs | new µs | new / v0.5.0 [min] |
+|---|---|---|---|---|
+| AIPW | 100 | 11.4 | 11.5 | 1.01 [1.04] |
+| AIPW | 1,000 | 78.4 | 79.7 | 1.02 [1.01] |
+| AIPW | 10,000 | 1,024 | 1,021 | 1.00 [1.00] |
+| Regression, B = 999 | 100 | 921 | 10,699 | **11.62** [11.61] |
+| Regression, B = 999 | 1,000 | 7,486 | 72,439 | **9.68** [9.71] |
+| Regression, B = 999 | 10,000 | 140,200 | 764,600 | **5.45** [5.44] |
+| IPW, B = 999 | 100 | 1,198 | 7,325 | **6.11** [6.13] |
+| IPW, B = 999 | 1,000 | 10,138 | 58,498 | **5.77** [5.82] |
+| IPW, B = 999 | 10,000 | 165,300 | 649,900 | **3.93** [3.94] |
+
+Each replicate now refits the propensity model and both arm regressions (see above). The bootstrap
+rows were signed off on 2026-11-13 (rule 5).
+
 ## References
 
 - Robins, J.M., Rotnitzky, A. & Zhao, L.P. (1994). "Estimation of Regression Coefficients When Some Regressors Are Not Always Observed."

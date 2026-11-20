@@ -263,6 +263,28 @@ information at the final coefficients, where glm's `vcov` holds the weights of t
 for a probit (Fisher scoring, linear convergence) the two differ by about 1e-6 relative at this
 control. Those stay pinned at 1e-6 against glm at `epsilon = 1e-14`.
 
+## Wall-clock against v0.5.0 (2026-11-13)
+
+Re-timed on 2026-11-13: release builds of v0.5.0 (`f80b0131`) and this version, one P core
+(`taskset -c 2`, `RAYON_NUM_THREADS=1`), five rounds interleaving the two builds in alternating order;
+each round is one process per build reporting the median of its calls after warm-up calls. Ratios are
+of the medians of the five per-round medians, with the ratio of their minima in brackets (1-minute
+load average 4.3-8.7 at the start of each round, right after the conversation-store benchmarks of the
+round before, and 2.2-3.8 at its end; the alternating order protects the ratios).
+Logit with two regressors; the contrast row adds `contrasts` at x1 = -1, 0, 1 to the same fit.
+
+| Call | n | v0.5.0 µs | new µs | new / v0.5.0 [min] |
+|---|---|---|---|---|
+| logit AME | 100 | 39.0 | 38.8 | 0.99 [1.00] |
+| logit AME | 1,000 | 270 | 268 | 0.99 [0.99] |
+| logit AME | 10,000 | 3,170 | 3,178 | 1.00 [1.00] |
+| logit AME and contrasts | 100 | 37.6 | 49.6 | **1.32** [1.34] |
+| logit AME and contrasts | 1,000 | 268 | 370 | **1.38** [1.41] |
+| logit AME and contrasts | 10,000 | 3,194 | 4,151 | **1.30** [1.31] |
+
+The contrasts are now average comparisons over every row with the delta-method SE (above). The
+contrast rows were signed off on 2026-11-13 (rule 5).
+
 ## Status
 
 - [x] Core implementation complete
