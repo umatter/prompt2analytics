@@ -197,11 +197,9 @@ pub fn linear_svm(
         shrinking: true,
         min_working_set: 0,
     };
-    // fast_svm's messages name it; the callers (ml_svm, p2a ml svm) know it as SVM
-    let fast = fast_svm(data, target, &config).map_err(|e| match e.strip_prefix("FastSVM:") {
-        Some(rest) => format!("SVM:{rest}"),
-        None => e,
-    })?;
+    // fast_svm's messages name it, after the error kind for those of the solver; the callers
+    // (ml_svm, p2a ml svm) know it as SVM
+    let fast = fast_svm(data, target, &config).map_err(|e| e.replacen("FastSVM:", "SVM:", 1))?;
 
     // w = sum_k (alpha_k y_k) x_k over the support vectors
     let mut weights = vec![0.0; n_features];
@@ -889,6 +887,24 @@ pub fn kernel_svm_predict(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The linear tool's overflow advice names no gamma, which it does not have, and calls the
+    /// solver SVM. Before: "...: FastSVM: the kernel overflows on these data; rescale them or
+    /// lower gamma" (the prefix rewrite missed messages that start with the error kind).
+    #[test]
+    fn test_linear_svm_overflow_message_names_the_features() {
+        let x = Array2::from_shape_fn((12, 2), |(i, j)| {
+            (1.0 + (i % 2) as f64 * 3.0 + 0.07 * i as f64 + 0.4 * j as f64) * 1e200
+        });
+        let y = Array1::from_shape_fn(12, |i| (i % 2) as f64);
+        let e = linear_svm(x.view(), y.view(), None, None, None, None).unwrap_err();
+        assert!(
+            e.contains("SVM: the inner products overflow")
+                && !e.contains("FastSVM")
+                && !e.contains("gamma"),
+            "{e}"
+        );
+    }
     use crate::resource::{Budget, CancelToken, with_budget};
     use ndarray::Array2;
     use ndarray::array;
