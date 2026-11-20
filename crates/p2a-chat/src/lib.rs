@@ -508,7 +508,6 @@ impl ChartNamer {
         tool: Option<&str>,
         img: &ImageData,
     ) -> anyhow::Result<PathBuf> {
-        use std::io::Write as _;
         let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &img.data)?;
         let ext = chart_extension(&img.mime_type);
         let tool = tool.map(chart_tool_part).filter(|t| !t.is_empty());
@@ -524,8 +523,8 @@ impl ChartNamer {
                 .create_new(true)
                 .open(&path)
             {
-                Ok(mut file) => {
-                    file.write_all(&bytes)?;
+                Ok(file) => {
+                    write_new_chart(&path, file, &bytes)?;
                     return Ok(path);
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -539,6 +538,21 @@ impl ChartNamer {
     }
 }
 
+/// Writes `bytes` to the chart file just created at `path`. A failed write (a full disk,
+/// for example) removes the file, so that no truncated chart is left under a valid name.
+fn write_new_chart(
+    path: &std::path::Path,
+    mut file: impl std::io::Write,
+    bytes: &[u8],
+) -> std::io::Result<()> {
+    if let Err(e) = file.write_all(bytes) {
+        drop(file);
+        let _ = std::fs::remove_file(path);
+        return Err(e);
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // HTTP client and connection errors
 // ---------------------------------------------------------------------------
@@ -548,7 +562,8 @@ const START_SERVER_COMMAND: &str =
     "cargo run -p p2a-mcp --features full -- --transport http --port 8080";
 
 /// The error for an access token that breaks the visible-ASCII rule. It
-/// states the rule, in the Dioxus app's wording, and never the value.
+/// states the rule as the Dioxus app's settings message does (visible ASCII
+/// only), names where the token came from, and never includes the value.
 const ACCESS_TOKEN_RULE_ERROR: &str = "--access-token / P2A_ACCESS_TOKEN may contain only visible ASCII characters ('!' to '~'), no spaces or tabs";
 
 /// Client builder with the backend access token, if any, as a default
@@ -567,13 +582,13 @@ fn client_builder(access_token: Option<&str>) -> anyhow::Result<reqwest::ClientB
     let Some(token) = access_token.map(str::trim).filter(|t| !t.is_empty()) else {
         return Ok(builder);
     };
-    let unsendable = || anyhow::Error::msg(ACCESS_TOKEN_RULE_ERROR);
+    let rule_error = || anyhow::Error::msg(ACCESS_TOKEN_RULE_ERROR);
     if !token.chars().all(|c| ('!'..='~').contains(&c)) {
-        return Err(unsendable());
+        return Err(rule_error());
     }
     // Backstop: the check above already rules out every value this rejects.
     let mut value = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
-        .map_err(|_| unsendable())?;
+        .map_err(|_| rule_error())?;
     value.set_sensitive(true);
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert(reqwest::header::AUTHORIZATION, value);
@@ -733,7 +748,11 @@ async fn stream_or_cancel(
     outcome
 }
 
-/// How often [`stream_or_cancel`] yields to the runtime after a cancellation.
+/// How often [`stream_or_cancel`] yields to the runtime after a cancellation. The count
+/// is empirical, not derived: it is enough polls for the HTTP client's connection task
+/// (reqwest/hyper) to close the socket, and a change in how many polls that task needs
+/// can make it too few. The test `stream_or_cancel_returns_cancelled` guards it by
+/// checking that the server sees the connection close.
 const CLOSE_YIELDS: usize = 16;
 
 /// Completes at the next Ctrl+C; never when the signal handler cannot be installed.
@@ -890,11 +909,12 @@ async fn run_with_client(
             println!();
             match ask!(input) {
                 Outcome::Done(_) => {}
-                Outcome::Failed(e) => {
+                // ask! has printed the error already
+                Outcome::Failed(_) => {
                     failed += 1;
                     if !args.keep_going {
                         anyhow::bail!(
-                            "prompt {} of {n} failed: {e}; the remaining prompts were not sent (use --keep-going to send them)",
+                            "prompt {} of {n} failed; the remaining prompts were not sent (use --keep-going to send them)",
                             k + 1
                         );
                     }
@@ -1275,9 +1295,16 @@ mod tests {
         let err = build_http_client(Some("bad\r\ntoken"))
             .unwrap_err()
             .to_string();
-        assert_eq!(
-            err, ACCESS_TOKEN_RULE_ERROR,
-            "the message names the source and never the value"
+        assert_eq!(err, ACCESS_TOKEN_RULE_ERROR);
+        assert!(
+            err.contains("--access-token")
+                && err.contains("P2A_ACCESS_TOKEN")
+                && err.contains("visible ASCII"),
+            "the message names the source and the rule: {err}"
+        );
+        assert!(
+            !err.contains("bad") && !err.contains("token\r"),
+            "the message never includes the value: {err}"
         );
     }
 
@@ -1503,6 +1530,32 @@ mod tests {
         assert_eq!(std::fs::read(d.0.join("chart_002.png")).unwrap(), b"new");
     }
 
+    /// A writer whose every write fails, as a full disk does.
+    struct FullDisk;
+
+    impl std::io::Write for FullDisk {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("no space left on device"))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_chart_that_cannot_be_written_leaves_no_file() {
+        let d = scratch_dir("full");
+        let path = d.0.join("chart_001.png");
+        std::fs::write(&path, b"").unwrap();
+        let err = write_new_chart(&path, FullDisk, b"\x89PNG").unwrap_err();
+        assert!(err.to_string().contains("no space left"), "{err}");
+        assert!(!path.exists(), "the partial chart file was removed");
+        // A good write keeps the file.
+        let file = std::fs::File::create(&path).unwrap();
+        write_new_chart(&path, file, b"\x89PNG").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"\x89PNG");
+    }
+
     #[test]
     fn chart_extensions_and_tool_names_are_safe() {
         let d = scratch_dir("names");
@@ -1655,10 +1708,10 @@ mod tests {
             .await
             .unwrap_err()
             .to_string();
-        assert!(
-            err.starts_with("prompt 1 of 2 failed: provider down"),
-            "{err}"
-        );
+        // ask! has already printed "Request failed: provider down"; the final error
+        // does not repeat it.
+        assert!(err.starts_with("prompt 1 of 2 failed;"), "{err}");
+        assert!(!err.contains("provider down"), "{err}");
         assert!(err.contains("--keep-going"), "{err}");
         assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
