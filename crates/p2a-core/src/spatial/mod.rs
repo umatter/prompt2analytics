@@ -83,6 +83,13 @@ pub use diagnostics::{
 pub use neighbors::{NeighborMethod, Neighbors};
 pub use weights::{SparseWeights, SpatialWeights, WeightStyle};
 
+/// The first unit (0-based) whose weights row lists the unit itself, if any. The local
+/// statistics and samplers that assume a zero diagonal refuse such weights; the crate's own
+/// neighbour builders never produce one, but `Neighbors::from_indices` accepts it.
+pub(crate) fn first_self_link(listw: &SpatialWeights) -> Option<usize> {
+    (0..listw.n()).find(|&i| listw.get_weights(i).indices.contains(&i))
+}
+
 #[cfg(test)]
 pub(crate) mod test_fixtures {
     //! 30 points used by the spatial tests. R 4.3.3:

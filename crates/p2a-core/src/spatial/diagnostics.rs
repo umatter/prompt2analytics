@@ -145,7 +145,8 @@ pub struct LocalMoranObs {
 pub struct LocalMoranResult {
     /// Local statistics for each observation
     pub local_stats: Vec<LocalMoranObs>,
-    /// Global Moran's I, the sum of the local I over S0
+    /// Global Moran's I, the sum of the local I over S0, with m2 over all n units (spdep
+    /// `adjust.n = FALSE`); with islands, n / (n - islands) times [`moran_test`]'s statistic
     pub global_i: f64,
     /// Number of observations
     pub n: usize,
@@ -701,12 +702,15 @@ pub fn localmoran(
 /// repeats from the other n - 1 values (Anselin's conditional permutation; spdep's
 /// `no_repeat_in_row = TRUE`, not its default). A zero variance (an island, or z_i = 0 under
 /// conditional moments) gives a NaN z-score and p-value and [`LisaCluster::NotSignificant`],
-/// where spdep gives NaN. `global_i` is Moran's I, Σ I_i / S0.
+/// where spdep gives NaN. `global_i` is Moran's I, Σ I_i / S0, with m2 over all n units
+/// (spdep `adjust.n = FALSE`): when W has islands it is n / (n - islands) times the statistic
+/// of [`moran_test`], which divides by the n - islands units with neighbours.
 ///
 /// # Errors
 ///
 /// - `InvalidSpecification`: `x` and the weights differ in length, `x` has a non-finite value
-///   or is constant, fewer than 3 units, or `alpha` is not in [0, 1].
+///   or is constant, fewer than 3 units, `alpha` is not in [0, 1], or a unit lists itself as
+///   a neighbour (the moments and the permutation assume a zero diagonal).
 /// - `Cancelled`: the installed budget expired during the permutations.
 ///
 /// # Reference
@@ -749,6 +753,26 @@ pub fn localmoran_with(
             message: "localmoran: x is constant, so local autocorrelation is undefined".to_string(),
         });
     }
+    if let Some(i) = super::first_self_link(listw) {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "localmoran: unit {} lists itself as a neighbour; W must have a zero diagonal",
+                i + 1
+            ),
+        });
+    }
+    if config.permutations > 0
+        && let Some(i) = (0..n).find(|&i| listw.get_weights(i).indices.len() > n - 1)
+    {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "localmoran: unit {} has {} neighbours, more than the n - 1 = {} other units",
+                i + 1,
+                listw.get_weights(i).indices.len(),
+                n - 1
+            ),
+        });
+    }
 
     let n_f = n as f64;
     let mean = x.sum() / n_f;
@@ -764,14 +788,19 @@ pub fn localmoran_with(
     let observed: Vec<f64> = (0..n).map(|i| (z[i] / m2) * wz[i]).collect();
 
     let perm_pvalues = if config.permutations > 0 {
-        Some(local_moran_permutation_pvalues(
-            &z,
-            m2,
-            &observed,
-            listw,
-            config.permutations,
-            config.seed,
-        )?)
+        let nsim = config.permutations;
+        let count = local_moran_permutation_counts(&z, m2, &observed, listw, nsim, config.seed)?;
+        Some(
+            (0..n)
+                .map(|i| {
+                    if listw.get_weights(i).indices.is_empty() || z[i] == 0.0 {
+                        return f64::NAN;
+                    }
+                    let r = count[i].min(nsim - count[i]);
+                    (r as f64 + 1.0) / (nsim as f64 + 1.0)
+                })
+                .collect::<Vec<f64>>(),
+        )
     } else {
         None
     };
@@ -857,20 +886,21 @@ pub fn localmoran_with(
     })
 }
 
-/// Folded conditional-permutation p-values of local Moran's I (spdep `localmoran_perm`,
-/// "Pr(folded) Sim", with `no_repeat_in_row = TRUE`): in each of `nsim` permutations unit i's
-/// neighbours receive |N_i| values drawn without repeats from the other n - 1 values, and
-/// p_i = (min(r_i, nsim - r_i) + 1) / (nsim + 1) with r_i the count of I_perm >= I_i. The
-/// draws of permutation r come from a generator keyed by (seed, r). NaN for a unit without
-/// neighbours or with z_i = 0 (every permuted I_i is 0).
-fn local_moran_permutation_pvalues(
+/// Conditional-permutation counts of local Moran's I (spdep `localmoran_perm` with
+/// `no_repeat_in_row = TRUE`): in each of `nsim` permutations unit i's neighbours receive
+/// |N_i| values drawn without repeats from the other n - 1 values, and r_i counts the
+/// permutations with I_perm >= I_i. The caller folds them into
+/// p_i = (min(r_i, nsim - r_i) + 1) / (nsim + 1) ("Pr(folded) Sim"). The draws of
+/// permutation r come from a generator keyed by (seed, r). The weights must have a zero
+/// diagonal ([`localmoran_with`] refuses a self-link), so no row has more than n - 1 entries.
+fn local_moran_permutation_counts(
     z: &Array1<f64>,
     m2: f64,
     observed: &[f64],
     listw: &SpatialWeights,
     nsim: usize,
     seed: u64,
-) -> EconResult<Vec<f64>> {
+) -> EconResult<Vec<usize>> {
     use rand::{Rng, SeedableRng};
     use rand_chacha::ChaCha8Rng;
 
@@ -904,15 +934,7 @@ fn local_moran_permutation_pvalues(
             }
         }
     }
-    Ok((0..n)
-        .map(|i| {
-            if listw.get_weights(i).indices.is_empty() || z[i] == 0.0 {
-                return f64::NAN;
-            }
-            let r = count[i].min(nsim - count[i]);
-            (r as f64 + 1.0) / (nsim as f64 + 1.0)
-        })
-        .collect())
+    Ok(count)
 }
 
 /// Rao score (Lagrange multiplier) tests for spatial dependence in a linear regression, as
@@ -1901,6 +1923,91 @@ mod tests {
                 4.0 * se
             );
         }
+    }
+
+    /// The one-sided count r_i / nsim converges to the enumerated P(I_perm >= I_i) of the
+    /// 7-unit fixture: the folded check alone would miss a count taken in the wrong direction.
+    #[test]
+    fn localmoran_permutation_count_converges_to_one_sided_limit() {
+        let (case, ds) = crate::test_support::load_case("spatial_localmoran_t4");
+        let (_, _, coords) = sim_design(&ds);
+        let x7 = Array1::from(case.vector("perm7_x"));
+        let w7 = SpatialWeights::from_neighbors(
+            &Neighbors::try_from_knn(&coords[..7], 2).unwrap(),
+            WeightStyle::RowStd,
+        );
+        let mean = x7.sum() / 7.0;
+        let z = x7.mapv(|v| v - mean);
+        let m2 = z.iter().map(|v| v * v).sum::<f64>() / 7.0;
+        let wz = w7.lag(&z);
+        let observed: Vec<f64> = (0..7).map(|i| z[i] / m2 * wz[i]).collect();
+        let nsim = 99_999;
+        let count = local_moran_permutation_counts(&z, m2, &observed, &w7, nsim, 42).unwrap();
+        let p_ge = case.vector("perm7_p_ge");
+        let nf = nsim as f64;
+        for i in 0..7 {
+            let p = count[i] as f64 / nf;
+            let se = (p_ge[i] * (1.0 - p_ge[i]) / nf).sqrt();
+            assert!(
+                (p - p_ge[i]).abs() <= 4.0 * se + 1.0 / nf,
+                "unit {i}: r/nsim {p} vs P(I >= Ii) {} (4 SE = {})",
+                p_ge[i],
+                4.0 * se
+            );
+        }
+    }
+
+    /// A unit that lists itself is refused, with or without permutations: the moments and
+    /// the draws from the other n - 1 units assume a zero diagonal, and a row of n entries
+    /// would leave the permutation an empty range to draw from.
+    #[test]
+    fn localmoran_refuses_a_self_link() {
+        let x = Array1::from(vec![0.3, -1.2, 0.8, 2.1, -0.4]);
+        let nb = Neighbors::from_indices(vec![
+            vec![0, 1, 2, 3, 4],
+            vec![0, 2],
+            vec![1, 3],
+            vec![2, 4],
+            vec![3, 0],
+        ]);
+        let w = SpatialWeights::from_neighbors(&nb, WeightStyle::RowStd);
+        for permutations in [0, 99] {
+            let cfg = LocalMoranConfig {
+                permutations,
+                ..LocalMoranConfig::default()
+            };
+            match localmoran_with(&x, &w, &cfg) {
+                Err(EconError::InvalidSpecification { message }) => {
+                    assert!(message.contains("unit 1 lists itself"), "{message}")
+                }
+                other => panic!("permutations = {permutations}: {other:?}"),
+            }
+        }
+    }
+
+    /// With islands, global_i (m2 over all n units) is n / (n - islands) times moran_test's
+    /// statistic, which uses the n - islands units with neighbours.
+    #[test]
+    fn localmoran_global_i_with_islands_scales_by_n_over_n_adj() {
+        let x = Array1::from(vec![0.3, -1.2, 0.8, 2.1, -0.4, 1.7, -0.9]);
+        let nb = Neighbors::from_indices(vec![
+            vec![1, 4],
+            vec![0, 2],
+            vec![1, 3],
+            vec![2, 4],
+            vec![3, 0],
+            vec![],
+            vec![],
+        ]);
+        let w = SpatialWeights::from_neighbors(&nb, WeightStyle::RowStd);
+        let g = localmoran(&x, &w, 0.05, 0).unwrap().global_i;
+        let m = moran_test(&x, &w, MoranAlternative::Greater).unwrap();
+        assert_eq!(m.n_islands, 2);
+        let expected = m.statistic * 7.0 / 5.0;
+        assert!(
+            (g - expected).abs() <= 1e-12 * expected.abs(),
+            "{g} vs {expected}"
+        );
     }
 
     #[test]
