@@ -376,7 +376,8 @@ impl PersistentSessionManager {
     ///    is updated, a live session without a row gets one);
     /// 2. delete the rows of every session that is not live and whose row was
     ///    last accessed longer ago than the TTL (the whole-minute rule the
-    ///    live table uses);
+    ///    live table uses); a failed delete does not stop the others, and the
+    ///    first failure ends the sweep once every delete was tried;
     /// 3. delete orphaned rows: the first successful sweep of this manager
     ///    scans every row (`DbConnection::delete_orphans`), the later ones
     ///    only the rows of recently deleted conversations
@@ -430,13 +431,19 @@ impl PersistentSessionManager {
             .and_then(|ttl| chrono::Utc::now().checked_sub_signed(ttl));
         if let Some(cutoff) = cutoff {
             let live = self.live_ids().await;
-            for id in self.db.session_ids_last_accessed_before(cutoff).await? {
-                if live.contains(&id) {
-                    continue;
-                }
-                self.db.delete_session(&id).await?;
-                stats.expired_deleted += 1;
-            }
+            let expired = self
+                .db
+                .session_ids_last_accessed_before(cutoff)
+                .await?
+                .into_iter()
+                .filter(|id| !live.contains(id));
+            self.delete_each_session(
+                expired,
+                &mut stats.expired_deleted,
+                "Failed to delete the rows of an expired session",
+            )
+            .await
+            .map_err(|(_, e)| e)?;
         }
 
         use std::sync::atomic::Ordering;
@@ -498,7 +505,8 @@ impl PersistentSessionManager {
     /// A failed write stops the loop, but the rows written before it still
     /// get that check before the write's error is returned, so a failed row
     /// write cannot leave a departed session with an adoptable row; a failed
-    /// delete is reported.
+    /// delete is reported (logged with its session's id when the write's
+    /// error is the one returned).
     async fn write_missing_rows(
         &self,
         missing: Vec<(SessionId, chrono::DateTime<chrono::Utc>)>,
@@ -519,12 +527,16 @@ impl PersistentSessionManager {
                 }
             }
         }
-        let checked = self.delete_rows_unless_live(created, stats).await;
+        let checked = self.delete_departed_rows(created, stats).await;
         let Some(e) = failed else {
-            return checked;
+            return checked.map_err(|(_, e)| e.into());
         };
-        if let Err(also) = checked {
-            tracing::warn!(error = %also, "Failed to delete a row the sweep wrote for a departed session");
+        if let Err((id, also)) = checked {
+            tracing::warn!(
+                session_id = %id,
+                error = %also,
+                "Failed to delete a row the sweep wrote for a departed session"
+            );
         }
         Err(e.into())
     }
@@ -543,26 +555,53 @@ impl PersistentSessionManager {
         created: Vec<SessionId>,
         stats: &mut SweepStats,
     ) -> Result<(), PersistentSessionError> {
+        self.delete_departed_rows(created, stats)
+            .await
+            .map_err(|(_, e)| e.into())
+    }
+
+    /// [`delete_rows_unless_live`](Self::delete_rows_unless_live), with the
+    /// first failed delete's session id next to its error.
+    async fn delete_departed_rows(
+        &self,
+        created: Vec<SessionId>,
+        stats: &mut SweepStats,
+    ) -> Result<(), (SessionId, DbError)> {
         if created.is_empty() {
             return Ok(());
         }
         let live = self.live_ids().await;
+        let (kept, departed): (Vec<_>, Vec<_>) =
+            created.into_iter().partition(|id| live.contains(id));
+        stats.refreshed += kept.len();
+        self.delete_each_session(
+            departed,
+            &mut stats.departed_deleted,
+            "Failed to delete a row the sweep wrote for a departed session",
+        )
+        .await
+    }
+
+    /// Delete the rows of each session in `ids`, adding the deletes that
+    /// succeed to `deleted`. A failed delete does not stop the others: the
+    /// first failure is returned, with its session's id, once every delete
+    /// was tried, and each later one is logged as `failed` with its
+    /// session's id.
+    async fn delete_each_session(
+        &self,
+        ids: impl IntoIterator<Item = SessionId>,
+        deleted: &mut usize,
+        failed: &str,
+    ) -> Result<(), (SessionId, DbError)> {
         let mut first_err = None;
-        for id in created {
-            if live.contains(&id) {
-                stats.refreshed += 1;
-                continue;
-            }
+        for id in ids {
             match self.db.delete_session(&id).await {
-                Ok(()) => stats.departed_deleted += 1,
-                Err(e) if first_err.is_none() => first_err = Some(e),
-                Err(e) => tracing::warn!(
-                    error = %e,
-                    "Failed to delete a row the sweep wrote for a departed session"
-                ),
+                Ok(()) => *deleted += 1,
+                Err(e) if first_err.is_none() => first_err = Some((id, e)),
+                Err(e) => tracing::warn!(session_id = %id, error = %e, "{failed}"),
             }
         }
-        first_err.map_or(Ok(()), |e| Err(e.into()))
+        first_err.map_or(Ok(()), Err)
     }
 
     /// The ids of the live sessions.
@@ -1657,6 +1696,142 @@ mod tests {
         assert_eq!((stats.refreshed, stats.departed_deleted), (0, 1));
         assert!(pm.db().get_session(&departed).await.unwrap().is_none());
         assert!(pm.db().get_session(&refused).await.unwrap().is_none());
+    }
+
+    /// What `tracing` writes at WARN and above while [`Logs::capture`]'s
+    /// guard is held.
+    #[derive(Clone, Default)]
+    struct Logs(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl Logs {
+        /// Make these logs the thread's default subscriber until the guard
+        /// is dropped. A second registered dispatcher that wants no event
+        /// makes the callsites' interest combine every dispatcher's, so a
+        /// callsite another test reached first without a subscriber still
+        /// logs here (see the `Logs` of `db::tests`).
+        fn capture(&self) -> tracing::subscriber::DefaultGuard {
+            static OTHER: std::sync::OnceLock<tracing::Dispatch> = std::sync::OnceLock::new();
+            OTHER.get_or_init(|| tracing::Dispatch::new(tracing::subscriber::NoSubscriber::new()));
+            let logs = self.clone();
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(move || logs.clone())
+                .with_max_level(tracing::Level::WARN)
+                .with_ansi(false)
+                .finish();
+            tracing::subscriber::set_default(subscriber)
+        }
+
+        fn text(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+        }
+    }
+
+    impl std::io::Write for Logs {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Make every delete of `session`'s dataset metadata fail inside the
+    /// store, so that deleting the session's rows fails there.
+    async fn refuse_rows_delete(db: &DbConnection, session: &str) {
+        let meta = crate::db::DatasetMeta::new(
+            session.to_string(),
+            "d".into(),
+            "csv".into(),
+            3,
+            1,
+            vec!["x".into()],
+        );
+        db.save_dataset_meta(&meta).await.unwrap();
+        db.db()
+            .query(format!(
+                "DEFINE EVENT refuse_meta_{tag} ON TABLE dataset_meta \
+                 WHEN $event = 'DELETE' AND $before.session_id = '{session}' \
+                 THEN {{ THROW 'refused' }}",
+                tag = session.replace('-', "_")
+            ))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+    }
+
+    /// When a row write fails and the departure check's delete fails too,
+    /// the logged delete failure names the session whose rows stay.
+    #[tokio::test]
+    async fn a_failed_departed_delete_after_a_failed_write_names_the_session() {
+        let pm = manager().await;
+        let departed = uuid::Uuid::new_v4().to_string();
+        let refused = pm.sessions().create_session(None).await.unwrap();
+        refuse_rows_delete(pm.db(), &departed).await;
+        pm.db()
+            .db()
+            .query(format!(
+                "DEFINE EVENT refuse_row ON TABLE sessions \
+                 WHEN $event = 'CREATE' AND $after.id = type::record('sessions', '{refused}') \
+                 THEN {{ THROW 'refused' }}"
+            ))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        let live: std::collections::HashSet<SessionId> = [departed.clone(), refused.clone()].into();
+        let now = chrono::Utc::now();
+        let mut stats = SweepStats::default();
+        let logs = Logs::default();
+        let written = {
+            let _guard = logs.capture();
+            pm.write_missing_rows(
+                vec![(departed.clone(), now), (refused.clone(), now)],
+                &live,
+                &mut stats,
+            )
+            .await
+        };
+        assert!(written.is_err());
+        assert!(pm.db().get_session(&departed).await.unwrap().is_some());
+        let text = logs.text();
+        let line = text
+            .lines()
+            .find(|line| line.contains("departed session"))
+            .unwrap_or_else(|| panic!("no warning: {text}"));
+        assert!(line.contains(&format!("session_id={departed}")), "{line}");
+    }
+
+    /// A failed delete of one expired session's rows does not stop the
+    /// sweep from deleting the other expired sessions' rows; the error is
+    /// reported.
+    #[tokio::test]
+    async fn a_failed_expired_delete_still_deletes_the_others() {
+        let pm = manager().await;
+        let stale = chrono::Duration::hours(2);
+        let (first, _) = stored_only(pm.db(), stale).await;
+        let (second, second_conv) = stored_only(pm.db(), stale).await;
+        // Whichever the store lists first fails, so the other comes after
+        // the failure.
+        let listed = pm
+            .db()
+            .session_ids_last_accessed_before(chrono::Utc::now())
+            .await
+            .unwrap();
+        let (refused, other, other_conv) = if listed.first() == Some(&first) {
+            (first, second, second_conv)
+        } else {
+            let first_conv = pm.db().list_conversations(&first).await.unwrap()[0].id_string();
+            (second, first, first_conv)
+        };
+        refuse_rows_delete(pm.db(), &refused).await;
+
+        assert!(pm.sweep().await.is_err());
+        assert!(pm.db().get_session(&refused).await.unwrap().is_some());
+        assert!(pm.db().get_session(&other).await.unwrap().is_none());
+        assert!(pm.db().get_conversation(&other_conv).await.is_err());
     }
 
     #[tokio::test]
