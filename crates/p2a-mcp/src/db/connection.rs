@@ -392,6 +392,9 @@ pub(super) fn set_aside_rocksdb_store_to(
     aside: &Path,
 ) -> Result<std::path::PathBuf, String> {
     let lock = surrealkv_compat_rocksdb::lock_directory(path).map_err(|e| e.to_string())?;
+    // `a_store_is_not_set_aside_without_an_enforced_lock` covers the helper
+    // only: on Linux the real lock is always enforced, so nothing checks
+    // cheaply that `lock.enforced` is the value passed here.
     let moved = move_store_aside(path, aside, lock.enforced);
     drop(lock);
     moved
