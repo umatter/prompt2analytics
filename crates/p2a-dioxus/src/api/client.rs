@@ -593,6 +593,16 @@ impl ApiClient {
         }
     }
 
+    /// Delete one stored message (and its tool calls) of a conversation of
+    /// the current session
+    pub async fn delete_message(&self, message_id: &str) -> Result<(), String> {
+        self.delete_with(
+            &format!("/api/messages/{message_id}"),
+            &session_headers(None),
+        )
+        .await
+    }
+
     /// Clear all messages in a conversation
     pub async fn clear_messages(&self, conversation_id: &str) -> Result<u32, String> {
         let response: ApiResponse<DeletedCount> = self

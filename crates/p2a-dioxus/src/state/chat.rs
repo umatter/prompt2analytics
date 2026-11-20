@@ -219,6 +219,23 @@ pub fn turn_persistence(conversation_id: &str) -> &'static [&'static str] {
     }
 }
 
+/// The stored rows of the turns Retry took out, to delete before it asks
+/// again: each stored prompt whose id is in `prompt_ids` and the assistant
+/// row stored right after it (the interrupted reply), in `stored`'s order.
+/// A prompt the store never got (its id is the client's own) has no row.
+pub fn stale_rows(stored: &[ConversationMessage], prompt_ids: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for (i, row) in stored.iter().enumerate() {
+        if row.role == "user" && prompt_ids.contains(&row.id) {
+            out.push(row.id.clone());
+            if let Some(next) = stored.get(i + 1).filter(|m| m.role == "assistant") {
+                out.push(next.id.clone());
+            }
+        }
+    }
+    out
+}
+
 /// The banner when the stream closed before the answer finished.
 pub const CLOSED_EARLY: &str =
     "The connection closed before the answer finished. Retry to ask again.";
@@ -254,6 +271,10 @@ pub struct ChatState {
     /// The prompt Retry sends when the transcript was cleared (the session
     /// ended); kept by `clear_messages`.
     pub retry_prompt: Option<String>,
+    /// The ids of the prompts whose interrupted turns Retry took out of the
+    /// transcript; the next send deletes their stored rows ([`stale_rows`])
+    /// before it asks again.
+    stale_turns: Vec<String>,
     /// The live transcripts (plots and tool results included) of the
     /// conversations left in this page session, least recently left first;
     /// at most `LIVE_CACHE_CONVERSATIONS`.
@@ -365,6 +386,7 @@ impl ChatState {
             history_index: -1,
             active_tool: None,
             retry_prompt: None,
+            stale_turns: Vec::new(),
             live: Vec::new(),
         }
     }
@@ -424,6 +446,13 @@ impl ChatState {
     /// Take the prompt Retry should send after the transcript was cleared.
     pub fn take_retry_prompt(&mut self) -> Option<String> {
         self.retry_prompt.take()
+    }
+
+    /// Take the ids of the prompts whose interrupted turns Retry took out
+    /// ([`take_retry_turn`](Self::take_retry_turn)), for the send to delete
+    /// their stored rows ([`stale_rows`]).
+    pub fn take_stale_turns(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.stale_turns)
     }
 
     /// Add a user message
@@ -581,8 +610,9 @@ impl ChatState {
 
     /// The prompt Retry sends, with the turn it replaces taken out: after an
     /// answer that is empty or interrupted, that answer and its prompt are
-    /// removed (the send adds the prompt again); after a finished answer the
-    /// last prompt is asked again and nothing is removed. With no prompt in
+    /// removed (the send adds the prompt again, and deletes the stored turn:
+    /// [`take_stale_turns`](Self::take_stale_turns)); after a finished answer
+    /// the last prompt is asked again and nothing is removed. With no prompt in
     /// the transcript (the session ended and it was cleared), the prompt that
     /// was being sent. That stashed prompt is taken either way, so a stale
     /// one is never sent later.
@@ -596,7 +626,10 @@ impl ChatState {
             && self.messages[before].role == "user"
         {
             self.messages.pop();
-            return self.messages.pop().map(|m| m.content);
+            return self.messages.pop().map(|m| {
+                self.stale_turns.push(m.id);
+                m.content
+            });
         }
         self.messages
             .iter()
@@ -1257,6 +1290,59 @@ mod tests {
         chat.stop_processing();
         assert_eq!(chat.take_retry_turn().as_deref(), Some("a"));
         assert!(chat.messages.is_empty());
+    }
+
+    /// Retry that takes an interrupted turn out remembers its prompt's id, so the send can
+    /// delete the stored prompt and the reply stored after it; one that re-asks after a
+    /// finished answer takes nothing out and remembers nothing.
+    #[test]
+    fn take_retry_turn_remembers_the_turn_it_took_out() {
+        let mut chat = ChatState::new();
+        send(&mut chat, "a");
+        let stored = chat.messages[0].id.clone();
+        chat.finish_stream(false);
+        chat.stop_processing();
+        assert_eq!(chat.take_retry_turn().as_deref(), Some("a"));
+        assert_eq!(chat.take_stale_turns(), [stored]);
+        assert!(chat.take_stale_turns().is_empty());
+
+        let mut chat = ChatState::new();
+        send(&mut chat, "a");
+        finish(&mut chat, reply("done"));
+        assert_eq!(chat.take_retry_turn().as_deref(), Some("a"));
+        assert!(chat.take_stale_turns().is_empty());
+    }
+
+    /// The stored rows a Retry deletes: each remembered prompt and the assistant row stored
+    /// right after it; a prompt the store never got deletes nothing.
+    #[test]
+    fn stale_rows_are_the_prompt_and_the_reply_after_it() {
+        let row = |id: &str, role: &str| ConversationMessage {
+            id: id.into(),
+            conversation_id: "c".into(),
+            role: role.into(),
+            content: String::new(),
+            created_at: String::new(),
+            token_count: None,
+            model: None,
+        };
+        let stored = [
+            row("u1", "user"),
+            row("a1", "assistant"),
+            row("u2", "user"),
+            row("a2", "assistant"),
+            row("u3", "user"),
+        ];
+        assert_eq!(stale_rows(&stored, &["u2".into()]), ["u2", "a2"]);
+        // the last prompt, whose reply was never stored
+        assert_eq!(stale_rows(&stored, &["u3".into()]), ["u3"]);
+        assert_eq!(
+            stale_rows(&stored, &["u1".into(), "u3".into()]),
+            ["u1", "a1", "u3"]
+        );
+        // a local id, or an assistant id, is not a stored prompt
+        assert!(stale_rows(&stored, &["local".into(), "a1".into()]).is_empty());
+        assert!(stale_rows(&stored, &[]).is_empty());
     }
 
     #[test]
