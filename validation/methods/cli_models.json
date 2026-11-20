@@ -306,7 +306,7 @@
         {
           "finding": "CLI-33",
           "quantity": "cross-validated r",
-          "note": "on gsynth_staggered.csv core's cross-validation over r = 0..5 chooses r = 1 (ATT 2.967) where gsynth 1.4's deterministic cross-validation chooses r = 0 (ATT 6.948); default_r and default_att_avg are kept out of the Check, and the default run's ATT is pinned at the fixed-r fit for the r core chooses"
+          "note": "on gsynth_staggered.csv core's cross-validation over r = 0..5 chooses r = 1 (ATT 2.967) where gsynth 1.4's default cross-validation (fect 2.4.5: random folds, then cv.rule = '1se') chooses r = 0 (ATT 6.948) under the case's seed; the fold MSPE is lowest at r = 1 there and the 1-SE band moves the choice to 0, other seeds choose r = 1 or 2, and fect's leave-one-out CV, core's scheme, chooses r = 1 under its min, 1pct and 1se rules; default_r and default_att_avg are kept out of the Check, and the default run's ATT is pinned at the fixed-r fit for the r core chooses"
         }
       ],
       "supersedes_legacy": []

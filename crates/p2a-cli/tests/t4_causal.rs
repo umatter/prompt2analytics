@@ -285,8 +285,9 @@ fn test_validate_cli_gsynth_defaults() {
     let j = s.json(&base);
     assert_eq!(j["force"], "unit", "{j}");
     assert_eq!(j["r_max"], 5, "{j}");
-    // deviation CLI-33: gsynth's (deterministic) cross-validation chooses r = 0 on this panel
-    // (`default_r`, ATT `default_att_avg` 6.948); core's chooses r = 1, ATT 2.967, so both keys
+    // deviation CLI-33: gsynth's default cross-validation (random folds, then fect's 1-SE rule)
+    // chooses r = 0 under the case's seed (`default_r`, ATT `default_att_avg` 6.948); core's
+    // leave-one-out cross-validation chooses r = 1, ATT 2.967, as fect's does, so both keys
     // stay out of the Check. The default run's ATT is pinned at the r core chose, which is
     // still R's fixed-r fit.
     let r = number(&j, "n_factors") as usize;
