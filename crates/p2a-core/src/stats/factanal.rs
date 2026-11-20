@@ -1292,11 +1292,21 @@ fn invert_matrix(m: &ArrayView2<f64>) -> EconResult<Array2<f64>> {
     }
 }
 
-/// The first column whose values are all equal (zero variance), if any.
+/// The first column with zero variance, if any: all values equal, or a standard deviation at
+/// or below `64 * eps * max|x|`, the rounding level of the column's magnitude. Such a column
+/// (a large level plus a few ulps of noise) has no meaningful correlation.
 fn zero_variance_column(data: &ArrayView2<f64>) -> Option<usize> {
-    data.columns()
-        .into_iter()
-        .position(|c| c.iter().all(|&v| v == c[0]))
+    data.columns().into_iter().position(|c| {
+        if c.iter().all(|&v| v == c[0]) {
+            return true;
+        }
+        let n = c.len() as f64;
+        let mean = c.sum() / n;
+        let ss: f64 = c.iter().map(|&v| (v - mean) * (v - mean)).sum();
+        let sd = (ss / (n - 1.0).max(1.0)).sqrt();
+        let scale = c.iter().fold(0.0_f64, |m, &v| m.max(v.abs()));
+        sd <= 64.0 * f64::EPSILON * scale
+    })
 }
 
 /// Compute correlation matrix from data. Every column must vary ([`zero_variance_column`]);
@@ -1864,6 +1874,33 @@ mod tests {
             matches!(&e, EconError::InvalidSpecification { message } if message.contains("'k'")),
             "{e}"
         );
+    }
+
+    /// A column that varies only at rounding level (a large level plus noise of a few ulps)
+    /// has no meaningful correlation and is refused like an exactly constant one; a column
+    /// with a large level and a real spread still fits.
+    #[test]
+    fn test_factanal_refuses_rounding_level_variance() {
+        let (_, x) = factanal_case("stat_factanal_t4");
+        let mut xc = x.slice(ndarray::s![.., 0..7]).to_owned();
+        let n = xc.nrows();
+        for i in 0..n {
+            // 1e6 plus 0, 1 or 2 ulps of 1e6 (about 1.2e-10 each): not all equal.
+            xc[[i, 6]] = 1e6 + (i % 3) as f64 * 1e6 * f64::EPSILON;
+        }
+        assert!(xc.column(6).iter().any(|&v| v != xc[[0, 6]]));
+        let e = factanal(&xc.view(), 2, RotationMethod::None, ScoresMethod::None).unwrap_err();
+        assert!(
+            matches!(&e, EconError::InvalidSpecification { message } if message.contains("column 6") && message.contains("zero variance")),
+            "{e}"
+        );
+        // The scores and run_factanal share the helper.
+        assert_eq!(zero_variance_column(&xc.view()), Some(6));
+
+        // The same level with a real spread is a valid column.
+        let mut ok = x.slice(ndarray::s![.., 0..7]).to_owned();
+        ok.column_mut(6).mapv_inplace(|v| v + 1e6);
+        assert!(factanal(&ok.view(), 2, RotationMethod::None, ScoresMethod::None).is_ok());
     }
 
     /// Promax regression and Bartlett scores (first 10 rows), as R 4.3.3: regression scores are
