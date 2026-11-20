@@ -97,6 +97,19 @@ impl Default for CausalImpactConfig {
     }
 }
 
+/// The z statistic of the cumulative effect, `effect / se`. At `se = 0` the interval is the
+/// point `[effect, effect]`: z is infinite with the effect's sign (p = 0) for a nonzero effect
+/// and 0 (p = 1) for a zero one, so the test still agrees with the interval.
+fn cumulative_z(effect: f64, se: f64) -> f64 {
+    if se > 0.0 || se.is_nan() || effect.is_nan() {
+        effect / se
+    } else if effect == 0.0 {
+        0.0
+    } else {
+        effect.signum() * f64::INFINITY
+    }
+}
+
 /// Summary statistics for causal effect.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CausalImpactSummary {
@@ -618,12 +631,15 @@ fn run_causal_impact_core(
 
     // The normal approximation under the fitted model: Phi(z) and Phi(-z) for the sign of
     // the effect, the two-sided p-value 2 Phi(-|z|), which is below alpha exactly when the
-    // 1 - alpha interval excludes 0.
-    let z_cumulative = if cumulative_se > 0.0 {
-        cumulative_effect / cumulative_se
-    } else {
-        0.0
-    };
+    // 1 - alpha interval excludes 0 (cumulative_z keeps this at a zero standard error).
+    if cumulative_se == 0.0 {
+        warnings.push(
+            "the cumulative effect's standard error is 0 (the fitted model's forecast \
+             variance is degenerate); its interval is a single point"
+                .to_string(),
+        );
+    }
+    let z_cumulative = cumulative_z(cumulative_effect, cumulative_se);
     let normal = Normal::standard();
     let prob_positive = normal.cdf(z_cumulative);
     let prob_negative = normal.cdf(-z_cumulative);
@@ -1016,6 +1032,9 @@ struct ControlStates {
     /// Their covariance, NaN rows and columns for an aliased control.
     cov: ndarray::Array2<f64>,
     /// The innovations of each control's mean-only pass over the pre-period (n_pre x k).
+    /// Only the tests read it (the GLS check of
+    /// `control_gls_solves_the_innovation_normal_equations`); keeping it costs no allocation,
+    /// because the matrix the GLS step built is moved here.
     innovations: ndarray::Array2<f64>,
     /// Z' a_t|t of each control's mean-only pass over the pre-period (n_pre x k).
     filtered_means: ndarray::Array2<f64>,
@@ -1691,11 +1710,33 @@ mod tests {
             "{:?}",
             r.warnings
         );
-        // The counterfactual is that of no control.
+        // The counterfactual is that of no control: the aliased control adds nothing.
         let none = run_causal_impact(&d, "y", "time", (0, 49), (50, 69), None).unwrap();
-        assert!(
-            r.summary.cumulative_effect.is_finite() && none.summary.cumulative_effect.is_finite()
-        );
+        let close = |a: f64, b: f64| (a - b).abs() <= 1e-6 * (1.0 + b.abs());
+        for (i, (p, q)) in r.series.predicted.iter().zip(&none.series.predicted).enumerate() {
+            assert!(close(*p, *q), "predicted[{i}]: {p} with the control, {q} without");
+        }
+        for (with, without) in [
+            (r.summary.cumulative_effect, none.summary.cumulative_effect),
+            (r.summary.cumulative_effect_lower, none.summary.cumulative_effect_lower),
+            (r.summary.cumulative_effect_upper, none.summary.cumulative_effect_upper),
+        ] {
+            assert!(close(with, without), "{with} with the control, {without} without");
+        }
+    }
+
+    /// A zero cumulative standard error (a degenerate forecast variance): the interval is the
+    /// point [c, c], so the test agrees with it: a nonzero effect is significant (p = 0,
+    /// probability 1 of its sign), a zero effect is not (p = 1).
+    #[test]
+    fn cumulative_test_with_zero_standard_error_agrees_with_the_interval() {
+        let normal = Normal::standard();
+        for (effect, p, prob_pos) in [(2.5, 0.0, 1.0), (-0.1, 0.0, 0.0), (0.0, 1.0, 0.5)] {
+            let z = cumulative_z(effect, 0.0);
+            assert_eq!(normal_p_value_two_sided(z), p, "effect {effect}");
+            assert_eq!(normal.cdf(z), prob_pos, "effect {effect}");
+        }
+        assert_eq!(cumulative_z(3.0, 2.0), 1.5);
     }
 
     /// The mean-only passes are the filter, and beta solves the GLS normal equations, for a
