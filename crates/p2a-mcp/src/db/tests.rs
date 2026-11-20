@@ -4077,3 +4077,85 @@ fn test_surrealkv_config_caps_memory() {
         "{text}"
     );
 }
+
+/// Deleting one message removes it and its tool calls, leaves the others,
+/// recounts the conversation (its count and the preview of the message now
+/// last) and releases the bytes it removed from the session's counter.
+#[tokio::test]
+async fn deleting_one_message_removes_it_and_its_tool_calls() {
+    let db = limited_db(PersistenceLimits {
+        session_db_bytes: Some(10_000),
+        ..Default::default()
+    })
+    .await;
+    let conv = db.create_conversation("s1", "t").await.unwrap(); // 1
+    let id = conv.id_string();
+    db.add_message(&id, "user", "first question").await.unwrap();
+    db.add_message(&id, "assistant", "first answer")
+        .await
+        .unwrap();
+    let asked = db
+        .add_message(&id, "user", "second question")
+        .await
+        .unwrap();
+    let failed = db.add_message(&id, "assistant", "").await.unwrap();
+    let call = ToolCall::new(
+        failed.id_string(),
+        id.clone(),
+        "regression_ols".into(),
+        "y".repeat(50),
+    );
+    db.create_tool_call(&call).await.unwrap();
+    db.update_message_content(&failed.id_string(), "[Error: stream failed]")
+        .await
+        .unwrap();
+    let before = db.session_bytes_entry("s1").unwrap();
+
+    db.delete_message(&failed.id_string()).await.unwrap();
+    db.delete_message(&asked.id_string()).await.unwrap();
+
+    let left: Vec<String> = db
+        .get_messages(&id)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|m| m.content)
+        .collect();
+    assert_eq!(left, ["first question", "first answer"]);
+    assert!(
+        db.get_tool_calls_for_message(&failed.id_string())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let conv = db.get_conversation(&id).await.unwrap();
+    assert_eq!(conv.message_count, 2);
+    assert_eq!(conv.last_message_preview.as_deref(), Some("first answer"));
+    let released = ("second question".len() + "[Error: stream failed]".len() + 50) as u64;
+    assert_eq!(db.session_bytes_entry("s1"), Some(before - released));
+    assert_eq!(counter_gap(&db, "s1").await, None);
+
+    // A message that is gone, or never was, is not found.
+    assert!(matches!(
+        db.delete_message(&asked.id_string()).await,
+        Err(DbError::NotFound(_))
+    ));
+
+    // The last message gone: no preview.
+    let only = db.create_conversation("s1", "u").await.unwrap();
+    let m = db
+        .add_message(&only.id_string(), "user", "q")
+        .await
+        .unwrap();
+    db.delete_message(&m.id_string()).await.unwrap();
+    let only = db.get_conversation(&only.id_string()).await.unwrap();
+    assert_eq!(only.message_count, 0);
+    assert_eq!(only.last_message_preview, None);
+
+    // Limits off: the same delete, no accounting.
+    let off = test_db().await;
+    let c = off.create_conversation("s1", "t").await.unwrap();
+    let m = off.add_message(&c.id_string(), "user", "q").await.unwrap();
+    off.delete_message(&m.id_string()).await.unwrap();
+    assert!(off.get_messages(&c.id_string()).await.unwrap().is_empty());
+}

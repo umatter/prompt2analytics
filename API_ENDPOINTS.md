@@ -41,6 +41,7 @@ Examples in this document marked "captured" are real responses of a sandboxed se
 | DELETE | `/api/conversations/{id}/messages` | `db` | with the session database | `X-P2A-Session-Id` |
 | POST | `/api/conversations/{id}/messages/clear` | `db` | with the session database; answers as `DELETE /api/conversations/{id}/messages` | `X-P2A-Session-Id` |
 | GET | `/api/conversations/{id}/tool-calls` | `db` | with the session database | `X-P2A-Session-Id` |
+| DELETE | `/api/messages/{id}` | `db` | with the session database | `X-P2A-Session-Id` |
 | GET | `/api/messages/{id}/tool-calls` | `db` | with the session database | `X-P2A-Session-Id` |
 | GET | `/api/sessions/{session_id}/settings` | `db` | with the session database | path id |
 | PUT | `/api/sessions/{session_id}/settings` | `db` | with the session database | path id |
@@ -528,7 +529,7 @@ POST /api/llm/generate-title
 
 ## Conversation Management
 
-Every `/api/conversations/{id}*` and `/api/messages/{id}/tool-calls` request names the caller's session in the `X-P2A-Session-Id: <session id>` header; the `?session_id=` query parameter is accepted as a fallback. Without either the answer is 400 `invalid_arguments` (captured):
+Every `/api/conversations/{id}*` and `/api/messages/{id}*` request names the caller's session in the `X-P2A-Session-Id: <session id>` header; the `?session_id=` query parameter is accepted as a fallback. Without either the answer is 400 `invalid_arguments` (captured):
 
 ```json
 {"success":false,"error":"send the session id in the X-P2A-Session-Id header","code":"invalid_arguments"}
@@ -546,7 +547,7 @@ Limits on what a session stores (hosted values; [DEPLOYMENT.md](docs/guides/DEPL
 
 - a message, title or settings string longer than `message_bytes` (262,144 bytes) answers 413 `payload_too_large`;
 - more than `conversations_per_session` (50) conversations or `messages_per_conversation` (1,000) messages answers 422 `quota_exceeded`;
-- `session_db_bytes` (16 MiB hosted, no limit when limits are off) caps the bytes one session's history holds (titles, message contents, tool-call arguments, results and errors) together with its dataset metadata rows (each row's texts, kept column names included, plus 128 bytes): a client write past it answers 422 `quota_exceeded`, text the server produces is truncated to the room left, a dataset whose row would pass it is loaded but not listed in `GET /api/sessions/{id}/datasets`, and deleting a conversation frees its bytes;
+- `session_db_bytes` (16 MiB hosted, no limit when limits are off) caps the bytes one session's history holds (titles, message contents, tool-call arguments, results and errors) together with its dataset metadata rows (each row's texts, kept column names included, plus 128 bytes): a client write past it answers 422 `quota_exceeded`, text the server produces is truncated to the room left, a dataset whose row would pass it is loaded but not listed in `GET /api/sessions/{id}/datasets`, and deleting a conversation or a message frees its bytes;
 - while the server is low on memory, writes answer 503 `memory_pressure` with `Retry-After: 15`.
 
 Captured from an open public server:
@@ -702,6 +703,13 @@ Answers exactly as `DELETE /api/conversations/{conversation_id}/messages`, an al
 ```json
 {"success":true,"data":{"deleted_count":10}}
 ```
+
+### Delete a Message
+```
+DELETE /api/messages/{message_id}
+```
+
+Deletes one message and its tool calls in one transaction and recounts its conversation: `message_count`, and `last_message_preview` from the message now last (null when none is left). Answers 204; a message that does not exist, or that belongs to another session's conversation, answers 404 `not_found`. The web client's Retry deletes the stored prompt of an interrupted turn and the reply stored after it before it asks again, so a reloaded transcript (and the history the server sends to the model) holds the prompt once.
 
 ### Get Tool Calls of a Conversation
 ```

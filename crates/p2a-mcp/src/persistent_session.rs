@@ -306,6 +306,15 @@ impl PersistentSessionManager {
         Ok(self.db.get_messages(conversation_id).await?)
     }
 
+    /// Delete one message and its tool calls, and recount its conversation
+    /// ([`DbConnection::delete_message`](crate::db::DbConnection::delete_message)).
+    /// Check the caller owns it first ([`authorize_message`](Self::authorize_message)).
+    pub async fn delete_message(&self, message_id: &str) -> Result<(), PersistentSessionError> {
+        self.db.delete_message(message_id).await?;
+        tracing::debug!(message_id = %message_id, "Deleted message");
+        Ok(())
+    }
+
     /// Clear all messages in a conversation.
     pub async fn clear_messages(
         &self,

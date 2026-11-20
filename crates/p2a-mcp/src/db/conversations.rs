@@ -631,6 +631,97 @@ impl DbConnection {
         })
         .await
     }
+
+    /// Delete message `message_id` and its tool calls in one transaction,
+    /// then recount its conversation: `message_count` and the preview of
+    /// the message that is now last (none when no message is left). With a
+    /// `session_db_bytes` budget the bytes removed (the content and the tool
+    /// calls' texts) are released from the session's counter. `NotFound`
+    /// when the message does not exist, also when another delete or a clear
+    /// took it first.
+    ///
+    /// The delete takes the conversation's turn, in a task a dropped caller
+    /// does not stop ([`run_to_end`]), like a clear: an add, a content update
+    /// or a tool-call write of the conversation runs wholly before or after
+    /// it (one after it finds no message and is `NotFound`). An error from
+    /// the recount comes after the rows were deleted: only the
+    /// conversation's `message_count` and preview are stale, until the next
+    /// add recounts.
+    pub async fn delete_message(&self, message_id: &str) -> Result<(), DbError> {
+        let conversation_id = self.get_message(message_id).await?.conversation_id;
+        let db = self.clone();
+        let message_id = message_id.to_string();
+        let turn = db.conversation_turn(&conversation_id).await;
+        run_to_end(turn, async move {
+            let not_found = || DbError::NotFound(format!("Message not found: {message_id}"));
+            // Read again in the turn: a clear or delete that ran first took it.
+            match db.get_message(&message_id).await {
+                Ok(m) if m.conversation_id == conversation_id => {}
+                Ok(_) | Err(DbError::NotFound(_)) => return Err(not_found()),
+                Err(e) => return Err(e),
+            }
+            let owner = db.counted_owner(&conversation_id).await?;
+            let mut response = db
+                .db()
+                .query("BEGIN TRANSACTION")
+                .query("DELETE FROM tool_calls WHERE message_id = $id RETURN BEFORE")
+                .query("DELETE $message RETURN BEFORE")
+                .query("COMMIT TRANSACTION")
+                .bind(("id", message_id.clone()))
+                .bind(("message", RecordId::new("messages", message_id.as_str())))
+                .await?;
+            if let Some(error) = failed_statement(response.take_errors()) {
+                return Err(error.into());
+            }
+            // BEGIN and COMMIT take result slots 0 and 3.
+            let tool_calls: Vec<ToolCallText> = response.take(1)?;
+            let messages: Vec<MessageText> = response.take(2)?;
+            if messages.is_empty() {
+                return Err(not_found());
+            }
+            if let Some(session_id) = &owner {
+                let bytes =
+                    tool_call_text_bytes(&tool_calls).saturating_add(message_text_bytes(&messages));
+                db.release_session_bytes(session_id, bytes);
+            }
+            db.update_conversation_after_delete(&conversation_id).await
+        })
+        .await
+    }
+
+    /// Update conversation metadata after a message was deleted: the stored
+    /// `message_count` (a recount) and the preview of the message now last,
+    /// or none. Call it during the conversation's turn.
+    async fn update_conversation_after_delete(&self, conversation_id: &str) -> Result<(), DbError> {
+        #[derive(SurrealValue)]
+        struct Last {
+            content: String,
+        }
+        let message_count =
+            i32::try_from(self.count_messages(conversation_id).await?).unwrap_or(i32::MAX);
+        let mut result = self
+            .db()
+            .query(
+                "SELECT content, created_at FROM messages WHERE conversation_id = $id \
+                 ORDER BY created_at DESC LIMIT 1",
+            )
+            .bind(("id", conversation_id.to_string()))
+            .await?
+            .check()?;
+        let last: Option<Last> = result.take(0)?;
+        let preview = last.map(|l| p2a_text::ellipsize(&l.content, 100).into_owned());
+        self.db()
+            .query(
+                "UPDATE conversations SET message_count = $count, last_message_preview = $preview, \
+                 updated_at = time::now() WHERE id = $conv RETURN NONE",
+            )
+            .bind(("conv", RecordId::new("conversations", conversation_id)))
+            .bind(("count", message_count))
+            .bind(("preview", preview))
+            .await?
+            .check()?;
+        Ok(())
+    }
 }
 
 /// What [`delete_conversation_rows`](DbConnection::delete_conversation_rows)
