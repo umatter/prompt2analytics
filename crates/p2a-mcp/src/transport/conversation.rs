@@ -266,6 +266,9 @@ pub struct DatasetMetaResponse {
     /// The `na_strings` the dataset was loaded with, when it was.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub na_strings: Option<Vec<String>>,
+    /// The `value_labels` a Stata file was loaded with, when it was.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value_labels: Option<String>,
 }
 
 impl From<DatasetMeta> for DatasetMetaResponse {
@@ -282,6 +285,7 @@ impl From<DatasetMeta> for DatasetMetaResponse {
             loaded_at: chrono::DateTime::<chrono::Utc>::from(meta.loaded_at).to_rfc3339(),
             file_size_bytes: meta.file_size_bytes,
             na_strings: meta.na_strings,
+            value_labels: meta.value_labels,
         }
     }
 }
@@ -963,6 +967,7 @@ mod tests {
                 name: (*name).to_string(),
                 source_path: format!("{name}.parquet"),
                 na_strings: None,
+                value_labels: None,
             })
             .collect()
     }

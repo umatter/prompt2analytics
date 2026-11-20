@@ -62,6 +62,8 @@ struct DatasetMetaText {
     column_names: Vec<String>,
     #[surreal(default)]
     na_strings: Option<Vec<String>>,
+    #[surreal(default)]
+    value_labels: Option<String>,
 }
 
 impl DatasetMetaText {
@@ -73,6 +75,7 @@ impl DatasetMetaText {
             &self.source_type,
             &self.column_names,
             self.na_strings.as_deref(),
+            self.value_labels.as_deref(),
         )
     }
 }
@@ -86,8 +89,8 @@ fn dataset_meta_text_bytes(rows: &[DatasetMetaText]) -> u64 {
 
 /// The bytes one dataset metadata row counts against its session's
 /// `session_db_bytes` budget: the UTF-8 bytes of its session id, name,
-/// source path and type, stored column names and missing-value markers, and
-/// [`DATASET_META_FIXED_BYTES`]. The one definition for both sides of the
+/// source path and type, stored column names, missing-value markers and
+/// value-label option, and [`DATASET_META_FIXED_BYTES`]. The one definition for both sides of the
 /// counter, the saves that count a row and the seed and deletes that read
 /// what is stored.
 fn dataset_meta_row_bytes(
@@ -97,11 +100,13 @@ fn dataset_meta_row_bytes(
     source_type: &str,
     column_names: &[String],
     na_strings: Option<&[String]>,
+    value_labels: Option<&str>,
 ) -> u64 {
     let len = |s: &str| s.len() as u64;
     [session_id, name, source_type]
         .into_iter()
         .chain(source_path)
+        .chain(value_labels)
         .chain(column_names.iter().map(String::as_str))
         .chain(na_strings.unwrap_or_default().iter().map(String::as_str))
         .map(len)
@@ -118,6 +123,7 @@ fn meta_bytes(meta: &DatasetMeta) -> u64 {
         &meta.source_type,
         &meta.column_names,
         meta.na_strings.as_deref(),
+        meta.value_labels.as_deref(),
     )
 }
 
@@ -136,6 +142,7 @@ fn stored_meta(meta: &DatasetMeta) -> DatasetMeta {
         loaded_at: meta.loaded_at,
         file_size_bytes: meta.file_size_bytes,
         na_strings: meta.na_strings.clone(),
+        value_labels: meta.value_labels.clone(),
     }
 }
 
@@ -156,6 +163,7 @@ fn same_row(a: Option<&DatasetMeta>, b: Option<&DatasetMeta>) -> bool {
                 && a.loaded_at == b.loaded_at
                 && a.file_size_bytes == b.file_size_bytes
                 && a.na_strings == b.na_strings
+                && a.value_labels == b.value_labels
         }
         _ => false,
     }
@@ -505,7 +513,7 @@ impl DbConnection {
             .db()
             .query(
                 "SELECT session_id, name, source_path, source_type, column_names, \
-                 na_strings FROM dataset_meta WHERE session_id = $session_id",
+                 na_strings, value_labels FROM dataset_meta WHERE session_id = $session_id",
             )
             .bind(("session_id", session_id.to_string()))
             .await?;

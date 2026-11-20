@@ -260,6 +260,7 @@ pub(crate) async fn sync_dataset_meta(
                     meta.source_path = None;
                     meta.file_size_bytes = None;
                     meta.na_strings = None;
+                    meta.value_labels = None;
                     meta.source_type = made_by(tool).to_string();
                 }
                 meta
@@ -338,8 +339,8 @@ fn log_failure(tool: &str, session_id: &str, dataset: &str, what: &str, e: &DbEr
 /// (`load_dataset`, `upload_dataset` or `create_dataset`) in session
 /// `session_id`: the dataset's name, dimensions and column names, read
 /// from the call's `result_text`, and its source, read from the
-/// `path` and `filename` fields of `arguments`, and the `na_strings` of a
-/// `load_dataset` call, which a reload reads the file with. The work is linear in
+/// `path` and `filename` fields of `arguments`, and the `na_strings` and
+/// `value_labels` of a `load_dataset` call, which a reload reads the file with. The work is linear in
 /// `result_text`, so the tool route and the LLM tool loop both run it
 /// on the blocking pool
 /// (`routes_tools::capture_dataset_metadata_off_runtime`).
@@ -572,6 +573,16 @@ pub(crate) async fn capture_loader_metadata(
                 .collect()
         });
 
+    // How load_dataset read a Stata file's labelled columns, which a reload
+    // reads them as again, by its canonical name (the call succeeded, so it
+    // parsed).
+    let value_labels: Option<String> = arguments
+        .get("value_labels")
+        .filter(|_| tool_name == "load_dataset")
+        .and_then(|v| v.as_str())
+        .and_then(|v| v.parse::<p2a_core::data::ValueLabels>().ok())
+        .map(|v| v.to_string());
+
     // Determine source type
     let source_type = if tool_name == "upload_dataset" {
         arguments
@@ -613,6 +624,7 @@ pub(crate) async fn capture_loader_metadata(
             meta.source_path = source_path;
             meta.file_size_bytes = file_size_bytes;
             meta.na_strings = na_strings;
+            meta.value_labels = value_labels;
 
             tracing::info!(
                 meta_id = %meta.id_string(),
@@ -752,6 +764,7 @@ mod tests {
             );
             meta.source_path = Some(format!("{name}.csv"));
             meta.na_strings = Some(vec!["-99".into()]);
+            meta.value_labels = Some("text".into());
             db.save_dataset_meta(&meta).await.unwrap();
             let tool = if loader {
                 "load_dataset"
@@ -771,6 +784,7 @@ mod tests {
             assert_eq!(row.column_names, ["x", "y (cm)"], "{name}");
             assert_eq!(row.source_path.is_some(), kept, "{name}");
             assert_eq!(row.na_strings.is_some(), kept, "{name}");
+            assert_eq!(row.value_labels.is_some(), kept, "{name}");
             assert_eq!(row.made_in_session(), !kept, "{name}");
         }
     }

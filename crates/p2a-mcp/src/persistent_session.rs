@@ -735,6 +735,7 @@ impl PersistentSessionManager {
                     name: meta.name,
                     source_path,
                     na_strings: meta.na_strings,
+                    value_labels: meta.value_labels,
                 }),
                 // A dataset a tool generated or derived in the session: no
                 // file holds it.
@@ -775,13 +776,16 @@ pub struct ReloadSource {
     /// The `na_strings` the dataset was loaded with; `None` reads the file with the
     /// loader's default markers.
     pub na_strings: Option<Vec<String>>,
+    /// The `value_labels` a Stata file was loaded with (`"codes"`, `"text"`); `None`
+    /// reads labelled columns as their codes.
+    pub value_labels: Option<String>,
 }
 
 /// The load step of a dataset reload: validate `source.source_path` through
 /// the path jail, check the file before any parsing as `load_dataset` does
 /// (its size against the `load_file_bytes` budget, then a parquet file's
-/// footer and decoded size), and load the file, with the `na_strings` it was
-/// loaded with. It blocks, and runs the async part of the parquet check on
+/// footer and decoded size), and load the file as `load_dataset` did, with
+/// the `na_strings` and `value_labels` it was loaded with. It blocks, and runs the async part of the parquet check on
 /// `handle`; run it on the blocking pool inside the session's path-jail
 /// scope and under the server's request limits (`ToolGovernor::run_blocking`
 /// does all three). The error is a fixed text, the budget refusal with the file's
@@ -862,15 +866,19 @@ pub(crate) fn load_reload_source(
             return Err(format!("{RELOAD_LOAD_FAILED}: {reason}"));
         }
     }
-    // The dataset's own missing-value markers, as load_dataset read it.
-    let loaded = match source.na_strings.as_deref() {
-        None => p2a_core::DataLoader::load(&path),
-        Some(na) => {
-            let na: Vec<&str> = na.iter().map(String::as_str).collect();
-            p2a_core::DataLoader::load_with_na(&path, &na)
-        }
-    };
-    let dataset = loaded.map_err(|e| {
+    // The dataset's own missing-value markers and value labels, as
+    // load_dataset read it. A stored option that no longer parses reads codes.
+    let value_labels = source
+        .value_labels
+        .as_deref()
+        .and_then(|v| v.parse::<p2a_core::data::ValueLabels>().ok())
+        .unwrap_or_default();
+    let loaded = crate::tools::handlers::data::load_dataset_file(
+        &path,
+        source.na_strings.as_deref(),
+        value_labels,
+    );
+    let (dataset, _, _) = loaded.map_err(|e| {
         tracing::debug!(dataset = %name, error = %e, "Failed to reload dataset");
         RELOAD_LOAD_FAILED.to_string()
     })?;

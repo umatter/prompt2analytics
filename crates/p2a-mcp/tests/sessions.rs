@@ -988,6 +988,99 @@ async fn reload_reads_a_dataset_with_its_na_strings() {
     );
 }
 
+/// A Stata file loaded with `value_labels: "text"` is reloaded with its labels
+/// as text: its stored row keeps the option, and a reload does not bring the
+/// labelled column back as its numeric codes. A file loaded without the option
+/// keeps none and reloads with its codes.
+#[cfg(feature = "llm")]
+#[tokio::test]
+async fn reload_reads_a_stata_file_with_its_value_labels() {
+    let (r, state) = app(ServerConfig::default()).await;
+    let sid = new_session(&r).await;
+    let root = allowed_data_root().unwrap();
+    let dir = tempfile::Builder::new()
+        .prefix(".p2a-labels-reload-")
+        .tempdir_in(&root)
+        .unwrap();
+    std::fs::copy(
+        p2a_validation::repo_path("validation/datasets/files/dta118_formats.dta"),
+        dir.path().join("f.dta"),
+    )
+    .unwrap();
+    let file = dir
+        .path()
+        .strip_prefix(&root)
+        .unwrap()
+        .join("f.dta")
+        .to_string_lossy()
+        .into_owned();
+    for arguments in [
+        json!({"path": file, "name": "text", "value_labels": "Text"}),
+        json!({"path": file, "name": "codes"}),
+    ] {
+        let (st, body) = call(
+            &r,
+            "POST",
+            "/api/tools/load_dataset",
+            Some(&sid),
+            Some(json!({"session_id": sid, "arguments": arguments})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        assert_eq!(body["data"]["success"], true, "{body}");
+    }
+
+    let (st, body) = call(
+        &r,
+        "GET",
+        &format!("/api/sessions/{sid}/datasets"),
+        Some(&sid),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let stored = |name: &str| {
+        body["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["name"] == name)
+            .map(|d| d["value_labels"].clone())
+    };
+    assert_eq!(stored("text"), Some(json!("text")), "{body}");
+    assert_eq!(stored("codes"), Some(Value::Null), "{body}");
+
+    let session = state.session_manager.get_session(&sid).await.unwrap();
+    async fn dtypes(
+        session: &p2a_mcp::session::Session,
+    ) -> (
+        p2a_core::polars::prelude::DataType,
+        p2a_core::polars::prelude::DataType,
+    ) {
+        let datasets = session.datasets.read().await;
+        let gl = |name: &str| datasets[name].df().column("gl").unwrap().dtype().clone();
+        (gl("text"), gl("codes"))
+    }
+    let before = dtypes(&session).await;
+    assert_eq!(before.0, p2a_core::polars::prelude::DataType::String);
+    assert_ne!(before.1, p2a_core::polars::prelude::DataType::String);
+
+    // The live datasets go, as when the server restarts; the reload reads the
+    // file again.
+    session.datasets.write().await.clear();
+    session.refresh_data_bytes().await;
+    let body = reload(&r, &sid).await;
+    let mut succeeded: Vec<&str> = body["data"]["succeeded"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|s| s.as_str())
+        .collect();
+    succeeded.sort_unstable();
+    assert_eq!(succeeded, ["codes", "text"], "{body}");
+    assert_eq!(dtypes(&session).await, before);
+}
+
 /// A reload is admitted like a tool call: above the memory soft limit it is
 /// refused with the governor's 503.
 #[tokio::test]
