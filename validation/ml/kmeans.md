@@ -24,8 +24,9 @@ against 0.
 k-means++ draws only among points not yet a centre, so `k` above the number of distinct rows is an error with R's
 text ("more cluster centers than distinct data points."); the internal callers (the Gaussian mixture's k-means
 start, the spectral embedding's k-means, `gap_statistic` with `k_max` above the distinct rows) report the same
-error. A run whose centroid update leaves a cluster without points keeps that centroid and carries R's warning
-"empty cluster: try a better set of initial centers". Finite data whose squared distances overflow is an error
+error. A centroid update that leaves a cluster without points keeps that centroid; a run that ends with an empty
+cluster carries R's warning "empty cluster: try a better set of initial centers" (R's Lloyd warns on the final
+counts). Finite data whose squared distances overflow is an error
 ("squared distances overflow; rescale the data").
 `kmeans_from_centers` starts from given centres, as R's `centers =` matrix: the centres must be finite,
 have the data's columns and be distinct ("initial centers are not distinct"), and a cluster that empties is
