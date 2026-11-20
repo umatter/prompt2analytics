@@ -182,13 +182,26 @@ async fn raw_post(addr: std::net::SocketAddr, uri: &str, body: &Value) -> Value 
 async fn serve_writes_out_the_audit_queue_before_it_returns() {
     // A caller that exits right after a graceful shutdown keeps the audit
     // entries of every call the server answered.
-    use p2a_mcp::audit::{AuditEntry, AuditLogger, ResultSummary};
+    use p2a_mcp::audit::{AuditEntry, AuditLogger, ResultSummary, RotationPolicy};
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("audit.log");
     let audit = p2a_mcp::config::AuditConfig {
         enabled: true,
         path: log.to_string_lossy().into_owned(),
     };
+    // The path's first logger, created before the server's: the first
+    // configuration of a path wins, so the server's `AuditLogger::new` shares
+    // this writer, which never rotates whatever `P2A_AUDIT_MAX_MB` says in
+    // the environment running the test (a rotation would move the first
+    // entries to `audit.log.1`).
+    let second = AuditLogger::with_rotation(
+        &audit,
+        RotationPolicy {
+            max_bytes: None,
+            keep: 3,
+        },
+    )
+    .unwrap();
     let mut cfg = http_cfg("127.0.0.1:0", None, false);
     cfg.audit = audit.clone();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -205,11 +218,9 @@ async fn serve_writes_out_the_audit_queue_before_it_returns() {
         raw_post(addr, "/api/tools/list_datasets", &call).await;
     }
     // Work for the flush at shutdown: one more entry, 32 MiB of arguments
-    // (an entry stores its arguments as given), queued through a second
-    // handle on the server's writer (the path is absolute, so
-    // `AuditLogger::new` returns that writer) and not flushed here.
+    // (an entry stores its arguments as given), queued through the second
+    // handle on the server's writer and not flushed here.
     let big = 32 << 20;
-    let second = AuditLogger::new(&audit).unwrap();
     second
         .log(AuditEntry::new(
             "last",
