@@ -90,6 +90,24 @@ pub(crate) fn first_self_link(listw: &SpatialWeights) -> Option<usize> {
     (0..listw.n()).find(|&i| listw.get_weights(i).indices.contains(&i))
 }
 
+/// The first unit (0-based) whose weights row lists one neighbour more than once, with that
+/// neighbour. The crate's builders never produce one (`Neighbors::from_indices` removes
+/// duplicates), but a deserialized weights object can hold one. A statistic that sums
+/// w_ij z_j reads the two entries as one weight w + w, while the moments that square each
+/// entry (sum w_ij^2) and the permutation draws (one value per entry) read them as two
+/// neighbours, so the two disagree; the statistics that rely on that refuse such weights.
+pub(crate) fn first_duplicate_neighbour(listw: &SpatialWeights) -> Option<(usize, usize)> {
+    (0..listw.n()).find_map(|i| {
+        let idx = &listw.get_weights(i).indices;
+        if idx.windows(2).all(|p| p[0] < p[1]) {
+            return None;
+        }
+        let mut sorted = idx.clone();
+        sorted.sort_unstable();
+        sorted.windows(2).find(|p| p[0] == p[1]).map(|p| (i, p[0]))
+    })
+}
+
 #[cfg(test)]
 pub(crate) mod test_fixtures {
     //! 30 points used by the spatial tests. R 4.3.3:
@@ -147,5 +165,43 @@ pub(crate) mod test_fixtures {
         }
         .expect("fixture columns have equal length");
         crate::data::Dataset::new(df)
+    }
+
+    /// `w` with neighbour `j` listed a second time in unit `i`'s row, carrying the row's first
+    /// weight. The builders never produce this, so it goes through JSON, the one route that can.
+    pub(crate) fn with_duplicate_entry(w: &SpatialWeights, i: usize, j: usize) -> SpatialWeights {
+        let mut v = serde_json::to_value(w).expect("weights serialize");
+        let row = &mut v["weights"][i];
+        let first = row["weights"][0].clone();
+        row["indices"]
+            .as_array_mut()
+            .expect("indices")
+            .push(j.into());
+        row["weights"].as_array_mut().expect("weights").push(first);
+        serde_json::from_value(v).expect("weights deserialize")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_fixtures::with_duplicate_entry;
+    use super::*;
+
+    fn ring(n: usize) -> SpatialWeights {
+        let lists = (0..n).map(|i| vec![(i + 1) % n, (i + n - 1) % n]).collect();
+        SpatialWeights::from_neighbors(&Neighbors::from_indices(lists), WeightStyle::RowStd)
+    }
+
+    #[test]
+    fn first_duplicate_neighbour_finds_the_first_repeated_entry() {
+        let w = ring(6);
+        assert_eq!(first_duplicate_neighbour(&w), None);
+        // an appended entry leaves the row unsorted as well as duplicated
+        assert_eq!(
+            first_duplicate_neighbour(&with_duplicate_entry(&w, 3, 2)),
+            Some((3, 2))
+        );
+        let twice = with_duplicate_entry(&with_duplicate_entry(&w, 4, 5), 1, 0);
+        assert_eq!(first_duplicate_neighbour(&twice), Some((1, 0)));
     }
 }

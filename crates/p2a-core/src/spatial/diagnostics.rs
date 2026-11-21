@@ -709,8 +709,9 @@ pub fn localmoran(
 /// # Errors
 ///
 /// - `InvalidSpecification`: `x` and the weights differ in length, `x` has a non-finite value
-///   or is constant, fewer than 3 units, `alpha` is not in [0, 1], or a unit lists itself as
-///   a neighbour (the moments and the permutation assume a zero diagonal).
+///   or is constant, fewer than 3 units, `alpha` is not in [0, 1], a unit lists itself as
+///   a neighbour (the moments and the permutation assume a zero diagonal), or a unit lists
+///   one neighbour more than once (possible only in deserialized weights).
 /// - `Cancelled`: the installed budget expired during the permutations.
 ///
 /// # Reference
@@ -758,6 +759,15 @@ pub fn localmoran_with(
             message: format!(
                 "localmoran: unit {} lists itself as a neighbour; W must have a zero diagonal",
                 i + 1
+            ),
+        });
+    }
+    if let Some((i, j)) = super::first_duplicate_neighbour(listw) {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "localmoran: unit {} lists unit {} as a neighbour more than once; merge the entries into one weight",
+                i + 1,
+                j + 1
             ),
         });
     }
@@ -1980,6 +1990,29 @@ mod tests {
                 Err(EconError::InvalidSpecification { message }) => {
                     assert!(message.contains("unit 1 lists itself"), "{message}")
                 }
+                other => panic!("permutations = {permutations}: {other:?}"),
+            }
+        }
+    }
+
+    /// A neighbour listed twice is refused, with or without permutations: I_i would read the
+    /// two entries as one weight, the moments and the draws as two neighbours.
+    #[test]
+    fn localmoran_refuses_a_duplicate_neighbour() {
+        let x = Array1::from(vec![0.3, -1.2, 0.8, 2.1, -0.4]);
+        let nb = Neighbors::from_indices((0..5).map(|i| vec![(i + 1) % 5, (i + 4) % 5]).collect());
+        let w = SpatialWeights::from_neighbors(&nb, WeightStyle::RowStd);
+        let w = crate::spatial::test_fixtures::with_duplicate_entry(&w, 2, 1);
+        for permutations in [0, 99] {
+            let cfg = LocalMoranConfig {
+                permutations,
+                ..LocalMoranConfig::default()
+            };
+            match localmoran_with(&x, &w, &cfg) {
+                Err(EconError::InvalidSpecification { message }) => assert!(
+                    message.contains("unit 3 lists unit 2 as a neighbour more than once"),
+                    "{message}"
+                ),
                 other => panic!("permutations = {permutations}: {other:?}"),
             }
         }

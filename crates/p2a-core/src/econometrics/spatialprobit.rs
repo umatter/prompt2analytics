@@ -396,6 +396,7 @@ impl std::fmt::Display for SpatialProbitResult {
 /// `InvalidSpecification` when, besides the data checks (a binary `y` with both values, one
 /// row per unit of W, no missing values):
 /// * a unit of W lists itself as a neighbour (W must have a zero diagonal);
+/// * a unit of W lists one neighbour more than once (possible only in deserialized weights);
 /// * `config.rho_prior_range` has a NaN end, or does not overlap the range where
 ///   I - rho W is invertible (an empty or non-finite intersection);
 /// * `compute_impacts` is set with no regressor besides the intercept.
@@ -452,6 +453,7 @@ pub fn run_sar_probit(
 /// `InvalidSpecification` when, besides the data checks (a binary `y` with both values, one
 /// row per unit of W, no missing values):
 /// * a unit of W lists itself as a neighbour (W must have a zero diagonal);
+/// * a unit of W lists one neighbour more than once (possible only in deserialized weights);
 /// * `config.rho_prior_range` (the prior of lambda) has a NaN end, or does not overlap the range where
 ///   I - lambda W is invertible (an empty or non-finite intersection);
 /// * `compute_impacts` is set with no regressor besides the intercept.
@@ -521,6 +523,17 @@ fn run_spatial_probit_internal(
             message: format!(
                 "spatial probit: unit {} lists itself as a neighbour; W must have a zero diagonal",
                 i + 1
+            ),
+        });
+    }
+    // The same sum of squares counts each entry apart, so a neighbour listed twice would enter
+    // H_ii as two neighbours but the lag as one doubled weight.
+    if let Some((i, j)) = crate::spatial::first_duplicate_neighbour(listw) {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "spatial probit: unit {} lists unit {} as a neighbour more than once; merge the entries into one weight",
+                i + 1,
+                j + 1
             ),
         });
     }
@@ -2186,6 +2199,21 @@ mod tests {
             let e = run(&d, "y", &["x"], &mut w, probit_config(10, false)).unwrap_err();
             assert!(
                 matches!(&e, EconError::InvalidSpecification { message } if message.contains("unit 4 lists itself")),
+                "{e}"
+            );
+        }
+    }
+
+    #[test]
+    fn spatial_probit_rejects_a_duplicate_neighbour() {
+        let (d, w) = create_test_spatial_binary_data();
+        let j = w.get_weights(7).indices[0];
+        let mut w = crate::spatial::test_fixtures::with_duplicate_entry(&w, 7, j);
+        let expected = format!("unit 8 lists unit {} as a neighbour more than once", j + 1);
+        for run in [run_sar_probit, run_sem_probit] {
+            let e = run(&d, "y", &["x"], &mut w, probit_config(10, false)).unwrap_err();
+            assert!(
+                matches!(&e, EconError::InvalidSpecification { message } if message.contains(&expected)),
                 "{e}"
             );
         }

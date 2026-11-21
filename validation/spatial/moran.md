@@ -82,8 +82,9 @@ repeats (Anselin's scheme, spdep's `no_repeat_in_row = TRUE`), seeded per permut
 (an island, or z_i = 0 under conditional moments) gives NaN z and p and the cluster "not significant".
 `global_i` is Moran's I, Σ I_i / S0. It uses m2 over all n units (as `spdep::moran.test(adjust.n = FALSE)` counts n), so when W
 has islands it is n / (n - islands) times `moran_test`'s statistic, which uses the n - islands units with
-neighbours. Non-finite or constant x, `alpha` outside [0, 1] and a unit that lists itself as a neighbour
-are `InvalidSpecification`.
+neighbours. Non-finite or constant x, `alpha` outside [0, 1], a unit that lists itself as a neighbour
+and a unit that lists one neighbour more than once (only a deserialized weights object can) are
+`InvalidSpecification`.
 
 ## Reference values
 
