@@ -503,10 +503,8 @@ pub fn box_plot(
         chart
             .configure_mesh()
             .y_desc(y_label)
-            .x_label_formatter(&|x| {
-                let idx = x.round() as usize;
-                labels.get(idx).cloned().unwrap_or_default()
-            })
+            .x_labels(labels.len())
+            .x_label_formatter(&|x| category_label(&labels, *x))
             .draw()
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
@@ -1017,6 +1015,7 @@ pub fn coefficient_plot(
     // The estimates run along x (horizontal layout) or y (vertical layout),
     // the coefficients along the other axis.
     let n_coefs = valid_coefs.len() as f64;
+    let coef_names: Vec<String> = valid_coefs.iter().map(|c| c.0.clone()).collect();
     let (value_axis, coef_axis) = if horizontal { ("x", "y") } else { ("y", "x") };
     let value_range = checked_axis_range(x_range_min, x_range_max, value_axis)?;
     let coef_range = checked_axis_range(-0.5, n_coefs - 0.5, coef_axis)?;
@@ -1046,13 +1045,8 @@ pub fn coefficient_plot(
             chart
                 .configure_mesh()
                 .x_desc(x_label)
-                .y_label_formatter(&|y| {
-                    let idx = y.round() as usize;
-                    valid_coefs
-                        .get(idx)
-                        .map(|c| c.0.clone())
-                        .unwrap_or_default()
-                })
+                .y_labels(coef_names.len())
+                .y_label_formatter(&|y| category_label(&coef_names, *y))
                 .draw()
                 .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
@@ -1113,13 +1107,8 @@ pub fn coefficient_plot(
             chart
                 .configure_mesh()
                 .y_desc(x_label)
-                .x_label_formatter(&|x| {
-                    let idx = x.round() as usize;
-                    valid_coefs
-                        .get(idx)
-                        .map(|c| c.0.clone())
-                        .unwrap_or_default()
-                })
+                .x_labels(coef_names.len())
+                .x_label_formatter(&|x| category_label(&coef_names, *x))
                 .draw()
                 .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
@@ -2234,6 +2223,21 @@ fn invalid_data(e: crate::errors::EconError) -> VisualizationError {
 /// key points.
 const MAX_AXIS_WIDTH: f64 = 1e308;
 
+/// The label of the category drawn at `pos` on a category axis laid out
+/// continuously over `-0.5..n - 0.5` (category `i` at `i`), or an empty string
+/// when `pos` is not a category position. plotters picks its own tick
+/// positions on such an axis, so a tick between two categories must stay
+/// unlabelled rather than borrow the nearest category's name; the callers also
+/// ask for `n` labels, which makes plotters choose step 1 and put a tick on
+/// every category.
+fn category_label(labels: &[String], pos: f64) -> String {
+    let idx = pos.round();
+    if (pos - idx).abs() > 1e-6 || idx < 0.0 {
+        return String::new();
+    }
+    labels.get(idx as usize).cloned().unwrap_or_default()
+}
+
 /// The axis range `lo..hi` if plotters can lay it out: both ends finite,
 /// `hi >= lo` and a width below [`MAX_AXIS_WIDTH`]. A zero-width range is
 /// accepted (plotters returns early on it, so constant data still render).
@@ -2608,6 +2612,18 @@ fn compute_leaf_order(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn category_label_names_only_category_positions() {
+        let labels = vec!["Intercept".to_string(), "x".to_string()];
+        assert_eq!(category_label(&labels, 0.0), "Intercept");
+        assert_eq!(category_label(&labels, 1.0), "x");
+        assert_eq!(category_label(&labels, 1.0 + 1e-9), "x");
+        // ticks between categories, and outside them, stay unlabelled
+        for pos in [-0.4, -0.2, 0.2, 0.4, 0.6, 0.8, 1.2, 1.4, -1.0, 2.0] {
+            assert_eq!(category_label(&labels, pos), "", "tick at {pos}");
+        }
+    }
 
     fn wavy(n: usize) -> Vec<f64> {
         (0..n)
