@@ -674,6 +674,9 @@ Fixed Effects (within) estimation for panel data.
 - Coefficients represent within-entity effects
 - Controls for time-invariant unobserved heterogeneity
 
+The coefficients are saved as a dataset named `<dataset>_fe_<y>` (here `panel_fe_wage`), with the
+same columns as the table `regression_ols` saves; `viz_coefficient` plots it directly.
+
 ### panel_random_effects
 Random Effects (GLS) estimation for panel data.
 
@@ -684,6 +687,9 @@ Random Effects (GLS) estimation for panel data.
 **When to use:**
 - When unobserved effects are uncorrelated with regressors
 - More efficient than FE if RE assumptions hold
+
+The coefficients are saved as `<dataset>_re_<y>` (here `panel_re_wage`); its `t_value` column holds
+the z statistics random effects reports, and the 95% interval uses the normal quantile.
 
 ### hausman_test
 Specification test to choose between Fixed and Random Effects.

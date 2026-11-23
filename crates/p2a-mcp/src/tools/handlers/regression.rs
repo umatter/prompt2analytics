@@ -403,6 +403,56 @@ fn coefficient_table(result: &OlsResult) -> Result<Dataset, String> {
     .map_err(|e| e.to_string())
 }
 
+/// A coefficient table from parallel columns (any estimator): one row per term.
+pub(crate) fn coefficient_table_from(
+    terms: &[String],
+    estimate: &[f64],
+    std_error: &[f64],
+    statistic: &[f64],
+    p_value: &[f64],
+    ci: &[(f64, f64)],
+) -> Result<Dataset, String> {
+    let n = terms.len();
+    if [
+        estimate.len(),
+        std_error.len(),
+        statistic.len(),
+        p_value.len(),
+        ci.len(),
+    ]
+    .iter()
+    .any(|&len| len != n)
+    {
+        return Err("the coefficient columns differ in length".to_string());
+    }
+    let col = |name: &str, v: Vec<f64>| Series::new(name.into(), v).into();
+    DataFrame::new(vec![
+        Series::new("term".into(), terms.to_vec()).into(),
+        col("estimate", estimate.to_vec()),
+        col("std_error", std_error.to_vec()),
+        col("t_value", statistic.to_vec()),
+        col("p_value", p_value.to_vec()),
+        col("ci_lower", ci.iter().map(|c| c.0).collect()),
+        col("ci_upper", ci.iter().map(|c| c.1).collect()),
+    ])
+    .map(Dataset::new)
+    .map_err(|e| e.to_string())
+}
+
+/// The reply with the saved-table line first (the chat loop keeps only the start of an
+/// earlier turn's tool result, and a later "plot the coefficients" needs it), or a note
+/// at the end when the table could not be saved.
+pub(crate) fn with_saved_table_line(saved: Result<String, String>, text: String) -> String {
+    match saved {
+        Ok(name) => format!(
+            "Coefficients saved as dataset '{name}' (columns {}); plot them with \
+             viz_coefficient(model = '{name}').\n\n{text}",
+            COEFFICIENT_TABLE_COLUMNS.join(", ")
+        ),
+        Err(e) => format!("{text}\n\nNote: the coefficient table was not saved: {e}"),
+    }
+}
+
 /// Whether `ds` has exactly the columns of a saved coefficient table.
 pub(crate) fn is_coefficient_table(ds: &Dataset) -> bool {
     let names = ds.df().get_column_names();
@@ -416,7 +466,7 @@ pub(crate) fn is_coefficient_table(ds: &Dataset) -> bool {
 /// Saves `table` under `base`, replacing an earlier coefficient table of that name but
 /// never another dataset: if `base` holds one, the table goes to `base_2`, `base_3`, ...
 /// Returns the name it was saved under.
-fn save_coefficient_table(
+pub(crate) fn save_coefficient_table(
     datasets: &mut std::collections::HashMap<String, Dataset>,
     base: &str,
     table: Result<Dataset, String>,
@@ -463,8 +513,6 @@ impl AnalyticsServer {
                         .replace("\nAdj. R-squared: ", "\nAdj. R-squared (uncentered): ");
                 }
                 append_unshown_notes(&mut text, &result);
-                // The saved-table line goes first: the chat loop keeps only the start of
-                // an earlier turn's tool result, and a later "plot the coefficients" needs it.
                 let saved = {
                     let mut datasets = self.datasets.write().await;
                     save_coefficient_table(
@@ -473,14 +521,7 @@ impl AnalyticsServer {
                         coefficient_table(&result),
                     )
                 };
-                let text = match saved {
-                    Ok(name) => format!(
-                        "Coefficients saved as dataset '{name}' (columns {}); plot them with \
-                         viz_coefficient(model = '{name}').\n\n{text}",
-                        COEFFICIENT_TABLE_COLUMNS.join(", ")
-                    ),
-                    Err(e) => format!("{text}\n\nNote: the coefficient table was not saved: {e}"),
-                };
+                let text = with_saved_table_line(saved, text);
                 Ok(CallToolResult::success(vec![Content::text(text)]))
             }
             Err(msg) => Ok(CallToolResult::error(vec![Content::text(msg)])),
