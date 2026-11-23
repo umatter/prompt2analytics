@@ -167,11 +167,6 @@ body { background: var(--k-paper); color: var(--k-ink); }
   .k-status .r { margin-left: auto; }
 
   /* welcome */
-  .k-big { display: flex; gap: 10px; margin: 0; }
-  .k-big .ch { display: grid; grid-auto-flow: row; }
-  .k-big .ch i { display: block; }
-  .k-big .ch i.on { background: var(--k-ink); }
-  .k-big .ch i.u { background: var(--k-orange); }
   .k-start {
     display: grid; grid-template-columns: 150px 1fr auto; gap: 16px; align-items: baseline;
     width: 100%; text-align: left; border-bottom: 1px solid var(--k-rule); padding: 12px 0; cursor: pointer;

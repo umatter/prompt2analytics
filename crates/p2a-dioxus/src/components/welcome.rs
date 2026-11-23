@@ -1,36 +1,13 @@
-//! The welcome screen of an empty conversation: "Grüezi" in block letters,
-//! the greeting in five languages, and the bundled example datasets as
-//! starters.
+//! The welcome screen of an empty conversation: the long logo, a row of
+//! facts about the backend, one line on what p2a is, and the bundled example
+//! datasets as starters.
 
 use dioxus::prelude::*;
 
+use crate::api::ApiClient;
+use crate::components::P2aLockup;
 use crate::examples::{EXAMPLES, Example, load_example};
 use crate::state::{SessionState, Settings};
-
-/// Block letters of "Grüezi", one string per row; `#` is a filled cell and
-/// `o` an orange one (the umlaut dots).
-const GRUEZI: [&[&str]; 6] = [
-    &[
-        " ### ", "#   #", "#    ", "# ###", "#   #", "#   #", " ### ",
-    ],
-    &["    ", "    ", "# ##", "##  ", "#   ", "#   ", "#   "],
-    &[
-        " o o ", "     ", "#   #", "#   #", "#   #", "#  ##", " ## #",
-    ],
-    &[
-        "     ", "     ", " ### ", "#   #", "#####", "#    ", " ####",
-    ],
-    &[
-        "     ", "     ", "#####", "   # ", "  #  ", " #   ", "#####",
-    ],
-    &[" # ", "   ", "## ", " # ", " # ", " # ", "###"],
-];
-
-/// Cell size of the block letters, in pixels.
-const CELL: u32 = 11;
-
-/// The greetings next to "Grüezi", in the order shown.
-const GREETINGS: [&str; 5] = ["Welcome", "Bienvenue", "Benvenuto", "Willkommen", "欢迎"];
 
 /// Props for [`Welcome`].
 #[derive(Props, Clone, PartialEq)]
@@ -50,6 +27,15 @@ pub fn Welcome(props: WelcomeProps) -> Element {
     let settings = use_context::<Signal<Settings>>();
     let mut loading = use_signal(|| None::<&'static str>);
     let mut error = use_signal(|| None::<String>);
+    // Backend version and tool count for the tag row (None until known).
+    let mut facts = use_signal(|| None::<(String, Option<usize>)>);
+    use_future(move || async move {
+        let client = ApiClient::new();
+        if let Ok(h) = client.health().await {
+            let tools = client.list_tools().await.ok().map(|t| t.len());
+            facts.set(Some((h.version, tools)));
+        }
+    });
 
     let mut start = move |example: Example| {
         if loading.peek().is_some() {
@@ -77,13 +63,21 @@ pub fn Welcome(props: WelcomeProps) -> Element {
 
     rsx! {
         div { class: "px-12 pt-11 pb-6 max-w-[920px]",
-            BlockWord {}
-            div { class: "flex flex-wrap gap-x-[22px] gap-y-1 mt-[18px] mb-[30px] text-base k-muted",
-                for (i, greeting) in GREETINGS.iter().enumerate() {
-                    span { class: if i == 0 { "k-ink" } else { "" }, "{greeting}" }
+            P2aLockup { cell: 10.0 }
+            div { class: "flex flex-wrap gap-1.5 mt-6",
+                if let Some((ref version, tools)) = *facts.read() {
+                    if let Some(n) = tools {
+                        Tag { label: "tools", value: n.to_string() }
+                    }
+                    Tag { label: "p2a", value: version.clone() }
                 }
+                Tag { label: "license", value: "MIT/Apache-2.0".to_string() }
+                Tag { label: "engine", value: "pure Rust".to_string() }
             }
-            p { class: "text-base max-w-[60ch] mb-4",
+            p { class: "text-[15px] max-w-[66ch] mt-4 mb-8",
+                "Chat-first data analytics: econometrics, statistics, machine learning and charts behind one conversation, validated against R."
+            }
+            p { class: "text-sm k-muted max-w-[60ch] mb-3",
                 "Ask for an analysis in plain words. Every number comes from a tool call you can open, check and export as a script."
             }
             div { class: "k-rule-t",
@@ -119,47 +113,13 @@ pub fn Welcome(props: WelcomeProps) -> Element {
     }
 }
 
-/// "Grüezi" drawn from square cells.
+/// A label and a value in a small outlined box, like a README badge.
 #[component]
-fn BlockWord() -> Element {
+fn Tag(label: &'static str, value: String) -> Element {
     rsx! {
-        div { class: "k-big", role: "img", "aria-label": "Grüezi",
-            for (n, rows) in GRUEZI.iter().enumerate() {
-                span {
-                    key: "{n}",
-                    class: "ch",
-                    style: "grid-template-columns: repeat({rows[0].len()}, {CELL}px); grid-auto-rows: {CELL}px;",
-                    for (r, row) in rows.iter().enumerate() {
-                        for (c, cell) in row.chars().enumerate() {
-                            i {
-                                key: "{r}-{c}",
-                                class: match cell {
-                                    '#' => "on",
-                                    'o' => "u",
-                                    _ => "",
-                                },
-                                style: "width: {CELL}px; height: {CELL}px;",
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn every_letter_has_seven_rows_of_one_width() {
-        for rows in GRUEZI {
-            assert_eq!(rows.len(), 7);
-            assert!(
-                rows.iter()
-                    .all(|r| r.chars().count() == rows[0].chars().count())
-            );
+        span { class: "k-mono text-[11.5px] border border-[var(--k-rule)] px-1.5 py-[1px]",
+            "{label} "
+            span { class: "k-orange-text font-semibold", "{value}" }
         }
     }
 }

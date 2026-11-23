@@ -54,6 +54,37 @@ pub fn P2aWordmark(
     }
 }
 
+/// The long logo: the wordmark, a rule, and "Prompt 2 / Analytics" in
+/// Archivo extra-wide, as in the README header.
+#[component]
+pub fn P2aLockup(
+    /// Cell size of the wordmark in pixels; the type scales with it.
+    #[props(default = 10.0)]
+    cell: f64,
+) -> Element {
+    let font = cell * 4.6;
+    let gap = cell * 2.2;
+    rsx! {
+        div {
+            class: "inline-flex items-center text-black dark:text-white",
+            style: "gap: {gap}px;",
+            role: "img",
+            "aria-label": "p2a, Prompt 2 Analytics",
+            P2aWordmark { width: cell * 14.0, class: "shrink-0" }
+            span { class: "self-stretch w-[2px] bg-current", "aria-hidden": "true" }
+            span {
+                class: "font-extrabold leading-[0.95] tracking-[-0.015em]",
+                style: "font-size: {font}px; font-stretch: 125%;",
+                "aria-hidden": "true",
+                "Prompt "
+                span { style: "color: {colors::ORANGE};", "2" }
+                br {}
+                "Analytics"
+            }
+        }
+    }
+}
+
 /// The orange tile with a black 2, as in the favicon.
 #[component]
 pub fn P2aIconMinimal(

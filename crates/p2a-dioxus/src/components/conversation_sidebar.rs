@@ -495,7 +495,7 @@ pub fn ConversationSidebar() -> Element {
             }
             // New conversation
             button {
-                class: "flex-shrink-0 w-full text-left px-[18px] py-[10px] k-line-b font-semibold text-sm hover:bg-[var(--k-fill)] disabled:opacity-50 disabled:cursor-not-allowed",
+                class: "flex-shrink-0 mx-[18px] mt-3.5 mb-2 text-left px-3 py-[7px] border border-[var(--k-rule)] font-semibold text-sm hover:bg-[var(--k-fill)] disabled:opacity-50 disabled:cursor-not-allowed",
                 disabled: new_blocked.is_some(),
                 onclick: handle_new_conversation,
                 title: new_blocked.unwrap_or("Start a new analysis"),
