@@ -160,11 +160,7 @@ pub fn ExportMenu() -> Element {
         div { class: "relative",
             // Export button
             button {
-                class: if has_completed_messages {
-                    "px-3 py-1.5 text-sm font-medium text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200 dark:text-gray-200 dark:bg-gray-700 dark:hover:bg-gray-600 transition-colors flex items-center gap-1.5"
-                } else {
-                    "px-3 py-1.5 text-sm font-medium text-gray-400 bg-gray-100 rounded-lg cursor-not-allowed dark:text-gray-500 dark:bg-gray-800 flex items-center gap-1.5"
-                },
+                class: "k-btn",
                 disabled: !has_completed_messages,
                 onclick: handle_toggle,
                 title: if has_completed_messages {
@@ -172,33 +168,8 @@ pub fn ExportMenu() -> Element {
                 } else {
                     "No messages to export"
                 },
-                // Download icon
-                svg {
-                    class: "w-4 h-4",
-                    fill: "none",
-                    stroke: "currentColor",
-                    view_box: "0 0 24 24",
-                    path {
-                        stroke_linecap: "round",
-                        stroke_linejoin: "round",
-                        stroke_width: "2",
-                        d: "M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"
-                    }
-                }
                 "Export"
-                // Dropdown arrow
-                svg {
-                    class: "w-3 h-3",
-                    fill: "none",
-                    stroke: "currentColor",
-                    view_box: "0 0 24 24",
-                    path {
-                        stroke_linecap: "round",
-                        stroke_linejoin: "round",
-                        stroke_width: "2",
-                        d: "M19 9l-7 7-7-7"
-                    }
-                }
+                span { class: "k-mono text-[10px]", aria_hidden: "true", "\u{25BE}" }
             }
 
             // Dropdown menu
@@ -211,84 +182,33 @@ pub fn ExportMenu() -> Element {
 
                 // Menu
                 div {
-                    class: "absolute right-0 top-full mt-1 w-56 bg-white dark:bg-gray-800 rounded-lg shadow-lg border border-gray-200 dark:border-gray-700 z-20 py-1",
-                    // JSON export
+                    class: "k-menu absolute right-0 top-full mt-1 w-60 z-20",
                     button {
-                        class: "w-full px-4 py-2 text-left text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center gap-3",
+                        class: "k-menu-item",
                         onclick: move |_| do_export(ExportFormat::Json),
-                        svg {
-                            class: "w-4 h-4 text-gray-500 dark:text-gray-400",
-                            fill: "none",
-                            stroke: "currentColor",
-                            view_box: "0 0 24 24",
-                            path {
-                                stroke_linecap: "round",
-                                stroke_linejoin: "round",
-                                stroke_width: "2",
-                                d: "M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z"
-                            }
-                        }
                         span { "Download as JSON" }
+                        span { class: "ext", ".json" }
                     }
-
-                    // Markdown export
                     button {
-                        class: "w-full px-4 py-2 text-left text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center gap-3",
+                        class: "k-menu-item",
                         onclick: move |_| do_export(ExportFormat::Markdown),
-                        svg {
-                            class: "w-4 h-4 text-gray-500 dark:text-gray-400",
-                            fill: "none",
-                            stroke: "currentColor",
-                            view_box: "0 0 24 24",
-                            path {
-                                stroke_linecap: "round",
-                                stroke_linejoin: "round",
-                                stroke_width: "2",
-                                d: "M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
-                            }
-                        }
                         span { "Download as Markdown" }
+                        span { class: "ext", ".md" }
                     }
-
-                    // HTML export
                     button {
-                        class: "w-full px-4 py-2 text-left text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center gap-3",
+                        class: "k-menu-item",
                         onclick: move |_| do_export(ExportFormat::Html),
-                        svg {
-                            class: "w-4 h-4 text-gray-500 dark:text-gray-400",
-                            fill: "none",
-                            stroke: "currentColor",
-                            view_box: "0 0 24 24",
-                            path {
-                                stroke_linecap: "round",
-                                stroke_linejoin: "round",
-                                stroke_width: "2",
-                                d: "M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"
-                            }
-                        }
-                        span { "Download as HTML Report" }
+                        span { "Download as HTML report" }
+                        span { class: "ext", ".html" }
                     }
 
-                    // Divider
-                    div { class: "my-1 border-t border-gray-200 dark:border-gray-700" }
+                    div { class: "k-menu-sep" }
 
-                    // Copy as Markdown
                     button {
-                        class: "w-full px-4 py-2 text-left text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center gap-3",
+                        class: "k-menu-item",
                         onclick: do_copy_markdown,
-                        svg {
-                            class: "w-4 h-4 text-gray-500 dark:text-gray-400",
-                            fill: "none",
-                            stroke: "currentColor",
-                            view_box: "0 0 24 24",
-                            path {
-                                stroke_linecap: "round",
-                                stroke_linejoin: "round",
-                                stroke_width: "2",
-                                d: "M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3"
-                            }
-                        }
                         span { "Copy as Markdown" }
+                        span { class: "ext", "clipboard" }
                     }
                 }
             }
@@ -296,7 +216,7 @@ pub fn ExportMenu() -> Element {
             // Status message toast
             if let Some(ref msg) = *status_message.read() {
                 div {
-                    class: "absolute right-0 top-full mt-1 px-3 py-2 bg-gray-900 dark:bg-gray-100 text-white dark:text-gray-900 text-sm rounded-lg shadow-lg z-30 whitespace-nowrap",
+                    class: "k-toast absolute right-0 top-full mt-1 z-30",
                     "{msg}"
                 }
             }

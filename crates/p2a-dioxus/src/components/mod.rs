@@ -12,7 +12,9 @@ mod message;
 mod message_list;
 mod settings_modal;
 mod shortcuts_modal;
+mod status_bar;
 mod tool_call;
+mod welcome;
 
 pub use autocomplete::AutocompleteDropdown;
 pub use chat_input::ChatInput;
@@ -26,4 +28,6 @@ pub use message::Message;
 pub use message_list::{MessageList, next_at_bottom};
 pub use settings_modal::SettingsModal;
 pub use shortcuts_modal::ShortcutsModal;
+pub use status_bar::StatusBar;
 pub use tool_call::{ToolCallDisplay, status_label as tool_status_label};
+pub use welcome::Welcome;

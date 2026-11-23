@@ -770,3 +770,9 @@ mod tests {
         });
     }
 }
+
+/// Asks the chat panel to open the add-data dialog: the dataset sidebar's
+/// "Add data" button bumps the count, the chat panel (which owns the
+/// dialog) opens it on every change.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AddDataRequest(pub Signal<u64>);

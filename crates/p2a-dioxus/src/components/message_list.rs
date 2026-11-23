@@ -2,7 +2,7 @@
 
 use dioxus::prelude::*;
 
-use crate::components::{Message, P2aWordmark};
+use crate::components::{Message, Welcome};
 use crate::state::{ChatMessage, ChatState};
 
 /// What the auto-scroll watches: the message count and the last message's
@@ -124,55 +124,13 @@ pub fn MessageList(props: MessageListProps) -> Element {
     rsx! {
         div { class: "py-6 h-full",
             if messages.is_empty() {
-                // Empty state: centered wordmark + a row of greetings in one size.
-                // Previous layout had "Grüezi" as an oversized headline with the
-                // other languages demoted below it; it now sits inline with the
-                // rest so no one language feels singled out.
-                div { class: "flex flex-col items-center justify-center min-h-[400px] h-full text-center mx-auto",
-                    // Wordmark
-                    div { class: "mb-20",
-                        P2aWordmark { width: 280.0 }
-                    }
-                    // Multilingual welcome — all greetings at equal weight.
-                    div { class: "mb-4 flex flex-wrap justify-center gap-x-3 gap-y-1 text-base text-gray-700 dark:text-gray-300 max-w-md",
-                        span { "Welcome" }
-                        span { class: "text-gray-400 dark:text-gray-600", "·" }
-                        span { "Bienvenue" }
-                        span { class: "text-gray-400 dark:text-gray-600", "·" }
-                        span { "Willkommen" }
-                        span { class: "text-gray-400 dark:text-gray-600", "·" }
-                        span { "Grüezi" }
-                        span { class: "text-gray-400 dark:text-gray-600", "·" }
-                        span { "Benvenuto" }
-                        span { class: "text-gray-400 dark:text-gray-600", "·" }
-                        span { "欢迎" }
-                    }
-                    p { class: "text-sm text-gray-500 dark:text-gray-400 max-w-sm",
-                        "Start a conversation to get help with your data analysis."
-                    }
-
-                    // Quick suggestions
-                    div { class: "mt-6 flex flex-wrap gap-2 justify-center",
-                        QuickSuggestion {
-                            text: "Create a sample dataset with x and y",
-                            disabled: props.suggestions_disabled,
-                            on_click: props.on_suggestion
-                        }
-                        QuickSuggestion {
-                            text: "Explain OLS regression",
-                            disabled: props.suggestions_disabled,
-                            on_click: props.on_suggestion
-                        }
-                        QuickSuggestion {
-                            text: "What tools are available?",
-                            disabled: props.suggestions_disabled,
-                            on_click: props.on_suggestion
-                        }
-                    }
+                Welcome {
+                    on_suggestion: props.on_suggestion,
+                    disabled: props.suggestions_disabled
                 }
             } else {
                 // Message list
-                div { class: "space-y-2 px-4",
+                div { class: "k-log px-5 sm:px-8",
                     for message in messages.iter() {
                         Message {
                             key: "{message.id}",
@@ -188,40 +146,6 @@ pub fn MessageList(props: MessageListProps) -> Element {
                     }
                 }
             }
-        }
-    }
-}
-
-/// Props for QuickSuggestion
-#[derive(Props, Clone, PartialEq)]
-struct QuickSuggestionProps {
-    text: String,
-    /// Greyed out and deaf to clicks (a send runs)
-    #[props(default)]
-    disabled: bool,
-    #[props(default)]
-    on_click: Option<EventHandler<String>>,
-}
-
-/// Quick suggestion chip
-#[component]
-fn QuickSuggestion(props: QuickSuggestionProps) -> Element {
-    let text = props.text.clone();
-    let text_for_click = props.text.clone();
-
-    rsx! {
-        button {
-            class: "px-3 py-1.5 text-sm text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-full cursor-pointer shadow-sm transition-all duration-150 hover:border-orange-500 hover:bg-orange-50 hover:text-orange-700 hover:shadow-md dark:hover:bg-orange-900/30 dark:hover:text-orange-300 active:scale-95 active:shadow-none active:bg-orange-100 dark:active:bg-orange-900/50 disabled:opacity-50 disabled:cursor-not-allowed disabled:pointer-events-none",
-            disabled: props.disabled,
-            onclick: move |_| {
-                if props.disabled {
-                    return;
-                }
-                if let Some(ref handler) = props.on_click {
-                    handler.call(text_for_click.clone());
-                }
-            },
-            "{text}"
         }
     }
 }

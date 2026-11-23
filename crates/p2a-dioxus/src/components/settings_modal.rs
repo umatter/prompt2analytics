@@ -536,28 +536,29 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
 
             // Backdrop - separate clickable layer behind modal
             div {
-                class: "absolute inset-0 bg-black/50 backdrop-blur-sm",
+                class: "k-backdrop",
                 onclick: move |_| dismiss.call(()),
             }
 
             // Modal - positioned above backdrop, clicks don't propagate to backdrop
             div {
-                class: "relative bg-white dark:bg-gray-900 rounded-2xl shadow-2xl w-full max-w-lg max-h-[90vh] overflow-hidden border border-gray-200 dark:border-gray-800",
+                class: "k-modal max-w-lg max-h-[90vh]",
 
                 // Header
-                div { class: "px-6 py-4 border-b border-gray-200 dark:border-gray-800 flex items-center justify-between",
-                    h2 { class: "text-xl font-semibold text-gray-900 dark:text-white", "Settings" }
+                div { class: "k-modal-head",
+                    h2 { class: "k-modal-title", "Settings" }
                     button {
-                        class: "p-2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors",
+                        class: "k-icon-btn",
+                        title: "Close",
+                        aria_label: "Close",
                         onclick: move |_| dismiss.call(()),
                         svg {
-                            class: "w-5 h-5",
+                            class: "w-4 h-4",
                             fill: "none",
                             stroke: "currentColor",
                             view_box: "0 0 24 24",
                             path {
-                                stroke_linecap: "round",
-                                stroke_linejoin: "round",
+                                stroke_linecap: "square",
                                 stroke_width: "2",
                                 d: "M6 18L18 6M6 6l12 12"
                             }
@@ -566,39 +567,39 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
                 }
 
                 // Tabs
-                div { class: "px-6 pt-4 flex gap-2 border-b border-gray-200 dark:border-gray-800",
+                div { class: "k-tabs pt-1",
                     button {
                         class: if current_tab == "llm" {
-                            "px-4 py-2 text-sm font-medium text-teal-600 dark:text-teal-400 border-b-2 border-teal-600 dark:border-teal-400 -mb-px"
+                            "k-tab on"
                         } else {
-                            "px-4 py-2 text-sm font-medium text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300"
+                            "k-tab"
                         },
                         onclick: move |_| active_tab.set("llm".to_string()),
-                        "LLM Provider"
+                        "LLM provider"
                     }
                     button {
                         class: if current_tab == "data" {
-                            "px-4 py-2 text-sm font-medium text-teal-600 dark:text-teal-400 border-b-2 border-teal-600 dark:border-teal-400 -mb-px"
+                            "k-tab on"
                         } else {
-                            "px-4 py-2 text-sm font-medium text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300"
+                            "k-tab"
                         },
                         onclick: move |_| active_tab.set("data".to_string()),
-                        "Load Data"
+                        "Load data"
                     }
                 }
 
                 // Content
-                div { class: "px-6 py-4 overflow-y-auto max-h-[60vh]",
+                div { class: "k-modal-body max-h-[60vh]",
                     if current_tab == "llm" {
                         // LLM Settings
                         div { class: "space-y-4",
                             // Theme selection
                             div {
-                                label { class: "block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5",
+                                label { class: "k-label",
                                     "Theme"
                                 }
                                 select {
-                                    class: "w-full px-3 py-2.5 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-teal-500 focus:border-transparent",
+                                    class: "k-input",
                                     value: "{current_theme.as_str().to_lowercase()}",
                                     onchange: handle_theme_change,
                                     option { value: "system", "System (auto)" }
@@ -609,8 +610,9 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
 
                             // First-run nudge: no provider configured yet.
                             if current_provider == Provider::None {
-                                div { class: "p-3 bg-teal-50 dark:bg-teal-900/20 rounded-lg border border-teal-200 dark:border-teal-800",
-                                    p { class: "text-sm text-teal-700 dark:text-teal-300",
+                                div { class: "k-notice",
+                                    b { "start here" }
+                                    p {
                                         "{WELCOME_TEXT}"
                                     }
                                 }
@@ -618,11 +620,11 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
 
                             // Provider selection
                             div {
-                                label { class: "block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5",
+                                label { class: "k-label",
                                     "Provider"
                                 }
                                 select {
-                                    class: "w-full px-3 py-2.5 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-teal-500 focus:border-transparent",
+                                    class: "k-input",
                                     value: "{current_provider.as_str()}",
                                     onchange: handle_provider_change,
                                     option { value: "none", disabled: true, "— Select a provider —" }
@@ -633,15 +635,15 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
                                 }
                                 // Helper text per provider: where to get an API key.
                                 if current_provider == Provider::Anthropic {
-                                    p { class: "text-xs text-gray-500 dark:text-gray-400 mt-1",
+                                    p { class: "k-help",
                                         "Get a key at console.anthropic.com/settings/keys"
                                     }
                                 } else if current_provider == Provider::Openai {
-                                    p { class: "text-xs text-gray-500 dark:text-gray-400 mt-1",
+                                    p { class: "k-help",
                                         "Get a key at platform.openai.com/api-keys"
                                     }
                                 } else if current_provider == Provider::Openrouter {
-                                    p { class: "text-xs text-gray-500 dark:text-gray-400 mt-1",
+                                    p { class: "k-help",
                                         "Get a key at openrouter.ai/keys — one key, 100+ models (model format: provider/model, e.g. openai/gpt-4o-mini)"
                                     }
                                 }
@@ -650,17 +652,17 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
                             // Ollama base URL
                             if current_provider == Provider::Ollama {
                                 div {
-                                    label { class: "block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5",
-                                        "Ollama Base URL"
+                                    label { class: "k-label",
+                                        "Ollama base URL"
                                     }
                                     input {
-                                        class: "w-full px-3 py-2.5 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-teal-500 focus:border-transparent",
+                                        class: "k-input",
                                         r#type: "text",
                                         placeholder: "http://localhost:11434",
                                         value: "{local_base_url}",
                                         oninput: move |evt| local_base_url.set(evt.value().clone())
                                     }
-                                    p { class: "text-xs text-gray-500 dark:text-gray-400 mt-1",
+                                    p { class: "k-help",
                                         "{ollama.hint}"
                                     }
                                 }
@@ -669,19 +671,19 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
                             // API Key
                             if requires_api_key {
                                 div {
-                                    label { class: "block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5",
-                                        "API Key"
+                                    label { class: "k-label",
+                                        "API key"
                                     }
                                     input {
-                                        class: "w-full px-3 py-2.5 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-teal-500 focus:border-transparent",
+                                        class: "k-input",
                                         r#type: "password",
                                         placeholder: "Enter your API key...",
                                         value: "{local_api_key}",
                                         oninput: move |evt| local_api_key.set(evt.value().clone())
                                     }
-                                    p { class: "text-xs text-gray-500 dark:text-gray-400 mt-1.5 flex items-center gap-1",
+                                    p { class: "k-help flex items-start gap-1.5",
                                         svg {
-                                            class: "w-3.5 h-3.5",
+                                            class: "w-3.5 h-3.5 flex-shrink-0 mt-px",
                                             fill: "none",
                                             stroke: "currentColor",
                                             view_box: "0 0 24 24",
@@ -699,19 +701,19 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
 
                             // Model
                             div {
-                                label { class: "block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5",
+                                label { class: "k-label",
                                     "Model"
                                 }
                                 div { class: "flex gap-2",
                                     input {
-                                        class: "flex-1 min-w-0 px-3 py-2.5 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-teal-500 focus:border-transparent",
+                                        class: "k-input k-mono text-[13px] flex-1 min-w-0",
                                         r#type: "text",
                                         list: "p2a-model-options",
                                         value: "{local_model}",
                                         oninput: move |evt| local_model.set(evt.value().clone())
                                     }
                                     button {
-                                        class: "px-3 py-2 text-sm font-medium text-gray-700 dark:text-gray-200 bg-gray-100 dark:bg-gray-700 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-600 transition-colors whitespace-nowrap",
+                                        class: "k-btn whitespace-nowrap",
                                         title: "Ask the provider which models it offers",
                                         onclick: handle_list_models,
                                         "List models"
@@ -723,20 +725,21 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
                                     }
                                 }
                                 if let Some(ref note) = *models_note.read() {
-                                    p { class: "text-xs text-gray-500 dark:text-gray-400 mt-1", "{note}" }
+                                    p { class: "k-help", "{note}" }
                                 }
                                 if let Some(hint) = model_hint(&local_model.read(), &listed_models.read()) {
-                                    p { class: "text-xs text-orange-600 dark:text-orange-400 mt-1", "{hint}" }
+                                    p { class: "k-field-error", "{hint}" }
                                 }
                             }
 
                             // Temperature
                             div {
-                                label { class: "block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5",
-                                    "Temperature: {local_temperature:.1}"
+                                label { class: "k-label",
+                                    "Temperature "
+                                    span { class: "k-mono font-normal k-orange-text", "{local_temperature:.1}" }
                                 }
                                 input {
-                                    class: "w-full h-2 bg-gray-200 dark:bg-gray-600 rounded-lg appearance-none cursor-pointer accent-teal-600",
+                                    class: "k-range",
                                     r#type: "range",
                                     min: "0",
                                     max: "2",
@@ -748,7 +751,7 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
                                         }
                                     }
                                 }
-                                div { class: "flex justify-between text-xs text-gray-500 dark:text-gray-400 mt-1",
+                                div { class: "flex justify-between k-help",
                                     span { "Precise" }
                                     span { "Creative" }
                                 }
@@ -756,11 +759,11 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
 
                             // Backend access token (for servers started with --access-token)
                             div {
-                                label { class: "block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5",
+                                label { class: "k-label",
                                     "Backend access token (optional)"
                                 }
                                 input {
-                                    class: "w-full px-3 py-2.5 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-teal-500 focus:border-transparent",
+                                    class: "k-input",
                                     r#type: "password",
                                     placeholder: "Leave empty unless your server requires one",
                                     value: "{local_access_token}",
@@ -769,11 +772,11 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
                                         token_error.set(None);
                                     }
                                 }
-                                p { class: "text-xs text-gray-500 dark:text-gray-400 mt-1",
+                                p { class: "k-help",
                                     "Only needed when the server operator has enabled token access (P2A_ACCESS_TOKEN). Stored the same way as your API key."
                                 }
                                 if let Some(ref error) = *token_error.read() {
-                                    p { class: "text-xs text-red-600 dark:text-red-400 mt-1",
+                                    p { class: "k-field-error",
                                         "{error}"
                                     }
                                 }
@@ -783,16 +786,16 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
                         // Data Loading
                         div { class: "space-y-4",
                             // Info box
-                            div { class: "p-3 bg-teal-50 dark:bg-teal-900/20 rounded-lg border border-teal-200 dark:border-teal-800",
-                                p { class: "text-sm text-teal-700 dark:text-teal-300",
+                            div { class: "k-notice",
+                                p {
                                     "Load datasets from your local filesystem. Supported formats: CSV, Parquet, Excel, Stata (.dta), SAS (.sas7bdat)"
                                 }
                             }
 
                             // Browse Files section
                             div {
-                                label { class: "block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5",
-                                    "Browse Files"
+                                label { class: "k-label",
+                                    "Browse files"
                                 }
                                 div { class: "flex gap-2",
                                     // Hidden file input
@@ -806,7 +809,7 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
                                     // Browse button
                                     label {
                                         r#for: "file-upload-input",
-                                        class: "flex-1 px-4 py-2.5 bg-teal-600 hover:bg-teal-700 text-white rounded-lg font-medium transition-colors flex items-center justify-center gap-2 cursor-pointer",
+                                        class: "k-btn-pri flex-1 justify-center",
                                         svg {
                                             class: "w-5 h-5",
                                             fill: "none",
@@ -819,13 +822,13 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
                                                 d: "M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"
                                             }
                                         }
-                                        "Browse Files..."
+                                        "Choose a file\u{2026}"
                                     }
                                 }
                                 // Show selected file
                                 if let Some(ref fname) = *selected_file_name.read() {
-                                    div { class: "mt-2 px-3 py-2 bg-green-50 dark:bg-green-900/20 rounded-lg border border-green-200 dark:border-green-800",
-                                        p { class: "text-sm text-green-700 dark:text-green-300 flex items-center gap-2",
+                                    div { class: "mt-2 k-notice ink",
+                                        p { class: "flex items-center gap-2 k-mono text-[12px]",
                                             svg {
                                                 class: "w-4 h-4 flex-shrink-0",
                                                 fill: "none",
@@ -845,19 +848,15 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
                             }
 
                             // Divider
-                            div { class: "flex items-center gap-3",
-                                div { class: "flex-1 h-px bg-gray-200 dark:bg-gray-700" }
-                                span { class: "text-xs text-gray-500 dark:text-gray-400", "OR" }
-                                div { class: "flex-1 h-px bg-gray-200 dark:bg-gray-700" }
-                            }
+                            div { class: "k-or", "or" }
 
                             // File path (manual entry)
                             div {
-                                label { class: "block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5",
-                                    "Enter File Path"
+                                label { class: "k-label",
+                                    "File path"
                                 }
                                 input {
-                                    class: "w-full px-3 py-2.5 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-teal-500 focus:border-transparent font-mono text-sm",
+                                    class: "k-input k-mono text-[13px]",
                                     r#type: "text",
                                     placeholder: "/path/to/your/data.csv",
                                     value: "{file_path}",
@@ -871,18 +870,18 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
                                         }
                                     }
                                 }
-                                p { class: "text-xs text-gray-500 dark:text-gray-400 mt-1",
+                                p { class: "k-help",
                                     "Use this for files on the server or when Browse doesn't work."
                                 }
                             }
 
                             // File type selector
                             div {
-                                label { class: "block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5",
-                                    "File Type"
+                                label { class: "k-label",
+                                    "File type"
                                 }
                                 select {
-                                    class: "w-full px-3 py-2.5 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-teal-500 focus:border-transparent",
+                                    class: "k-input",
                                     value: "{file_type}",
                                     onchange: move |evt| file_type.set(evt.value().clone()),
                                     option { value: "auto", "Auto-detect (from extension)" }
@@ -892,18 +891,18 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
                                     option { value: "stata", "Stata (.dta)" }
                                     option { value: "sas", "SAS (.sas7bdat)" }
                                 }
-                                p { class: "text-xs text-gray-500 dark:text-gray-400 mt-1",
+                                p { class: "k-help",
                                     "Usually auto-detect works. Override if needed."
                                 }
                             }
 
                             // Dataset name
                             div {
-                                label { class: "block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5",
-                                    "Dataset Name (optional)"
+                                label { class: "k-label",
+                                    "Dataset name (optional)"
                                 }
                                 input {
-                                    class: "w-full px-3 py-2.5 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-teal-500 focus:border-transparent",
+                                    class: "k-input",
                                     r#type: "text",
                                     placeholder: "Auto-generated from filename",
                                     value: "{dataset_name}",
@@ -913,7 +912,7 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
 
                             // Load button
                             button {
-                                class: "w-full px-4 py-2.5 bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium transition-colors flex items-center justify-center gap-2",
+                                class: "k-btn-pri w-full justify-center",
                                 onclick: handle_load_dataset,
                                 svg {
                                     class: "w-5 h-5",
@@ -927,13 +926,13 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
                                         d: "M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"
                                     }
                                 }
-                                "Load Dataset"
+                                "Load dataset"
                             }
 
                             // Status/Error
                             if let Some(ref status) = *load_status.read() {
-                                div { class: "p-3 bg-green-50 dark:bg-green-900/20 rounded-lg border border-green-200 dark:border-green-800",
-                                    p { class: "text-sm text-green-700 dark:text-green-300 flex items-center gap-2",
+                                div { class: "k-notice ink",
+                                    p { class: "flex items-center gap-2",
                                         svg {
                                             class: "w-4 h-4",
                                             fill: "none",
@@ -952,8 +951,9 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
                             }
 
                             if let Some(ref error) = *load_error.read() {
-                                div { class: "p-3 bg-red-50 dark:bg-red-900/20 rounded-lg border border-red-200 dark:border-red-800",
-                                    p { class: "text-sm text-red-700 dark:text-red-300 flex items-center gap-2",
+                                div { class: "k-notice",
+                                    b { "error" }
+                                    p { class: "flex items-center gap-2",
                                         svg {
                                             class: "w-4 h-4",
                                             fill: "none",
@@ -975,27 +975,27 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
                 }
 
                 if let Some(ref error) = *save_error.read() {
-                    p { class: "px-6 pt-3 text-sm text-red-600 dark:text-red-400",
+                    p { class: "mx-5 mt-3 k-notice",
                         "{error}"
                     }
                 }
 
                 // Footer
-                div { class: "px-6 py-4 border-t border-gray-200 dark:border-gray-800 flex justify-end gap-3",
+                div { class: "k-modal-foot",
                     button {
-                        class: "px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-gray-700 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-600 transition-colors",
+                        class: "k-btn",
                         onclick: handle_cancel,
                         "Cancel"
                     }
                     if current_tab == "llm" {
                         button {
-                            class: "px-4 py-2 text-sm font-medium text-white bg-teal-600 rounded-lg hover:bg-teal-700 transition-colors",
+                            class: "k-btn-pri",
                             onclick: handle_save,
-                            "Save Settings"
+                            "Save settings"
                         }
                     } else {
                         button {
-                            class: "px-4 py-2 text-sm font-medium text-white bg-teal-600 rounded-lg hover:bg-teal-700 transition-colors",
+                            class: "k-btn-pri",
                             onclick: handle_cancel,
                             "Done"
                         }

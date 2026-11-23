@@ -4,7 +4,9 @@ use dioxus::prelude::*;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsCast;
 
-use crate::components::{ChatPanel, ConversationSidebar, DatasetSidebar, ShortcutsModal};
+use crate::components::{
+    ChatPanel, ConversationSidebar, DatasetSidebar, ShortcutsModal, StatusBar,
+};
 use crate::state::settings::Theme;
 use crate::state::{
     ChatState, ConversationState, EscapeStack, SessionState, Settings, start_new_conversation,
@@ -240,6 +242,7 @@ pub fn App() -> Element {
     use_context_provider(|| conversation_state);
     use_context_provider(|| settings);
     use_context_provider(|| sidebar_visible);
+    use_context_provider(|| crate::state::AddDataRequest(Signal::new(0)));
     // The open dialogs, for Escape (use_escape_close)
     let escape_stack = use_context_provider(|| Signal::new(EscapeStack::<Callback<()>>::new()));
 
@@ -347,58 +350,45 @@ pub fn App() -> Element {
 
     rsx! {
         // Include stylesheet - works for both web and desktop
+        Stylesheet { href: asset!("/assets/fonts.css") }
         Stylesheet { href: asset!("/assets/styles.css") }
 
         div {
-            class: "min-h-screen bg-gray-50 dark:bg-gray-900 flex",
+            class: "h-screen flex flex-col k-paper",
             tabindex: "0",
             onkeydown: handle_global_keydown,
 
-            // Conversation sidebar (collapsible)
-            if is_sidebar_visible {
-                div {
-                    class: "w-72 flex-shrink-0",
-                    ConversationSidebar {}
-                }
-            } else {
-                // Show expand button when sidebar is hidden
-                div {
-                    class: "flex-shrink-0 bg-white dark:bg-gray-900 border-r border-gray-300 dark:border-gray-800",
-                    button {
-                        class: "m-2 p-2 text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 hover:bg-gray-200 dark:hover:bg-gray-700 rounded-lg transition-colors",
-                        onclick: move |_| sidebar_visible.set(true),
-                        title: "Show conversations",
-                        svg {
-                            class: "w-5 h-5",
-                            fill: "none",
-                            stroke: "currentColor",
-                            view_box: "0 0 24 24",
-                            path {
-                                stroke_linecap: "round",
-                                stroke_linejoin: "round",
-                                stroke_width: "2",
-                                d: "M13 5l7 7-7 7M5 5l7 7-7 7"
-                            }
+            div { class: "flex-1 min-h-0 flex",
+                // Conversation sidebar (collapsible)
+                if is_sidebar_visible {
+                    div { class: "w-[236px] flex-shrink-0 k-rule-r min-h-0",
+                        ConversationSidebar {}
+                    }
+                } else {
+                    // Show expand button when sidebar is hidden
+                    div { class: "flex-shrink-0 k-rule-r",
+                        button {
+                            class: "k-icon-btn m-2",
+                            onclick: move |_| sidebar_visible.set(true),
+                            title: "Show conversations",
+                            "aria-label": "Show conversations",
+                            span { class: "k-mono font-bold k-orange", "»" }
                         }
                     }
                 }
-            }
 
-            // Main chat area
-            div {
-                class: "flex-1 min-w-0 flex",
                 // Chat panel
-                div {
-                    class: "flex-1 min-w-0",
+                div { class: "flex-1 min-w-0 min-h-0",
                     ChatPanel {}
                 }
 
-                // Dataset sidebar (always visible for now)
-                div {
-                    class: "w-72 flex-shrink-0",
+                // Dataset sidebar
+                div { class: "w-[312px] flex-shrink-0 k-rule-l min-h-0",
                     DatasetSidebar {}
                 }
             }
+
+            StatusBar {}
 
             // Shortcuts modal
             ShortcutsModal {

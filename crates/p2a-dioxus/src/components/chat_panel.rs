@@ -6,9 +6,7 @@ use crate::api::{
     PersistedToolCall, StreamErrorKind, StreamEvent, StreamStop, api, stop_pair, stream_chat,
 };
 use crate::app::apply_theme;
-use crate::components::{
-    ChatInput, ExportMenu, MessageList, P2aWordmark, SettingsModal, next_at_bottom,
-};
+use crate::components::{ChatInput, ExportMenu, MessageList, SettingsModal, next_at_bottom};
 use crate::state::settings::Theme;
 use crate::state::{
     ChatMessage, ChatState, ConversationState, SESSION_ENDED_TEXT, SessionState, Settings,
@@ -73,6 +71,15 @@ pub fn ChatPanel() -> Element {
 
     let mut settings_open = use_signal(|| false);
     let mut settings_initial_tab = use_signal(|| "llm".to_string());
+
+    // The dataset sidebar's "Add data" opens the dialog on its data tab.
+    let add_data = use_context::<crate::state::AddDataRequest>().0;
+    use_effect(move || {
+        if add_data() > 0 {
+            settings_initial_tab.set("data".to_string());
+            settings_open.set(true);
+        }
+    });
 
     // First-run onboarding: auto-open the settings modal on the LLM tab when
     // no provider is configured, so users land directly on the setup screen
@@ -726,69 +733,50 @@ pub fn ChatPanel() -> Element {
     };
 
     rsx! {
-        div { class: "flex flex-col h-screen bg-white dark:bg-gray-900 shadow-xl",
-            // Header - fixed height for alignment with DatasetSidebar
-            header { class: "flex-shrink-0 h-16 px-6 border-b border-gray-300 dark:border-gray-800 bg-gray-50 dark:bg-gray-900",
-                div { class: "h-full w-full flex items-center justify-between",
-                    div { class: "flex items-center gap-3",
-                        // Logo/Wordmark
-                        P2aWordmark { width: 70.0, class: "shrink-0" }
-                        // Current conversation title
+        div { class: "flex flex-col h-full k-paper",
+            // Header, as tall as the sidebars' first rows
+            header { class: "flex-shrink-0 h-[60px] px-8 k-rule-b",
+                div { class: "h-full w-full flex items-center justify-between gap-4",
+                    div { class: "flex items-baseline gap-3.5 min-w-0",
                         if let Some(ref conv) = current_conversation {
-                            span { class: "text-sm text-gray-500 dark:text-gray-400",
-                                "/ {conv.title}"
-                            }
+                            h2 { class: "text-2xl font-extrabold k-cond truncate", "{conv.title}" }
+                        } else {
+                            h2 { class: "text-2xl font-extrabold k-cond", "New analysis" }
                         }
-                        // Provider badge: CTA when unconfigured, model pill otherwise.
-                        // Both open the Settings modal on click so users can
-                        // reach the setup flow from the header at any time.
-                        if settings.read().provider.is_configured() {
+                        // Model: a call to action when none is set up; the
+                        // model itself is in the status bar.
+                        if !settings.read().provider.is_configured() {
                             button {
-                                class: "px-2.5 py-1 text-xs font-medium rounded-full bg-orange-100 text-orange-700 border border-orange-300 hover:bg-orange-200 dark:bg-orange-900/30 dark:text-orange-300 dark:border-orange-700 dark:hover:bg-orange-900/50 transition-colors",
+                                class: "k-btn-pri self-center",
+                                onclick: move |_| {
+                                    settings_initial_tab.set("llm".to_string());
+                                    settings_open.set(true);
+                                },
+                                "Connect a model"
+                            }
+                        } else {
+                            button {
+                                class: "k-mono text-[11.5px] k-muted hover:text-[var(--k-ink)] truncate",
+                                title: "Change the model",
                                 onclick: move |_| {
                                     settings_initial_tab.set("llm".to_string());
                                     settings_open.set(true);
                                 },
                                 "{settings.read().provider.display_name()} / {settings.read().current_model()}"
                             }
-                        } else {
-                            button {
-                                class: "px-3 py-1 text-xs font-semibold rounded-full bg-teal-600 text-white border border-teal-600 hover:bg-teal-700 transition-colors flex items-center gap-1",
-                                onclick: move |_| {
-                                    settings_initial_tab.set("llm".to_string());
-                                    settings_open.set(true);
-                                },
-                                "Connect LLM provider →"
-                            }
                         }
                     }
 
                     div { class: "flex items-center gap-2",
-                        // Load Data button
-                        button {
-                            class: "px-3 py-1.5 text-sm font-medium text-white bg-orange-600 rounded-lg hover:bg-orange-700 transition-colors flex items-center gap-1.5",
-                            onclick: handle_open_load_data,
-                            svg {
-                                class: "w-4 h-4",
-                                fill: "none",
-                                stroke: "currentColor",
-                                view_box: "0 0 24 24",
-                                path {
-                                    stroke_linecap: "round",
-                                    stroke_linejoin: "round",
-                                    stroke_width: "2",
-                                    d: "M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"
-                                }
-                            }
-                            "Load Data"
-                        }
+                        // Load data
+                        button { class: "k-btn", onclick: handle_open_load_data, "Add data" }
 
                         // Export menu
                         ExportMenu {}
 
                         // Theme toggle button
                         button {
-                            class: "p-2 text-gray-600 bg-gray-100 rounded-lg hover:bg-gray-200 dark:text-gray-300 dark:bg-gray-700 dark:hover:bg-gray-600 transition-colors",
+                            class: "k-icon-btn",
                             onclick: handle_theme_toggle,
                             title: match settings.read().theme {
                                 Theme::System => "Theme: System (click to switch)",
@@ -800,7 +788,7 @@ pub fn ChatPanel() -> Element {
                                 Theme::System => rsx! {
                                     // Computer/monitor icon for system
                                     svg {
-                                        class: "w-5 h-5",
+                                        class: "w-[18px] h-[18px]",
                                         fill: "none",
                                         stroke: "currentColor",
                                         view_box: "0 0 24 24",
@@ -815,7 +803,7 @@ pub fn ChatPanel() -> Element {
                                 Theme::Light => rsx! {
                                     // Sun icon for light mode
                                     svg {
-                                        class: "w-5 h-5",
+                                        class: "w-[18px] h-[18px]",
                                         fill: "none",
                                         stroke: "currentColor",
                                         view_box: "0 0 24 24",
@@ -830,7 +818,7 @@ pub fn ChatPanel() -> Element {
                                 Theme::Dark => rsx! {
                                     // Moon icon for dark mode
                                     svg {
-                                        class: "w-5 h-5",
+                                        class: "w-[18px] h-[18px]",
                                         fill: "none",
                                         stroke: "currentColor",
                                         view_box: "0 0 24 24",
@@ -847,7 +835,7 @@ pub fn ChatPanel() -> Element {
 
                         // Settings button (icon-only like theme toggle)
                         button {
-                            class: "p-2 text-gray-600 bg-gray-100 rounded-lg hover:bg-gray-200 dark:text-gray-300 dark:bg-gray-700 dark:hover:bg-gray-600 transition-colors",
+                            class: "k-icon-btn",
                             onclick: handle_open_settings,
                             title: "Settings",
                             svg {
@@ -873,52 +861,13 @@ pub fn ChatPanel() -> Element {
                 }
             }
 
-            // Loaded datasets indicator (outside fixed-height header)
-            {
-                let datasets = session_state.read().loaded_datasets.clone();
-                rsx! {
-                    if !datasets.is_empty() {
-                        div { class: "flex items-center gap-2 px-6 py-2 flex-wrap bg-white dark:bg-gray-800 border-b border-gray-200 dark:border-gray-800",
-                            span { class: "text-xs text-gray-500 dark:text-gray-400", "Datasets:" }
-                            for ds in datasets.iter() {
-                                span {
-                                    class: "inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded-full bg-teal-100 text-teal-700 dark:bg-teal-900/30 dark:text-teal-300",
-                                    svg {
-                                        class: "w-3 h-3",
-                                        fill: "none",
-                                        stroke: "currentColor",
-                                        view_box: "0 0 24 24",
-                                        path {
-                                            stroke_linecap: "round",
-                                            stroke_linejoin: "round",
-                                            stroke_width: "2",
-                                            d: "M4 7v10c0 2 1 3 3 3h10c2 0 3-1 3-3V7c0-2-1-3-3-3H7c-2 0-3 1-3 3z"
-                                        }
-                                        path {
-                                            stroke_linecap: "round",
-                                            stroke_linejoin: "round",
-                                            stroke_width: "2",
-                                            d: "M4 7h16"
-                                        }
-                                    }
-                                    "{ds.name}"
-                                    span { class: "text-teal-600 dark:text-teal-400",
-                                        "({ds.rows}×{ds.cols})"
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
             // Error banner with retry button
             if let Some(ref err) = error {
-                div { class: "mx-4 mt-4 px-4 py-3 rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800",
+                div { class: "mx-8 mt-4 pl-3 py-1.5 border-l-4 border-[var(--k-orange)]", role: "alert",
                     div { class: "flex items-center justify-between",
                         div { class: "flex items-center gap-2 flex-1 min-w-0",
                             svg {
-                                class: "w-5 h-5 text-red-500 flex-shrink-0",
+                                class: "hidden",
                                 fill: "currentColor",
                                 view_box: "0 0 20 20",
                                 path {
@@ -927,31 +876,19 @@ pub fn ChatPanel() -> Element {
                                     clip_rule: "evenodd"
                                 }
                             }
-                            span { class: "text-sm text-red-700 dark:text-red-300 truncate", "{err}" }
+                            span { class: "text-sm truncate", "{err}" }
                         }
                         div { class: "flex items-center gap-2 flex-shrink-0 ml-2",
                             // Retry button
                             button {
-                                class: "px-3 py-1 text-sm font-medium text-white bg-red-600 hover:bg-red-700 rounded-lg transition-colors flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed",
+                                class: "k-btn",
                                 disabled: busy,
                                 onclick: handle_retry,
-                                svg {
-                                    class: "w-4 h-4",
-                                    fill: "none",
-                                    stroke: "currentColor",
-                                    view_box: "0 0 24 24",
-                                    path {
-                                        stroke_linecap: "round",
-                                        stroke_linejoin: "round",
-                                        stroke_width: "2",
-                                        d: "M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
-                                    }
-                                }
                                 "Retry"
                             }
                             // Dismiss button
                             button {
-                                class: "p-1 text-red-500 hover:text-red-700 dark:hover:text-red-300 rounded transition-colors",
+                                class: "k-icon-btn",
                                 onclick: handle_clear_error,
                                 title: "Dismiss",
                                 svg {
@@ -974,10 +911,10 @@ pub fn ChatPanel() -> Element {
 
             // While an answer is written: the Stop control
             if is_processing {
-                div { class: "mx-4 mt-2 px-3 py-1.5 rounded-lg bg-gray-50 dark:bg-gray-800 flex items-center justify-between gap-2",
-                    span { class: "text-sm text-gray-600 dark:text-gray-300", "Writing the answer\u{2026}" }
+                div { class: "mx-8 mt-2 flex items-center justify-between gap-2",
+                    span { class: "k-mono text-xs k-orange-text", span { class: "k-spin" } " writing the answer" }
                     button {
-                        class: "px-3 py-1 text-sm font-medium text-gray-700 dark:text-gray-200 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors",
+                        class: "k-btn",
                         title: "Stop the answer",
                         onclick: move |_| {
                             let stop = stream_stop.read().clone();
@@ -992,9 +929,9 @@ pub fn ChatPanel() -> Element {
 
             // Status indicator
             if let Some(ref stat) = status {
-                div { class: "mx-4 mt-2 px-3 py-2 rounded-lg bg-teal-50 dark:bg-teal-900/20 flex items-center gap-2",
-                    div { class: "w-2 h-2 rounded-full bg-teal-500 animate-pulse" }
-                    span { class: "text-sm text-teal-700 dark:text-teal-300", "{stat}" }
+                div { class: "mx-8 mt-2 flex items-center gap-2 k-mono text-xs k-muted",
+                    span { class: "k-orange k-spin" }
+                    span { "{stat}" }
                 }
             }
 
@@ -1003,23 +940,10 @@ pub fn ChatPanel() -> Element {
                 let active_tool = chat_state.read().active_tool.clone();
                 rsx! {
                     if let Some(ref tool) = active_tool {
-                        div { class: "mx-4 mt-2 px-3 py-2 rounded-lg bg-orange-50 dark:bg-orange-900/20 border border-orange-200 dark:border-orange-700 flex items-center gap-2",
-                            svg {
-                                class: "w-4 h-4 text-orange-600 dark:text-orange-400 animate-spin",
-                                fill: "none",
-                                stroke: "currentColor",
-                                view_box: "0 0 24 24",
-                                path {
-                                    stroke_linecap: "round",
-                                    stroke_linejoin: "round",
-                                    stroke_width: "2",
-                                    d: "M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
-                                }
-                            }
-                            span { class: "text-sm font-medium text-orange-700 dark:text-orange-300",
-                                "Running: "
-                            }
-                            span { class: "text-sm text-orange-600 dark:text-orange-400 font-mono",
+                        div { class: "mx-8 mt-2 flex items-center gap-2 k-mono text-xs",
+                            span { class: "k-orange-text k-spin" }
+                            span { class: "k-muted", "running" }
+                            span { class: "font-semibold",
                                 "{tool.name}"
                             }
                         }
@@ -1057,7 +981,7 @@ pub fn ChatPanel() -> Element {
             }
 
             // Input area
-            div { class: "flex-shrink-0 border-t border-gray-300 dark:border-gray-800 bg-gray-50 dark:bg-gray-900",
+            div { class: "flex-shrink-0 k-rule-t",
                 ChatInput { on_send: handle_send }
             }
 

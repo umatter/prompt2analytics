@@ -6,7 +6,7 @@
 use dioxus::prelude::*;
 
 use crate::api::Conversation;
-use crate::components::P2aIconMinimal;
+use crate::components::P2aWordmark;
 use crate::state::{
     ChatState, ConversationState, SessionState, report_conversation_error, start_new_conversation,
     switch_blocked,
@@ -299,15 +299,18 @@ pub fn ConversationSidebar() -> Element {
             div {
                 key: "{conv_id}",
                 class: if is_current {
-                    "group relative p-3 rounded-lg mb-1 cursor-pointer bg-teal-50 dark:bg-teal-900/30 border border-teal-400 dark:border-teal-700"
+                    "group relative py-[7px] pr-3 pl-[34px] cursor-pointer font-semibold"
                 } else {
-                    "group relative p-3 rounded-lg mb-1 cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-800 border border-gray-200 dark:border-transparent"
+                    "group relative py-[7px] pr-3 pl-[34px] cursor-pointer hover:bg-[var(--k-fill)]"
                 },
                 onclick: {
                     let id = conv_id.clone();
                     move |_| handle_select(id.clone())
                 },
 
+                if is_current {
+                    span { class: "absolute left-4 top-[6px] k-mono font-bold k-orange", "aria-hidden": "true", "›" }
+                }
                 // Title row
                 div { class: "flex items-center gap-2",
                     if is_editing {
@@ -366,16 +369,16 @@ pub fn ConversationSidebar() -> Element {
                         // Title
                         span {
                             class: if is_archived {
-                                "flex-1 text-sm font-medium text-gray-400 dark:text-gray-500 truncate italic"
+                                "flex-1 text-sm k-muted truncate italic"
                             } else {
-                                "flex-1 text-sm font-medium text-gray-800 dark:text-gray-200 truncate"
+                                "flex-1 text-sm truncate"
                             },
                             "{conv_title}"
                         }
 
                         // Archived badge
                         if is_archived {
-                            span { class: "px-1.5 py-0.5 text-xs rounded bg-gray-200 dark:bg-gray-700 text-gray-500 dark:text-gray-400",
+                            span { class: "k-mono text-[11px] k-muted",
                                 "archived"
                             }
                         }
@@ -461,8 +464,8 @@ pub fn ConversationSidebar() -> Element {
 
                 // Message count
                 if !is_editing {
-                    div { class: "mt-1 flex items-center gap-2",
-                        span { class: "text-xs text-gray-400 dark:text-gray-500",
+                    div { class: "flex items-center gap-2",
+                        span { class: "text-xs font-normal k-muted",
                             "{message_count} messages"
                         }
                     }
@@ -478,64 +481,34 @@ pub fn ConversationSidebar() -> Element {
         // Use fragment to render sidebar and dialog as siblings
         // This ensures the dialog isn't constrained by sidebar's width
 
-        div { class: "flex flex-col h-full w-fit min-w-[180px] max-w-[320px] bg-white dark:bg-gray-900 border-r border-gray-300 dark:border-gray-800",
-            // Header - h-16 matches ChatPanel header height
-            div { class: "flex-shrink-0 h-16 px-4 border-b border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-900",
-                div { class: "h-full flex items-center justify-between",
-                    div { class: "flex items-center gap-2",
-                        P2aIconMinimal { size: 20.0 }
-                        h2 { class: "text-sm font-semibold text-gray-700 dark:text-gray-300 uppercase tracking-wider",
-                            "Conversations"
-                        }
-                    }
-                    div { class: "flex items-center gap-1",
-                        // New conversation button
-                        button {
-                            class: "p-1 text-gray-500 hover:text-teal-600 dark:text-gray-400 dark:hover:text-teal-400 hover:bg-gray-200 dark:hover:bg-gray-700 rounded transition-colors",
-                            disabled: new_blocked.is_some(),
-                            onclick: handle_new_conversation,
-                            title: new_blocked.unwrap_or("New Conversation"),
-                            svg {
-                                class: "w-4 h-4",
-                                fill: "none",
-                                stroke: "currentColor",
-                                view_box: "0 0 24 24",
-                                path {
-                                    stroke_linecap: "round",
-                                    stroke_linejoin: "round",
-                                    stroke_width: "2",
-                                    d: "M12 4v16m8-8H4"
-                                }
-                            }
-                        }
-                        // Collapse button
-                        button {
-                            class: "p-1 text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700 rounded transition-colors",
-                            onclick: move |_| sidebar_visible.set(false),
-                            title: "Hide sidebar",
-                            svg {
-                                class: "w-4 h-4",
-                                fill: "none",
-                                stroke: "currentColor",
-                                view_box: "0 0 24 24",
-                                path {
-                                    stroke_linecap: "round",
-                                    stroke_linejoin: "round",
-                                    stroke_width: "2",
-                                    d: "M11 19l-7-7 7-7m8 14l-7-7 7-7"
-                                }
-                            }
-                        }
-                    }
+        div { class: "flex flex-col h-full k-paper",
+            // Brand row, as tall as the chat header
+            div { class: "flex-shrink-0 h-[60px] px-[18px] k-rule-b flex items-center justify-between",
+                P2aWordmark { width: 56.0 }
+                button {
+                    class: "k-icon-btn",
+                    onclick: move |_| sidebar_visible.set(false),
+                    title: "Hide conversations",
+                    "aria-label": "Hide conversations",
+                    span { class: "k-mono text-sm k-muted", "«" }
                 }
+            }
+            // New conversation
+            button {
+                class: "flex-shrink-0 w-full text-left px-[18px] py-[10px] k-line-b font-semibold text-sm hover:bg-[var(--k-fill)] disabled:opacity-50 disabled:cursor-not-allowed",
+                disabled: new_blocked.is_some(),
+                onclick: handle_new_conversation,
+                title: new_blocked.unwrap_or("Start a new analysis"),
+                span { class: "k-mono k-orange-text mr-1", "+" }
+                "New analysis"
             }
 
             // A refused switch or a failed conversation call, dismissable
             if let Some(ref err) = sidebar_error {
-                div { class: "mx-2 mt-2 px-3 py-2 rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 flex items-start gap-2",
-                    p { class: "flex-1 text-xs text-red-700 dark:text-red-300", "{err}" }
+                div { class: "mx-[18px] mt-3 pl-3 py-1 border-l-4 border-[var(--k-orange)] flex items-start gap-2",
+                    p { class: "flex-1 text-xs", "{err}" }
                     button {
-                        class: "text-red-500 hover:text-red-700 dark:hover:text-red-300 text-xs",
+                        class: "k-muted hover:text-[var(--k-ink)] text-xs",
                         title: "Dismiss",
                         onclick: move |_| {
                             let mut conv = conversation_state;
@@ -547,15 +520,15 @@ pub fn ConversationSidebar() -> Element {
             }
 
             // Conversation list
-            div { class: "flex-1 overflow-y-auto p-2",
+            div { class: "flex-1 overflow-y-auto py-1.5",
                 if is_loading {
                     div { class: "flex items-center justify-center py-8",
-                        div { class: "w-6 h-6 border-2 border-gray-300 border-t-teal-500 rounded-full animate-spin" }
+                        span { class: "k-mono k-orange k-spin" }
                     }
                 } else if conversations.is_empty() {
-                    div { class: "text-center py-8 px-2 text-gray-500 dark:text-gray-400",
-                        p { class: "text-sm", "No conversations yet" }
-                        p { class: "text-xs mt-1", "Click + to start a new one" }
+                    div { class: "px-[18px] py-4 k-muted",
+                        p { class: "text-sm", "No analyses yet." }
+                        p { class: "text-xs mt-1", "Your conversations will appear here." }
                     }
                 } else {
                     for conv in conversations.iter() {
@@ -565,7 +538,7 @@ pub fn ConversationSidebar() -> Element {
                 // Archived conversations, collapsed under the list
                 if !is_loading && show_archived_toggle(archived.len()) {
                     button {
-                        class: "w-full mt-2 px-3 py-1.5 text-xs font-medium text-left text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg transition-colors",
+                        class: "w-full mt-2 px-[18px] py-1.5 text-xs k-mono text-left k-muted hover:text-[var(--k-ink)]",
                         onclick: move |_| show_archived.set(!archived_open),
                         "{archived_toggle_label(archived.len(), archived_open)}"
                     }
@@ -584,11 +557,11 @@ pub fn ConversationSidebar() -> Element {
             div { class: "fixed inset-0 z-[9999] flex items-center justify-center bg-black/50",
                 onclick: move |_| handle_cancel_delete(()),
                 div {
-                    class: "bg-white dark:bg-gray-800 rounded-xl shadow-2xl p-6 m-4 w-[90vw] max-w-md",
+                    class: "k-paper border-2 border-[var(--k-rule)] p-6 m-4 w-[90vw] max-w-md",
                     onclick: |e| e.stop_propagation(),
                     // Warning icon and title
                     div { class: "flex items-center gap-3 mb-4",
-                        div { class: "p-2 rounded-full bg-red-100 dark:bg-red-900/30",
+                        div { class: "hidden",
                             svg {
                                 class: "w-6 h-6 text-red-600 dark:text-red-400",
                                 fill: "none",
@@ -602,24 +575,23 @@ pub fn ConversationSidebar() -> Element {
                                 }
                             }
                         }
-                        h3 { class: "text-lg font-semibold text-gray-900 dark:text-white",
-                            "Delete Conversation?"
+                        h3 { class: "text-[22px] font-extrabold k-cond",
+                            "Delete this conversation?"
                         }
                     }
                     // Message
-                    p { class: "text-sm text-gray-600 dark:text-gray-400 mb-6",
+                    p { class: "text-sm mb-6",
                         "This will permanently delete the conversation and all its messages. This action cannot be undone."
                     }
                     // Buttons - use grid to ensure both are always visible
                     div { class: "grid grid-cols-2 gap-3 mt-2",
                         button {
-                            class: "px-4 py-2.5 text-sm font-medium text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-gray-700 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-600 transition-colors cursor-pointer",
+                            class: "k-btn justify-center",
                             onclick: move |_| handle_cancel_delete(()),
                             "Cancel"
                         }
                         button {
-                            class: "px-4 py-2.5 text-sm font-medium rounded-lg transition-colors cursor-pointer border-2 border-red-600 bg-red-600 text-white hover:bg-red-700 hover:border-red-700",
-                            style: "background-color: #dc2626; color: white;",
+                            class: "k-btn-pri justify-center",
                             onclick: handle_confirm_delete,
                             "Delete"
                         }

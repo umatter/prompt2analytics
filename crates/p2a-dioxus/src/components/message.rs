@@ -31,7 +31,7 @@ impl PartialEq for ChatMessage {
 fn render_content(message: &ChatMessage) -> Element {
     if message.role == "user" {
         rsx! {
-            p { class: "text-white whitespace-pre-wrap",
+            p { class: "k-q whitespace-pre-wrap",
                 "{message.content}"
             }
         }
@@ -39,18 +39,21 @@ fn render_content(message: &ChatMessage) -> Element {
         let content = &message.content;
         if message.is_streaming {
             rsx! {
-                div { class: "text-gray-800 dark:text-gray-200",
+                div { class: "k-answer",
                     {render_markdown(content)}
-                    span { class: "inline-block w-2 h-4 ml-0.5 bg-teal-500 animate-pulse" }
+                    span { class: "streaming-cursor", aria_hidden: "true" }
                 }
             }
         } else {
-            render_markdown(content)
+            rsx! {
+                div { class: "k-answer", {render_markdown(content)} }
+            }
         }
     }
 }
 
-/// Message component
+/// Message component: one turn of the transcript, a narrow label column
+/// ("you" or "p2a", with the time) beside the content
 #[component]
 pub fn Message(props: MessageProps) -> Element {
     let message = &props.message;
@@ -59,110 +62,65 @@ pub fn Message(props: MessageProps) -> Element {
     let timestamp = message.timestamp.format("%H:%M").to_string();
 
     if is_user {
-        // User message - right aligned, teal background
+        // User message: the question, set large
         rsx! {
-            div { class: "flex justify-end mb-4 message-enter",
-                div { class: "max-w-[80%] rounded-2xl rounded-tr-sm px-4 py-3 bg-teal-600 text-white shadow-sm",
-                    // Message content
+            div { class: "k-turn message-enter",
+                div { class: "k-who me",
+                    "you"
+                    span { class: "k-when", "{timestamp}" }
+                }
+                div { class: "min-w-0",
                     {render_content(message)}
-
-                    // Timestamp
-                    div { class: "text-xs text-teal-200 mt-2 text-right",
-                        "{timestamp}"
-                    }
                 }
             }
         }
     } else {
-        // Assistant message - left aligned, gray background
+        let n_calls = message.tool_calls.len();
+        // Assistant message: the tool-call tree, then the answer
         rsx! {
-            div { class: "flex justify-start mb-4 message-enter",
-                div { class: "max-w-[85%]",
-                    // Tools Used indicator (orange for Rust/p2a-core branding)
-                    if !message.tool_calls.is_empty() {
-                        div { class: "mb-2 px-3 py-2 rounded-lg bg-orange-50 dark:bg-orange-900/30 border border-orange-200 dark:border-orange-700",
-                            div { class: "flex items-center gap-2 flex-wrap",
-                                // Rust gear icon
-                                svg {
-                                    class: "w-4 h-4 text-orange-600 dark:text-orange-400 flex-shrink-0",
-                                    fill: "none",
-                                    stroke: "currentColor",
-                                    view_box: "0 0 24 24",
-                                    path {
-                                        stroke_linecap: "round",
-                                        stroke_linejoin: "round",
-                                        stroke_width: "2",
-                                        d: "M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"
-                                    }
-                                    path {
-                                        stroke_linecap: "round",
-                                        stroke_linejoin: "round",
-                                        stroke_width: "2",
-                                        d: "M15 12a3 3 0 11-6 0 3 3 0 016 0z"
-                                    }
-                                }
-                                span { class: "text-xs font-semibold text-orange-700 dark:text-orange-300",
-                                    "Rust Analytics:"
-                                }
-                                // Tool chips
-                                for tool_call in message.tool_calls.iter() {
-                                    span {
-                                        key: "{tool_call.id}",
-                                        class: "inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-orange-100 dark:bg-orange-800 text-orange-800 dark:text-orange-200",
-                                        "{tool_call.name}"
+            div { class: "k-turn message-enter",
+                div { class: "k-who",
+                    "p2a"
+                    span { class: "k-when", "{timestamp}" }
+                }
+                div { class: "k-body",
+                    // Tool calls as a process tree, each line opening to its
+                    // arguments and result
+                    if n_calls > 0 {
+                        div { class: "k-tree k-calls", role: "list", aria_label: "Tool calls",
+                            for (i , tool_call) in message.tool_calls.iter().enumerate() {
+                                div { key: "{tool_call.id}", role: "listitem",
+                                    crate::components::ToolCallDisplay {
+                                        id: tool_call.id.clone(),
+                                        name: tool_call.name.clone(),
+                                        arguments: tool_call.arguments.clone(),
+                                        result: tool_call.result.clone(),
+                                        success: tool_call.success,
+                                        // A Done call without a result has ended too.
+                                        finished: tool_call.is_finished() || !message.is_streaming,
+                                        last: i + 1 == n_calls
                                     }
                                 }
                             }
                         }
                     }
 
-                    // Main message bubble
-                    div { class: "rounded-2xl rounded-tl-sm px-4 py-3 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700",
-                        // Message content
-                        {render_content(message)}
+                    // Message content
+                    {render_content(message)}
 
-                        // An answer that ended before it was finished
-                        if message.interrupted {
-                            p { class: "mt-2 text-xs italic text-gray-500 dark:text-gray-400",
-                                "Answer interrupted"
-                            }
-                        }
-
-                        // Display images if any
-                        if !message.images.is_empty() {
-                            div { class: "mt-3 space-y-2",
-                                for (idx , image) in message.images.iter().enumerate() {
-                                    img {
-                                        key: "{idx}",
-                                        src: "data:image/png;base64,{image}",
-                                        class: "max-w-full rounded-lg shadow-md",
-                                        alt: "Visualization"
-                                    }
-                                }
-                            }
-                        }
-
-                        // Timestamp
-                        div { class: "text-xs text-gray-500 dark:text-gray-400 mt-2",
-                            "{timestamp}"
-                        }
+                    // An answer that ended before it was finished
+                    if message.interrupted {
+                        p { class: "k-note", "Answer interrupted" }
                     }
 
-                    // Tool call details (expandable cards) displayed below
-                    if !message.tool_calls.is_empty() {
-                        div { class: "mt-2 space-y-2",
-                            for tool_call in message.tool_calls.iter() {
-                                crate::components::ToolCallDisplay {
-                                    key: "{tool_call.id}",
-                                    id: tool_call.id.clone(),
-                                    name: tool_call.name.clone(),
-                                    arguments: tool_call.arguments.clone(),
-                                    result: tool_call.result.clone(),
-                                    success: tool_call.success,
-                                    // A Done call without a result has ended too.
-                                    finished: tool_call.is_finished() || !message.is_streaming
-                                }
+                    // Plots, each under a rule with a muted caption
+                    for (idx , image) in message.images.iter().enumerate() {
+                        figure { key: "{idx}", class: "k-plot",
+                            img {
+                                src: "data:image/png;base64,{image}",
+                                alt: "Visualization"
                             }
+                            figcaption { "Plot {idx + 1}" }
                         }
                     }
                 }
