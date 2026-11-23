@@ -1263,6 +1263,9 @@ fn fit_ols(
     let ssr: f64 = residuals.iter().map(|&e| e.powi(2)).sum();
     let sigma_squared = ssr / (df_resid as f64);
     let residual_std_error = sigma_squared.sqrt();
+    if essentially_perfect_fit(y, &residuals, sigma_squared) {
+        warnings.push(PERFECT_FIT_WARNING.to_string());
+    }
     let FitSummary {
         sst,
         r_squared,
@@ -1374,6 +1377,24 @@ fn fit_ols(
         sst,
         path: Some(path),
     })
+}
+
+/// summary.lm's warning for a fit whose residual variance is negligible: the standard
+/// errors, t values and p-values it reports are rounding noise.
+pub(crate) const PERFECT_FIT_WARNING: &str = "essentially perfect fit: summary may be unreliable";
+
+/// summary.lm's test for an essentially perfect fit: the residual variance is below
+/// `(mean(f)^2 + var(f)) * 1e-30`, with `f` the fitted values and `var` the n - 1
+/// sample variance.
+fn essentially_perfect_fit(y: &Array1<f64>, residuals: &Array1<f64>, sigma_squared: f64) -> bool {
+    let n = y.len();
+    if n < 2 || !sigma_squared.is_finite() {
+        return false;
+    }
+    let fitted: Vec<f64> = y.iter().zip(residuals).map(|(&yi, &e)| yi - e).collect();
+    let mean = fitted.iter().sum::<f64>() / n as f64;
+    let var = fitted.iter().map(|f| (f - mean).powi(2)).sum::<f64>() / (n - 1) as f64;
+    sigma_squared < (mean * mean + var) * 1e-30
 }
 
 /// Compute variance-covariance matrix based on the covariance type.
@@ -3880,6 +3901,39 @@ mod tests {
         }
         .unwrap();
         Dataset::new(df)
+    }
+
+    #[test]
+    fn perfect_fit_carries_summary_lm_warning() {
+        // y = x + 1 exactly, as the chat's sample data: SEs are rounding noise.
+        let exact = Dataset::new(
+            df! {
+                "x" => [1.0, 3.0, 5.0, 7.0, 9.0],
+                "y" => [2.0, 4.0, 6.0, 8.0, 10.0],
+            }
+            .unwrap(),
+        );
+        let r = run_ols(&exact, "y", &["x"], true, CovarianceType::Standard).unwrap();
+        assert!(
+            r.warnings.iter().any(|w| w == PERFECT_FIT_WARNING),
+            "{:?}",
+            r.warnings
+        );
+        assert!(r.to_string().contains(PERFECT_FIT_WARNING));
+
+        let noisy = Dataset::new(
+            df! {
+                "x" => [1.0, 3.0, 5.0, 7.0, 9.0],
+                "y" => [2.1, 3.8, 6.2, 7.9, 10.1],
+            }
+            .unwrap(),
+        );
+        let r = run_ols(&noisy, "y", &["x"], true, CovarianceType::Standard).unwrap();
+        assert!(
+            r.warnings.iter().all(|w| w != PERFECT_FIT_WARNING),
+            "{:?}",
+            r.warnings
+        );
     }
 
     #[test]
