@@ -75,7 +75,7 @@ pub fn Welcome(props: WelcomeProps) -> Element {
                 Tag { label: "engine", value: "pure Rust".to_string() }
             }
             p { class: "text-[15px] max-w-[66ch] mt-4 mb-8",
-                "Chat-first data analytics: econometrics, statistics, machine learning and charts behind one conversation, validated against R."
+                "Chat-first data analytics: validated, pre-implemented econometrics, statistics, machine learning and charts behind one conversation."
             }
             p { class: "text-sm k-muted max-w-[60ch] mb-3",
                 "Ask for an analysis in plain words. Every number comes from a tool call you can open, check and export as a script."
