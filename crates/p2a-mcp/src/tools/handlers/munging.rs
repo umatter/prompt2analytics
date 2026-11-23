@@ -3050,6 +3050,24 @@ impl AnalyticsServer {
             }
         };
 
+        // Arithmetic combines two columns; a number in an operand is the usual
+        // misreading, and "column '2' not found" alone does not say how to recover.
+        if let MutateExpr::Arithmetic(left, _, right) = &expr {
+            let has = |c: &str| dataset.df().column(c).is_ok();
+            if let Some(number) = [left, right]
+                .into_iter()
+                .find(|o| !has(o.as_str()) && o.trim().parse::<f64>().is_ok())
+            {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Mutate failed: '{number}' is not a column of '{}'. Arithmetic operands \
+                     are column names; for a column holding the number {number} use \
+                     expr_type 'constant' with left = '{number}', then combine the two \
+                     columns with an arithmetic expression.",
+                    request.dataset
+                ))]));
+            }
+        }
+
         let result_name = request
             .result_name
             .clone()
@@ -3446,6 +3464,25 @@ mod bound;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A number where arithmetic expects a column gets a hint to use a constant.
+    #[test]
+    fn mutate_hints_constant_for_a_numeric_operand() {
+        use crate::tools::common::test_support::{server_with, text};
+        let df = p2a_core::polars::prelude::df!("x" => [1.0, 2.0, 3.0]).unwrap();
+        let (rt, server) = server_with(vec![("d", df)]);
+        let args = serde_json::json!({"dataset": "d", "new_column": "z", "expr_type": "arithmetic",
+            "left": "1.0", "operator": "*", "right": "x"});
+        let r = rt
+            .block_on(server.munge_mutate(Parameters(serde_json::from_value(args).unwrap())))
+            .unwrap();
+        assert_eq!(r.is_error, Some(true));
+        let t = text(&r);
+        assert!(
+            t.contains("'1.0' is not a column") && t.contains("expr_type 'constant'"),
+            "{t}"
+        );
+    }
     use crate::config::SessionConfig;
     use crate::session::{DATASET_QUOTA_EXCEEDED, DatasetAdmission, Session, SessionManager};
     use crate::tools::limits::{self, Limits};

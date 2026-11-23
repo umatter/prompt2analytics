@@ -554,6 +554,11 @@ Run Ordinary Least Squares regression with robust standard errors.
 - F-statistic and p-value
 - Significance stars (*, **, ***)
 
+The coefficients are also saved as a dataset named `<dataset>_ols_<y>` (here `housing_ols_price`;
+`_2`, `_3`, ... if a dataset of yours already has that name), with the columns `term`, `estimate`,
+`std_error`, `t_value`, `p_value`, `ci_lower` and `ci_upper` (95%). The reply's first line names it;
+`viz_coefficient` plots it directly.
+
 ### regression_diagnostics
 Run diagnostic tests on a regression model.
 
@@ -1549,7 +1554,14 @@ Event study plot for DiD or dynamic treatment effects.
 ```
 
 ### viz_coefficient
-Coefficient plot with confidence intervals.
+Coefficient plot with confidence intervals. After `regression_ols`, pass the coefficient table it saved;
+the column arguments default to that table's `term`, `estimate`, `ci_lower` and `ci_upper`:
+
+```
+/viz_coefficient dataset:housing_ols_price
+```
+
+Any other table with one row per coefficient names its columns:
 
 ```
 /viz_coefficient dataset:results name_column:term estimate_column:estimate ci_lower_column:ci_low ci_upper_column:ci_high

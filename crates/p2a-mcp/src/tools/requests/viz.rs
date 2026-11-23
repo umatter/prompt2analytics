@@ -225,24 +225,32 @@ pub struct EventStudyRequest {
 #[serde(deny_unknown_fields)]
 pub struct CoefficientPlotRequest {
     /// Name/ID of the dataset
-    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    #[schemars(
+        description = "Name or ID of a dataset holding one row per coefficient, such as the table regression_ols saves (named in its reply)."
+    )]
     pub dataset: String,
 
     /// Column name for variable/coefficient names
-    #[schemars(description = "Column with variable names or coefficient labels.")]
-    pub name_column: String,
+    #[schemars(
+        description = "Column with variable names or coefficient labels (default 'term', as in a saved coefficient table)."
+    )]
+    pub name_column: Option<String>,
 
     /// Column name for coefficient estimates
-    #[schemars(description = "Column with coefficient point estimates.")]
-    pub estimate_column: String,
+    #[schemars(description = "Column with coefficient point estimates (default 'estimate').")]
+    pub estimate_column: Option<String>,
 
     /// Column name for lower confidence interval bound
-    #[schemars(description = "Column with lower bound of confidence interval.")]
-    pub ci_lower_column: String,
+    #[schemars(
+        description = "Column with lower bound of confidence interval (default 'ci_lower')."
+    )]
+    pub ci_lower_column: Option<String>,
 
     /// Column name for upper confidence interval bound
-    #[schemars(description = "Column with upper bound of confidence interval.")]
-    pub ci_upper_column: String,
+    #[schemars(
+        description = "Column with upper bound of confidence interval (default 'ci_upper')."
+    )]
+    pub ci_upper_column: Option<String>,
 
     /// Chart title (optional)
     #[schemars(description = "Optional title for the chart.")]

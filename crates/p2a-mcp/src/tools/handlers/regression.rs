@@ -40,6 +40,7 @@ use crate::tools::requests::regression::{
 
 use p2a_core::data::Dataset;
 use p2a_core::data::columns::ColumnRequest;
+use p2a_core::polars::prelude::{DataFrame, NamedFrom, Series};
 use p2a_core::regression::{
     BgTestType, CovarianceType, GlmnetConfig, GlmnetFamily, OlsResult, ResetType,
     SmoothSplineConfig, bg_test, harvey_collier_test, reset_test, run_cv_glmnet, run_diagnostics,
@@ -366,11 +367,75 @@ fn run_ols_request(
         .map_err(|e| format!("Regression failed: {e}"))
 }
 
+/// The columns of a saved coefficient table, in order; `viz_coefficient(model = ...)`
+/// reads `term`, `estimate`, `ci_lower` and `ci_upper` from it.
+pub(crate) const COEFFICIENT_TABLE_COLUMNS: [&str; 7] = [
+    "term",
+    "estimate",
+    "std_error",
+    "t_value",
+    "p_value",
+    "ci_lower",
+    "ci_upper",
+];
+
+/// An OLS fit's coefficients as a dataset, one row per term (the 95% interval as OLS
+/// reports it; an aliased term has NaN in every numeric column).
+fn coefficient_table(result: &OlsResult) -> Result<Dataset, String> {
+    let c = &result.coefficients;
+    let col = |name: &str, f: fn(&p2a_core::regression::OlsCoefficient) -> f64| {
+        Series::new(name.into(), c.iter().map(f).collect::<Vec<f64>>()).into()
+    };
+    DataFrame::new(vec![
+        Series::new(
+            "term".into(),
+            c.iter().map(|k| k.name.clone()).collect::<Vec<String>>(),
+        )
+        .into(),
+        col("estimate", |k| k.estimate),
+        col("std_error", |k| k.std_error),
+        col("t_value", |k| k.t_value),
+        col("p_value", |k| k.p_value),
+        col("ci_lower", |k| k.ci_lower_95),
+        col("ci_upper", |k| k.ci_upper_95),
+    ])
+    .map(Dataset::new)
+    .map_err(|e| e.to_string())
+}
+
+/// Whether `ds` has exactly the columns of a saved coefficient table.
+pub(crate) fn is_coefficient_table(ds: &Dataset) -> bool {
+    let names = ds.df().get_column_names();
+    names.len() == COEFFICIENT_TABLE_COLUMNS.len()
+        && names
+            .iter()
+            .zip(COEFFICIENT_TABLE_COLUMNS)
+            .all(|(n, want)| n.as_str() == want)
+}
+
+/// Saves `table` under `base`, replacing an earlier coefficient table of that name but
+/// never another dataset: if `base` holds one, the table goes to `base_2`, `base_3`, ...
+/// Returns the name it was saved under.
+fn save_coefficient_table(
+    datasets: &mut std::collections::HashMap<String, Dataset>,
+    base: &str,
+    table: Result<Dataset, String>,
+) -> Result<String, String> {
+    let table = table?;
+    let free = |name: &str| datasets.get(name).is_none_or(is_coefficient_table);
+    let name = std::iter::once(base.to_string())
+        .chain((2..).map(|i| format!("{base}_{i}")))
+        .find(|n| free(n))
+        .expect("an unbounded sequence of names has a free one");
+    datasets.insert(name.clone(), table);
+    Ok(name)
+}
+
 #[tool_router(router = regression_router, vis = "pub")]
 impl AnalyticsServer {
     /// Run OLS regression.
     #[tool(
-        description = "Run Ordinary Least Squares (OLS) regression. Returns coefficients, standard errors, t-values, p-values, R-squared, and F-statistic. Standard errors default to HC1 (heteroskedasticity-robust); set cov_type = 'standard' for classical, or 'hc0', 'hc2', 'hc3'. Set intercept = false to omit the intercept. For comparing group means with a single categorical predictor, consider anova_one_way instead."
+        description = "Run Ordinary Least Squares (OLS) regression. Returns coefficients, standard errors, t-values, p-values, R-squared, and F-statistic. Standard errors default to HC1 (heteroskedasticity-robust); set cov_type = 'standard' for classical, or 'hc0', 'hc2', 'hc3'. Set intercept = false to omit the intercept. The coefficients are also saved as a dataset named in the reply's first line, which viz_coefficient plots directly. For comparing group means with a single categorical predictor, consider anova_one_way instead."
     )]
     pub async fn regression_ols(
         &self,
@@ -382,11 +447,13 @@ impl AnalyticsServer {
             Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
         };
 
-        let datasets = self.datasets.read().await;
+        let fitted = {
+            let datasets = self.datasets.read().await;
+            let dataset = crate::get_dataset!(datasets, &request.dataset);
+            run_ols_request(dataset, &request, options)
+        };
 
-        let dataset = crate::get_dataset!(datasets, &request.dataset);
-
-        match run_ols_request(dataset, &request, options) {
+        match fitted {
             Ok(result) => {
                 let mut text = result.to_string();
                 if !request.intercept.unwrap_or(true) {
@@ -396,6 +463,24 @@ impl AnalyticsServer {
                         .replace("\nAdj. R-squared: ", "\nAdj. R-squared (uncentered): ");
                 }
                 append_unshown_notes(&mut text, &result);
+                // The saved-table line goes first: the chat loop keeps only the start of
+                // an earlier turn's tool result, and a later "plot the coefficients" needs it.
+                let saved = {
+                    let mut datasets = self.datasets.write().await;
+                    save_coefficient_table(
+                        &mut datasets,
+                        &format!("{}_ols_{}", request.dataset, request.y),
+                        coefficient_table(&result),
+                    )
+                };
+                let text = match saved {
+                    Ok(name) => format!(
+                        "Coefficients saved as dataset '{name}' (columns {}); plot them with \
+                         viz_coefficient(model = '{name}').\n\n{text}",
+                        COEFFICIENT_TABLE_COLUMNS.join(", ")
+                    ),
+                    Err(e) => format!("{text}\n\nNote: the coefficient table was not saved: {e}"),
+                };
                 Ok(CallToolResult::success(vec![Content::text(text)]))
             }
             Err(msg) => Ok(CallToolResult::error(vec![Content::text(msg)])),
@@ -1547,6 +1632,85 @@ mod tests {
     use p2a_core::data::{DataLoader, Dataset};
     use p2a_validation::{Case, Check, Tol};
     use serde_json::{Value, json};
+
+    /// regression_ols saves its coefficients as a dataset that viz_coefficient plots
+    /// with its default columns, replaces only its own earlier table, and never
+    /// overwrites a dataset of the user's.
+    #[test]
+    fn ols_saves_a_coefficient_table_viz_coefficient_plots() {
+        let df = p2a_core::polars::prelude::df!(
+            "x" => [1.0, 3.0, 5.0, 7.0, 9.0, 11.0],
+            "y" => [2.3, 3.8, 6.4, 7.7, 10.2, 11.9]
+        )
+        .unwrap();
+        let user = p2a_core::polars::prelude::df!("a" => [1.0, 2.0]).unwrap();
+        let (rt, server) = server_with(vec![("d", df), ("d_ols_x", user)]);
+        let ols = |y: &str, x: &str| {
+            let args = json!({"dataset": "d", "y": y, "x": [x], "cov_type": "standard"});
+            let r = rt
+                .block_on(server.regression_ols(Parameters(serde_json::from_value(args).unwrap())))
+                .unwrap();
+            assert_ne!(r.is_error, Some(true), "{}", text(&r));
+            text(&r)
+        };
+
+        let reply = ols("y", "x");
+        assert!(
+            reply.starts_with("Coefficients saved as dataset 'd_ols_y'"),
+            "{reply}"
+        );
+        let table = rt.block_on(async { server.datasets.read().await.get("d_ols_y").cloned() });
+        let table = table.expect("saved table");
+        assert!(is_coefficient_table(&table));
+        let df = table.df();
+        let terms: Vec<&str> = df
+            .column("term")
+            .unwrap()
+            .str()
+            .unwrap()
+            .into_no_null_iter()
+            .collect();
+        assert_eq!(terms, ["(Intercept)", "x"]);
+        let fit = run_ols(
+            rt.block_on(async { server.datasets.read().await.get("d").cloned() })
+                .as_ref()
+                .unwrap(),
+            "y",
+            &["x"],
+            true,
+            CovarianceType::Standard,
+        )
+        .unwrap();
+        for (col, want) in [
+            ("estimate", fit.coefficients[1].estimate),
+            ("ci_lower", fit.coefficients[1].ci_lower_95),
+            ("ci_upper", fit.coefficients[1].ci_upper_95),
+        ] {
+            let got = df.column(col).unwrap().f64().unwrap().get(1).unwrap();
+            assert_eq!(got, want, "{col}");
+        }
+
+        // viz_coefficient needs only the dataset
+        let args = json!({"dataset": "d_ols_y"});
+        let r = rt
+            .block_on(server.viz_coefficient(Parameters(serde_json::from_value(args).unwrap())))
+            .unwrap();
+        assert!(text(&r).contains("Coefficients: 2"), "{}", text(&r));
+
+        // a rerun replaces its own table; a user's dataset of the same name is kept
+        assert!(ols("y", "x").starts_with("Coefficients saved as dataset 'd_ols_y'"));
+        assert!(ols("x", "y").starts_with("Coefficients saved as dataset 'd_ols_x_2'"));
+        let kept = rt.block_on(async { server.datasets.read().await.get("d_ols_x").cloned() });
+        assert_eq!(kept.unwrap().df().get_column_names()[0].as_str(), "a");
+
+        // the raw data are not a coefficient table, and the error says what is
+        let args = json!({"dataset": "d"});
+        let r = rt
+            .block_on(server.viz_coefficient(Parameters(serde_json::from_value(args).unwrap())))
+            .unwrap();
+        assert_eq!(r.is_error, Some(true));
+        assert!(text(&r).contains("regression_ols"), "{}", text(&r));
+    }
 
     /// The four smoothers return their vectors by one rule: the first 20 under
     /// `<key>_sample` with a note by default, every value with `full`.

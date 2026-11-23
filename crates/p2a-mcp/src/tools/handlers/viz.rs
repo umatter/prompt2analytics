@@ -900,7 +900,7 @@ impl AnalyticsServer {
 
     /// Generate a coefficient plot with confidence intervals.
     #[tool(
-        description = "Generate a coefficient plot showing regression coefficients with confidence intervals (error bars). Useful for visualizing regression results. Shows vertical zero line for reference. Rows with a missing value in a plotted column are left out and counted."
+        description = "Generate a coefficient plot showing regression coefficients with confidence intervals (error bars). After regression_ols, pass the coefficient table it saved (named in its reply) as the dataset; the column arguments default to that table's columns. Shows vertical zero line for reference. Rows with a missing value in a plotted column are left out and counted."
     )]
     pub async fn viz_coefficient(
         &self,
@@ -918,14 +918,26 @@ impl AnalyticsServer {
         };
 
         let df = dataset.df();
+        let name_column = request.name_column.as_deref().unwrap_or("term");
+        let estimate_column = request.estimate_column.as_deref().unwrap_or("estimate");
+        let ci_lower_column = request.ci_lower_column.as_deref().unwrap_or("ci_lower");
+        let ci_upper_column = request.ci_upper_column.as_deref().unwrap_or("ci_upper");
 
         // Extract name column
-        let name_col = match df.column(&request.name_column) {
+        let name_col = match df.column(name_column) {
             Ok(c) => c,
-            Err(e) => {
+            Err(_) => {
+                let available: Vec<String> = df
+                    .get_column_names()
+                    .iter()
+                    .map(|c| c.to_string())
+                    .collect();
                 return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Name column '{}' not found: {}",
-                    request.name_column, e
+                    "Name column '{name_column}' not found in dataset '{}' (columns: {}). \
+                     viz_coefficient plots a table with one row per coefficient: after \
+                     regression_ols, pass the coefficient table it saved as the dataset.",
+                    request.dataset,
+                    available.join(", ")
                 ))]));
             }
         };
@@ -937,9 +949,9 @@ impl AnalyticsServer {
         let plotted = match plotted_columns(
             df,
             &[
-                (&request.estimate_column, Role::Numeric),
-                (&request.ci_lower_column, Role::Numeric),
-                (&request.ci_upper_column, Role::Numeric),
+                (estimate_column, Role::Numeric),
+                (ci_lower_column, Role::Numeric),
+                (ci_upper_column, Role::Numeric),
             ],
             1,
             "viz_coefficient",
@@ -948,9 +960,9 @@ impl AnalyticsServer {
             Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
         };
         let names: Vec<String> = plotted.rows().iter().map(|&i| names[i].clone()).collect();
-        let estimates = plotted.values(&request.estimate_column);
-        let ci_lower = plotted.values(&request.ci_lower_column);
-        let ci_upper = plotted.values(&request.ci_upper_column);
+        let estimates = plotted.values(estimate_column);
+        let ci_lower = plotted.values(ci_lower_column);
+        let ci_upper = plotted.values(ci_upper_column);
 
         let mut config = ChartConfig::default();
         config.title = request.title;
@@ -1505,10 +1517,10 @@ mod tests {
             Limits::off(),
             server.viz_coefficient(Parameters(CoefficientPlotRequest {
                 dataset: "d".into(),
-                name_column: "names".into(),
-                estimate_column: "y".into(),
-                ci_lower_column: "lo".into(),
-                ci_upper_column: "hi".into(),
+                name_column: Some("names".into()),
+                estimate_column: Some("y".into()),
+                ci_lower_column: Some("lo".into()),
+                ci_upper_column: Some("hi".into()),
                 title: None,
                 horizontal: None,
             })),
