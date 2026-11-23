@@ -1,4 +1,9 @@
-# prompt2analytics
+<h1>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/p2a-lockup-dark.svg">
+    <img src="docs/assets/p2a-lockup-light.svg" alt="prompt2analytics (p2a)" width="420">
+  </picture>
+</h1>
 
 [![CI](https://github.com/umatter/prompt2analytics/actions/workflows/ci.yml/badge.svg)](https://github.com/umatter/prompt2analytics/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-yellow.svg)](#license)

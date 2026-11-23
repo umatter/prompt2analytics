@@ -732,7 +732,7 @@ pub fn ChatPanel() -> Element {
                 div { class: "h-full w-full flex items-center justify-between",
                     div { class: "flex items-center gap-3",
                         // Logo/Wordmark
-                        P2aWordmark { width: 140.0, class: "shrink-0" }
+                        P2aWordmark { width: 70.0, class: "shrink-0" }
                         // Current conversation title
                         if let Some(ref conv) = current_conversation {
                             span { class: "text-sm text-gray-500 dark:text-gray-400",

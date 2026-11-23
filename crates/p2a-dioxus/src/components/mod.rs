@@ -21,7 +21,7 @@ pub use conversation_sidebar::ConversationSidebar;
 pub use dataset_inspector::DatasetInspectorModal;
 pub use dataset_sidebar::DatasetSidebar;
 pub use export_menu::ExportMenu;
-pub use logo::{P2aBadge, P2aIconMinimal, P2aWordmark};
+pub use logo::{P2aIconMinimal, P2aWordmark};
 pub use message::Message;
 pub use message_list::{MessageList, next_at_bottom};
 pub use settings_modal::SettingsModal;
