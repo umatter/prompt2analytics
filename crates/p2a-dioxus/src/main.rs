@@ -12,6 +12,7 @@ mod api;
 mod app;
 mod components;
 mod examples;
+mod exhibit;
 mod export;
 mod platform;
 mod state;

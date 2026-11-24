@@ -244,6 +244,7 @@ pub fn App() -> Element {
     use_context_provider(|| sidebar_visible);
     use_context_provider(|| crate::state::AddDataRequest(Signal::new(0)));
     use_context_provider(|| crate::state::ConnectModelRequest(Signal::new(0)));
+    use_context_provider(crate::exhibit::ExhibitViewer::new);
     // The open dialogs, for Escape (use_escape_close)
     let escape_stack = use_context_provider(|| Signal::new(EscapeStack::<Callback<()>>::new()));
 
@@ -390,6 +391,9 @@ pub fn App() -> Element {
             }
 
             StatusBar {}
+
+            // Figures and tables of the transcript, enlarged
+            crate::components::ExhibitViewerModal {}
 
             // Shortcuts modal
             ShortcutsModal {

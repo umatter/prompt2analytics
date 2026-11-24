@@ -2,8 +2,9 @@
 
 use dioxus::prelude::*;
 
+use crate::exhibit::ExhibitViewer;
 use crate::state::chat::ChatMessage;
-use crate::utils::render_markdown;
+use crate::utils::render_answer;
 
 /// Props for the Message component
 #[derive(Props, Clone, PartialEq)]
@@ -28,7 +29,7 @@ impl PartialEq for ChatMessage {
 }
 
 /// Render message content based on role
-fn render_content(message: &ChatMessage) -> Element {
+fn render_content(message: &ChatMessage, viewer: Option<ExhibitViewer>) -> Element {
     if message.role == "user" {
         rsx! {
             p { class: "k-q whitespace-pre-wrap",
@@ -40,13 +41,13 @@ fn render_content(message: &ChatMessage) -> Element {
         if message.is_streaming {
             rsx! {
                 div { class: "k-answer",
-                    {render_markdown(content)}
+                    {render_answer(content, viewer)}
                     span { class: "streaming-cursor", aria_hidden: "true" }
                 }
             }
         } else {
             rsx! {
-                div { class: "k-answer", {render_markdown(content)} }
+                div { class: "k-answer", {render_answer(content, viewer)} }
             }
         }
     }
@@ -58,6 +59,7 @@ fn render_content(message: &ChatMessage) -> Element {
 pub fn Message(props: MessageProps) -> Element {
     let message = &props.message;
     let is_user = message.role == "user";
+    let viewer = try_use_context::<ExhibitViewer>();
 
     let timestamp = message.timestamp.format("%H:%M").to_string();
 
@@ -70,7 +72,7 @@ pub fn Message(props: MessageProps) -> Element {
                     span { class: "k-when", "{timestamp}" }
                 }
                 div { class: "min-w-0",
-                    {render_content(message)}
+                    {render_content(message, viewer)}
                 }
             }
         }
@@ -106,21 +108,20 @@ pub fn Message(props: MessageProps) -> Element {
                     }
 
                     // Message content
-                    {render_content(message)}
+                    {render_content(message, viewer)}
 
                     // An answer that ended before it was finished
                     if message.interrupted {
                         p { class: "k-note", "Answer interrupted" }
                     }
 
-                    // Plots, each under a rule with a muted caption
+                    // Plots, each under a rule with its caption and actions;
+                    // a click opens the viewer
                     for (idx , image) in message.images.iter().enumerate() {
-                        figure { key: "{idx}", class: "k-plot",
-                            img {
-                                src: "data:image/png;base64,{image}",
-                                alt: "Visualization"
-                            }
-                            figcaption { "Plot {idx + 1}" }
+                        crate::components::FigureExhibit {
+                            key: "{idx}",
+                            image: image.clone(),
+                            label: format!("Figure {}", idx + 1),
                         }
                     }
                 }

@@ -106,6 +106,27 @@ fn markdown_options() -> Options {
     Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_MATH
 }
 
+thread_local! {
+    /// The exhibit viewer while [`render_answer`] runs: tables then get
+    /// their expand and export actions.
+    static EXHIBITS: std::cell::Cell<Option<crate::exhibit::ExhibitViewer>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// [`render_markdown`] for an answer in the transcript: each table gets the
+/// exhibit actions (expand, csv, latex, copy) under it.
+pub fn render_answer(text: &str, viewer: Option<crate::exhibit::ExhibitViewer>) -> Element {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            EXHIBITS.with(|e| e.set(None));
+        }
+    }
+    EXHIBITS.with(|e| e.set(viewer));
+    let _reset = Reset;
+    render_markdown(text)
+}
+
 /// Render markdown text to RSX elements with proper styling
 pub fn render_markdown(text: &str) -> Element {
     let parser = Parser::new_ext(text, markdown_options());
@@ -398,16 +419,26 @@ fn render_tag(tag: &Tag, events: &[Event]) -> (Element, usize) {
         }
         Tag::Table(_) => {
             let children = render_table_content(inner_events);
-            (
-                rsx! {
-                    div { class: "overflow-x-auto my-4",
-                        table { class: "min-w-full border-collapse border border-gray-300 dark:border-gray-600",
-                            {children.into_iter()}
+            let table = rsx! {
+                div { class: "overflow-x-auto my-4",
+                    table { class: "min-w-full border-collapse border border-gray-300 dark:border-gray-600",
+                        {children.into_iter()}
+                    }
+                }
+            };
+            let element = match EXHIBITS.with(std::cell::Cell::get) {
+                Some(viewer) => {
+                    let data = crate::exhibit::TableData::from_events(inner_events);
+                    rsx! {
+                        div { class: "k-exhibit k-table-exhibit",
+                            {table}
+                            {crate::components::table_toolbar(data, viewer)}
                         }
                     }
-                },
-                end_idx + 1,
-            )
+                }
+                None => table,
+            };
+            (element, end_idx + 1)
         }
         Tag::TableHead => {
             let children = render_events(inner_events);

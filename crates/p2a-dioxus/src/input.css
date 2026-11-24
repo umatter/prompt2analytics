@@ -535,6 +535,46 @@ body { background: var(--k-paper); color: var(--k-ink); }
   .k-plot img { display: block; max-width: 100%; height: auto; }
   .k-plot figcaption { font-size: 12.5px; color: var(--k-muted); margin-top: 4px; }
 
+  /* exhibits: a figure or table with its caption and actions; the viewer */
+  .k-zoomable { display: block; padding: 0; border: 0; background: none; cursor: zoom-in; max-width: 100%; }
+  .k-zoomable:focus-visible { outline: 2px solid var(--k-orange); outline-offset: 2px; }
+  .k-exhibit-bar {
+    display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
+    font-size: 12.5px; color: var(--k-muted); margin-top: 4px;
+  }
+  .k-exhibit-acts { display: flex; gap: 12px; }
+  .k-xbtn {
+    font-family: var(--font-mono); font-stretch: 87.5%; font-size: 12px; color: var(--k-orange-text);
+    background: none; border: 0; padding: 0; cursor: pointer; text-decoration: underline; text-underline-offset: 3px;
+  }
+  .k-xbtn:hover { color: var(--k-ink); }
+  .k-xbtn:focus-visible { outline: 2px solid var(--k-orange); outline-offset: 2px; }
+  .k-table-exhibit { margin: 16px 0; }
+  .k-table-exhibit > div:first-child { margin: 0 !important; }
+  .k-viewer { max-width: none; height: 100%; }
+  .k-viewer-body { flex: 1; padding: 20px; }
+  .k-viewer-fig { min-height: 100%; }
+  .k-viewer-fig.fit { height: 100%; display: flex; }
+  .k-viewer-fig img { display: block; }
+  .k-zoom { display: flex; align-items: baseline; gap: 10px; margin-right: 8px; font-size: 12px; }
+  .k-zoom .k-xbtn { font-size: 15px; text-decoration: none; }
+  .k-zoom .k-mono { min-width: 4ch; text-align: center; }
+  .k-xtable { border-collapse: collapse; font-size: 13px; }
+  .k-xtable th, .k-xtable td { padding: 6px 22px 6px 0; text-align: right; white-space: nowrap; }
+  .k-xtable th:first-child, .k-xtable td:first-child { text-align: left; }
+  .k-xtable th {
+    position: sticky; top: -20px; background: var(--k-paper); font-weight: 700;
+    border-bottom: 2px solid var(--k-rule);
+  }
+  .k-xtable td { border-bottom: 1px solid var(--k-hair); font-family: var(--font-mono); font-stretch: 87.5%; }
+  .k-xtable td:first-child { font-family: var(--font-sans); font-stretch: 100%; }
+  .k-xtable tr:last-child td { border-bottom: 2px solid var(--k-rule); }
+  .k-toast {
+    position: fixed; right: 20px; bottom: 44px; z-index: 80; max-width: 60ch;
+    background: var(--k-ink); color: var(--k-paper); padding: 8px 14px;
+    font-family: var(--font-mono); font-stretch: 87.5%; font-size: 12.5px; border-left: 4px solid var(--k-orange);
+  }
+
   /* Markdown inside a turn: the renderer sets Tailwind utilities on each
      element, which outrank this layer, so these few rules are !important. */
   .k-answer .prose { color: var(--k-ink); font-size: 14px; }
