@@ -776,3 +776,8 @@ mod tests {
 /// dialog) opens it on every change.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AddDataRequest(pub Signal<u64>);
+
+/// Asks the chat panel to open the settings dialog on its model tab, the
+/// same way: the welcome screen's "Connect a model" bumps the count.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ConnectModelRequest(pub Signal<u64>);

@@ -243,6 +243,7 @@ pub fn App() -> Element {
     use_context_provider(|| settings);
     use_context_provider(|| sidebar_visible);
     use_context_provider(|| crate::state::AddDataRequest(Signal::new(0)));
+    use_context_provider(|| crate::state::ConnectModelRequest(Signal::new(0)));
     // The open dialogs, for Escape (use_escape_close)
     let escape_stack = use_context_provider(|| Signal::new(EscapeStack::<Callback<()>>::new()));
 

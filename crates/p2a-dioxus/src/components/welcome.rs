@@ -7,7 +7,7 @@ use dioxus::prelude::*;
 use crate::api::ApiClient;
 use crate::components::P2aLockup;
 use crate::examples::{EXAMPLES, Example, load_example};
-use crate::state::{SessionState, Settings};
+use crate::state::{ConnectModelRequest, SessionState, Settings};
 
 /// Props for [`Welcome`].
 #[derive(Props, Clone, PartialEq)]
@@ -27,6 +27,21 @@ pub fn Welcome(props: WelcomeProps) -> Element {
     let settings = use_context::<Signal<Settings>>();
     let mut loading = use_signal(|| None::<&'static str>);
     let mut error = use_signal(|| None::<String>);
+    // An example loaded while no model was connected: its question waits
+    // here and is asked as soon as a model is set up.
+    let mut waiting = use_signal(|| None::<Example>);
+    let mut connect_model = use_context::<ConnectModelRequest>().0;
+    let on_suggestion = props.on_suggestion;
+    use_effect(move || {
+        if settings.read().provider.is_configured()
+            && let Some(example) = waiting()
+        {
+            waiting.set(None);
+            if let Some(handler) = on_suggestion {
+                handler.call(example.prompt.to_string());
+            }
+        }
+    });
     // Backend version and tool count for the tag row (None until known).
     let mut facts = use_signal(|| None::<(String, Option<usize>)>);
     use_future(move || async move {
@@ -43,15 +58,16 @@ pub fn Welcome(props: WelcomeProps) -> Element {
         }
         loading.set(Some(example.name));
         error.set(None);
-        let on_suggestion = props.on_suggestion;
+        waiting.set(None);
         spawn(async move {
             match load_example(session, example).await {
                 Ok(()) => {
                     // With a provider set up, ask the starter's question;
-                    // otherwise the data is loaded and waits in the list.
-                    if settings.peek().provider.is_configured()
-                        && let Some(handler) = on_suggestion
-                    {
+                    // otherwise the data waits in the list and the question
+                    // waits for a model.
+                    if !settings.peek().provider.is_configured() {
+                        waiting.set(Some(example));
+                    } else if let Some(handler) = on_suggestion {
                         handler.call(example.prompt.to_string());
                     }
                 }
@@ -100,6 +116,21 @@ pub fn Welcome(props: WelcomeProps) -> Element {
                                 "load"
                             }
                         }
+                    }
+                }
+            }
+            if let Some(example) = waiting() {
+                div {
+                    class: "k-notice mt-4 flex flex-col items-start gap-2",
+                    role: "status",
+                    span {
+                        b { "{example.name} is loaded." }
+                        " Connect a model to ask the question; p2a asks it as soon as one is set up."
+                    }
+                    button {
+                        class: "k-btn-pri",
+                        onclick: move |_| connect_model += 1,
+                        "Connect a model"
                     }
                 }
             }

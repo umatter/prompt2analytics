@@ -80,6 +80,14 @@ pub fn ChatPanel() -> Element {
             settings_open.set(true);
         }
     });
+    // The welcome screen's "Connect a model" opens it on the model tab.
+    let connect_model = use_context::<crate::state::ConnectModelRequest>().0;
+    use_effect(move || {
+        if connect_model() > 0 {
+            settings_initial_tab.set("llm".to_string());
+            settings_open.set(true);
+        }
+    });
 
     // First-run onboarding: auto-open the settings modal on the LLM tab when
     // no provider is configured, so users land directly on the setup screen
