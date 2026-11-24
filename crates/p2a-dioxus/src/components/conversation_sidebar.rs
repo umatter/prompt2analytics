@@ -8,8 +8,8 @@ use dioxus::prelude::*;
 use crate::api::Conversation;
 use crate::components::P2aWordmark;
 use crate::state::{
-    ChatState, ConversationState, SessionState, report_conversation_error, start_new_conversation,
-    switch_blocked,
+    ChatState, ConversationState, SessionState, remember_conversation, report_conversation_error,
+    start_new_conversation, stored_conversation, switch_blocked,
 };
 
 /// Whether a switch may run now; when not, the reason is shown in the
@@ -58,6 +58,11 @@ pub fn ConversationSidebar() -> Element {
     // Whether the archived conversations are listed
     let mut show_archived = use_signal(|| false);
 
+    // Whether the conversation open before a reload was looked for (once,
+    // with the first list), and the open conversation last remembered.
+    let mut reopen_done = use_signal(|| false);
+    let mut remembered = use_signal(|| None::<String>);
+
     // Load conversations when session is ready
     use_effect(move || {
         let session = session_state.read();
@@ -69,12 +74,47 @@ pub fn ConversationSidebar() -> Element {
                 let state = conv_state.read().clone();
                 match state.load_conversations(&session_id).await {
                     Ok(conversations) => {
+                        // After a reload: open the conversation that was open,
+                        // if it is still listed and nothing else was opened.
+                        let reopen = (!*reopen_done.peek())
+                            .then(stored_conversation)
+                            .flatten()
+                            .filter(|id| conversations.iter().any(|c| &c.id == id))
+                            .filter(|_| conv_state.peek().current_conversation_id.is_none());
+                        reopen_done.set(true);
                         conv_state.write().set_conversations(conversations);
                         conv_state.write().set_loading(false);
+                        if let Some(id) = reopen {
+                            conv_state
+                                .write()
+                                .set_current_conversation(Some(id.clone()));
+                            let state = conv_state.read().clone();
+                            match state.load_messages(&id).await {
+                                Ok(messages) => {
+                                    conv_state.write().set_current_messages(&id, messages);
+                                }
+                                Err(e) => report_conversation_error(
+                                    session_state,
+                                    conv_state,
+                                    chat_state,
+                                    e,
+                                ),
+                            }
+                        }
                     }
                     Err(e) => report_conversation_error(session_state, conv_state, chat_state, e),
                 }
             });
+        }
+    });
+
+    // Remember the open conversation for the next reload, once the one open
+    // before was looked for (until then the empty start would erase it).
+    use_effect(move || {
+        let current = conversation_state.read().current_conversation_id.clone();
+        if *reopen_done.read() && *remembered.peek() != current {
+            remember_conversation(current.as_deref());
+            remembered.set(current);
         }
     });
 

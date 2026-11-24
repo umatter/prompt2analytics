@@ -249,9 +249,9 @@ pub fn App() -> Element {
     let escape_stack = use_context_provider(|| Signal::new(EscapeStack::<Callback<()>>::new()));
 
     // No session is created at mount: the first send, data load or new
-    // conversation creates it (state::ensure_session). The native app
-    // restores the session it used last, through the same gate.
-    #[cfg(any(feature = "desktop", feature = "mobile"))]
+    // conversation creates it (state::ensure_session). The app restores the
+    // session it used last, through the same gate: on desktop and mobile
+    // across restarts, on web across a reload of the tab.
     use_effect(move || {
         spawn(crate::state::restore_session(session_state));
     });

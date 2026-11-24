@@ -122,6 +122,11 @@ impl ChatMessage {
     ) -> Self {
         let mut chat_msg = Self::from_conversation_message(msg);
         chat_msg.set_tool_calls(tool_calls.iter().map(ToolCallInfo::from).collect());
+        // The plots, in the order of their calls, as the stream showed them.
+        chat_msg.images = tool_calls
+            .iter()
+            .flat_map(|c| c.images.iter().cloned())
+            .collect();
         chat_msg
     }
 

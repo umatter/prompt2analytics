@@ -286,6 +286,14 @@ pub fn ChatPanel() -> Element {
                                     msg.set_tool_calls(
                                         tcs.iter().map(ToolCallInfo::from).collect(),
                                     );
+                                    // The plots the calls stored, unless the
+                                    // stream already showed them.
+                                    if msg.images.is_empty() {
+                                        msg.images = tcs
+                                            .iter()
+                                            .flat_map(|c| c.images.iter().cloned())
+                                            .collect();
+                                    }
                                 }
                             }
                         }

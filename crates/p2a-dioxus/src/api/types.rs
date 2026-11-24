@@ -323,6 +323,10 @@ pub struct PersistedToolCall {
     pub completed_at: Option<String>,
     #[serde(default)]
     pub duration_ms: Option<i32>,
+    /// Images the call returned (base64 PNG), in order; absent from older
+    /// servers and from calls without images.
+    #[serde(default)]
+    pub images: Vec<String>,
 }
 
 // === Dataset Metadata types ===

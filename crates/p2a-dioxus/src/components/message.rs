@@ -190,12 +190,52 @@ mod tests {
             started_at: "2026-11-18T10:00:01Z".into(),
             completed_at: None,
             duration_ms: None,
+            images: Vec::new(),
         };
         let first = ChatMessage::from_conversation_message_with_tools(&stored, &[call("success")]);
         let second = ChatMessage::from_conversation_message_with_tools(&stored, &[call("error")]);
         assert_ne!(first, second);
         // A clone is the same message and is not redrawn.
         assert_eq!(first, first.clone());
+    }
+
+    /// A message reopened from the store shows the plots its calls stored,
+    /// in the order of the calls.
+    #[test]
+    fn a_reopened_message_shows_its_stored_plots() {
+        use crate::api::{ConversationMessage, PersistedToolCall};
+        let stored = ConversationMessage {
+            id: "m-1".into(),
+            conversation_id: "c-1".into(),
+            role: "assistant".into(),
+            content: "Plotted.".into(),
+            created_at: "2026-11-24T10:00:00Z".into(),
+            token_count: None,
+            model: None,
+        };
+        let call = |id: &str, images: &[&str]| PersistedToolCall {
+            id: id.into(),
+            message_id: "m-1".into(),
+            conversation_id: "c-1".into(),
+            tool_name: "viz_scatter".into(),
+            arguments: "{}".into(),
+            result: Some("ok".into()),
+            error: None,
+            status: "success".into(),
+            started_at: "2026-11-24T10:00:01Z".into(),
+            completed_at: None,
+            duration_ms: None,
+            images: images.iter().map(|s| s.to_string()).collect(),
+        };
+        let msg = ChatMessage::from_conversation_message_with_tools(
+            &stored,
+            &[
+                call("a", &["AAA"]),
+                call("b", &[]),
+                call("c", &["CCC", "DDD"]),
+            ],
+        );
+        assert_eq!(msg.images, ["AAA", "CCC", "DDD"]);
     }
 }
 

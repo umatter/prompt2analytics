@@ -4,12 +4,12 @@ use dioxus::prelude::*;
 
 use crate::api::{DatasetMeta, ReloadResult, api};
 use crate::components::DatasetInspectorModal;
-use crate::state::{AddDataRequest, SessionState};
+use crate::state::{AddDataRequest, DatasetInfo, SessionState};
 
 /// Dataset sidebar component
 #[component]
 pub fn DatasetSidebar() -> Element {
-    let session_state = use_context::<Signal<SessionState>>();
+    let mut session_state = use_context::<Signal<SessionState>>();
     let mut datasets = use_signal(Vec::<DatasetMeta>::new);
     let mut is_loading = use_signal(|| false);
     let mut is_reloading = use_signal(|| false);
@@ -33,6 +33,19 @@ pub fn DatasetSidebar() -> Element {
                 let client = api();
                 match client.list_session_datasets(&sid).await {
                     Ok(ds) => {
+                        // The session's datasets as the server lists them, so
+                        // the status bar counts them after a reload too.
+                        let known: Vec<DatasetInfo> = ds
+                            .iter()
+                            .map(|d| DatasetInfo {
+                                name: d.name.clone(),
+                                rows: usize::try_from(d.row_count).unwrap_or(0),
+                                cols: usize::try_from(d.column_count).unwrap_or(0),
+                            })
+                            .collect();
+                        if session_state.peek().datasets_differ(&known) {
+                            session_state.write().loaded_datasets = known;
+                        }
                         datasets.set(ds);
                     }
                     Err(e) => {
