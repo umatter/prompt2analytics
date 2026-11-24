@@ -569,6 +569,10 @@ body { background: var(--k-paper); color: var(--k-ink); }
   .k-xtable td { border-bottom: 1px solid var(--k-hair); font-family: var(--font-mono); font-stretch: 87.5%; }
   .k-xtable td:first-child { font-family: var(--font-sans); font-stretch: 100%; }
   .k-xtable tr:last-child td { border-bottom: 2px solid var(--k-rule); }
+  .k-source {
+    margin: 0; font-family: var(--font-mono); font-stretch: 87.5%; font-size: 12.5px; line-height: 1.55;
+    white-space: pre; user-select: text; color: var(--k-ink);
+  }
   .k-toast {
     position: fixed; right: 20px; bottom: 44px; z-index: 80; max-width: 60ch;
     background: var(--k-ink); color: var(--k-paper); padding: 8px 14px;
@@ -714,6 +718,10 @@ body { background: var(--k-paper); color: var(--k-ink); }
   .k-menu-item:hover::before, .k-menu-item:focus-visible::before { color: var(--k-orange); }
   .k-menu-item .ext { margin-left: auto; font-family: var(--font-mono); font-stretch: 87.5%; font-size: 11px; color: var(--k-muted); }
   .k-menu-sep { margin: 4px 0; border-top: 1px solid var(--k-hair); }
+  .k-source {
+    margin: 0; font-family: var(--font-mono); font-stretch: 87.5%; font-size: 12.5px; line-height: 1.55;
+    white-space: pre; user-select: text; color: var(--k-ink);
+  }
   .k-toast {
     background: var(--k-ink); color: var(--k-paper); padding: 6px 10px;
     font-family: var(--font-mono); font-stretch: 87.5%; font-size: 12px; white-space: nowrap;

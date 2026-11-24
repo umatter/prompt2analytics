@@ -76,6 +76,15 @@ pub enum TableFormat {
 }
 
 impl TableFormat {
+    /// The name on the viewer's tabs and buttons.
+    pub fn name(self) -> &'static str {
+        match self {
+            TableFormat::Csv => "CSV",
+            TableFormat::Latex => "LaTeX",
+            TableFormat::Markdown => "Markdown",
+        }
+    }
+
     fn extension(self) -> &'static str {
         match self {
             TableFormat::Csv => "csv",
@@ -343,6 +352,14 @@ pub fn export_table(data: &TableData, label: &str, format: TableFormat) -> Strin
 pub fn copy_table(data: &TableData) -> String {
     match crate::export::copy_to_clipboard(&data.to_tsv()) {
         Ok(()) => "Copied; paste into a spreadsheet or a document".to_string(),
+        Err(e) => format!("Copy failed: {e}"),
+    }
+}
+
+/// Copies a table in `format` (its source text) and returns the notice to show.
+pub fn copy_table_as(data: &TableData, format: TableFormat) -> String {
+    match crate::export::copy_to_clipboard(&data.render(format)) {
+        Ok(()) => format!("Copied as {}", format.name()),
         Err(e) => format!("Copy failed: {e}"),
     }
 }
