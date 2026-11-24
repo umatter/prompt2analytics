@@ -283,6 +283,7 @@ pub(super) struct ToolCallText {
     arguments: String,
     result: Option<String>,
     error: Option<String>,
+    images: Option<Vec<String>>,
 }
 
 /// UTF-8 bytes of the messages' contents.
@@ -292,26 +293,44 @@ pub(super) fn message_text_bytes(rows: &[MessageText]) -> u64 {
         .fold(0u64, u64::saturating_add)
 }
 
-/// UTF-8 bytes of the tool calls' arguments, results and errors.
+/// UTF-8 bytes of the tool calls' arguments, results, errors and images.
 pub(super) fn tool_call_text_bytes(rows: &[ToolCallText]) -> u64 {
     rows.iter()
-        .map(|t| tool_call_texts_len(&t.arguments, t.result.as_deref(), t.error.as_deref()))
+        .map(|t| {
+            tool_call_texts_len(
+                &t.arguments,
+                t.result.as_deref(),
+                t.error.as_deref(),
+                t.images.as_deref(),
+            )
+        })
         .fold(0u64, u64::saturating_add)
 }
 
 /// The bytes of one tool call's texts that the `session_db_bytes` budget
-/// counts: its arguments, result and error. The one definition for both
-/// sides of the counter, the writes that count bytes and the seed and
+/// counts: its arguments, result, error and images. The one definition for
+/// both sides of the counter, the writes that count bytes and the seed and
 /// deletes that read what is stored, so the two cannot drift apart.
 pub(super) fn tool_call_texts_len(
     arguments: &str,
     result: Option<&str>,
     error: Option<&str>,
+    images: Option<&[String]>,
 ) -> u64 {
     let len = |s: &str| s.len() as u64;
     len(arguments)
         .saturating_add(result.map_or(0, len))
         .saturating_add(error.map_or(0, len))
+        .saturating_add(images_len(images))
+}
+
+/// The bytes of a tool call's stored images (their base64 text).
+pub(super) fn images_len(images: Option<&[String]>) -> u64 {
+    images
+        .unwrap_or_default()
+        .iter()
+        .map(|i| i.len() as u64)
+        .fold(0u64, u64::saturating_add)
 }
 
 impl DbConnection {
@@ -569,7 +588,7 @@ impl DbConnection {
     }
 
     /// Bytes the messages and tool calls of conversation `conversation_id`
-    /// store (contents, arguments, results and errors; the title not
+    /// store (contents, arguments, results, errors and images; the title not
     /// included), as UTF-8 bytes.
     pub(crate) async fn conversation_text_bytes(
         &self,
@@ -578,7 +597,9 @@ impl DbConnection {
         let mut result = self
             .db()
             .query("SELECT content FROM messages WHERE conversation_id = $id")
-            .query("SELECT arguments, result, error FROM tool_calls WHERE conversation_id = $id")
+            .query(
+                "SELECT arguments, result, error, images FROM tool_calls WHERE conversation_id = $id",
+            )
             .bind(("id", conversation_id.to_string()))
             .await?;
         let contents: Vec<MessageText> = result.take(0)?;

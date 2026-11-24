@@ -11,7 +11,7 @@ use surrealdb::types::{RecordId, SurrealValue};
 
 use super::connection::{DbConnection, DbError, run_to_end};
 use super::models::{ToolCall, ToolCallStatus};
-use super::sessions::tool_call_texts_len;
+use super::sessions::{images_len, tool_call_texts_len};
 
 impl DbConnection {
     // ==================== Tool Call Operations ====================
@@ -98,6 +98,7 @@ impl DbConnection {
                 &stored.arguments,
                 stored.result.as_deref(),
                 stored.error.as_deref(),
+                stored.images.as_deref(),
             );
             let tool_call = db
                 .fit_tool_call_texts(session_id.as_deref(), tool_call, replaced)
@@ -235,6 +236,58 @@ impl DbConnection {
             let updated =
                 updated.ok_or_else(|| DbError::NotFound(format!("Tool call not found: {}", id)))?;
             if let Some((session_id, replaced)) = counted {
+                db.release_session_bytes(&session_id, replaced);
+            }
+            Ok(updated)
+        })
+        .await
+    }
+
+    /// Store the images (base64 PNG) tool call `id` returned, in its
+    /// conversation's turn, like [`create_tool_call`](Self::create_tool_call),
+    /// replacing any stored ones. An image is kept whole or not at all: one
+    /// longer than `message_bytes`, or than what the session has left under
+    /// `session_db_bytes` (with the bytes of the stored images as room), is
+    /// dropped, never cut. Refused with `MemoryPressure` above the RSS soft
+    /// limit.
+    pub async fn set_tool_call_images(
+        &self,
+        id: &str,
+        images: Vec<String>,
+    ) -> Result<ToolCall, DbError> {
+        self.check_memory()?;
+        let conversation_id = self.get_tool_call(id).await?.conversation_id;
+        let db = self.clone();
+        let id = id.to_string();
+        let turn = db.conversation_turn(&conversation_id).await;
+        run_to_end(turn, async move {
+            // Read again in the turn: a delete or clear that ran before it
+            // took the row, and no bytes may be counted for a write that
+            // finds none.
+            let stored = db.get_tool_call(&id).await?;
+            let replaced = images_len(stored.images.as_deref());
+            let mut images = images;
+            let session_id = if db.tracks_session_bytes() {
+                Some(
+                    db.get_conversation(&stored.conversation_id)
+                        .await?
+                        .session_id,
+                )
+            } else {
+                None
+            };
+            db.fit_session_images(session_id.as_deref(), &mut images, replaced)
+                .await?;
+            let mut result = db
+                .db()
+                .query("UPDATE tool_calls SET images = $images WHERE id = $id RETURN AFTER")
+                .bind(("id", RecordId::new("tool_calls", id.as_str())))
+                .bind(("images", images))
+                .await?;
+            let updated: Option<ToolCall> = result.take(0)?;
+            let updated =
+                updated.ok_or_else(|| DbError::NotFound(format!("Tool call not found: {}", id)))?;
+            if let Some(session_id) = session_id {
                 db.release_session_bytes(&session_id, replaced);
             }
             Ok(updated)

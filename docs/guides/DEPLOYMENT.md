@@ -349,10 +349,13 @@ HTTP), and they never depend on the resource profile:
   (1,000) messages answers 422 `quota_exceeded`.
 - **History budget.** `session_db_bytes` (hosted 16 MiB, none when off) caps the
   bytes one session's conversations store: titles, message contents and
-  tool-call arguments, results and errors, and also its dataset metadata rows
+  tool-call arguments, results, errors and images (the base64 PNGs of chart
+  tools, kept so a reopened conversation shows its plots; a plot of about
+  800 x 600 takes some 170 KB), and also its dataset metadata rows
   (the dataset listing; each row's texts and kept column names, plus 128 bytes).
   A client write past it answers 422 `quota_exceeded`; text the server produces
-  (assistant replies, tool results) is truncated to the room left; a dataset
+  (assistant replies, tool results) is truncated to the room left, and an
+  image that does not fit whole is not stored; a dataset
   whose metadata row would pass it is loaded but not listed; deleting a
   conversation frees its bytes. Under the budget a session also keeps at most
   1,000 dataset metadata rows. Every dataset a tool makes (generated data,

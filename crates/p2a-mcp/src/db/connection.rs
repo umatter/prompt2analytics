@@ -665,6 +665,41 @@ impl DbConnection {
         .await
     }
 
+    /// Fit images of a write that replaces stored images of `replaced`
+    /// bytes, in place: an image longer than `message_bytes` is dropped,
+    /// and, given the session `session_id` and the `session_db_bytes`
+    /// budget, so is each image that does not fit whole in what the session
+    /// has left plus `replaced`; the kept ones are counted. Never refused.
+    /// Same turn and release rules as
+    /// [`fit_session_texts`](Self::fit_session_texts).
+    pub(crate) async fn fit_session_images(
+        &self,
+        session_id: Option<&str>,
+        images: &mut Vec<String>,
+        replaced: u64,
+    ) -> Result<(), DbError> {
+        if let Some(limit) = self.limits.message_bytes {
+            images.retain(|i| i.len() <= limit);
+        }
+        let (Some(limit), Some(session_id)) = (self.limits.session_db_bytes, session_id) else {
+            return Ok(());
+        };
+        self.with_session_bytes(session_id, |used| {
+            let mut room = limit.saturating_sub(*used).saturating_add(replaced);
+            images.retain(|i| {
+                let n = i.len() as u64;
+                if n <= room {
+                    room -= n;
+                    *used = used.saturating_add(n);
+                    true
+                } else {
+                    false
+                }
+            });
+        })
+        .await
+    }
+
     /// Drop the session's byte counter (its rows were deleted); a later
     /// write re-seeds it from the store.
     pub(crate) fn forget_session_bytes(&self, session_id: &str) {
@@ -868,6 +903,7 @@ impl DbConnection {
             DEFINE FIELD IF NOT EXISTS started_at ON tool_calls TYPE datetime;
             DEFINE FIELD IF NOT EXISTS completed_at ON tool_calls TYPE option<datetime>;
             DEFINE FIELD IF NOT EXISTS duration_ms ON tool_calls TYPE option<int>;
+            DEFINE FIELD IF NOT EXISTS images ON tool_calls TYPE option<array<string>>;
             DEFINE INDEX IF NOT EXISTS idx_tool_calls_message ON tool_calls COLUMNS message_id;
             DEFINE INDEX IF NOT EXISTS idx_tool_calls_conversation ON tool_calls COLUMNS conversation_id;
             DEFINE INDEX IF NOT EXISTS idx_tool_calls_id ON tool_calls COLUMNS id UNIQUE;

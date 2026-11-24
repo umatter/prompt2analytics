@@ -480,6 +480,21 @@ impl ToolCallStore {
             {
                 tracing::warn!("Failed to update tool call record: {}", e);
             }
+            // The images the client was sent, so a reopened conversation
+            // shows them again.
+            let images: Vec<String> = result
+                .content
+                .iter()
+                .filter_map(|item| match item {
+                    ContentItem::Image { data, .. } => Some(data.clone()),
+                    ContentItem::Text { .. } => None,
+                })
+                .collect();
+            if !images.is_empty()
+                && let Err(e) = db.set_tool_call_images(tc_id, images).await
+            {
+                tracing::warn!("Failed to store the tool call's images: {}", e);
+            }
         }
 
         // Capture dataset metadata for load_dataset, upload_dataset and create_dataset, when the
