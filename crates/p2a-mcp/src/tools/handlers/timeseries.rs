@@ -681,7 +681,7 @@ impl AnalyticsServer {
 
     /// Fit an ARIMA model by conditional sum of squares.
     #[tool(
-        description = "Fit an ARIMA(p,d,q) model to a univariate time series by conditional sum of squares (as R arima(method = 'CSS') and forecast::Arima(method = 'CSS')). Returns the AR and MA coefficients, the mean (R's 'intercept', estimated by default when d = 0) or a drift (include_drift, d = 0 or 1), sigma^2, the CSS log-likelihood and AIC, and whether the optimiser converged. The series must have no missing values. If the user does not specify p, d, q, use reasonable defaults like ARIMA(1,0,1) or ARIMA(1,1,1). Do NOT call timeseries_acf first — call this tool directly."
+        description = "Fit a NON-SEASONAL ARIMA(p,d,q) model to a univariate time series (no seasonal terms are available: for seasonal data use ts_holt_winters, and never call the result a seasonal ARIMA) by conditional sum of squares (as R arima(method = 'CSS') and forecast::Arima(method = 'CSS')). Returns the AR and MA coefficients, the mean (R's 'intercept', estimated by default when d = 0) or a drift (include_drift, d = 0 or 1), sigma^2, the CSS log-likelihood and AIC, and whether the optimiser converged. The series must have no missing values. If the user does not specify p, d, q, use reasonable defaults like ARIMA(1,0,1) or ARIMA(1,1,1). Do NOT call timeseries_acf first — call this tool directly."
     )]
     pub async fn ts_arima_fit(
         &self,
@@ -702,16 +702,16 @@ impl AnalyticsServer {
             request.include_drift,
         );
         match run_arima_with(dataset, &request.column, &spec) {
-            Ok(fit) => Ok(CallToolResult::success(vec![Content::text(
-                fit.to_string(),
-            )])),
+            Ok(fit) => Ok(CallToolResult::success(vec![Content::text(format!(
+                "{fit}\n{NON_SEASONAL}"
+            ))])),
             Err(e) => Ok(ts_error("ARIMA fitting failed", &e)),
         }
     }
 
     /// Forecast with an ARIMA model fitted by conditional sum of squares.
     #[tool(
-        description = "Forecast h steps ahead with an ARIMA(p,d,q) model fitted by conditional sum of squares. Returns the fitted model, point forecasts, standard errors and 80% / 95% prediction intervals computed as R's forecast(Arima(x, order, method = 'CSS')). Accepts include_mean and include_drift like ts_arima_fit. The series must have no missing values."
+        description = "Forecast h steps ahead with a NON-SEASONAL ARIMA(p,d,q) model (no seasonal terms are available: for seasonal data use ts_holt_winters, and never call the result a seasonal ARIMA) fitted by conditional sum of squares. Returns the fitted model, point forecasts, standard errors and 80% / 95% prediction intervals computed as R's forecast(Arima(x, order, method = 'CSS')). Accepts include_mean and include_drift like ts_arima_fit. The series must have no missing values. The history and forecasts are also saved as a dataset named in the reply's first line, which viz_line plots."
     )]
     pub async fn ts_arima_forecast(
         &self,
@@ -735,9 +735,24 @@ impl AnalyticsServer {
         match forecast_arima_with(dataset, &request.column, &spec, request.horizon) {
             Ok(fc) => {
                 let fit = fc.fit.as_ref().map(|f| f.to_string()).unwrap_or_default();
-                Ok(CallToolResult::success(vec![Content::text(format!(
-                    "{fit}\n\n{fc}"
-                ))]))
+                let interval = |pct: f64| {
+                    let i = fc.levels.iter().position(|l| *l == pct)?;
+                    Some((fc.lower.get(i)?.as_slice(), fc.upper.get(i)?.as_slice()))
+                };
+                let table = forecast_table(
+                    dataset,
+                    &request.column,
+                    &fc.forecast,
+                    interval(80.0),
+                    interval(95.0),
+                );
+                drop(datasets);
+                let saved = self
+                    .save_forecast_table(&request.dataset, &request.column, table)
+                    .await;
+                Ok(CallToolResult::success(vec![Content::text(
+                    with_saved_forecast_line(saved, format!("{fit}\n\n{fc}\n{NON_SEASONAL}")),
+                )]))
             }
             Err(e) => Ok(ts_error("ARIMA forecasting failed", &e)),
         }
@@ -997,7 +1012,7 @@ impl AnalyticsServer {
 
     ///   OTexts. https://otexts.com/fpp3/
     #[tool(
-        description = "Fit Holt-Winters exponential smoothing model to a time series with trend and seasonality. Supports both additive (constant seasonal variation) and multiplicative (proportional variation) seasonality. Optimises the smoothing parameters alpha, beta and gamma that are not provided on [0, 1], as R's HoltWinters does. Can generate forecasts for future periods, with predict.HoltWinters' 95% prediction intervals for additive and non-seasonal fits (point forecasts only for multiplicative fits). Returns fitted values, residuals, optimized parameters, and seasonal coefficients."
+        description = "Fit Holt-Winters exponential smoothing model to a time series with trend and seasonality. Supports both additive (constant seasonal variation) and multiplicative (proportional variation) seasonality. Optimises the smoothing parameters alpha, beta and gamma that are not provided on [0, 1], as R's HoltWinters does. Can generate forecasts for future periods, with predict.HoltWinters' 95% prediction intervals for additive and non-seasonal fits (point forecasts only for multiplicative fits). Returns fitted values, residuals, optimized parameters, and seasonal coefficients. With a horizon, the history and forecasts are also saved as a dataset named in the reply's first line, which viz_line plots."
     )]
     pub async fn ts_holt_winters(
         &self,
@@ -1075,6 +1090,7 @@ impl AnalyticsServer {
         }
 
         // If forecast horizon was requested, generate forecasts
+        let mut table = None;
         if let Some(horizon) = request.horizon {
             if horizon > 0 {
                 // predict.HoltWinters' interval formula is wrong for multiplicative
@@ -1083,6 +1099,13 @@ impl AnalyticsServer {
                     result.seasonal_type == SeasonalType::Additive || result.gamma.is_none();
                 let forecasts = if with_intervals {
                     result.predict(horizon, 0.95).map(|fc| {
+                        table = Some(forecast_table(
+                            dataset,
+                            &request.column,
+                            &fc.forecast,
+                            None,
+                            Some((&fc.lower, &fc.upper)),
+                        ));
                         output.push_str(&format!(
                             "\nForecasts ({horizon} periods ahead; 95% prediction intervals as predict.HoltWinters):\n"
                         ));
@@ -1097,6 +1120,13 @@ impl AnalyticsServer {
                     })
                 } else {
                     holt_winters_forecast(&result, horizon).map(|forecasts| {
+                        table = Some(forecast_table(
+                            dataset,
+                            &request.column,
+                            &forecasts,
+                            None,
+                            None,
+                        ));
                         output.push_str(&format!("\nForecasts ({} periods ahead):\n", horizon));
                         for (i, val) in forecasts.iter().enumerate() {
                             output.push_str(&format!("  t+{}: {:.4}\n", i + 1, val));
@@ -1146,6 +1176,13 @@ impl AnalyticsServer {
         }
         output.push_str("...]\n");
 
+        drop(datasets);
+        if let Some(table) = table {
+            let saved = self
+                .save_forecast_table(&request.dataset, &request.column, table)
+                .await;
+            output = with_saved_forecast_line(saved, output);
+        }
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
@@ -2142,6 +2179,111 @@ fn arima_refusal(
         .map(limit_refusal)
 }
 
+/// The last line of every ARIMA reply.
+const NON_SEASONAL: &str = "Note: this is a non-seasonal ARIMA; it has no seasonal terms. For a \
+                            series with a seasonal pattern use ts_holt_winters.";
+
+/// The first columns of a saved forecast; the interval columns follow.
+const FORECAST_COLUMNS: [&str; 3] = ["time", "actual", "forecast"];
+const FORECAST_LIMITS: [&str; 4] = ["lower_95", "upper_95", "lower_80", "upper_80"];
+
+/// Whether `ds` has exactly the columns of a saved forecast.
+fn is_forecast_table(ds: &p2a_core::Dataset) -> bool {
+    let names = ds.df().get_column_names();
+    let mut names = names.iter().map(|n| n.as_str());
+    FORECAST_COLUMNS.iter().all(|c| names.next() == Some(c))
+        && names.zip(FORECAST_LIMITS).all(|(n, c)| n == c)
+        && matches!(ds.df().width(), 3 | 5 | 7)
+}
+
+/// Lower and upper limits.
+type Limits<'a> = Option<(&'a [f64], &'a [f64])>;
+
+/// The history of `column` followed by its forecasts, with the 95% and 80% limits there are.
+fn forecast_table(
+    dataset: &p2a_core::Dataset,
+    column: &str,
+    forecast: &[f64],
+    pi80: Limits<'_>,
+    pi95: Limits<'_>,
+) -> Result<p2a_core::Dataset, String> {
+    use p2a_core::polars::prelude::{Column, DataFrame};
+    let (history, _) =
+        numeric_column(dataset, column, NaPolicy::Fail).map_err(|e| e.to_string())?;
+    let (n, h) = (history.len(), forecast.len());
+    let after = |v: &[f64]| -> Vec<Option<f64>> {
+        std::iter::repeat_n(None, n)
+            .chain(v.iter().copied().map(Some))
+            .collect()
+    };
+    let actual: Vec<Option<f64>> = history
+        .into_iter()
+        .map(Some)
+        .chain(std::iter::repeat_n(None, h))
+        .collect();
+    let mut columns = vec![
+        p2a_core::data::dates::extended_time(dataset.df(), h, FORECAST_COLUMNS[0]),
+        Column::new(FORECAST_COLUMNS[1].into(), actual),
+        Column::new(FORECAST_COLUMNS[2].into(), after(forecast)),
+    ];
+    let limits = [pi95, pi80].into_iter().flatten();
+    for ((lower, upper), names) in limits.zip(FORECAST_LIMITS.chunks(2)) {
+        columns.push(Column::new(names[0].into(), after(lower)));
+        columns.push(Column::new(names[1].into(), after(upper)));
+    }
+    DataFrame::new(columns)
+        .map(p2a_core::Dataset::new)
+        .map_err(|e| e.to_string())
+}
+
+/// The reply with the saved-forecast line first (the chat loop keeps only the start of an
+/// earlier turn's tool result), or a note at the end when it could not be saved.
+fn with_saved_forecast_line(saved: Result<(String, Vec<String>), String>, text: String) -> String {
+    match saved {
+        Ok((name, columns)) => {
+            let band = if columns.iter().any(|c| c == FORECAST_LIMITS[0]) {
+                ", lower_column = 'lower_95', upper_column = 'upper_95'"
+            } else {
+                ""
+            };
+            format!(
+                "Forecast saved with the history as dataset '{name}' (columns {}); plot it with \
+                 viz_line(dataset = '{name}', x_column = 'time', y_columns = ['actual', \
+                 'forecast']{band}).\n\n{text}",
+                columns.join(", ")
+            )
+        }
+        Err(e) => format!("{text}\n\nNote: the forecast was not saved as a dataset: {e}"),
+    }
+}
+
+impl AnalyticsServer {
+    /// Saves a forecast as `<dataset>_forecast_<column>`, replacing an earlier forecast of that
+    /// name but never another dataset. Returns its name and columns.
+    async fn save_forecast_table(
+        &self,
+        dataset: &str,
+        column: &str,
+        table: Result<p2a_core::Dataset, String>,
+    ) -> Result<(String, Vec<String>), String> {
+        let table = table?;
+        let columns = table
+            .df()
+            .get_column_names()
+            .iter()
+            .map(|c| c.to_string())
+            .collect();
+        let mut datasets = self.datasets.write().await;
+        let name = crate::tools::handlers::regression::save_table(
+            &mut datasets,
+            &format!("{dataset}_forecast_{column}"),
+            table,
+            is_forecast_table,
+        );
+        Ok((name, columns))
+    }
+}
+
 /// The ARIMA specification of a request: R's defaults unless the options are given.
 fn arima_spec(
     p: usize,
@@ -2304,6 +2446,73 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// Forecasts are saved with their history, continue the months, plot with viz_line, and
+    /// never replace a dataset that is not a forecast.
+    #[tokio::test]
+    async fn forecasts_are_saved_as_datasets_viz_line_plots() {
+        use p2a_core::polars::prelude::*;
+        let y = seasonal(48);
+        let months: Vec<String> = (0..48)
+            .map(|i| format!("{}-{:02}", 1949 + i / 12, i % 12 + 1))
+            .collect();
+        let df = df!("month" => months, "y" => y).unwrap();
+        let server = AnalyticsServer::new();
+        {
+            let mut datasets = server.datasets.write().await;
+            datasets.insert("air".into(), p2a_core::Dataset::new(df.clone()));
+            datasets.insert("air_forecast_y".into(), p2a_core::Dataset::new(df));
+        }
+        let arima = serde_json::json!({
+            "dataset": "air", "column": "y", "p": 1, "d": 1, "q": 1, "horizon": 3
+        });
+        for _ in 0..2 {
+            let req = serde_json::from_value(arima.clone()).unwrap();
+            let r = server.ts_arima_forecast(Parameters(req)).await.unwrap();
+            let t = text_of(&r);
+            assert!(
+                t.starts_with("Forecast saved with the history as dataset 'air_forecast_y_2'")
+                    && t.ends_with(NON_SEASONAL),
+                "{t}"
+            );
+        }
+        {
+            let datasets = server.datasets.read().await;
+            assert_eq!(datasets.len(), 3);
+            let df = datasets["air_forecast_y_2"].df();
+            assert_eq!(df.shape(), (51, 7));
+            let time = df.column("time").unwrap().cast(&DataType::String).unwrap();
+            assert_eq!(time.str().unwrap().get(50), Some("1953-03-01"));
+            assert_eq!(df.column("actual").unwrap().null_count(), 3);
+            assert_eq!(df.column("upper_95").unwrap().null_count(), 48);
+        }
+        for seasonal in ["additive", "multiplicative"] {
+            let req = serde_json::from_value(serde_json::json!({
+                "dataset": "air", "column": "y", "period": 12, "seasonal": seasonal, "horizon": 12
+            }))
+            .unwrap();
+            let t = text_of(&server.ts_holt_winters(Parameters(req)).await.unwrap());
+            assert!(t.contains("as dataset 'air_forecast_y_2'"), "{t}");
+            assert_eq!(t.contains("lower_95"), seasonal == "additive", "{t}");
+            let mut plot = serde_json::json!({
+                "dataset": "air_forecast_y_2", "x_column": "time",
+                "y_columns": ["actual", "forecast"]
+            });
+            if seasonal == "additive" {
+                plot["lower_column"] = "lower_95".into();
+                plot["upper_column"] = "upper_95".into();
+            }
+            let req = serde_json::from_value(plot).unwrap();
+            let r = server.viz_line(Parameters(req)).await.unwrap();
+            assert_ne!(r.is_error, Some(true), "{}", text_of(&r));
+        }
+        let req = serde_json::from_value(serde_json::json!({
+            "dataset": "air", "x_column": "month", "y_columns": ["y"], "lower_column": "y"
+        }))
+        .unwrap();
+        let r = server.viz_line(Parameters(req)).await.unwrap();
+        assert!(text_of(&r).contains("go together"), "{}", text_of(&r));
     }
 
     async fn server_with_series(name: &str, y: &[f64]) -> AnalyticsServer {

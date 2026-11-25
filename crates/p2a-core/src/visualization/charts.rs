@@ -1,5 +1,6 @@
 //! Chart generation: histograms, scatter plots, box plots, line charts.
 
+use super::axis::XAxis;
 use super::colors::{CHART_PALETTE, DEFAULT_SERIES_COLOR, OUTLIER_COLOR, TREND_LINE_COLOR};
 use super::vector::{FigureBackend, SvgRecorder};
 use super::{DEFAULT_HEIGHT, DEFAULT_WIDTH, VisualizationError};
@@ -22,6 +23,9 @@ pub struct ChartConfig {
     pub label_font_size: u32,
     /// Font size for tick labels (default: 16)
     pub tick_font_size: u32,
+    /// The x values of a line chart or scatter plot are days since 1970-01-01 and are labelled
+    /// as dates (default: false)
+    pub x_dates: bool,
 }
 
 impl Default for ChartConfig {
@@ -35,6 +39,7 @@ impl Default for ChartConfig {
             title_font_size: 32,
             label_font_size: 20,
             tick_font_size: 16,
+            x_dates: false,
         }
     }
 }
@@ -355,7 +360,7 @@ pub fn scatter_plot(
             .margin(10)
             .x_label_area_size(40)
             .y_label_area_size(50)
-            .build_cartesian_2d(x_range, y_range)
+            .build_cartesian_2d(XAxis::new(x_range, config.x_dates), y_range)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
         chart
@@ -642,6 +647,64 @@ pub fn line_chart(
     series: &[(String, Vec<f64>, Vec<f64>)],
     config: ChartConfig,
 ) -> Result<LineChartResult, VisualizationError> {
+    line_chart_with_band(series, None, config)
+}
+
+/// A shaded band of a line chart; a NaN in any of the three values ends a stretch of it.
+pub struct Band {
+    pub label: String,
+    pub x: Vec<f64>,
+    pub lower: Vec<f64>,
+    pub upper: Vec<f64>,
+}
+
+impl Band {
+    /// The stretches of consecutive finite points, as (x, lower, upper).
+    fn stretches(&self) -> Vec<Vec<(f64, f64, f64)>> {
+        let mut out = vec![Vec::new()];
+        for ((&x, &lo), &hi) in self.x.iter().zip(&self.lower).zip(&self.upper) {
+            if x.is_finite() && lo.is_finite() && hi.is_finite() {
+                if let Some(stretch) = out.last_mut() {
+                    stretch.push((x, lo, hi));
+                }
+            } else {
+                out.push(Vec::new());
+            }
+        }
+        out.retain(|s: &Vec<_>| !s.is_empty());
+        out
+    }
+}
+
+/// The corner of the plot with the fewest points, for the legend (upper left first).
+fn emptiest_corner(
+    series: &[(String, Vec<f64>, Vec<f64>)],
+    (x_min, x_max): (f64, f64),
+    (y_min, y_max): (f64, f64),
+) -> SeriesLabelPosition {
+    use SeriesLabelPosition as P;
+    let corners = [P::UpperLeft, P::UpperRight, P::LowerLeft, P::LowerRight];
+    let mut counts = [0usize; 4];
+    for (_, xs, ys) in series {
+        for (x, y) in xs.iter().zip(ys) {
+            let (u, v) = ((x - x_min) / (x_max - x_min), (y - y_min) / (y_max - y_min));
+            for (i, count) in counts.iter_mut().enumerate() {
+                let across = if i % 2 == 0 { u < 0.3 } else { u > 0.7 };
+                let down = if i < 2 { v > 0.75 } else { v < 0.25 };
+                *count += usize::from(across && down);
+            }
+        }
+    }
+    let best = (0..4).min_by_key(|&i| counts[i]).unwrap_or(0);
+    corners.into_iter().nth(best).unwrap_or(P::UpperLeft)
+}
+
+/// [`line_chart`] with a shaded band behind the lines, such as prediction intervals.
+pub fn line_chart_with_band(
+    series: &[(String, Vec<f64>, Vec<f64>)],
+    band: Option<&Band>,
+    config: ChartConfig,
+) -> Result<LineChartResult, VisualizationError> {
     if series.is_empty() {
         return Err(VisualizationError::InvalidData(
             "No series provided".to_string(),
@@ -665,6 +728,14 @@ pub fn line_chart(
                 total_points += 1;
             }
         }
+    }
+
+    let stretches = band.map(Band::stretches).unwrap_or_default();
+    for (x, lo, hi) in stretches.iter().flatten() {
+        x_min = x_min.min(*x);
+        x_max = x_max.max(*x);
+        y_min = y_min.min(lo.min(*hi));
+        y_max = y_max.max(lo.max(*hi));
     }
 
     if total_points == 0 {
@@ -701,7 +772,7 @@ pub fn line_chart(
             .margin(10)
             .x_label_area_size(40)
             .y_label_area_size(50)
-            .build_cartesian_2d(x_range, y_range)
+            .build_cartesian_2d(XAxis::new(x_range, config.x_dates), y_range)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
         chart
@@ -712,6 +783,22 @@ pub fn line_chart(
             .axis_desc_style(("sans-serif", config.label_font_size))
             .draw()
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+
+        // The band, behind the lines
+        if let Some(band) = band {
+            // The colour of the last line, which the band belongs to.
+            let fill = colors[(series.len() - 1) % colors.len()].mix(0.25).filled();
+            let shapes = stretches.iter().map(|s| {
+                let upper = s.iter().map(|(x, _, hi)| (*x, *hi));
+                let lower = s.iter().rev().map(|(x, lo, _)| (*x, *lo));
+                Polygon::new(upper.chain(lower).collect::<Vec<_>>(), fill)
+            });
+            chart
+                .draw_series(shapes)
+                .map_err(|e| VisualizationError::PlottingError(e.to_string()))?
+                .label(&band.label)
+                .legend(move |(x, y)| Rectangle::new([(x, y - 5), (x + 20, y + 5)], fill));
+        }
 
         // Draw each series
         for (idx, (label, x_vals, y_vals)) in series.iter().enumerate() {
@@ -733,9 +820,12 @@ pub fn line_chart(
         }
 
         // Draw legend if multiple series
-        if series.len() > 1 {
-            chart
-                .configure_series_labels()
+        if series.len() > 1 || band.is_some() {
+            let mut legend = chart.configure_series_labels();
+            if band.is_some() || config.x_dates {
+                legend.position(emptiest_corner(series, (x_min, x_max), (y_min, y_max)));
+            }
+            legend
                 .background_style(WHITE.mix(0.8))
                 .border_style(BLACK)
                 .draw()
@@ -2788,6 +2878,21 @@ mod tests {
         ] {
             assert!(svg.unwrap().contains("<circle"));
         }
+    }
+
+    /// A gap ends a stretch of the band, and the band is in the vector version.
+    #[test]
+    fn bands_are_drawn_per_stretch() {
+        let x: Vec<f64> = (0..6).map(f64::from).collect();
+        let series = [("y".to_string(), x.clone(), wavy(6))];
+        let band = Band {
+            label: "b".into(),
+            x,
+            lower: vec![0.0, 0.0, f64::NAN, 0.0, 0.0, 0.0],
+            upper: vec![1.0; 6],
+        };
+        let r = line_chart_with_band(&series, Some(&band), ChartConfig::default()).unwrap();
+        assert_eq!(r.svg.unwrap().matches("Z\"/>").count(), 2);
     }
 
     /// A chart with too many shapes keeps its PNG and has no vector version.

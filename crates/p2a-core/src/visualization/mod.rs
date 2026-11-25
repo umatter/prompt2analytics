@@ -17,6 +17,7 @@
 //! - Interactive exploration of data
 //! - HTML output for web display
 
+mod axis;
 pub mod charts;
 pub mod colors;
 pub mod heatmap;
@@ -24,10 +25,10 @@ pub mod interactive;
 mod vector;
 
 pub use charts::{
-    BoxPlotResult, ChartConfig, CoefficientPlotResult, DendrogramResult, EventStudyResult,
+    Band, BoxPlotResult, ChartConfig, CoefficientPlotResult, DendrogramResult, EventStudyResult,
     HistogramResult, IrfPlotResult, LineChartResult, ResidualDiagnosticsResult, ScatterResult,
     box_plot, coefficient_plot, dendrogram, event_study_plot, histogram, irf_plot, line_chart,
-    residual_diagnostics, scatter_plot,
+    line_chart_with_band, residual_diagnostics, scatter_plot,
 };
 pub use colors::{
     BRAND_CYAN, BRAND_ORANGE, BRAND_ORANGE_DARK, BRAND_ORANGE_LIGHT, BRAND_SLATE, BRAND_TEAL,

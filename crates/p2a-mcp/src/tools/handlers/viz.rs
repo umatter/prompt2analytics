@@ -18,10 +18,11 @@ use crate::tools::requests::viz::*;
 use p2a_core::{
     ChartConfig,
     data::columns::{ColumnRequest, Columns, MissingSummary, NaPolicy},
+    data::dates::as_date_column,
     polars::prelude::{DataFrame, DataType},
     visualization::{
-        box_plot, coefficient_plot, correlation_heatmap, dendrogram, event_study_plot, histogram,
-        irf_plot, line_chart, residual_diagnostics, scatter_plot,
+        Band, box_plot, coefficient_plot, correlation_heatmap, dendrogram, event_study_plot,
+        histogram, irf_plot, line_chart_with_band, residual_diagnostics, scatter_plot,
     },
 };
 
@@ -112,8 +113,8 @@ fn linkage_rows(matrix: &[Vec<f64>]) -> Result<Vec<(usize, usize, f64, usize)>, 
 enum Role {
     /// A number (integers, floats, Decimal; Boolean as 0/1).
     Numeric,
-    /// An axis: a `Date` column as days since 1970-01-01, anything else as a number (a
-    /// `Datetime` is refused as not numeric).
+    /// An axis: dates (a `Date` or `Datetime` column, or text such as "1949-01") as days since
+    /// 1970-01-01, anything else as a number.
     Axis,
 }
 
@@ -123,6 +124,8 @@ enum Role {
 struct Plotted {
     cols: Columns,
     days: Vec<String>,
+    /// Whether the axis is in days.
+    dates: bool,
 }
 
 impl Plotted {
@@ -157,6 +160,22 @@ fn plotted_columns(
     min_rows: usize,
     context: &str,
 ) -> Result<Plotted, String> {
+    let mut df = df.clone();
+    let mut dates = false;
+    for &(name, _) in columns.iter().filter(|(_, role)| *role == Role::Axis) {
+        let Some(i) = df.get_column_index(name) else {
+            continue;
+        };
+        let column = &df.get_columns()[i];
+        if let Some(days) = as_date_column(column) {
+            dates = true;
+            df.replace_column(i, days.take_materialized_series())
+                .map_err(|e| e.to_string())?;
+        } else if column.dtype() == &DataType::String {
+            return Err(text_axis_error(&df, name));
+        }
+    }
+    let df = &df;
     let mut request = ColumnRequest::new(df)
         .na(NaPolicy::Omit)
         .allow_infinite(true)
@@ -175,15 +194,37 @@ fn plotted_columns(
         };
     }
     let cols = request.extract().map_err(|e| e.to_string())?;
-    Ok(Plotted { cols, days })
+    Ok(Plotted { cols, days, dates })
+}
+
+/// The refusal of a text x axis that does not hold dates, with the columns that would do.
+fn text_axis_error(df: &DataFrame, name: &str) -> String {
+    let usable: Vec<String> = df
+        .get_columns()
+        .iter()
+        .filter(|c| c.dtype().is_integer() || c.dtype().is_float() || as_date_column(c).is_some())
+        .map(|c| c.name().to_string())
+        .collect();
+    format!(
+        "Column '{name}' contains non-numeric values that are not all dates, so it cannot be the \
+         x axis. Text is read as dates when every value looks like 1949-01, 1949-01-31 or 1949Q1. \
+         Do not repeat this call: use another x column (numeric or date columns: {}), or \
+         viz_boxplot to compare groups.",
+        crate::tools::common::echo_list(&usable, ", ", 20)
+    )
 }
 
 /// A numeric column over every row, a missing value as NaN (for an optional band whose gaps
 /// are drawn as gaps); ±Inf kept.
 fn numeric_with_gaps(df: &DataFrame, name: &str) -> Result<Vec<f64>, String> {
-    let plotted = plotted_columns(df, &[(name, Role::Numeric)], 0, name)?;
+    with_gaps(df, name, Role::Numeric)
+}
+
+/// [`numeric_with_gaps`] for a column in any role.
+fn with_gaps(df: &DataFrame, name: &str, role: Role) -> Result<Vec<f64>, String> {
+    let plotted = plotted_columns(df, &[(name, role)], 0, name)?;
     let mut out = vec![f64::NAN; df.height()];
-    for (&row, &v) in plotted.rows().iter().zip(plotted.cols.numeric(name)) {
+    for (&row, v) in plotted.rows().iter().zip(plotted.values(name)) {
         out[row] = v;
     }
     Ok(out)
@@ -395,7 +436,7 @@ impl AnalyticsServer {
 
     /// Generate a scatter plot for two numeric columns.
     #[tool(
-        description = "Generate a scatter plot visualization showing the relationship between two numeric columns (a Date x column plots as days). Rows with a missing value in a plotted column are left out and counted. Returns a base64-encoded PNG image."
+        description = "Generate a scatter plot visualization showing the relationship between two numeric columns (a date x column, or text such as 1949-01, plots as dates). Rows with a missing value in a plotted column are left out and counted. Returns a base64-encoded PNG image."
     )]
     pub async fn viz_scatter(
         &self,
@@ -431,6 +472,7 @@ impl AnalyticsServer {
         config.title = request.title;
         config.x_label = Some(request.x_column.clone());
         config.y_label = Some(request.y_column.clone());
+        config.x_dates = plotted.dates;
 
         match scatter_plot(&x_values, &y_values, config) {
             Ok(result) => {
@@ -456,7 +498,7 @@ impl AnalyticsServer {
 
     /// Generate a line chart for time series or sequential data.
     #[tool(
-        description = "Generate a line chart visualization for time series or sequential data. Supports multiple Y series. Rows with a missing value in a plotted column are left out and counted, each series on its own. Returns a base64-encoded PNG image."
+        description = "Generate a line chart visualization for time series or sequential data. Supports multiple Y series. The x column is numeric or holds dates (date columns, or text such as 1949-01, 1949-01-31 or 1949Q1). lower_column and upper_column shade a band, such as the intervals of a saved forecast. Rows with a missing value in a plotted column are left out and counted, each series on its own. Returns a base64-encoded PNG image."
     )]
     pub async fn viz_line(
         &self,
@@ -477,6 +519,7 @@ impl AnalyticsServer {
         let mut series: Vec<(String, Vec<f64>, Vec<f64>)> = Vec::new();
         let mut series_names = Vec::new();
         let mut missing = Vec::new();
+        let mut x_dates = false;
         for y_col_name in &request.y_columns {
             let plotted = match plotted_columns(
                 dataset.df(),
@@ -487,6 +530,7 @@ impl AnalyticsServer {
                 Ok(p) => p,
                 Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
             };
+            x_dates = plotted.dates;
             series_names.push(y_col_name.clone());
             series.push((
                 y_col_name.clone(),
@@ -499,8 +543,36 @@ impl AnalyticsServer {
         let mut config = ChartConfig::default();
         config.title = request.title;
         config.x_label = Some(request.x_column.clone());
+        config.x_dates = x_dates;
+        if let [y] = request.y_columns.as_slice() {
+            config.y_label = Some(y.clone());
+        }
 
-        match line_chart(&series, config) {
+        let band = match (&request.lower_column, &request.upper_column) {
+            (None, None) => None,
+            (Some(lower), Some(upper)) => {
+                let df = dataset.df();
+                let read = || -> Result<Band, String> {
+                    Ok(Band {
+                        label: format!("{lower} to {upper}"),
+                        x: with_gaps(df, &request.x_column, Role::Axis)?,
+                        lower: numeric_with_gaps(df, lower)?,
+                        upper: numeric_with_gaps(df, upper)?,
+                    })
+                };
+                match read() {
+                    Ok(band) => Some(band),
+                    Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+                }
+            }
+            _ => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    "lower_column and upper_column go together: give both or neither",
+                )]));
+            }
+        };
+
+        match line_chart_with_band(&series, band.as_ref(), config) {
             Ok(result) => {
                 let mut description = format!(
                     "Line chart generated successfully.\nX: {}\nSeries: {}\nPoints: {}",
@@ -1473,6 +1545,8 @@ mod tests {
                 dataset: "d".into(),
                 x_column: "t".into(),
                 y_columns: vec!["y1".into(), "y2".into()],
+                lower_column: None,
+                upper_column: None,
                 title: None,
             })),
         ));
@@ -1589,10 +1663,10 @@ mod tests {
         assert!(text(&r).contains("Column 'names'"), "{}", text(&r));
     }
 
-    /// A `Date` x axis is plotted as days since 1970-01-01, a missing date dropping its row; a
-    /// `Datetime` x axis is refused as not numeric, naming the column.
+    /// A `Date` x axis is plotted as days since 1970-01-01, a missing date dropping its row;
+    /// so are a `Datetime` and text dates, while other text is refused with the usable columns.
     #[test]
-    fn date_axes_are_plotted_and_datetime_axes_refused() {
+    fn date_axes_are_plotted_and_other_text_refused() {
         let days = [
             Some(19_000i32),
             Some(19_001),
@@ -1602,7 +1676,9 @@ mod tests {
         ];
         let mut df = df!(
             "y" => [1.3, 1.9, 3.2, 3.8, 5.1],
-            "ms" => [1_000i64, 2_000, 3_000, 4_000, 5_000]
+            "ms" => [1_000i64, 2_000, 3_000, 4_000, 5_000],
+            "month" => ["1949-01", "1949-02", "1949-03", "1949-04", "1949-05"],
+            "name" => ["a", "b", "c", "1949-04", "1949-05"]
         )
         .unwrap();
         let date = Series::new("day".into(), days.as_slice())
@@ -1641,6 +1717,8 @@ mod tests {
                 dataset: "d".into(),
                 x_column: "day".into(),
                 y_columns: vec!["y".into()],
+                lower_column: None,
+                upper_column: None,
                 title: None,
             })),
         );
@@ -1648,10 +1726,19 @@ mod tests {
         assert!(text(&r).ends_with(note), "{}", text(&r));
 
         let r = scatter("stamp");
+        assert_ne!(r.is_error, Some(true), "{}", text(&r));
+        assert!(text(&r).contains("Points: 5"), "{}", text(&r));
+
+        let r = scatter("month");
+        assert_ne!(r.is_error, Some(true), "{}", text(&r));
+        assert!(text(&r).contains("Points: 5"), "{}", text(&r));
+
+        let r = scatter("name");
         assert_eq!(r.is_error, Some(true), "{}", text(&r));
         let t = text(&r);
         assert!(
-            t.contains("Column 'stamp'") && t.contains("non-numeric"),
+            t.contains("Column 'name' contains non-numeric")
+                && t.contains("y, ms, month, day, stamp"),
             "{t}"
         );
     }

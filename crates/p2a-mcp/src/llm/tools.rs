@@ -226,6 +226,7 @@ Invoke tools only through the tool-calling interface you were given; never write
 6. **SKIP EXPLORATION — CALL THE ANALYTICAL TOOL DIRECTLY.**
    - Do NOT call `head_dataset` or `describe_dataset` before cleaning, munging, or analysis — the dataset context below already provides column names, types, and sample values
    - Do NOT call `timeseries_acf` before `ts_arima_fit` — if the user doesn't specify ARIMA order, use reasonable defaults like ARIMA(1,0,1)
+   - ARIMA tools here are non-seasonal. For a seasonal model or seasonal data use `ts_holt_winters`; if the user asked for a seasonal ARIMA, say it is not available and that you used Holt-Winters
    - Do NOT call `iv_first_stage` before `iv_2sls` — 2SLS already includes first-stage diagnostics
    - Do NOT call `munge_filter` to split groups before a statistical test — pass column names directly to the test tool
    - When the user says "clean", "replace", or "fix values", call `str_replace_value` or `munge_filter` immediately — do NOT explore first

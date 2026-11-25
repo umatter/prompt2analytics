@@ -51,8 +51,8 @@ pub const EXAMPLES: [Example; 3] = [
     Example {
         name: "air_passengers",
         title: "Monthly airline passengers, 1949 to 1960",
-        question: "Fit a seasonal ARIMA and forecast the next 12 months.",
-        prompt: "Fit a seasonal ARIMA model to passengers in air_passengers (monthly data, frequency 12) and forecast the next 12 months.",
+        question: "Forecast the next 12 months with Holt-Winters.",
+        prompt: "Fit a Holt-Winters model with multiplicative seasonality to passengers in air_passengers (monthly data, period 12), forecast the next 12 months and plot the forecast.",
         csv: include_str!("../assets/examples/air_passengers.csv"),
         rows: 144,
         cols: 2,

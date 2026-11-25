@@ -1023,7 +1023,7 @@ Probit regression for binary outcomes.
 ## Time Series
 
 ### ts_arima_fit
-Fit an ARIMA(p,d,q) model.
+Fit a non-seasonal ARIMA(p,d,q) model (for seasonal data use `ts_holt_winters`).
 
 ```
 /ts_arima_fit dataset:sales column:revenue p:1 d:1 q:1
@@ -1051,7 +1051,7 @@ Generate forecasts from a fitted ARIMA model.
 - `horizon`: Forecast horizon (number of periods ahead)
 - `include_mean`, `include_drift` (optional): as for `ts_arima_fit`
 
-**Output includes:** the fitted model, point forecasts, standard errors and 80% / 95% prediction intervals, as R `forecast(Arima(x, order, method = 'CSS'))`.
+**Output includes:** the fitted model, point forecasts, standard errors and 80% / 95% prediction intervals, as R `forecast(Arima(x, order, method = 'CSS'))`. The history and forecasts are saved as the dataset `<dataset>_forecast_<column>` (`time`, `actual`, `forecast`, `lower_95`, `upper_95`, `lower_80`, `upper_80`); `time` continues the dataset's regular date or year column, else counts 1, 2, ... `ts_holt_winters` with a horizon saves its forecasts the same way.
 
 ### ts_mstl
 MSTL seasonal-trend decomposition.
@@ -1536,7 +1536,10 @@ Time series or multi-series line chart.
 
 ```
 /viz_line dataset:sales x_column:date y_columns:revenue,costs
+/viz_line dataset:sales_forecast_revenue x_column:time y_columns:actual,forecast lower_column:lower_95 upper_column:upper_95
 ```
+
+The x column is numeric or holds dates: a date column, or text in which every value looks like `1949-01`, `1949-01-31` or `1949Q1`.
 
 ### viz_boxplot
 Box plots for comparing distributions.

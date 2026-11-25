@@ -306,6 +306,19 @@ fn page(figure: &Figure) -> Result<String, VisualizationError> {
     ))
 }
 
+/// `df` with a text `x_col` that holds dates read as dates (`data::dates`).
+fn with_text_dates(df: &DataFrame, x_col: &str) -> DataFrame {
+    let mut df = df.clone();
+    if let Ok(x) = df.column(x_col)
+        && x.dtype() == &DataType::String
+        && let Some(dates) = crate::data::dates::as_date_column(x)
+        && let Some(i) = df.get_column_index(x_col)
+    {
+        let _ = df.replace_column(i, dates.take_materialized_series());
+    }
+    df
+}
+
 /// The plotted rows of `x` (and `y`), per trace: rows with a missing value are dropped, rows
 /// with an infinite one left out.
 struct Points {
@@ -426,6 +439,7 @@ pub fn scatter_interactive(
     group_col: Option<&str>,
     config: InteractiveConfig,
 ) -> Result<InteractivePlotResult, VisualizationError> {
+    let df = &with_text_dates(df, x_col);
     let (p, names) = points(df, x_col, Some(y_col), group_col)?;
     let warnings = p.warnings();
     let grouped = group_col.is_some();
@@ -522,6 +536,7 @@ pub fn line_interactive(
     y_col: &str,
     config: InteractiveConfig,
 ) -> Result<InteractivePlotResult, VisualizationError> {
+    let df = &with_text_dates(df, x_col);
     let (p, _) = points(df, x_col, Some(y_col), None)?;
     let warnings = p.warnings();
     let mut data = Vec::with_capacity(1);

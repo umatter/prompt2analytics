@@ -180,6 +180,7 @@ pub mod columns;
 #[cfg(feature = "database")]
 pub mod database;
 pub mod dataset;
+pub mod dates;
 pub mod loader;
 pub mod munging;
 pub mod quality;

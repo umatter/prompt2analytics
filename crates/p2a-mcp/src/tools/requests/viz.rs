@@ -60,7 +60,9 @@ pub struct LineChartRequest {
     pub dataset: String,
 
     /// X-axis column name
-    #[schemars(description = "Name of the column for X-axis values (e.g., time index).")]
+    #[schemars(
+        description = "Name of the column for X-axis values: numeric, or dates (date columns or text such as 1949-01)."
+    )]
     pub x_column: String,
 
     /// Y-axis column names (one or more series)
@@ -68,6 +70,18 @@ pub struct LineChartRequest {
         description = "Names of the columns to plot as lines (can be multiple for multi-series)."
     )]
     pub y_columns: Vec<String>,
+
+    /// Lower edge of a shaded band (optional)
+    #[schemars(
+        description = "Optional column with the lower edge of a shaded band (with upper_column), e.g. lower_95 of a saved forecast."
+    )]
+    pub lower_column: Option<String>,
+
+    /// Upper edge of a shaded band (optional)
+    #[schemars(
+        description = "Optional column with the upper edge of a shaded band (with lower_column), e.g. upper_95 of a saved forecast."
+    )]
+    pub upper_column: Option<String>,
 
     /// Chart title (optional)
     #[schemars(description = "Optional title for the chart.")]
@@ -173,7 +187,9 @@ pub struct LineInteractiveRequest {
     pub dataset: String,
 
     /// X-axis column name
-    #[schemars(description = "Name of the column for X-axis values (e.g., time index).")]
+    #[schemars(
+        description = "Name of the column for X-axis values: numeric, or dates (date columns or text such as 1949-01)."
+    )]
     pub x_column: String,
 
     /// Y-axis column name

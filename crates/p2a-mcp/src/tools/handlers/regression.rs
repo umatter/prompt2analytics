@@ -471,14 +471,24 @@ pub(crate) fn save_coefficient_table(
     base: &str,
     table: Result<Dataset, String>,
 ) -> Result<String, String> {
-    let table = table?;
-    let free = |name: &str| datasets.get(name).is_none_or(is_coefficient_table);
+    Ok(save_table(datasets, base, table?, is_coefficient_table))
+}
+
+/// Saves `table` under `base`, or `base_2`, `base_3`, ... while that names a dataset that is
+/// not `replaceable`. Returns the name.
+pub(crate) fn save_table(
+    datasets: &mut std::collections::HashMap<String, Dataset>,
+    base: &str,
+    table: Dataset,
+    replaceable: fn(&Dataset) -> bool,
+) -> String {
+    let free = |name: &str| datasets.get(name).is_none_or(replaceable);
     let name = std::iter::once(base.to_string())
         .chain((2..).map(|i| format!("{base}_{i}")))
         .find(|n| free(n))
         .expect("an unbounded sequence of names has a free one");
     datasets.insert(name.clone(), table);
-    Ok(name)
+    name
 }
 
 #[tool_router(router = regression_router, vis = "pub")]

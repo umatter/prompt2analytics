@@ -980,8 +980,24 @@ fn execute_line(
 
     match dataset {
         Some(ds) => {
+            // A date or text-date x column is plotted as days since 1970-01-01.
+            let dates = ds
+                .df()
+                .column(x_col)
+                .ok()
+                .and_then(p2a_core::data::dates::as_date_column)
+                .and_then(|c| c.cast(&p2a_core::polars::prelude::DataType::Float64).ok());
+            let mut df = ds.df().clone();
+            let x_dates = dates.is_some();
+            if let (Some(days), Some(i)) = (dates, df.get_column_index(x_col))
+                && let Err(e) = df.replace_column(i, days.take_materialized_series())
+            {
+                print_error(&e.to_string(), format);
+                return Ok(());
+            }
             // Complete (x, y) pairs only.
-            let cols = match complete_rows(ds, &[x_col, y_col], 1, "line") {
+            let cols = match complete_rows(&p2a_core::Dataset::new(df), &[x_col, y_col], 1, "line")
+            {
                 Ok(c) => c,
                 Err(e) => {
                     print_error(&e, format);
@@ -1000,6 +1016,7 @@ fn execute_line(
                 height: 600,
                 x_label: Some(x_col.to_string()),
                 y_label: Some(y_col.to_string()),
+                x_dates,
                 ..Default::default()
             };
 
