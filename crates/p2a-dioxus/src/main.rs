@@ -14,6 +14,7 @@ mod components;
 mod examples;
 mod exhibit;
 mod export;
+mod figure_pdf;
 mod platform;
 mod state;
 mod utils;

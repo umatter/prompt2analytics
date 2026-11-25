@@ -1,7 +1,8 @@
 //! Visualization module for creating charts and plots.
 //!
 //! This module provides two types of visualizations:
-//! - **Static charts** (via `plotters`): Generate PNG images encoded as base64 strings
+//! - **Static charts** (via `plotters`): Generate PNG images encoded as base64 strings, each
+//!   with a vector version (SVG) up to [`MAX_SVG_BYTES`]
 //! - **Interactive charts**: a Plotly figure written as JSON into an HTML page that loads
 //!   plotly.js 3.0.1 and MathJax from cdn.plot.ly and cdn.jsdelivr.net when opened; viewing needs
 //!   network access (docs/guides/DATA_SECURITY.md). Values are kept in double precision.
@@ -20,6 +21,7 @@ pub mod charts;
 pub mod colors;
 pub mod heatmap;
 pub mod interactive;
+mod vector;
 
 pub use charts::{
     BoxPlotResult, ChartConfig, CoefficientPlotResult, DendrogramResult, EventStudyResult,
@@ -37,6 +39,8 @@ pub use interactive::{
     InteractiveConfig, InteractivePlotResult, histogram_interactive, line_interactive,
     scatter_interactive,
 };
+
+pub use vector::MAX_SVG_BYTES;
 
 use thiserror::Error;
 

@@ -99,6 +99,7 @@ impl DbConnection {
                 stored.result.as_deref(),
                 stored.error.as_deref(),
                 stored.images.as_deref(),
+                stored.image_svgs.as_deref(),
             );
             let tool_call = db
                 .fit_tool_call_texts(session_id.as_deref(), tool_call, replaced)
@@ -243,7 +244,8 @@ impl DbConnection {
         .await
     }
 
-    /// Store the images (base64 PNG) tool call `id` returned, in its
+    /// Store the images (base64 PNG) tool call `id` returned, each with its
+    /// vector version (SVG; empty: none), in its
     /// conversation's turn, like [`create_tool_call`](Self::create_tool_call),
     /// replacing any stored ones. An image is kept whole or not at all: one
     /// longer than `message_bytes`, or than what the session has left under
@@ -253,7 +255,7 @@ impl DbConnection {
     pub async fn set_tool_call_images(
         &self,
         id: &str,
-        images: Vec<String>,
+        images: Vec<(String, String)>,
     ) -> Result<ToolCall, DbError> {
         self.check_memory()?;
         let conversation_id = self.get_tool_call(id).await?.conversation_id;
@@ -265,7 +267,8 @@ impl DbConnection {
             // took the row, and no bytes may be counted for a write that
             // finds none.
             let stored = db.get_tool_call(&id).await?;
-            let replaced = images_len(stored.images.as_deref());
+            let replaced = images_len(stored.images.as_deref())
+                .saturating_add(images_len(stored.image_svgs.as_deref()));
             let mut images = images;
             let session_id = if db.tracks_session_bytes() {
                 Some(
@@ -278,11 +281,17 @@ impl DbConnection {
             };
             db.fit_session_images(session_id.as_deref(), &mut images, replaced)
                 .await?;
+            let (images, svgs): (Vec<String>, Vec<String>) = images.into_iter().unzip();
+            let svgs = Some(svgs).filter(|s| s.iter().any(|svg| !svg.is_empty()));
             let mut result = db
                 .db()
-                .query("UPDATE tool_calls SET images = $images WHERE id = $id RETURN AFTER")
+                .query(
+                    "UPDATE tool_calls SET images = $images, image_svgs = $svgs \
+                     WHERE id = $id RETURN AFTER",
+                )
                 .bind(("id", RecordId::new("tool_calls", id.as_str())))
                 .bind(("images", images))
+                .bind(("svgs", svgs))
                 .await?;
             let updated: Option<ToolCall> = result.take(0)?;
             let updated =

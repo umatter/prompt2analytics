@@ -84,6 +84,10 @@ tracing = "0.1"
 # Image encoding
 base64.workspace = true
 
+# PDF export of figures: glyph widths of the embedded font, stream compression
+ttf-parser = { version = "0.20", default-features = false }
+miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
+
 # ============================================================================
 # Web-only dependencies (optional)
 # ============================================================================

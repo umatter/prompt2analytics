@@ -167,9 +167,9 @@ mod dispatch {
             .content
             .iter()
             .find_map(|c| match c {
-                ContentItem::Image { data, mime_type } if mime_type == "image/png" => {
-                    Some(data.clone())
-                }
+                ContentItem::Image {
+                    data, mime_type, ..
+                } if mime_type == "image/png" => Some(data.clone()),
                 _ => None,
             })
             .expect("a PNG image");

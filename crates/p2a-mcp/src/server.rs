@@ -853,7 +853,20 @@ impl AnalyticsServer {
             .dispatch_tool(tool_name, arguments)
             .await
             .map_err(|e| bound_error_message(e, &limits))?;
-        let output_bytes = crate::audit::ResultSummary::of_tool_result(&result).output_bytes();
+        let mut output_bytes = crate::audit::ResultSummary::of_tool_result(&result).output_bytes();
+        // The vector versions of the charts are an extra: a result above the
+        // cap goes out without them before it is refused.
+        if limits
+            .response_bytes
+            .is_some_and(|max| output_bytes as u64 > max as u64)
+        {
+            for item in &mut result.content {
+                if let crate::transport::http::ContentItem::Image { svg, .. } = item {
+                    *svg = None;
+                }
+            }
+            output_bytes = crate::audit::ResultSummary::of_tool_result(&result).output_bytes();
+        }
         check_response_size(&limits, tool_name, output_bytes).map_err(log_and_convert)?;
         fit_error_copy(&mut result, &limits);
         Ok(result)
@@ -879,13 +892,14 @@ impl AnalyticsServer {
             let content: Vec<ContentItem> = call_result
                 .content
                 .into_iter()
-                .filter_map(|c| match &c.raw {
+                .filter_map(|c| match c.raw {
                     RawContent::Text(text_content) => Some(ContentItem::Text {
-                        text: text_content.text.clone(),
+                        text: text_content.text,
                     }),
-                    RawContent::Image(img) => Some(ContentItem::Image {
-                        data: img.data.clone(),
-                        mime_type: img.mime_type.clone(),
+                    RawContent::Image(mut img) => Some(ContentItem::Image {
+                        svg: crate::tools::common::take_svg(&mut img),
+                        data: img.data,
+                        mime_type: img.mime_type,
                     }),
                     _ => None,
                 })
@@ -1802,7 +1816,7 @@ impl ServerHandler for AnalyticsServer {
             }
             checked.map_err(|v| (limit_error(v), "limit_exceeded"))?;
             // An unknown name gets the router's own error.
-            let result = self
+            let mut result = self
                 .tool_router
                 .call(ToolCallContext::new(self, request, context))
                 .await
@@ -1818,6 +1832,12 @@ impl ServerHandler for AnalyticsServer {
                     };
                     (e, code)
                 })?;
+            // The vector versions of the charts are for p2a's own frontend.
+            for item in &mut result.content {
+                if let RawContent::Image(image) = &mut item.raw {
+                    crate::tools::common::take_svg(image);
+                }
+            }
             let output_bytes = crate::audit::ResultSummary::of_call_result(&result).output_bytes();
             check_response_size(&limits, &tool, output_bytes)
                 .map_err(|v| (limit_error(v), "limit_exceeded"))?;

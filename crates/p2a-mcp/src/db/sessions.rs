@@ -284,6 +284,7 @@ pub(super) struct ToolCallText {
     result: Option<String>,
     error: Option<String>,
     images: Option<Vec<String>>,
+    image_svgs: Option<Vec<String>>,
 }
 
 /// UTF-8 bytes of the messages' contents.
@@ -302,13 +303,14 @@ pub(super) fn tool_call_text_bytes(rows: &[ToolCallText]) -> u64 {
                 t.result.as_deref(),
                 t.error.as_deref(),
                 t.images.as_deref(),
+                t.image_svgs.as_deref(),
             )
         })
         .fold(0u64, u64::saturating_add)
 }
 
 /// The bytes of one tool call's texts that the `session_db_bytes` budget
-/// counts: its arguments, result, error and images. The one definition for
+/// counts: its arguments, result, error, images and their vector versions. The one definition for
 /// both sides of the counter, the writes that count bytes and the seed and
 /// deletes that read what is stored, so the two cannot drift apart.
 pub(super) fn tool_call_texts_len(
@@ -316,12 +318,14 @@ pub(super) fn tool_call_texts_len(
     result: Option<&str>,
     error: Option<&str>,
     images: Option<&[String]>,
+    image_svgs: Option<&[String]>,
 ) -> u64 {
     let len = |s: &str| s.len() as u64;
     len(arguments)
         .saturating_add(result.map_or(0, len))
         .saturating_add(error.map_or(0, len))
         .saturating_add(images_len(images))
+        .saturating_add(images_len(image_svgs))
 }
 
 /// The bytes of a tool call's stored images (their base64 text).
@@ -598,7 +602,7 @@ impl DbConnection {
             .db()
             .query("SELECT content FROM messages WHERE conversation_id = $id")
             .query(
-                "SELECT arguments, result, error, images FROM tool_calls WHERE conversation_id = $id",
+                "SELECT arguments, result, error, images, image_svgs FROM tool_calls WHERE conversation_id = $id",
             )
             .bind(("id", conversation_id.to_string()))
             .await?;

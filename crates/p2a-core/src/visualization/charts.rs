@@ -1,6 +1,7 @@
 //! Chart generation: histograms, scatter plots, box plots, line charts.
 
 use super::colors::{CHART_PALETTE, DEFAULT_SERIES_COLOR, OUTLIER_COLOR, TREND_LINE_COLOR};
+use super::vector::{FigureBackend, SvgRecorder};
 use super::{DEFAULT_HEIGHT, DEFAULT_WIDTH, VisualizationError};
 use crate::resource;
 use crate::traits::convergence::{ResultNotes, notes_text};
@@ -42,6 +43,9 @@ impl Default for ChartConfig {
 pub struct HistogramResult {
     /// Base64-encoded PNG image
     pub image_base64: String,
+    /// Vector version of the image (SVG); None when it would be larger than
+    /// [`MAX_SVG_BYTES`](super::MAX_SVG_BYTES)
+    pub svg: Option<String>,
     /// Number of bins used
     pub bins: usize,
     /// Minimum value in data
@@ -188,9 +192,10 @@ pub fn histogram(
 
     // Create image buffer
     let mut buffer = rgb_buffer(config.width, config.height)?;
+    let mut recorder = SvgRecorder::new(config.width, config.height);
 
     {
-        let root = BitMapBackend::with_buffer(&mut buffer, (config.width, config.height))
+        let root = FigureBackend::new(&mut buffer, &mut recorder, (config.width, config.height))
             .into_drawing_area();
         root.fill(&WHITE)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
@@ -237,9 +242,11 @@ pub fn histogram(
 
     // Encode as PNG then base64
     let image_base64 = encode_rgb_to_png_base64(&buffer, config.width, config.height)?;
+    let svg = recorder.finish();
 
     Ok(HistogramResult {
         image_base64,
+        svg,
         bins: n_bins,
         min: min_val,
         max: max_val,
@@ -253,6 +260,9 @@ pub fn histogram(
 pub struct ScatterResult {
     /// Base64-encoded PNG image
     pub image_base64: String,
+    /// Vector version of the image (SVG); None when it would be larger than
+    /// [`MAX_SVG_BYTES`](super::MAX_SVG_BYTES)
+    pub svg: Option<String>,
     /// Number of points plotted
     pub n_points: usize,
     /// Correlation coefficient (if calculated)
@@ -328,9 +338,10 @@ pub fn scatter_plot(
 
     // Create image buffer
     let mut buffer = rgb_buffer(config.width, config.height)?;
+    let mut recorder = SvgRecorder::new(config.width, config.height);
 
     {
-        let root = BitMapBackend::with_buffer(&mut buffer, (config.width, config.height))
+        let root = FigureBackend::new(&mut buffer, &mut recorder, (config.width, config.height))
             .into_drawing_area();
         root.fill(&WHITE)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
@@ -370,9 +381,11 @@ pub fn scatter_plot(
     }
 
     let image_base64 = encode_rgb_to_png_base64(&buffer, config.width, config.height)?;
+    let svg = recorder.finish();
 
     Ok(ScatterResult {
         image_base64,
+        svg,
         n_points: points.len(),
         correlation,
     })
@@ -382,6 +395,9 @@ pub fn scatter_plot(
 pub struct BoxPlotResult {
     /// Base64-encoded PNG image
     pub image_base64: String,
+    /// Vector version of the image (SVG); None when it would be larger than
+    /// [`MAX_SVG_BYTES`](super::MAX_SVG_BYTES)
+    pub svg: Option<String>,
     /// Statistics for each group
     pub statistics: Vec<BoxPlotStats>,
 }
@@ -480,9 +496,10 @@ pub fn box_plot(
 
     // Create image buffer
     let mut buffer = rgb_buffer(config.width, config.height)?;
+    let mut recorder = SvgRecorder::new(config.width, config.height);
 
     {
-        let root = BitMapBackend::with_buffer(&mut buffer, (config.width, config.height))
+        let root = FigureBackend::new(&mut buffer, &mut recorder, (config.width, config.height))
             .into_drawing_area();
         root.fill(&WHITE)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
@@ -583,9 +600,11 @@ pub fn box_plot(
     }
 
     let image_base64 = encode_rgb_to_png_base64(&buffer, config.width, config.height)?;
+    let svg = recorder.finish();
 
     Ok(BoxPlotResult {
         image_base64,
+        svg,
         statistics,
     })
 }
@@ -594,6 +613,9 @@ pub fn box_plot(
 pub struct LineChartResult {
     /// Base64-encoded PNG image
     pub image_base64: String,
+    /// Vector version of the image (SVG); None when it would be larger than
+    /// [`MAX_SVG_BYTES`](super::MAX_SVG_BYTES)
+    pub svg: Option<String>,
     /// Number of data points
     pub n_points: usize,
     /// Number of series
@@ -662,9 +684,10 @@ pub fn line_chart(
 
     // Create image buffer
     let mut buffer = rgb_buffer(config.width, config.height)?;
+    let mut recorder = SvgRecorder::new(config.width, config.height);
 
     {
-        let root = BitMapBackend::with_buffer(&mut buffer, (config.width, config.height))
+        let root = FigureBackend::new(&mut buffer, &mut recorder, (config.width, config.height))
             .into_drawing_area();
         root.fill(&WHITE)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
@@ -724,9 +747,11 @@ pub fn line_chart(
     }
 
     let image_base64 = encode_rgb_to_png_base64(&buffer, config.width, config.height)?;
+    let svg = recorder.finish();
 
     Ok(LineChartResult {
         image_base64,
+        svg,
         n_points: total_points,
         n_series: series.len(),
     })
@@ -736,6 +761,9 @@ pub fn line_chart(
 pub struct EventStudyResult {
     /// Base64-encoded PNG image
     pub image_base64: String,
+    /// Vector version of the image (SVG); None when it would be larger than
+    /// [`MAX_SVG_BYTES`](super::MAX_SVG_BYTES)
+    pub svg: Option<String>,
     /// Number of time periods
     pub n_periods: usize,
     /// Treatment period (if identified)
@@ -830,9 +858,10 @@ pub fn event_study_plot(
 
     // Create image buffer
     let mut buffer = rgb_buffer(config.width, config.height)?;
+    let mut recorder = SvgRecorder::new(config.width, config.height);
 
     {
-        let root = BitMapBackend::with_buffer(&mut buffer, (config.width, config.height))
+        let root = FigureBackend::new(&mut buffer, &mut recorder, (config.width, config.height))
             .into_drawing_area();
         root.fill(&WHITE)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
@@ -927,9 +956,11 @@ pub fn event_study_plot(
     }
 
     let image_base64 = encode_rgb_to_png_base64(&buffer, config.width, config.height)?;
+    let svg = recorder.finish();
 
     Ok(EventStudyResult {
         image_base64,
+        svg,
         n_periods: valid_points.len(),
         treatment_period,
     })
@@ -939,6 +970,9 @@ pub fn event_study_plot(
 pub struct CoefficientPlotResult {
     /// Base64-encoded PNG image
     pub image_base64: String,
+    /// Vector version of the image (SVG); None when it would be larger than
+    /// [`MAX_SVG_BYTES`](super::MAX_SVG_BYTES)
+    pub svg: Option<String>,
     /// Number of coefficients plotted
     pub n_coefficients: usize,
 }
@@ -1022,9 +1056,10 @@ pub fn coefficient_plot(
 
     // Create image buffer
     let mut buffer = rgb_buffer(config.width, config.height)?;
+    let mut recorder = SvgRecorder::new(config.width, config.height);
 
     {
-        let root = BitMapBackend::with_buffer(&mut buffer, (config.width, config.height))
+        let root = FigureBackend::new(&mut buffer, &mut recorder, (config.width, config.height))
             .into_drawing_area();
         root.fill(&WHITE)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
@@ -1163,9 +1198,11 @@ pub fn coefficient_plot(
     }
 
     let image_base64 = encode_rgb_to_png_base64(&buffer, config.width, config.height)?;
+    let svg = recorder.finish();
 
     Ok(CoefficientPlotResult {
         image_base64,
+        svg,
         n_coefficients: valid_coefs.len(),
     })
 }
@@ -1174,6 +1211,9 @@ pub fn coefficient_plot(
 pub struct IrfPlotResult {
     /// Base64-encoded PNG image
     pub image_base64: String,
+    /// Vector version of the image (SVG); None when it would be larger than
+    /// [`MAX_SVG_BYTES`](super::MAX_SVG_BYTES)
+    pub svg: Option<String>,
     /// Number of horizons
     pub n_horizons: usize,
     /// Shock variable name
@@ -1308,9 +1348,10 @@ pub fn irf_plot(
 
     // Create image buffer
     let mut buffer = rgb_buffer(config.width, config.height)?;
+    let mut recorder = SvgRecorder::new(config.width, config.height);
 
     {
-        let root = BitMapBackend::with_buffer(&mut buffer, (config.width, config.height))
+        let root = FigureBackend::new(&mut buffer, &mut recorder, (config.width, config.height))
             .into_drawing_area();
         root.fill(&WHITE)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
@@ -1404,9 +1445,11 @@ pub fn irf_plot(
     }
 
     let image_base64 = encode_rgb_to_png_base64(&buffer, config.width, config.height)?;
+    let svg = recorder.finish();
 
     Ok(IrfPlotResult {
         image_base64,
+        svg,
         n_horizons: valid_points.len(),
         shock: shock_label.map(String::from),
         response: response_label.map(String::from),
@@ -1417,12 +1460,20 @@ pub fn irf_plot(
 pub struct ResidualDiagnosticsResult {
     /// Residuals vs Fitted values plot (base64 PNG)
     pub residuals_vs_fitted: String,
+    /// Its vector version (SVG), as [`ScatterResult::svg`]
+    pub residuals_vs_fitted_svg: Option<String>,
     /// Q-Q plot for normality (base64 PNG)
     pub qq_plot: String,
+    /// Its vector version (SVG), as [`ScatterResult::svg`]
+    pub qq_plot_svg: Option<String>,
     /// Scale-Location plot (base64 PNG)
     pub scale_location: String,
+    /// Its vector version (SVG), as [`ScatterResult::svg`]
+    pub scale_location_svg: Option<String>,
     /// Residuals vs Leverage plot (base64 PNG)
     pub residuals_vs_leverage: String,
+    /// Its vector version (SVG), as [`ScatterResult::svg`]
+    pub residuals_vs_leverage_svg: Option<String>,
     /// Number of observations
     pub n_observations: usize,
     /// Standardized residuals (R's `rstandard`); NaN at leverage one
@@ -1645,11 +1696,12 @@ pub fn residual_diagnostics_with(
     let fitted_plotted = pick(&fitted_valid);
     let standardized_plotted = pick(&standardized_residuals);
 
-    let residuals_vs_fitted =
+    let (residuals_vs_fitted, residuals_vs_fitted_svg) =
         generate_residuals_vs_fitted(&fitted_valid, &residuals_valid, &config)?;
-    let qq_plot = generate_qq_plot(&standardized_plotted, &config)?;
-    let scale_location = generate_scale_location(&fitted_plotted, &standardized_plotted, &config)?;
-    let residuals_vs_leverage = generate_residuals_vs_leverage(
+    let (qq_plot, qq_plot_svg) = generate_qq_plot(&standardized_plotted, &config)?;
+    let (scale_location, scale_location_svg) =
+        generate_scale_location(&fitted_plotted, &standardized_plotted, &config)?;
+    let (residuals_vs_leverage, residuals_vs_leverage_svg) = generate_residuals_vs_leverage(
         &pick(&leverage_valid),
         &standardized_plotted,
         &pick(&cooks_distance),
@@ -1659,9 +1711,13 @@ pub fn residual_diagnostics_with(
 
     Ok(ResidualDiagnosticsResult {
         residuals_vs_fitted,
+        residuals_vs_fitted_svg,
         qq_plot,
+        qq_plot_svg,
         scale_location,
+        scale_location_svg,
         residuals_vs_leverage,
+        residuals_vs_leverage_svg,
         n_observations: n_valid,
         standardized_residuals,
         cooks_distance,
@@ -1738,7 +1794,7 @@ fn generate_residuals_vs_fitted(
     fitted: &[f64],
     residuals: &[f64],
     config: &ChartConfig,
-) -> Result<String, VisualizationError> {
+) -> Result<(String, Option<String>), VisualizationError> {
     let x_min = fitted.iter().copied().fold(f64::INFINITY, f64::min);
     let x_max = fitted.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     let y_min = residuals.iter().copied().fold(f64::INFINITY, f64::min);
@@ -1755,9 +1811,10 @@ fn generate_residuals_vs_fitted(
     let y_range = checked_axis_range(y_min_adj, y_max_adj, "y")?;
 
     let mut buffer = rgb_buffer(config.width, config.height)?;
+    let mut recorder = SvgRecorder::new(config.width, config.height);
 
     {
-        let root = BitMapBackend::with_buffer(&mut buffer, (config.width, config.height))
+        let root = FigureBackend::new(&mut buffer, &mut recorder, (config.width, config.height))
             .into_drawing_area();
         root.fill(&WHITE)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
@@ -1811,7 +1868,8 @@ fn generate_residuals_vs_fitted(
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
     }
 
-    encode_rgb_to_png_base64(&buffer, config.width, config.height)
+    let png = encode_rgb_to_png_base64(&buffer, config.width, config.height)?;
+    Ok((png, recorder.finish()))
 }
 
 /// The abscissae of a normal Q-Q plot: R's `qnorm(ppoints(n))`.
@@ -1829,7 +1887,7 @@ fn qq_theoretical_quantiles(n: usize) -> Result<Vec<f64>, VisualizationError> {
 fn generate_qq_plot(
     standardized_residuals: &[f64],
     config: &ChartConfig,
-) -> Result<String, VisualizationError> {
+) -> Result<(String, Option<String>), VisualizationError> {
     // Sort residuals
     let mut sorted_residuals: Vec<f64> = standardized_residuals.to_vec();
     sorted_residuals.sort_by(f64::total_cmp);
@@ -1855,9 +1913,10 @@ fn generate_qq_plot(
     let y_range = checked_axis_range(y_min - y_pad, y_max + y_pad, "y")?;
 
     let mut buffer = rgb_buffer(config.width, config.height)?;
+    let mut recorder = SvgRecorder::new(config.width, config.height);
 
     {
-        let root = BitMapBackend::with_buffer(&mut buffer, (config.width, config.height))
+        let root = FigureBackend::new(&mut buffer, &mut recorder, (config.width, config.height))
             .into_drawing_area();
         root.fill(&WHITE)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
@@ -1905,7 +1964,8 @@ fn generate_qq_plot(
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
     }
 
-    encode_rgb_to_png_base64(&buffer, config.width, config.height)
+    let png = encode_rgb_to_png_base64(&buffer, config.width, config.height)?;
+    Ok((png, recorder.finish()))
 }
 
 /// Generate Scale-Location plot.
@@ -1913,7 +1973,7 @@ fn generate_scale_location(
     fitted: &[f64],
     standardized_residuals: &[f64],
     config: &ChartConfig,
-) -> Result<String, VisualizationError> {
+) -> Result<(String, Option<String>), VisualizationError> {
     // Calculate sqrt of absolute standardized residuals
     let sqrt_abs_resid: Vec<f64> = standardized_residuals
         .iter()
@@ -1934,9 +1994,10 @@ fn generate_scale_location(
     let y_range = checked_axis_range(0.0, y_max + y_pad, "y")?;
 
     let mut buffer = rgb_buffer(config.width, config.height)?;
+    let mut recorder = SvgRecorder::new(config.width, config.height);
 
     {
-        let root = BitMapBackend::with_buffer(&mut buffer, (config.width, config.height))
+        let root = FigureBackend::new(&mut buffer, &mut recorder, (config.width, config.height))
             .into_drawing_area();
         root.fill(&WHITE)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
@@ -1982,7 +2043,8 @@ fn generate_scale_location(
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
     }
 
-    encode_rgb_to_png_base64(&buffer, config.width, config.height)
+    let png = encode_rgb_to_png_base64(&buffer, config.width, config.height)?;
+    Ok((png, recorder.finish()))
 }
 
 /// Generate Residuals vs Leverage plot.
@@ -1992,7 +2054,7 @@ fn generate_residuals_vs_leverage(
     cooks_distance: &[f64],
     n_params: usize,
     config: &ChartConfig,
-) -> Result<String, VisualizationError> {
+) -> Result<(String, Option<String>), VisualizationError> {
     let x_min = 0.0;
     let x_max = leverage.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     let y_min = standardized_residuals
@@ -2015,9 +2077,10 @@ fn generate_residuals_vs_leverage(
     let y_range = checked_axis_range(y_min - y_pad, y_max + y_pad, "y")?;
 
     let mut buffer = rgb_buffer(config.width, config.height)?;
+    let mut recorder = SvgRecorder::new(config.width, config.height);
 
     {
-        let root = BitMapBackend::with_buffer(&mut buffer, (config.width, config.height))
+        let root = FigureBackend::new(&mut buffer, &mut recorder, (config.width, config.height))
             .into_drawing_area();
         root.fill(&WHITE)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
@@ -2098,7 +2161,8 @@ fn generate_residuals_vs_leverage(
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
     }
 
-    encode_rgb_to_png_base64(&buffer, config.width, config.height)
+    let png = encode_rgb_to_png_base64(&buffer, config.width, config.height)?;
+    Ok((png, recorder.finish()))
 }
 
 /// Calculate a simple smoothing line (local regression approximation).
@@ -2316,6 +2380,9 @@ pub(super) fn encode_rgb_to_png_base64(
 pub struct DendrogramResult {
     /// Base64-encoded PNG image
     pub image_base64: String,
+    /// Vector version of the image (SVG); None when it would be larger than
+    /// [`MAX_SVG_BYTES`](super::MAX_SVG_BYTES)
+    pub svg: Option<String>,
     /// Number of original samples
     pub n_samples: usize,
     /// Number of merges shown
@@ -2359,8 +2426,10 @@ pub fn dendrogram(
 
     // Create drawing area
     let mut buffer = rgb_buffer(width, height)?;
+    let mut recorder = SvgRecorder::new(width, height);
     {
-        let root = BitMapBackend::with_buffer(&mut buffer, (width, height)).into_drawing_area();
+        let root =
+            FigureBackend::new(&mut buffer, &mut recorder, (width, height)).into_drawing_area();
         root.fill(&WHITE)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
@@ -2523,9 +2592,11 @@ pub fn dendrogram(
     }
 
     let image_base64 = encode_rgb_to_png_base64(&buffer, width, height)?;
+    let svg = recorder.finish();
 
     Ok(DendrogramResult {
         image_base64,
+        svg,
         n_samples,
         n_merges,
         max_distance,
@@ -2686,6 +2757,88 @@ mod tests {
             e.contains("only p = 2 (one regressor and an intercept)"),
             "{e}"
         );
+    }
+
+    /// Every static chart has a vector version, and recording it leaves the PNG as the bitmap
+    /// backend alone draws it.
+    #[test]
+    fn charts_have_a_vector_version() {
+        let x = wavy(60);
+        let y: Vec<f64> = x.iter().map(|v| v * 0.5 + (v * 9.0).sin()).collect();
+        let mut config = ChartConfig::default();
+        config.title = Some("a < b & \"c\"".to_string());
+        let scatter = scatter_plot(&x, &y, config).unwrap().svg.unwrap();
+        assert!(scatter.starts_with("<svg ") && scatter.ends_with("</svg>"));
+        assert_eq!(scatter.matches("<circle").count(), 60);
+        assert!(scatter.contains(">a &lt; b &amp; &quot;c&quot;</text>"));
+        assert!(scatter.contains("rotate(270 ")); // the y-axis title
+        assert_eq!(
+            scatter.matches("<g ").count(),
+            scatter.matches("</g>").count()
+        );
+
+        let config = ChartConfig::default();
+        assert!(histogram(&x, None, config.clone()).unwrap().svg.is_some());
+        let r = residual_diagnostics(&x, &y, None, config).unwrap();
+        for svg in [
+            r.residuals_vs_fitted_svg,
+            r.qq_plot_svg,
+            r.scale_location_svg,
+            r.residuals_vs_leverage_svg,
+        ] {
+            assert!(svg.unwrap().contains("<circle"));
+        }
+    }
+
+    /// A chart with too many shapes keeps its PNG and has no vector version.
+    #[test]
+    fn a_chart_too_large_for_svg_has_only_its_png() {
+        let x = wavy(60_000);
+        let y: Vec<f64> = x.iter().map(|v| v * 0.5 + (v * 9.0).sin()).collect();
+        let r = scatter_plot(&x, &y, ChartConfig::default()).unwrap();
+        assert!(r.svg.is_none());
+        assert!(!r.image_base64.is_empty());
+    }
+
+    #[test]
+    fn recording_does_not_change_the_bitmap() {
+        use plotters::coord::Shift;
+        use plotters::style::text_anchor::{HPos, Pos, VPos};
+        fn draw<B: DrawingBackend>(root: DrawingArea<B, Shift>) {
+            root.fill(&WHITE).unwrap();
+            root.draw(&Circle::new((60, 60), 9, RED.mix(0.6).filled()))
+                .unwrap();
+            root.draw(&Circle::new((60, 60), 20, BLUE.stroke_width(2)))
+                .unwrap();
+            root.draw(&Rectangle::new([(90, 80), (20, 10)], BLACK.mix(0.4)))
+                .unwrap();
+            root.draw(&PathElement::new(
+                [(3, 4), (70, 33), (200, -8)],
+                RED.stroke_width(3),
+            ))
+            .unwrap();
+            root.draw(&PathElement::new([(3, 90), (99, 40)], RED))
+                .unwrap();
+            root.draw(&Polygon::new([(5, 5), (30, 9), (9, 40)], BLUE.mix(0.2)))
+                .unwrap();
+            root.draw(&Pixel::new((7, 7), BLACK)).unwrap();
+            let style = ("sans-serif", 18)
+                .into_font()
+                .transform(FontTransform::Rotate270)
+                .color(&BLACK)
+                .pos(Pos::new(HPos::Right, VPos::Center));
+            root.draw(&Text::new("Values, β", (40, 50), style)).unwrap();
+            root.present().unwrap();
+        }
+        let (mut plain, mut recorded) = (vec![0u8; 120 * 100 * 3], vec![0u8; 120 * 100 * 3]);
+        draw(BitMapBackend::with_buffer(&mut plain, (120, 100)).into_drawing_area());
+        let mut recorder = SvgRecorder::new(120, 100);
+        draw(FigureBackend::new(&mut recorded, &mut recorder, (120, 100)).into_drawing_area());
+        assert!(plain == recorded);
+        let svg = recorder.finish().unwrap();
+        // plotters clamps (200, -8) to the area before any backend sees it.
+        assert!(svg.contains("M3 4L70 33L120 0"), "{svg}");
+        assert!(svg.contains("text-anchor=\"end\""), "{svg}");
     }
 
     #[test]

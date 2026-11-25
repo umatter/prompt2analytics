@@ -22,8 +22,13 @@ pub struct TableData {
 /// One exhibit, as the viewer shows it.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Exhibit {
-    /// A PNG, base64-encoded, and its caption ("Figure 2").
-    Figure { label: String, png: String },
+    /// A PNG, base64-encoded, its vector version (SVG; empty: none), and its caption
+    /// ("Figure 2").
+    Figure {
+        label: String,
+        png: String,
+        svg: String,
+    },
     /// A table and its caption.
     Table { label: String, data: TableData },
 }
@@ -370,6 +375,51 @@ pub fn export_figure(png: &str, label: &str) -> String {
     match STANDARD.decode(png.trim()) {
         Ok(bytes) => outcome(download_bytes(&bytes, &filename, "image/png"), &filename),
         Err(e) => format!("Export failed: the image is not valid base64 ({e})"),
+    }
+}
+
+/// Download a figure as a PDF: a vector page when it has a vector version, the PNG on a page
+/// otherwise, which the notice says.
+pub fn export_figure_pdf(png: &str, svg: &str, label: &str) -> String {
+    let filename = exhibit_filename(label, "pdf");
+    if let Some(pdf) = crate::figure_pdf::from_svg(svg) {
+        return outcome(
+            download_bytes(&pdf, &filename, "application/pdf"),
+            &filename,
+        );
+    }
+    let pdf = STANDARD
+        .decode(png.trim())
+        .ok()
+        .and_then(|bytes| crate::figure_pdf::from_png(&bytes));
+    match pdf {
+        Some(pdf) => {
+            let note = outcome(
+                download_bytes(&pdf, &filename, "application/pdf"),
+                &filename,
+            );
+            format!("{note} (as an image: this figure has no vector version)")
+        }
+        None => "Export failed: the image cannot be put in a PDF".to_string(),
+    }
+}
+
+/// Download a figure's vector version as SVG.
+pub fn export_figure_svg(svg: &str, label: &str) -> String {
+    let filename = exhibit_filename(label, "svg");
+    outcome(
+        download_bytes(svg.as_bytes(), &filename, "image/svg+xml"),
+        &filename,
+    )
+}
+
+/// The `src` a figure is shown from: its vector version when it has one, which stays sharp
+/// when zoomed. As an image source an SVG runs no scripts and loads nothing.
+pub fn figure_src(png: &str, svg: &str) -> String {
+    if svg.is_empty() {
+        format!("data:image/png;base64,{png}")
+    } else {
+        format!("data:image/svg+xml;base64,{}", STANDARD.encode(svg))
     }
 }
 

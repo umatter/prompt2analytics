@@ -1,6 +1,7 @@
 //! Heatmap visualization for correlation matrices and other 2D data.
 
 use super::charts::{encode_rgb_to_png_base64, rgb_buffer};
+use super::vector::{FigureBackend, SvgRecorder};
 use super::{DEFAULT_HEIGHT, DEFAULT_WIDTH, VisualizationError};
 use plotters::prelude::*;
 use plotters::style::text_anchor::{HPos, Pos, VPos};
@@ -9,6 +10,9 @@ use plotters::style::text_anchor::{HPos, Pos, VPos};
 pub struct HeatmapResult {
     /// Base64-encoded PNG image
     pub image_base64: String,
+    /// Vector version of the image (SVG); None when it would be larger than
+    /// [`MAX_SVG_BYTES`](super::MAX_SVG_BYTES)
+    pub svg: Option<String>,
     /// Number of rows
     pub n_rows: usize,
     /// Number of columns
@@ -199,9 +203,11 @@ pub fn correlation_heatmap(
 
     // Create image buffer
     let mut buffer = rgb_buffer(width, height)?;
+    let mut recorder = SvgRecorder::new(width, height);
 
     {
-        let root = BitMapBackend::with_buffer(&mut buffer, (width, height)).into_drawing_area();
+        let root =
+            FigureBackend::new(&mut buffer, &mut recorder, (width, height)).into_drawing_area();
         root.fill(&WHITE)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
@@ -347,6 +353,7 @@ pub fn correlation_heatmap(
 
     Ok(HeatmapResult {
         image_base64,
+        svg: recorder.finish(),
         n_rows,
         n_cols,
         row_labels: row_labels.to_vec(),

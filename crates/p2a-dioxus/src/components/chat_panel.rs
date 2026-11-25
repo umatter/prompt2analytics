@@ -289,10 +289,7 @@ pub fn ChatPanel() -> Element {
                                     // The plots the calls stored, unless the
                                     // stream already showed them.
                                     if msg.images.is_empty() {
-                                        msg.images = tcs
-                                            .iter()
-                                            .flat_map(|c| c.images.iter().cloned())
-                                            .collect();
+                                        msg.set_stored_images(tcs);
                                     }
                                 }
                             }
@@ -543,7 +540,7 @@ pub fn ChatPanel() -> Element {
                         StreamEvent::ToolResult { images } => {
                             if let Some(imgs) = images {
                                 for img in imgs {
-                                    chat.write().add_image(&img.data);
+                                    chat.write().add_image(&img.data, img.svg);
                                 }
                             }
                         }

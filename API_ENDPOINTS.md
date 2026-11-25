@@ -398,11 +398,14 @@ An unknown or expired `session_id` does not change the HTTP status: the response
   "images": [
     {
       "data": "iVBORw0KGgoAAAANSUhEUgA...",
-      "mime_type": "image/png"
+      "mime_type": "image/png",
+      "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" ...>...</svg>"
     }
   ]
 }
 ```
+
+`svg` is the chart's vector version, at most 1 MiB; it is absent when the chart would need more. The tool routes answer it on an image item too, unless the result would then pass `response_bytes`. It is never sent to the model, and MCP clients (stdio) do not get it.
 
 #### Event 5: Content (streaming LLM response)
 ```json
@@ -721,7 +724,7 @@ GET /api/conversations/{conversation_id}/tool-calls
 GET /api/messages/{message_id}/tool-calls
 ```
 
-Both answer a list of the stored tool calls, oldest first; a conversation without any answers an empty `data` list. Every id is a string, and `arguments` and `result` are JSON text as the tool received and answered it (`result` and `completed_at` are null until the call ends, `error` holds the error text of a failed call). A call made in the chat that returned images (a chart tool's PNG) also has `images`, a list of the base64 PNGs in the order the call returned them, so a client can show them again when it reopens the conversation; the field is absent when there are none. Images count against `session_db_bytes` like the texts; one that is longer than `message_bytes`, or than what the session has left, is not stored (an image is never cut). They are never sent to the model:
+Both answer a list of the stored tool calls, oldest first; a conversation without any answers an empty `data` list. Every id is a string, and `arguments` and `result` are JSON text as the tool received and answered it (`result` and `completed_at` are null until the call ends, `error` holds the error text of a failed call). A call made in the chat that returned images (a chart tool's PNG) also has `images`, a list of the base64 PNGs in the order the call returned them, so a client can show them again when it reopens the conversation; the field is absent when there are none. `image_svgs` lists the vector version (SVG) of each image, an empty string for an image without one; it is absent when no image has one. Images and vector versions count against `session_db_bytes` like the texts; one that is longer than `message_bytes`, or than what the session has left, is not stored (an image is never cut), and a vector version gives way to the images. They are never sent to the model:
 
 ```json
 {"success":true,"data":[{"id":"9b1f0c2e-…","message_id":"4ea7256f-…","conversation_id":"e104f3c9-…","tool_name":"list_datasets","arguments":"{}","result":"No datasets currently loaded. Use the 'load_dataset' tool to load a data file.","error":null,"status":"success","started_at":"2026-10-22T18:50:11.021Z","completed_at":"2026-10-22T18:50:11.024Z","duration_ms":3}]}
@@ -922,7 +925,7 @@ type StreamEvent =
   | { type: "tool_start"; tool: string; arguments: Record<string, any> }
   | { type: "tool_end"; tool: string; elapsed_ms: number; result: string | null;
       status: "success" | "error" }   // "error": the call failed or the tool answered with an error result
-  | { type: "tool_result"; tool: string; images: { data: string; mime_type: string }[] }
+  | { type: "tool_result"; tool: string; images: { data: string; mime_type: string; svg?: string }[] }
   | { type: "content"; text: string }
   | { type: "done"; message: Message }
   | { type: "error"; error: string; code?: string };   // code: as the JSON routes give the same refusal

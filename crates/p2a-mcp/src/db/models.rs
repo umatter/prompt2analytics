@@ -191,6 +191,10 @@ pub struct ToolCall {
     /// stored before images were kept.
     #[serde(default)]
     pub images: Option<Vec<String>>,
+    /// The vector version (SVG) of each image, empty for one without. None
+    /// when no image has one, and on rows stored before they were kept.
+    #[serde(default)]
+    pub image_svgs: Option<Vec<String>>,
 }
 
 /// Tool call status enumeration
@@ -226,6 +230,7 @@ impl ToolCall {
             completed_at: None,
             duration_ms: None,
             images: None,
+            image_svgs: None,
         }
     }
 

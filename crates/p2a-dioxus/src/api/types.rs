@@ -168,6 +168,9 @@ pub struct ModelsResponse {
 pub struct ImageData {
     pub data: String,
     pub mime_type: String,
+    /// The vector version of the figure, when the server has one.
+    #[serde(default)]
+    pub svg: Option<String>,
 }
 
 /// SSE stream event types
@@ -327,6 +330,10 @@ pub struct PersistedToolCall {
     /// servers and from calls without images.
     #[serde(default)]
     pub images: Vec<String>,
+    /// The vector version (SVG) of each image, empty for one without; absent
+    /// from older servers and when no image has one.
+    #[serde(default)]
+    pub image_svgs: Vec<String>,
 }
 
 // === Dataset Metadata types ===

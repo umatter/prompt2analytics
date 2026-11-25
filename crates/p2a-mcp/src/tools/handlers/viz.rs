@@ -10,7 +10,7 @@ use rmcp::{
 };
 
 use crate::server::AnalyticsServer;
-use crate::tools::common::{append_missing_note, append_notes, limit_refusal};
+use crate::tools::common::{append_missing_note, append_notes, chart_content, limit_refusal};
 use crate::tools::handlers::data::format_significant;
 use crate::tools::limits;
 use crate::tools::requests::viz::*;
@@ -215,7 +215,7 @@ fn heatmap_reply(
     dataset: &p2a_core::Dataset,
     selection: Option<&[String]>,
     title: Option<&str>,
-) -> Result<(String, String), String> {
+) -> Result<(String, String, Option<String>), String> {
     use p2a_core::visualization::heatmap::heatmap_capacity;
     let df = dataset.df();
     // The dtypes stats::correlation_matrix correlates.
@@ -310,7 +310,7 @@ fn heatmap_reply(
         description.push_str(&note);
     }
     append_notes(&mut description, None, &result.warnings);
-    Ok((description, result.image_base64))
+    Ok((description, result.image_base64, result.svg))
 }
 
 /// Outliers listed per column in the viz_boxplot reply (in the core's order); the rest are
@@ -383,7 +383,7 @@ impl AnalyticsServer {
                 append_missing_note(&mut description, plotted.missing());
                 Ok(CallToolResult::success(vec![
                     Content::text(description),
-                    Content::image(result.image_base64, "image/png"),
+                    chart_content(result.image_base64, result.svg),
                 ]))
             }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
@@ -444,7 +444,7 @@ impl AnalyticsServer {
                 append_missing_note(&mut description, plotted.missing());
                 Ok(CallToolResult::success(vec![
                     Content::text(description),
-                    Content::image(result.image_base64, "image/png"),
+                    chart_content(result.image_base64, result.svg),
                 ]))
             }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
@@ -513,7 +513,7 @@ impl AnalyticsServer {
                 }
                 Ok(CallToolResult::success(vec![
                     Content::text(description),
-                    Content::image(result.image_base64, "image/png"),
+                    chart_content(result.image_base64, result.svg),
                 ]))
             }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
@@ -623,7 +623,7 @@ impl AnalyticsServer {
                 }
                 Ok(CallToolResult::success(vec![
                     Content::text(description),
-                    Content::image(result.image_base64, "image/png"),
+                    chart_content(result.image_base64, result.svg),
                 ]))
             }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
@@ -657,9 +657,9 @@ impl AnalyticsServer {
             request.columns.as_deref(),
             request.title.as_deref(),
         ) {
-            Ok((description, image)) => Ok(CallToolResult::success(vec![
+            Ok((description, image, svg)) => Ok(CallToolResult::success(vec![
                 Content::text(description),
-                Content::image(image, "image/png"),
+                chart_content(image, svg),
             ])),
             Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
         }
@@ -888,7 +888,7 @@ impl AnalyticsServer {
                 append_missing_note(&mut description, plotted.missing());
                 Ok(CallToolResult::success(vec![
                     Content::text(description),
-                    Content::image(result.image_base64, "image/png"),
+                    chart_content(result.image_base64, result.svg),
                 ]))
             }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
@@ -979,7 +979,7 @@ impl AnalyticsServer {
                 append_missing_note(&mut description, plotted.missing());
                 Ok(CallToolResult::success(vec![
                     Content::text(description),
-                    Content::image(result.image_base64, "image/png"),
+                    chart_content(result.image_base64, result.svg),
                 ]))
             }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
@@ -1069,7 +1069,7 @@ impl AnalyticsServer {
                 append_missing_note(&mut description, plotted.missing());
                 Ok(CallToolResult::success(vec![
                     Content::text(description),
-                    Content::image(result.image_base64, "image/png"),
+                    chart_content(result.image_base64, result.svg),
                 ]))
             }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
@@ -1161,10 +1161,13 @@ impl AnalyticsServer {
                 append_missing_note(&mut description, plotted.missing());
                 Ok(CallToolResult::success(vec![
                     Content::text(description),
-                    Content::image(result.residuals_vs_fitted, "image/png"),
-                    Content::image(result.qq_plot, "image/png"),
-                    Content::image(result.scale_location, "image/png"),
-                    Content::image(result.residuals_vs_leverage, "image/png"),
+                    chart_content(result.residuals_vs_fitted, result.residuals_vs_fitted_svg),
+                    chart_content(result.qq_plot, result.qq_plot_svg),
+                    chart_content(result.scale_location, result.scale_location_svg),
+                    chart_content(
+                        result.residuals_vs_leverage,
+                        result.residuals_vs_leverage_svg,
+                    ),
                 ]))
             }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
@@ -1227,7 +1230,7 @@ impl AnalyticsServer {
                 );
                 Ok(CallToolResult::success(vec![
                     Content::text(description),
-                    Content::image(result.image_base64, "image/png"),
+                    chart_content(result.image_base64, result.svg),
                 ]))
             }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(

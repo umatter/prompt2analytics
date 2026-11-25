@@ -30,6 +30,34 @@ pub fn success_image(base64_data: impl ToString) -> Result<CallToolResult, McpEr
     )]))
 }
 
+/// The metadata key a chart's vector version travels under, from the handler to
+/// the HTTP result. It is taken off again before a result goes to an MCP client.
+const SVG_META: &str = "p2a/svg";
+
+/// A static chart (base64-encoded PNG) as tool content, with its vector version (SVG) when the
+/// chart has one.
+pub fn chart_content(png: String, svg: Option<String>) -> Content {
+    let mut content = Content::image(png, "image/png");
+    if let (RawContent::Image(image), Some(svg)) = (&mut content.raw, svg) {
+        let mut meta = Meta::new();
+        meta.insert(SVG_META.to_string(), serde_json::Value::String(svg));
+        image.meta = Some(meta);
+    }
+    content
+}
+
+/// Take the vector version off an image [`chart_content`] made.
+pub fn take_svg(image: &mut RawImageContent) -> Option<String> {
+    let value = image.meta.as_mut()?.remove(SVG_META)?;
+    if image.meta.as_ref().is_some_and(|m| m.is_empty()) {
+        image.meta = None;
+    }
+    match value {
+        serde_json::Value::String(svg) => Some(svg),
+        _ => None,
+    }
+}
+
 /// Create a successful tool result with HTML content.
 pub fn success_html(html: impl ToString) -> Result<CallToolResult, McpError> {
     // Return HTML as text content for now (MCP doesn't have native HTML type)

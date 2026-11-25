@@ -482,11 +482,13 @@ impl ToolCallStore {
             }
             // The images the client was sent, so a reopened conversation
             // shows them again.
-            let images: Vec<String> = result
+            let images: Vec<(String, String)> = result
                 .content
                 .iter()
                 .filter_map(|item| match item {
-                    ContentItem::Image { data, .. } => Some(data.clone()),
+                    ContentItem::Image { data, svg, .. } => {
+                        Some((data.clone(), svg.clone().unwrap_or_default()))
+                    }
                     ContentItem::Text { .. } => None,
                 })
                 .collect();
@@ -1485,6 +1487,9 @@ pub enum ProgressEvent {
 pub struct ImageData {
     pub data: String,
     pub mime_type: String,
+    /// The vector version (SVG) of a static chart, when there is one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub svg: Option<String>,
 }
 
 /// The events of one streamed chat, shared by the provider's text callback, the tool executor and
@@ -1732,9 +1737,14 @@ impl ToolExecutor for StreamingToolExecutor {
                     .content
                     .iter()
                     .filter_map(|item| match item {
-                        ContentItem::Image { data, mime_type } => Some(ImageData {
+                        ContentItem::Image {
+                            data,
+                            mime_type,
+                            svg,
+                        } => Some(ImageData {
                             data: data.clone(),
                             mime_type: mime_type.clone(),
+                            svg: svg.clone(),
                         }),
                         _ => None,
                     })

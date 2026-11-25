@@ -121,6 +121,7 @@ pub fn Message(props: MessageProps) -> Element {
                         crate::components::FigureExhibit {
                             key: "{idx}",
                             image: image.clone(),
+                            svg: message.svgs.get(idx).cloned().unwrap_or_default(),
                             label: format!("Figure {}", idx + 1),
                         }
                     }
@@ -191,6 +192,7 @@ mod tests {
             completed_at: None,
             duration_ms: None,
             images: Vec::new(),
+            image_svgs: Vec::new(),
         };
         let first = ChatMessage::from_conversation_message_with_tools(&stored, &[call("success")]);
         let second = ChatMessage::from_conversation_message_with_tools(&stored, &[call("error")]);
@@ -226,6 +228,11 @@ mod tests {
             completed_at: None,
             duration_ms: None,
             images: images.iter().map(|s| s.to_string()).collect(),
+            image_svgs: if id == "a" {
+                vec!["<svg/>".into()]
+            } else {
+                Vec::new()
+            },
         };
         let msg = ChatMessage::from_conversation_message_with_tools(
             &stored,
@@ -236,6 +243,7 @@ mod tests {
             ],
         );
         assert_eq!(msg.images, ["AAA", "CCC", "DDD"]);
+        assert_eq!(msg.svgs, ["<svg/>", "", ""]);
     }
 }
 

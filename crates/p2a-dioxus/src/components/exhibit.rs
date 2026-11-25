@@ -1,6 +1,6 @@
 //! Exhibits in the transcript and the viewer that enlarges them.
 //!
-//! A figure shows its caption with "expand" and "png"; a table in an answer
+//! A figure shows its caption with "expand", "png" and "pdf"; a table in an answer
 //! gets "expand", "csv", "latex" and "copy" under it. "Expand" (or a click
 //! on a figure) opens the viewer: the exhibit over the whole window, zoomable
 //! when it is a figure, with the same exports.
@@ -9,7 +9,7 @@ use dioxus::prelude::*;
 
 use crate::exhibit::{
     Exhibit, ExhibitViewer, TableData, TableFormat, copy_table, copy_table_as, export_figure,
-    export_table,
+    export_figure_pdf, export_figure_svg, export_table, figure_src,
 };
 
 /// Zoom steps of the viewer, in percent of the viewer's width ("fit" shows
@@ -31,16 +31,23 @@ fn step_zoom(current: Option<u32>, up: bool) -> Option<u32> {
 /// A plot in an answer: the image, a click to enlarge it, and its caption
 /// with the actions.
 #[component]
-pub fn FigureExhibit(image: String, label: String) -> Element {
+pub fn FigureExhibit(
+    image: String,
+    /// The vector version (SVG); empty: none.
+    #[props(default)]
+    svg: String,
+    label: String,
+) -> Element {
     let viewer = try_use_context::<ExhibitViewer>();
     let open = {
-        let (image, label) = (image.clone(), label.clone());
+        let (image, svg, label) = (image.clone(), svg.clone(), label.clone());
         move |_| {
             if let Some(v) = viewer {
                 let mut o = v.open;
                 o.set(Some(Exhibit::Figure {
                     label: label.clone(),
                     png: image.clone(),
+                    svg: svg.clone(),
                 }));
             }
         }
@@ -50,6 +57,15 @@ pub fn FigureExhibit(image: String, label: String) -> Element {
         let (image, label) = (image.clone(), label.clone());
         move |_| {
             let note = export_figure(&image, &label);
+            if let Some(v) = viewer {
+                v.flash(note);
+            }
+        }
+    };
+    let save_pdf = {
+        let (image, label) = (image.clone(), label.clone());
+        move |_| {
+            let note = export_figure_pdf(&image, &svg, &label);
             if let Some(v) = viewer {
                 v.flash(note);
             }
@@ -69,6 +85,7 @@ pub fn FigureExhibit(image: String, label: String) -> Element {
                 span { class: "k-exhibit-acts",
                     button { class: "k-xbtn", onclick: open2, "expand" }
                     button { class: "k-xbtn", title: "Download as PNG", onclick: save, "png" }
+                    button { class: "k-xbtn", title: "Download as PDF", onclick: save_pdf, "pdf" }
                 }
             }
         }
@@ -117,6 +134,33 @@ pub fn table_toolbar(data: TableData, viewer: ExhibitViewer) -> Element {
     }
 }
 
+/// The viewer's downloads of a figure. SVG is offered when there is a vector version.
+#[component]
+fn FigureDownloads(label: String, png: String, svg: String) -> Element {
+    let viewer = use_context::<ExhibitViewer>();
+    let (l1, l2) = (label.clone(), label.clone());
+    let (p1, s1) = (png.clone(), svg.clone());
+    rsx! {
+        button {
+            class: "k-btn",
+            onclick: move |_| viewer.flash(export_figure(&p1, &l1)),
+            "PNG"
+        }
+        if !svg.is_empty() {
+            button {
+                class: "k-btn",
+                onclick: move |_| viewer.flash(export_figure_svg(&s1, &l2)),
+                "SVG"
+            }
+        }
+        button {
+            class: "k-btn-pri",
+            onclick: move |_| viewer.flash(export_figure_pdf(&png, &svg, &label)),
+            "Download PDF"
+        }
+    }
+}
+
 /// The viewer: the open exhibit over the whole window. Mounted once in the
 /// app; it also shows the last export notice.
 #[component]
@@ -157,7 +201,7 @@ pub fn ExhibitViewerModal() -> Element {
     };
 
     let actions = match exhibit.clone() {
-        Exhibit::Figure { label, png } => rsx! {
+        Exhibit::Figure { label, png, svg } => rsx! {
             div { class: "k-zoom", role: "group", aria_label: "Zoom",
                 button {
                     class: "k-xbtn",
@@ -181,11 +225,7 @@ pub fn ExhibitViewerModal() -> Element {
                     button { class: "k-xbtn", onclick: move |_| zoom.set(None), "fit" }
                 }
             }
-            button {
-                class: "k-btn-pri",
-                onclick: move |_| viewer.flash(export_figure(&png, &label)),
-                "Download PNG"
-            }
+            FigureDownloads { label, png, svg }
         },
         Exhibit::Table { label, data } => {
             let d1 = data.clone();
@@ -246,7 +286,8 @@ pub fn ExhibitViewerModal() -> Element {
     };
 
     let body = match exhibit {
-        Exhibit::Figure { label, png } => {
+        Exhibit::Figure { label, png, svg } => {
+            let src = figure_src(&png, &svg);
             let style = match zoom() {
                 None => "width: 100%; height: 100%; object-fit: contain;".to_string(),
                 Some(z) => format!("width: {z}%; max-width: none; margin: 0 auto;"),
@@ -255,7 +296,7 @@ pub fn ExhibitViewerModal() -> Element {
             rsx! {
                 div { class: if fitted { "k-viewer-fig fit" } else { "k-viewer-fig" },
                     img {
-                        src: "data:image/png;base64,{png}",
+                        src: "{src}",
                         alt: "{label}",
                         style: "{style}",
                         class: if fitted { "cursor-zoom-in" } else { "cursor-zoom-out" },

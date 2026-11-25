@@ -413,6 +413,10 @@ pub(crate) struct ToolCallResponse {
     /// Images the call returned (base64 PNG), in order; omitted when none.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<String>,
+    /// The vector version (SVG) of each image, empty for one without; omitted
+    /// when no image has one.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub image_svgs: Vec<String>,
 }
 
 impl From<ToolCall> for ToolCallResponse {
@@ -431,6 +435,7 @@ impl From<ToolCall> for ToolCallResponse {
             completed_at: c.completed_at.map(utc_string),
             duration_ms: c.duration_ms,
             images: c.images.unwrap_or_default(),
+            image_svgs: c.image_svgs.unwrap_or_default(),
         }
     }
 }

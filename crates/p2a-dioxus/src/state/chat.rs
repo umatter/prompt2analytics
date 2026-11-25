@@ -28,6 +28,9 @@ pub struct ChatMessage {
     pub tool_calls: Vec<ToolCallInfo>,
     /// Base64-encoded images from tool results
     pub images: Vec<String>,
+    /// The vector version (SVG) of the image at the same index; empty, or
+    /// past the end: none
+    pub svgs: Vec<String>,
     /// Whether this message is currently streaming
     pub is_streaming: bool,
     /// Whether the answer ended before it was finished (stopped, a stream
@@ -52,6 +55,7 @@ impl ChatMessage {
             content: content.to_string(),
             tool_calls: Vec::new(),
             images: Vec::new(),
+            svgs: Vec::new(),
             is_streaming: false,
             interrupted: false,
             tool_rev: next_rev(),
@@ -67,6 +71,7 @@ impl ChatMessage {
             content: String::new(),
             tool_calls: Vec::new(),
             images: Vec::new(),
+            svgs: Vec::new(),
             is_streaming: true,
             interrupted: false,
             tool_rev: next_rev(),
@@ -88,6 +93,7 @@ impl ChatMessage {
             content: msg.content.clone(),
             tool_calls,
             images: Vec::new(),
+            svgs: Vec::new(),
             is_streaming: false,
             interrupted: false,
             tool_rev: next_rev(),
@@ -108,6 +114,7 @@ impl ChatMessage {
             content: msg.content.clone(),
             tool_calls: Vec::new(), // Tool calls will be loaded separately
             images: Vec::new(),
+            svgs: Vec::new(),
             is_streaming: false,
             interrupted: false,
             tool_rev: next_rev(),
@@ -123,11 +130,22 @@ impl ChatMessage {
         let mut chat_msg = Self::from_conversation_message(msg);
         chat_msg.set_tool_calls(tool_calls.iter().map(ToolCallInfo::from).collect());
         // The plots, in the order of their calls, as the stream showed them.
-        chat_msg.images = tool_calls
-            .iter()
-            .flat_map(|c| c.images.iter().cloned())
-            .collect();
+        chat_msg.set_stored_images(tool_calls);
         chat_msg
+    }
+
+    /// Show the images the calls stored, in the order of the calls, each
+    /// with its vector version
+    pub fn set_stored_images(&mut self, tool_calls: &[PersistedToolCall]) {
+        self.images.clear();
+        self.svgs.clear();
+        for call in tool_calls {
+            for (i, image) in call.images.iter().enumerate() {
+                self.images.push(image.clone());
+                self.svgs
+                    .push(call.image_svgs.get(i).cloned().unwrap_or_default());
+            }
+        }
     }
 
     /// Set tool calls on this message
@@ -528,10 +546,12 @@ impl ChatState {
         }
     }
 
-    /// Add an image to the current streaming message
-    pub fn add_image(&mut self, base64_data: &str) {
+    /// Add an image, and its vector version if it has one, to the current
+    /// streaming message
+    pub fn add_image(&mut self, base64_data: &str, svg: Option<String>) {
         if let Some(last) = self.messages.last_mut() {
             last.images.push(base64_data.to_string());
+            last.svgs.push(svg.unwrap_or_default());
         }
     }
 
@@ -1511,7 +1531,7 @@ mod tests {
     fn stash_and_restore_move_the_transcript() {
         let mut chat = ChatState::new();
         send(&mut chat, "plot sales");
-        chat.add_image("iVBORw0KGgo=");
+        chat.add_image("iVBORw0KGgo=", None);
         chat.set_active_tool("plot".into(), json!({"dataset": "sales"}));
         chat.clear_active_tool(Some("ok".into()), Some("success"));
         finish(&mut chat, reply("Here it is."));

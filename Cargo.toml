@@ -80,6 +80,7 @@ duckdb = { version = "1.10506.1", features = ["bundled", "parquet"] }
 
 # Visualization
 plotters = "0.3"
+plotters-backend = "0.3"
 image = "0.24"
 
 # Image encoding (for base64 output)
