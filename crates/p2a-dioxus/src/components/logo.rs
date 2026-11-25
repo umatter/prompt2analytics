@@ -17,7 +17,7 @@ use dioxus::prelude::*;
 /// Brand colours.
 pub mod colors {
     /// International orange, the colour of the 2.
-    pub const ORANGE: &str = "#FF4F00";
+    pub const ORANGE: &str = "#F74C00";
 }
 
 /// Cell paths of the logo on its 14 x 6 grid: the black p and a.

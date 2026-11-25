@@ -3,7 +3,7 @@
 This directory contains the app icons for prompt2analytics.
 
 The logo is drawn on a grid of square cells: p, 2 and a, with the 2 in orange
-(#FF4F00). The icon is the 2 alone, black on an orange tile. Every SVG here is
+(#F74C00). The icon is the 2 alone, black on an orange tile. Every SVG here is
 drawn from the cell paths in `src/components/logo.rs`; the PNG and ICO files are
 rendered from `favicon.svg` (`rsvg-convert -w N -h N favicon.svg`).
 

@@ -1,74 +1,63 @@
-//! Brand color palette for p2a visualizations.
+//! Colors of the p2a charts.
 //!
-//! This module defines a consistent color scheme based on the project's brand identity:
-//! - **Primary gradient**: Orange (#FF6B35) to Cyan (#00B4D8)
-//! - **Accent colors**: Teal and orange variants from the UI palette
+//! The first is the app's orange. The order is fixed: neighbouring series colors stay apart for
+//! readers with protanopia, deuteranopia or tritanopia, and every color has a contrast of at
+//! least 3:1 on white.
 
 use plotters::style::RGBColor;
 
-/// Brand orange - primary color from logo (#FF6B35)
-pub const BRAND_ORANGE: RGBColor = RGBColor(255, 107, 53);
+/// Orange, the app's orange (#F74C00)
+pub const BRAND_ORANGE: RGBColor = RGBColor(247, 76, 0);
 
-/// Brand cyan - secondary color from logo (#00B4D8)
-pub const BRAND_CYAN: RGBColor = RGBColor(0, 180, 216);
+/// Blue (#1769AA)
+pub const BRAND_BLUE: RGBColor = RGBColor(23, 105, 170);
 
-/// Teal accent from UI palette (#14b8a6)
-pub const BRAND_TEAL: RGBColor = RGBColor(20, 184, 166);
+/// Teal (#14A38B)
+pub const BRAND_TEAL: RGBColor = RGBColor(20, 163, 139);
 
-/// Orange accent - lighter variant (#f97316)
-pub const BRAND_ORANGE_LIGHT: RGBColor = RGBColor(249, 115, 22);
+/// Purple (#7A3FB0)
+pub const BRAND_PURPLE: RGBColor = RGBColor(122, 63, 176);
 
-/// Darker teal for contrast (#0d9488)
-pub const BRAND_TEAL_DARK: RGBColor = RGBColor(13, 148, 136);
+/// Ochre (#B58900)
+pub const BRAND_OCHRE: RGBColor = RGBColor(181, 137, 0);
 
-/// Darker orange for contrast (#ea580c)
-pub const BRAND_ORANGE_DARK: RGBColor = RGBColor(234, 88, 12);
+/// Magenta (#B0286B)
+pub const BRAND_MAGENTA: RGBColor = RGBColor(176, 40, 107);
 
 /// Slate gray for neutral elements (#64748b)
 pub const BRAND_SLATE: RGBColor = RGBColor(100, 116, 139);
 
-/// Default color palette for multi-series charts.
-///
-/// Order optimized for visual distinction:
-/// 1. Brand orange (primary)
-/// 2. Brand cyan (secondary, high contrast with orange)
-/// 3. Teal (between orange and cyan)
-/// 4. Light orange (variant of primary)
-/// 5. Dark teal (variant of teal)
-/// 6. Dark orange (variant of primary)
+/// Default color palette for multi-series charts, in order of use.
 pub const CHART_PALETTE: [RGBColor; 6] = [
     BRAND_ORANGE,
-    BRAND_CYAN,
+    BRAND_BLUE,
     BRAND_TEAL,
-    BRAND_ORANGE_LIGHT,
-    BRAND_TEAL_DARK,
-    BRAND_ORANGE_DARK,
+    BRAND_PURPLE,
+    BRAND_OCHRE,
+    BRAND_MAGENTA,
 ];
 
-/// RGB tuple versions for the interactive (Plotly) charts.
-///
-/// Same colors as `CHART_PALETTE` but as (u8, u8, u8) tuples
-/// for the Plotly colours the interactive charts write.
+/// [`CHART_PALETTE`] as (u8, u8, u8) tuples, for the interactive (Plotly) charts.
 pub const PLOTLY_PALETTE: [(u8, u8, u8); 6] = [
-    (255, 107, 53), // Brand orange
-    (0, 180, 216),  // Brand cyan
-    (20, 184, 166), // Teal
-    (249, 115, 22), // Orange light
-    (13, 148, 136), // Teal dark
-    (234, 88, 12),  // Orange dark
+    (247, 76, 0),   // Orange
+    (23, 105, 170), // Blue
+    (20, 163, 139), // Teal
+    (122, 63, 176), // Purple
+    (181, 137, 0),  // Ochre
+    (176, 40, 107), // Magenta
 ];
 
-/// Default color for single-series charts (brand orange).
+/// Default color for single-series charts.
 pub const DEFAULT_SERIES_COLOR: RGBColor = BRAND_ORANGE;
 
-/// Secondary color for emphasis or contrast elements (brand cyan).
-pub const SECONDARY_COLOR: RGBColor = BRAND_CYAN;
+/// Secondary color for emphasis or contrast elements.
+pub const SECONDARY_COLOR: RGBColor = BRAND_BLUE;
 
-/// Color for outliers and anomalies (dark orange for visibility).
-pub const OUTLIER_COLOR: RGBColor = BRAND_ORANGE_DARK;
+/// Color for outliers and anomalies.
+pub const OUTLIER_COLOR: RGBColor = BRAND_MAGENTA;
 
-/// Color for trend lines and fitted curves (dark teal for contrast).
-pub const TREND_LINE_COLOR: RGBColor = BRAND_TEAL_DARK;
+/// Color for trend lines and fitted curves.
+pub const TREND_LINE_COLOR: RGBColor = BRAND_BLUE;
 
 #[cfg(test)]
 mod tests {
