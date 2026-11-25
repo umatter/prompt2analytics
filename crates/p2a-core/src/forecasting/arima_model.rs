@@ -12,6 +12,11 @@
 //! optional drift (forecast::Arima's `include.drift`, for d = 0 or 1). [`ArimaSpec`] selects
 //! the orders and the two options.
 //!
+//! A seasonal model ARIMA(p, d, q)(P, D, Q)[s] ([`SeasonalOrder`]) multiplies the polynomials
+//! by Φ(Bˢ) = 1 - Φ₁Bˢ - ... and Θ(Bˢ) = 1 + Θ₁Bˢ + ..., and differences by (1 - Bˢ)ᴰ as well:
+//! the fit and the forecasts work on the expanded polynomials (orders p + sP and q + sQ), with
+//! the Jacobian in the original coefficients. Below, d and p then stand for d + sD and p + sP.
+//!
 //! # Estimation
 //!
 //! As `stats::arima(method = "CSS")`: on w = (1 - B)ᵈ (x - μ - δ t) the residuals follow
@@ -105,7 +110,32 @@ const AR_NOT_STATIONARY: &str = "AR part is not stationary";
 const DIFFUSE_ARMA_PRIOR: &str = "AR part is not stationary: the Kalman filter starts the ARMA \
      state from a diffuse prior (variance 1e6) instead of the stationary covariance";
 
-/// ARIMA(p, d, q) with forecast::Arima's mean and drift options.
+/// Largest lag a seasonal model may reach in p + s P, q + s Q or d + s D: the forecasts' state
+/// space has up to their sum of states, and its covariance the square of that.
+const MAX_SEASONAL_LAG: usize = 400;
+
+/// The seasonal part (P, D, Q)[period] of an ARIMA model; all zero (the default) for none.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SeasonalOrder {
+    /// Seasonal AR order.
+    pub p: usize,
+    /// Order of seasonal differencing.
+    pub d: usize,
+    /// Seasonal MA order.
+    pub q: usize,
+    /// Observations per season (12 for monthly data with a yearly pattern); at least 2 when
+    /// an order is above 0.
+    pub period: usize,
+}
+
+impl SeasonalOrder {
+    /// Whether the model has a seasonal term.
+    pub fn is_seasonal(&self) -> bool {
+        self.p > 0 || self.d > 0 || self.q > 0
+    }
+}
+
+/// ARIMA(p, d, q)(P, D, Q)[s] with forecast::Arima's mean and drift options.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArimaSpec {
     /// AR order.
@@ -114,11 +144,14 @@ pub struct ArimaSpec {
     pub d: usize,
     /// MA order.
     pub q: usize,
-    /// Estimate the series mean (R's "intercept"). `None` = R's default: true when d = 0.
-    /// `Some(true)` with d > 0 is an error.
+    /// Seasonal part.
+    #[serde(default)]
+    pub seasonal: SeasonalOrder,
+    /// Estimate the series mean (R's "intercept"). `None` = R's default: true when the series
+    /// is not differenced (d = 0 and no seasonal difference). `Some(true)` otherwise is an error.
     pub include_mean: Option<bool>,
     /// Estimate a drift: a linear trend `drift * t`, t = 1..n, in the levels
-    /// (forecast::Arima `include.drift`). Only for d = 0 or 1.
+    /// (forecast::Arima `include.drift`). Only with at most one difference in all.
     pub include_drift: bool,
 }
 
@@ -129,25 +162,42 @@ impl ArimaSpec {
             p,
             d,
             q,
+            seasonal: SeasonalOrder::default(),
             include_mean: None,
             include_drift: false,
         }
     }
 
-    /// Whether the mean is estimated: `include_mean`, or d = 0 when it is `None`.
+    /// Whether the series is differenced, regularly or seasonally.
+    fn differenced(&self) -> bool {
+        self.d > 0 || self.seasonal.d > 0
+    }
+
+    /// Whether the mean is estimated: `include_mean`, or no differencing when it is `None`.
     pub fn mean_included(&self) -> bool {
-        self.include_mean.unwrap_or(self.d == 0)
+        self.include_mean.unwrap_or(!self.differenced())
+    }
+
+    /// "ARIMA(1,1,1)" or "ARIMA(0,1,1)(0,1,1)[12]".
+    pub fn orders(&self) -> String {
+        let base = format!("ARIMA({},{},{})", self.p, self.d, self.q);
+        let o = &self.seasonal;
+        if o.is_seasonal() {
+            format!("{base}({},{},{})[{}]", o.p, o.d, o.q, o.period)
+        } else {
+            base
+        }
     }
 
     /// forecast::Arima's label: "ARIMA(1,0,1) with non-zero mean", "ARIMA(1,0,0) with zero
     /// mean", "ARIMA(0,1,1) with drift" or "ARIMA(0,1,1)".
     pub fn label(&self) -> String {
-        let base = format!("ARIMA({},{},{})", self.p, self.d, self.q);
+        let base = self.orders();
         if self.include_drift {
             format!("{base} with drift")
         } else if self.mean_included() {
             format!("{base} with non-zero mean")
-        } else if self.d == 0 {
+        } else if !self.differenced() {
             format!("{base} with zero mean")
         } else {
             base
@@ -172,16 +222,26 @@ pub struct ArimaResult {
     pub d: usize,
     /// MA order (q)
     pub q: usize,
+    /// Seasonal part (P, D, Q)[s]; all zero without one.
+    #[serde(default)]
+    pub seasonal: SeasonalOrder,
     /// AR coefficients (phi), R's `ar1, ar2, ...`
     pub ar_coeffs: Vec<f64>,
     /// MA coefficients (theta, R's sign: `+ theta_j e_{t-j}`), R's `ma1, ma2, ...`
     pub ma_coeffs: Vec<f64>,
+    /// Seasonal AR coefficients, R's `sar1, ...`
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sar_coeffs: Vec<f64>,
+    /// Seasonal MA coefficients, R's `sma1, ...`
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sma_coeffs: Vec<f64>,
     /// The series mean (R's "intercept"); 0.0 when no mean is estimated (d > 0 or
     /// `include_mean = false`).
     pub intercept: f64,
     /// Constant of the differenced equation: mean x (1 - sum ar) (d = 0), drift x
-    /// (1 - sum ar) (d = 1 with drift), 0.0 without a mean or drift; `None` when it varies
-    /// with t (d = 0 with drift).
+    /// (1 - sum ar) (d = 1 with drift; times s with a seasonal difference instead), 0.0 without
+    /// a mean or drift; `None` when it varies with t (drift, no difference). "sum ar" runs over
+    /// the expanded AR polynomial of a seasonal model.
     #[serde(default)]
     pub constant: Option<f64>,
     /// Drift coefficient (forecast::Arima's "drift"); `None` when not estimated.
@@ -190,7 +250,8 @@ pub struct ArimaResult {
     /// Whether the mean was estimated.
     #[serde(default)]
     pub include_mean: bool,
-    /// Every estimated coefficient in R's order and naming: ar1.., ma1.., intercept, drift.
+    /// Every estimated coefficient in R's order and naming: ar1.., ma1.., sar1.., sma1.., intercept,
+    /// drift.
     #[serde(default)]
     pub coef_names: Vec<String>,
     /// The values of `coef_names`.
@@ -241,6 +302,7 @@ impl ArimaResult {
             p: self.p,
             d: self.d,
             q: self.q,
+            seasonal: self.seasonal,
             include_mean: Some(self.include_mean),
             include_drift: self.drift.is_some(),
         }
@@ -252,8 +314,11 @@ impl ArimaResult {
             .constant
             .map_or_else(|| "NA".to_string(), |c| format!("{c:.6}"));
         match (self.drift.is_some(), self.include_mean) {
-            (true, _) if self.d == 0 => {
+            (true, _) if self.constant.is_none() => {
                 Some("intercept + drift x t is the trend of the series mean".to_string())
+            }
+            (true, _) if self.seasonal.is_seasonal() => {
+                Some("drift is the mean change per period".to_string())
             }
             (true, _) => Some(format!(
                 "drift is the mean change per period; constant drift x (1 - sum(ar)) = {constant}"
@@ -571,37 +636,81 @@ struct Model {
     p: usize,
     d: usize,
     q: usize,
+    seasonal: SeasonalOrder,
     mean: bool,
     drift: bool,
     /// Number of estimated coefficients.
     k: usize,
+    /// Orders of the expanded polynomials: p + s P, d + s D, q + s Q.
+    ar_lags: usize,
+    diff_lags: usize,
+    ma_lags: usize,
+}
+
+/// A coefficient vector in R order, by part.
+struct Parts<'a> {
+    ar: &'a [f64],
+    ma: &'a [f64],
+    sar: &'a [f64],
+    sma: &'a [f64],
+    beta: &'a [f64],
 }
 
 impl Model {
     /// Checks the options and that `n` observations can fit the model.
     fn new(spec: &ArimaSpec, n: usize) -> EconResult<Model> {
         let ArimaSpec { p, d, q, .. } = *spec;
-        // p + d + q + 10, checked: an order sum that overflows can never be fitted.
-        let required = p
-            .checked_add(d)
-            .and_then(|s| s.checked_add(q))
-            .and_then(|s| s.checked_add(10));
-        match required {
-            None => {
-                return Err(invalid(format!(
-                    "Not enough observations ({n}) for ARIMA({p},{d},{q}): orders too large to \
-                     fit any series"
-                )));
-            }
-            Some(r) if n < r => {
-                return Err(invalid(format!(
-                    "Not enough observations ({n}) for ARIMA({p},{d},{q}): need at least {r} \
-                     (p + d + q + 10)"
-                )));
-            }
-            Some(_) => {}
+        let mut seasonal = spec.seasonal;
+        let label = spec.orders();
+        if !seasonal.is_seasonal() {
+            seasonal = SeasonalOrder::default();
+        } else if seasonal.period < 2 {
+            return Err(invalid(format!(
+                "a seasonal ARIMA needs a period of at least 2 observations per season, got {}",
+                seasonal.period
+            )));
         }
-        if spec.include_mean == Some(true) && d > 0 {
+        let reach = |order: usize, seasonal_order: usize| {
+            seasonal_order
+                .checked_mul(seasonal.period)
+                .and_then(|l| l.checked_add(order))
+        };
+        let lags = (
+            reach(p, seasonal.p),
+            reach(d, seasonal.d),
+            reach(q, seasonal.q),
+        );
+        // The lags + 10, checked: an order sum that overflows can never be fitted.
+        let required = match lags {
+            (Some(a), Some(b), Some(c)) => a
+                .checked_add(b)
+                .and_then(|s| s.checked_add(c))
+                .and_then(|s| s.checked_add(10)),
+            _ => None,
+        };
+        let (Some(required), (Some(ar_lags), Some(diff_lags), Some(ma_lags))) = (required, lags)
+        else {
+            return Err(invalid(format!(
+                "Not enough observations ({n}) for {label}: orders too large to fit any series"
+            )));
+        };
+        if n < required {
+            let rule = if seasonal.is_seasonal() {
+                "p + d + q + s (P + D + Q) + 10"
+            } else {
+                "p + d + q + 10"
+            };
+            return Err(invalid(format!(
+                "Not enough observations ({n}) for {label}: need at least {required} ({rule})"
+            )));
+        }
+        if seasonal.is_seasonal() && ar_lags.max(diff_lags).max(ma_lags) > MAX_SEASONAL_LAG {
+            return Err(invalid(format!(
+                "{label} reaches back too far: p + s P, d + s D and q + s Q may each be at most \
+                 {MAX_SEASONAL_LAG}"
+            )));
+        }
+        if spec.include_mean == Some(true) && diff_lags > 0 {
             return Err(invalid(
                 "include_mean = true needs d = 0: after differencing a mean has no effect on \
                  the fit or the forecasts (R's arima and forecast::Arima drop it); use \
@@ -609,24 +718,28 @@ impl Model {
                     .to_string(),
             ));
         }
-        if spec.include_drift && d >= 2 {
+        if spec.include_drift && d.saturating_add(seasonal.d) >= 2 {
             return Err(invalid(
-                "include_drift needs d = 0 or 1: (1 - B)^d removes a linear trend for d >= 2 \
-                 (forecast::Arima drops the drift with a warning)"
+                "include_drift needs d = 0 or 1: (1 - B)^d removes a linear trend for d >= 2, \
+                 seasonal differences included (forecast::Arima drops the drift with a warning)"
                     .to_string(),
             ));
         }
         let mean = spec.mean_included();
         let drift = spec.include_drift;
-        // p + q + 2 <= n here, so this cannot overflow.
-        let k = p + q + usize::from(mean) + usize::from(drift);
+        // The sum is at most n here, so this cannot overflow.
+        let k = p + q + seasonal.p + seasonal.q + usize::from(mean) + usize::from(drift);
         Ok(Model {
             p,
             d,
             q,
+            seasonal,
             mean,
             drift,
             k,
+            ar_lags,
+            diff_lags,
+            ma_lags,
         })
     }
 
@@ -635,11 +748,18 @@ impl Model {
         usize::from(self.mean) + usize::from(self.drift)
     }
 
-    /// R's coefficient names: ar1.., ma1.., intercept, drift.
+    /// Number of ARMA coefficients.
+    fn n_arma(&self) -> usize {
+        self.p + self.q + self.seasonal.p + self.seasonal.q
+    }
+
+    /// R's coefficient names: ar1.., ma1.., sar1.., sma1.., intercept, drift.
     fn names(&self) -> Vec<String> {
         let mut names = Vec::with_capacity(self.k);
         names.extend((1..=self.p).map(|i| format!("ar{i}")));
         names.extend((1..=self.q).map(|j| format!("ma{j}")));
+        names.extend((1..=self.seasonal.p).map(|i| format!("sar{i}")));
+        names.extend((1..=self.seasonal.q).map(|j| format!("sma{j}")));
         if self.mean {
             names.push("intercept".to_string());
         }
@@ -650,22 +770,53 @@ impl Model {
     }
 
     /// Regressor `b` (mean, then drift) of the differenced equation at index `s` of the
-    /// differenced series: 1 for the mean (d = 0) and for the drift with d = 1, the time
-    /// t = s + 1 for the drift with d = 0.
+    /// differenced series: 1 for the mean and for the drift with d = 1, the period for the
+    /// drift with one seasonal difference, the time t = s + 1 for the drift without any.
     fn regressor(&self, b: usize, s: usize) -> f64 {
         let is_drift = self.drift && b + 1 == self.n_beta();
-        if is_drift && self.d == 0 {
+        if is_drift && self.diff_lags == 0 {
             (s + 1) as f64
+        } else if is_drift {
+            self.diff_lags as f64
         } else {
             1.0
         }
     }
 
-    /// (ar, ma, [mean, drift]) of a coefficient vector in R order.
-    fn split<'a>(&self, coef: &'a [f64]) -> (&'a [f64], &'a [f64], &'a [f64]) {
+    /// The parts of a coefficient vector in R order.
+    fn split<'a>(&self, coef: &'a [f64]) -> Parts<'a> {
         let (ar, rest) = coef.split_at(self.p);
-        let (ma, beta) = rest.split_at(self.q);
-        (ar, ma, beta)
+        let (ma, rest) = rest.split_at(self.q);
+        let (sar, rest) = rest.split_at(self.seasonal.p);
+        let (sma, beta) = rest.split_at(self.seasonal.q);
+        Parts {
+            ar,
+            ma,
+            sar,
+            sma,
+            beta,
+        }
+    }
+
+    /// The expanded AR and MA polynomials of `parts` as (lag, coefficient), R's signs
+    /// (`ARIMA_transPars`): phi(B) Phi(B^s) = 1 - sum c B^lag, theta(B) Theta(B^s) =
+    /// 1 + sum c B^lag.
+    fn expand(&self, parts: &Parts<'_>, ar: &mut Vec<(usize, f64)>, ma: &mut Vec<(usize, f64)>) {
+        let expand = |low: &[f64], high: &[f64], sign: f64, out: &mut Vec<(usize, f64)>| {
+            out.clear();
+            out.extend(low.iter().enumerate().map(|(i, &c)| (i + 1, c)));
+            for (j, &big) in high.iter().enumerate() {
+                let base = (j + 1) * self.seasonal.period;
+                out.push((base, big));
+                out.extend(
+                    low.iter()
+                        .enumerate()
+                        .map(|(i, &c)| (base + i + 1, sign * c * big)),
+                );
+            }
+        };
+        expand(parts.ar, parts.sar, -1.0, ar);
+        expand(parts.ma, parts.sma, 1.0, ma);
     }
 
     /// (mean, drift) of the regression coefficients, 0.0 when not estimated.
@@ -691,26 +842,45 @@ impl Model {
             )))
         }
     }
+
+    /// Whether the AR part is stationary and the MA part invertible: each factor has its roots
+    /// outside the unit circle (a seasonal factor as a polynomial in B^s).
+    fn stable(&self, parts: &Parts<'_>) -> EconResult<(bool, bool)> {
+        let negated = |c: &[f64]| c.iter().map(|t| -t).collect::<Vec<f64>>();
+        Ok((
+            polynomial_stable(parts.ar)? && polynomial_stable(parts.sar)?,
+            polynomial_stable(&negated(parts.ma))? && polynomial_stable(&negated(parts.sma))?,
+        ))
+    }
 }
 
-/// (1 - B)^d applied `d` times in place, as R's ARIMA_CSS does; returns the m = n - d
-/// differenced values.
-fn difference(x: &[f64], d: usize) -> EconResult<Vec<f64>> {
+/// The series of a model differenced as R's ARIMA_CSS does, regularly and then seasonally; the
+/// m = n - d - s D differenced values.
+fn difference_model(x: &[f64], model: &Model) -> EconResult<Vec<f64>> {
+    let w = difference(x, model.d, 1)?;
+    if model.seasonal.d == 0 {
+        return Ok(w);
+    }
+    difference(&w, model.seasonal.d, model.seasonal.period)
+}
+
+/// (1 - B^lag)^d of `x`, without the first d lag values.
+fn difference(x: &[f64], d: usize, lag: usize) -> EconResult<Vec<f64>> {
     let mut w = try_vec(x.len(), 0.0, "the differenced series")?;
     w.copy_from_slice(x);
     for _ in 0..d {
         checkpoint()?;
-        for l in (1..w.len()).rev() {
-            w[l] -= w[l - 1];
+        for l in (lag..w.len()).rev() {
+            w[l] -= w[l - lag];
         }
     }
-    let d = d.min(w.len());
-    w.copy_within(d.., 0);
-    w.truncate(w.len() - d);
+    let lost = (d * lag).min(w.len());
+    w.copy_within(lost.., 0);
+    w.truncate(w.len() - lost);
     Ok(w)
 }
 
-/// Buffers of one CSS pass: adjusted series, residuals, the last q derivative rows, the
+/// Buffers of one CSS pass: adjusted series, residuals, the last q + s Q derivative rows, the
 /// current row, J'J and J'e.
 struct Workspace {
     w: Vec<f64>,
@@ -719,6 +889,8 @@ struct Workspace {
     row: Vec<f64>,
     jtj: Array2<f64>,
     jte: Array1<f64>,
+    ar: Vec<(usize, f64)>,
+    ma: Vec<(usize, f64)>,
 }
 
 impl Workspace {
@@ -727,10 +899,12 @@ impl Workspace {
         Ok(Workspace {
             w: try_vec(m, 0.0, WHAT)?,
             e: try_vec(m, 0.0, WHAT)?,
-            ring: try_vec(checked_len(&[model.q, model.k], WHAT)?, 0.0, WHAT)?,
+            ring: try_vec(checked_len(&[model.ma_lags, model.k], WHAT)?, 0.0, WHAT)?,
             row: try_vec(model.k, 0.0, WHAT)?,
             jtj: try_zeros2(model.k, model.k, WHAT)?,
             jte: try_zeros1(model.k, WHAT)?,
+            ar: Vec::new(),
+            ma: Vec::new(),
         })
     }
 }
@@ -746,7 +920,8 @@ fn css_pass(
     jacobian: bool,
 ) -> EconResult<f64> {
     let Model { p, q, k, .. } = *model;
-    let (phi, theta, beta) = model.split(coef);
+    let parts = model.split(coef);
+    let beta = parts.beta;
     let m = dx.len();
     let Workspace {
         w,
@@ -755,7 +930,11 @@ fn css_pass(
         row,
         jtj,
         jte,
+        ar,
+        ma,
     } = ws;
+    model.expand(&parts, ar, ma);
+    let (start, ring_len, period) = (model.ar_lags, model.ma_lags, model.seasonal.period);
     for s in 0..m {
         if s % ROW_STRIDE == ROW_STRIDE - 1 {
             checkpoint()?;
@@ -766,52 +945,83 @@ fn css_pass(
         }
         w[s] = v;
     }
-    e[..p.min(m)].fill(0.0);
+    e[..start.min(m)].fill(0.0);
     if jacobian {
         jtj.fill(0.0);
         jte.fill(0.0);
     }
     let mut ssr = 0.0;
-    for s in p..m {
-        if (s - p) % ROW_STRIDE == ROW_STRIDE - 1 {
+    for s in start..m {
+        if (s - start) % ROW_STRIDE == ROW_STRIDE - 1 {
             checkpoint()?;
         }
         // The MA terms reach back only to residuals after the conditioning ones.
-        let lags = q.min(s - p);
+        let lags = ring_len.min(s - start);
         let mut v = w[s];
-        for (i, &phi_i) in phi.iter().enumerate() {
-            v -= phi_i * w[s - i - 1];
+        for &(lag, c) in ar.iter() {
+            v -= c * w[s - lag];
         }
-        for (j, &theta_j) in theta.iter().enumerate().take(lags) {
-            v -= theta_j * e[s - j - 1];
+        for &(lag, c) in ma.iter() {
+            if lag <= lags {
+                v -= c * e[s - lag];
+            }
         }
         e[s] = v;
         ssr += v * v;
         if !jacobian {
             continue;
         }
+        // A coefficient's derivative is the other factor's filter at its own lag.
+        let residual = |lag: usize| if lag <= lags { e[s - lag] } else { 0.0 };
         for i in 0..p {
-            row[i] = -w[s - i - 1];
+            let mut g = w[s - i - 1];
+            for (j, &c) in parts.sar.iter().enumerate() {
+                g -= c * w[s - i - 1 - (j + 1) * period];
+            }
+            row[i] = -g;
         }
         for j in 0..q {
-            row[p + j] = if j < lags { -e[s - j - 1] } else { 0.0 };
+            let mut g = residual(j + 1);
+            for (i, &c) in parts.sma.iter().enumerate() {
+                g += c * residual(j + 1 + (i + 1) * period);
+            }
+            row[p + j] = -g;
+        }
+        for j in 0..parts.sar.len() {
+            let base = (j + 1) * period;
+            let mut g = w[s - base];
+            for (i, &c) in parts.ar.iter().enumerate() {
+                g -= c * w[s - base - i - 1];
+            }
+            row[p + q + j] = -g;
+        }
+        for j in 0..parts.sma.len() {
+            let base = (j + 1) * period;
+            let mut g = residual(base);
+            for (i, &c) in parts.ma.iter().enumerate() {
+                g += c * residual(base + i + 1);
+            }
+            row[p + q + parts.sar.len() + j] = -g;
         }
         for b in 0..beta.len() {
             let mut g = -model.regressor(b, s);
-            for (i, &phi_i) in phi.iter().enumerate() {
-                g += phi_i * model.regressor(b, s - i - 1);
+            for &(lag, c) in ar.iter() {
+                g += c * model.regressor(b, s - lag);
             }
-            row[p + q + b] = g;
+            row[model.n_arma() + b] = g;
         }
-        for (j, &theta_j) in theta.iter().enumerate().take(lags) {
-            let slot = (s - j - 1) % q;
+        for &(lag, c) in ma.iter() {
+            if lag > lags {
+                continue;
+            }
+            let slot = (s - lag) % ring_len;
             let prev = &ring[slot * k..(slot + 1) * k];
             for (r, &pv) in row.iter_mut().zip(prev) {
-                *r -= theta_j * pv;
+                *r -= c * pv;
             }
         }
-        if q > 0 {
-            let slot = s % q;
+        if ring_len > 0 {
+            let slot = s % ring_len;
             ring[slot * k..(slot + 1) * k].copy_from_slice(row);
         }
         for a in 0..k {
@@ -836,7 +1046,7 @@ fn css_pass(
 fn css_residuals(x: &[f64], spec: &ArimaSpec, coefficients: &[f64]) -> EconResult<(Vec<f64>, f64)> {
     let model = Model::new(spec, x.len())?;
     model.check_coefficients(coefficients)?;
-    let dx = difference(x, model.d)?;
+    let dx = difference_model(x, &model)?;
     let mut ws = Workspace::new(dx.len(), &model)?;
     let ssr = css_pass(&dx, &model, coefficients, &mut ws, false)?;
     Ok((full_residuals(x.len(), &model, &ws.e)?, ssr))
@@ -845,7 +1055,7 @@ fn css_residuals(x: &[f64], spec: &ArimaSpec, coefficients: &[f64]) -> EconResul
 /// The residuals of the differenced series at length n: d leading zeros, then `e`.
 fn full_residuals(n: usize, model: &Model, e: &[f64]) -> EconResult<Vec<f64>> {
     let mut residuals = try_vec(n, 0.0, "the ARIMA residuals")?;
-    residuals[model.d..].copy_from_slice(e);
+    residuals[model.diff_lags..].copy_from_slice(e);
     Ok(residuals)
 }
 
@@ -854,11 +1064,13 @@ fn full_residuals(n: usize, model: &Model, e: &[f64]) -> EconResult<Vec<f64>> {
 fn start_values(dx: &[f64], model: &Model) -> EconResult<Vec<f64>> {
     let mut coef = try_vec(model.k, 0.0, "the ARIMA coefficients")?;
     let m = dx.len() as f64;
-    let at = model.p + model.q;
+    let at = model.n_arma();
     match (model.mean, model.drift) {
         (false, false) => {}
         (true, false) => coef[at] = dx.iter().sum::<f64>() / m,
-        (false, true) if model.d == 1 => coef[at] = dx.iter().sum::<f64>() / m,
+        (false, true) if model.diff_lags > 0 => {
+            coef[at] = dx.iter().sum::<f64>() / m / model.diff_lags as f64;
+        }
         (false, true) => {
             // drift alone with d = 0: regression through the origin on t = 1..m
             let (sxt, stt) = dx
@@ -1124,9 +1336,9 @@ fn stationary_covariance(a: &Array2<f64>, v: &Array2<f64>) -> EconResult<Option<
 }
 
 /// The ARIMA state space of `stats::makeARIMA`: r = max(p, q + 1) ARMA states followed by
-/// d differencing states.
-struct StateSpace<'a> {
-    phi: &'a [f64],
+/// d differencing states (orders of the expanded polynomials).
+struct StateSpace {
+    phi: Vec<f64>,
     /// (1 - B)^d = 1 - delta_1 B - ... - delta_d B^d
     delta: Vec<f64>,
     /// (1, theta_1, ..., theta_q, 0, ...), length r
@@ -1135,7 +1347,7 @@ struct StateSpace<'a> {
     rd: usize,
 }
 
-impl StateSpace<'_> {
+impl StateSpace {
     /// out = T v.
     fn apply_t(&self, v: &[f64], out: &mut [f64]) {
         let (r, p) = (self.r, self.phi.len());
@@ -1229,17 +1441,26 @@ struct ArimaPrediction {
     warnings: Vec<String>,
 }
 
-/// The coefficients of (1 - B)^d as R's `Delta`: (1 - B)^d = 1 - delta_1 B - ... -
-/// delta_d B^d.
-fn differencing_weights(d: usize) -> EconResult<Vec<f64>> {
-    let mut poly = try_vec(d + 1, 0.0, "the differencing polynomial")?;
+/// The coefficients of (1 - B)^d (1 - B^s)^D as R's `Delta`: 1 - delta_1 B - delta_2 B^2 - ...
+fn differencing_weights(model: &Model) -> EconResult<Vec<f64>> {
+    let mut poly = try_vec(model.diff_lags + 1, 0.0, "the differencing polynomial")?;
     poly[0] = 1.0;
-    for len in 1..=d {
-        for i in (1..=len).rev() {
-            poly[i] -= poly[i - 1];
+    let seasonal = std::iter::repeat_n(model.seasonal.period, model.seasonal.d);
+    for lag in std::iter::repeat_n(1, model.d).chain(seasonal) {
+        for i in (lag..poly.len()).rev() {
+            poly[i] -= poly[i - lag];
         }
     }
     Ok(poly[1..].iter().map(|c| -c).collect())
+}
+
+/// Expanded terms as a dense vector over lags 1..=len.
+fn dense(terms: &[(usize, f64)], len: usize) -> EconResult<Vec<f64>> {
+    let mut out = try_vec(len, 0.0, "the expanded ARIMA polynomial")?;
+    for &(lag, c) in terms {
+        out[lag - 1] += c;
+    }
+    Ok(out)
 }
 
 /// predict.Arima for given coefficients (R order) and sigma2: `stats::makeARIMA`, the
@@ -1255,16 +1476,20 @@ fn arima_predict(
     let n = x.len();
     let model = Model::new(spec, n)?;
     model.check_coefficients(coefficients)?;
-    let (phi, theta, beta) = model.split(coefficients);
-    let (mean, drift) = model.mean_drift(beta);
-    let r = model.p.max(model.q + 1);
-    let d = model.d;
+    let parts = model.split(coefficients);
+    let (mean, drift) = model.mean_drift(parts.beta);
+    let (mut ar, mut ma) = (Vec::new(), Vec::new());
+    model.expand(&parts, &mut ar, &mut ma);
+    let phi = dense(&ar, model.ar_lags)?;
+    let theta = dense(&ma, model.ma_lags)?;
+    let r = model.ar_lags.max(model.ma_lags + 1);
+    let d = model.diff_lags;
     let rd = r + d;
     let mut warnings = Vec::new();
 
     let mut r_vec = try_vec(r, 0.0, WHAT)?;
     r_vec[0] = 1.0;
-    r_vec[1..=model.q].copy_from_slice(theta);
+    r_vec[1..=model.ma_lags].copy_from_slice(&theta);
 
     // P0: the stationary covariance of the ARMA states; kappa for the differencing states.
     let mut pm = try_zeros2(rd, rd, WHAT)?;
@@ -1299,7 +1524,7 @@ fn arima_predict(
 
     let ss = StateSpace {
         phi,
-        delta: differencing_weights(d)?,
+        delta: differencing_weights(&model)?,
         r_vec,
         r,
         rd,
@@ -1311,8 +1536,10 @@ fn arima_predict(
     };
     let mut a = try_vec(rd, 0.0, WHAT)?;
     let mut m = try_vec(rd, 0.0, WHAT)?;
+    // A step costs rd^2: large state spaces check the budget more often.
+    let stride = (FILTER_STRIDE / (1 + rd * rd / 1024)).max(1);
     for (t, &xt) in x.iter().enumerate() {
-        if t % FILTER_STRIDE == FILTER_STRIDE - 1 {
+        if t % stride == stride - 1 {
             checkpoint()?;
         }
         let zt = xt - mean - drift * (t + 1) as f64;
@@ -1347,8 +1574,7 @@ fn arima_predict(
         forecast[h] = ss.z_dot(&a) + mean + drift * (n + h + 1) as f64;
         se[h] = (sigma2 * ss.z_dot(&m)).sqrt();
     }
-    let neg_theta: Vec<f64> = theta.iter().map(|t| -t).collect();
-    if !polynomial_stable(&neg_theta)? {
+    if !model.stable(&parts)?.1 {
         warnings.push(MA_NOT_INVERTIBLE.to_string());
     }
     Ok(ArimaPrediction {
@@ -1364,7 +1590,7 @@ fn fit_css(x: &[f64], spec: &ArimaSpec, column: &str) -> EconResult<ArimaResult>
     let model = Model::new(spec, n)?;
     // A spent budget never starts the fit (Tier 0); with k = 0 no iteration checks it.
     checkpoint()?;
-    let dx = difference(x, model.d)?;
+    let dx = difference_model(x, &model)?;
     let mut ws = Workspace::new(dx.len(), &model)?;
     let mut coef = start_values(&dx, &model)?;
     let convergence = optimise(&dx, &model, &mut coef, &mut ws)?;
@@ -1393,22 +1619,22 @@ fn fit_css(x: &[f64], spec: &ArimaSpec, column: &str) -> EconResult<ArimaResult>
     let residuals = full_residuals(n, &model, &ws.e)?;
 
     let Model { p, d, q, k, .. } = model;
-    let (ar, ma, beta) = model.split(&coef);
-    let (mean, drift) = model.mean_drift(beta);
-    let sum_ar: f64 = ar.iter().sum();
-    let constant = if model.drift && d == 0 {
+    let parts = model.split(&coef);
+    let (mean, drift) = model.mean_drift(parts.beta);
+    let sum_ar: f64 = ws.ar.iter().map(|(_, c)| c).sum();
+    let constant = if model.drift && model.diff_lags == 0 {
         None
     } else if model.mean {
         Some(mean * (1.0 - sum_ar))
     } else if model.drift {
-        Some(drift * (1.0 - sum_ar))
+        Some(drift * model.diff_lags as f64 * (1.0 - sum_ar))
     } else {
         Some(0.0)
     };
-    let n_used = (n - d) as f64;
-    let sigma2 = ssr / (n - d - k) as f64;
+    let n_used = (n - model.diff_lags) as f64;
+    let sigma2 = ssr / (n - model.diff_lags - k) as f64;
     let loglik = -0.5
-        * (n_used * (ssr / (n - d - p) as f64).ln()
+        * (n_used * (ssr / (n - model.diff_lags - model.ar_lags) as f64).ln()
             + n_used * (1.0 + (2.0 * std::f64::consts::PI).ln()));
     let aic = -2.0 * loglik + 2.0 * (k + 1) as f64;
 
@@ -1420,11 +1646,11 @@ fn fit_css(x: &[f64], spec: &ArimaSpec, column: &str) -> EconResult<ArimaResult>
             convergence.iterations, convergence.step
         ));
     }
-    let neg_ma: Vec<f64> = ma.iter().map(|t| -t).collect();
-    if !polynomial_stable(&neg_ma)? {
+    let (stationary, invertible) = model.stable(&parts)?;
+    if !invertible {
         warnings.push(MA_NOT_INVERTIBLE.to_string());
     }
-    if !polynomial_stable(ar)? {
+    if !stationary {
         warnings.push(AR_NOT_STATIONARY.to_string());
     }
 
@@ -1433,8 +1659,11 @@ fn fit_css(x: &[f64], spec: &ArimaSpec, column: &str) -> EconResult<ArimaResult>
         p,
         d,
         q,
-        ar_coeffs: ar.to_vec(),
-        ma_coeffs: ma.to_vec(),
+        seasonal: model.seasonal,
+        ar_coeffs: parts.ar.to_vec(),
+        ma_coeffs: parts.ma.to_vec(),
+        sar_coeffs: parts.sar.to_vec(),
+        sma_coeffs: parts.sma.to_vec(),
         intercept: mean,
         constant,
         drift: model.drift.then_some(drift),
@@ -1443,7 +1672,7 @@ fn fit_css(x: &[f64], spec: &ArimaSpec, column: &str) -> EconResult<ArimaResult>
         coefficients: coef,
         residuals,
         n_obs: n,
-        n_cond: d + p,
+        n_cond: model.diff_lags + model.ar_lags,
         ssr,
         sigma2,
         loglik,
@@ -1463,10 +1692,10 @@ mod tests {
     #[test]
     fn test_difference() {
         let series = vec![1.0, 2.0, 4.0, 7.0, 11.0];
-        let diff1 = difference(&series, 1).unwrap();
+        let diff1 = difference(&series, 1, 1).unwrap();
         assert_eq!(diff1, vec![1.0, 2.0, 3.0, 4.0]);
 
-        let diff2 = difference(&series, 2).unwrap();
+        let diff2 = difference(&series, 2, 1).unwrap();
         assert_eq!(diff2, vec![1.0, 1.0, 1.0]);
     }
 
@@ -1842,6 +2071,167 @@ mod tests {
                 .scalar(&format!("{key}_n"), fit.n_obs as f64, Tol::exact());
         }
         check.finish();
+    }
+
+    /// R: forecast::Arima(seasonal = list(order, period), method = "CSS") at the exact optimum and
+    /// forecast::forecast there: seven seasonal models, the airline model among them.
+    #[test]
+    fn test_validate_arima_seasonal() {
+        use p2a_validation::{Check, Tol};
+        let case = crate::test_support::load_case("arima_seasonal").0;
+        let load = |name: &str| {
+            crate::data::DataLoader::load(&format!(
+                "{}/../../validation/datasets/generated/{name}.csv",
+                env!("CARGO_MANIFEST_DIR")
+            ))
+            .unwrap()
+        };
+        let (sim, air) = (load("arima_seasonal"), load("arima_seasonal_air"));
+        let spec = |(p, d, q), (sp, sd, sq), period| ArimaSpec {
+            seasonal: SeasonalOrder {
+                p: sp,
+                d: sd,
+                q: sq,
+                period,
+            },
+            ..ArimaSpec::new(p, d, q)
+        };
+        let drift = |s: ArimaSpec| ArimaSpec {
+            include_drift: true,
+            ..s
+        };
+        let fits = [
+            ("air_011_011", &air, "lair", spec((0, 1, 1), (0, 1, 1), 12)),
+            ("air_110_110", &air, "lair", spec((1, 1, 0), (1, 1, 0), 12)),
+            ("q4_101_101", &sim, "q4", spec((1, 0, 1), (1, 0, 1), 4)),
+            (
+                "q0_002_001_nomean",
+                &sim,
+                "q0",
+                ArimaSpec {
+                    include_mean: Some(false),
+                    ..spec((0, 0, 2), (0, 0, 1), 4)
+                },
+            ),
+            ("q4_000_200", &sim, "q4", spec((0, 0, 0), (2, 0, 0), 4)),
+            (
+                "sea_100_011_drift",
+                &sim,
+                "sea",
+                drift(spec((1, 0, 0), (0, 1, 1), 12)),
+            ),
+            (
+                "sea_100_100_drift",
+                &sim,
+                "sea",
+                drift(spec((1, 0, 0), (1, 0, 0), 12)),
+            ),
+        ];
+        let mut check = Check::new(&case);
+        for (key, ds, column, spec) in fits {
+            let fc = forecast_arima_with(ds, column, &spec, 15).unwrap();
+            let fit = fc.fit.as_ref().unwrap();
+            let n = fit.n_obs;
+            assert!(fit.converged, "{key}: {:?}", fit.warnings);
+            assert_eq!(fit.spec().label(), spec.label());
+            check
+                .named(
+                    &format!("{key}_coef_tight"),
+                    &fit.coef_names,
+                    &fit.coefficients,
+                    Tol::iterative(1e-6),
+                )
+                .named(
+                    &format!("{key}_coef"),
+                    &fit.coef_names,
+                    &fit.coefficients,
+                    Tol::iterative(1e-3),
+                )
+                .scalar(&format!("{key}_ssr_tight"), fit.ssr, Tol::stat(n))
+                .scalar(&format!("{key}_sigma2_tight"), fit.sigma2, Tol::stat(n))
+                .scalar(&format!("{key}_loglik_tight"), fit.loglik, Tol::stat(n))
+                .scalar(&format!("{key}_aic_css_tight"), fit.aic, Tol::stat(n))
+                .scalar(&format!("{key}_n_cond"), fit.n_cond as f64, Tol::exact())
+                .vector(
+                    &format!("{key}_resid_tail_tight"),
+                    &fit.residuals[n - 3..],
+                    Tol::new(1e-6, 1e-7),
+                )
+                // Forecasts follow the coefficients' 1e-8, so those near 0 have an absolute floor
+                // like the residuals (series scale 1-10).
+                .vector(
+                    &format!("{key}_mean_tight"),
+                    &fc.forecast,
+                    Tol::new(1e-6, 1e-7),
+                )
+                .vector(
+                    &format!("{key}_se_tight"),
+                    fc.std_errors.as_ref().unwrap(),
+                    Tol::stat(n),
+                )
+                .vector(
+                    &format!("{key}_lower80_tight"),
+                    &fc.lower[0],
+                    Tol::new(1e-6, 1e-7),
+                )
+                .vector(
+                    &format!("{key}_upper80_tight"),
+                    &fc.upper[0],
+                    Tol::new(1e-6, 1e-7),
+                )
+                .vector(
+                    &format!("{key}_lower95_tight"),
+                    &fc.lower[1],
+                    Tol::new(1e-6, 1e-7),
+                )
+                .vector(
+                    &format!("{key}_upper95_tight"),
+                    &fc.upper[1],
+                    Tol::new(1e-6, 1e-7),
+                );
+        }
+        check.finish();
+    }
+
+    #[test]
+    fn seasonal_specifications_are_checked() {
+        let y = generate_ar1_data(200, 0.6, 7);
+        let ds = Dataset::new(df! { "y" => &y }.unwrap());
+        let fit = |p, d, q, period, drift| {
+            let spec = ArimaSpec {
+                seasonal: SeasonalOrder { p, d, q, period },
+                include_drift: drift,
+                ..ArimaSpec::new(0, 1, 1)
+            };
+            run_arima_with(&ds, "y", &spec)
+        };
+        let message = |r: EconResult<ArimaResult>| r.unwrap_err().to_string();
+        assert!(message(fit(0, 1, 1, 0, false)).contains("period of at least 2"));
+        assert!(message(fit(0, 1, 1, 100, false)).contains("Not enough observations (200)"));
+        assert!(message(fit(usize::MAX, 0, 0, 12, false)).contains("orders too large"));
+        assert!(message(fit(0, 1, 0, 12, true)).contains("seasonal differences included"));
+        assert_eq!(
+            fit(0, 1, 1, 12, false).unwrap().spec().orders(),
+            "ARIMA(0,1,1)(0,1,1)[12]"
+        );
+        // A period without seasonal orders changes nothing.
+        let plain = run_arima_with(&ds, "y", &ArimaSpec::new(0, 1, 1)).unwrap();
+        let period_only = fit(0, 0, 0, 12, false).unwrap();
+        assert_eq!(plain.coefficients, period_only.coefficients);
+        assert_eq!(plain.spec(), period_only.spec());
+        let long = generate_ar1_data(2000, 0.5, 3);
+        let long = Dataset::new(df! { "y" => &long }.unwrap());
+        let spec = ArimaSpec {
+            seasonal: SeasonalOrder {
+                p: 2,
+                d: 0,
+                q: 0,
+                period: 365,
+            },
+            ..ArimaSpec::new(0, 0, 0)
+        };
+        let e = run_arima_with(&long, "y", &spec).unwrap_err().to_string();
+        assert!(e.contains("reaches back too far"), "{e}");
     }
 
     /// (case prefix, column, spec): the 13 fits of arima_css_forecast.

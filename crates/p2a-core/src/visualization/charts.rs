@@ -810,19 +810,32 @@ pub fn line_chart_with_band(
                 .map(|(xi, yi)| (*xi, *yi))
                 .collect();
 
-            chart
-                .draw_series(LineSeries::new(points, color.stroke_width(2)))
+            // Past the palette the colours come again, dashed.
+            let drawn = if idx < colors.len() {
+                chart.draw_series(LineSeries::new(points, color.stroke_width(2)))
+            } else {
+                chart.draw_series(DashedLineSeries::new(points, 8, 5, color.stroke_width(2)))
+            };
+            drawn
                 .map_err(|e| VisualizationError::PlottingError(e.to_string()))?
                 .label(label)
                 .legend(move |(x, y)| {
-                    PathElement::new(vec![(x, y), (x + 20, y)], color.stroke_width(2))
+                    // Two strokes stand for a dashed line.
+                    let ends = if idx < colors.len() {
+                        [20, 20]
+                    } else {
+                        [8, 12]
+                    };
+                    EmptyElement::at((x, y))
+                        + PathElement::new(vec![(0, 0), (ends[0], 0)], color.stroke_width(2))
+                        + PathElement::new(vec![(ends[1], 0), (20, 0)], color.stroke_width(2))
                 });
         }
 
         // Draw legend if multiple series
         if series.len() > 1 || band.is_some() {
             let mut legend = chart.configure_series_labels();
-            if band.is_some() || config.x_dates {
+            if band.is_some() || config.x_dates || series.len() > 2 {
                 legend.position(emptiest_corner(series, (x_min, x_max), (y_min, y_max)));
             }
             legend

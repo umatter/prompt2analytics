@@ -1023,18 +1023,20 @@ Probit regression for binary outcomes.
 ## Time Series
 
 ### ts_arima_fit
-Fit a non-seasonal ARIMA(p,d,q) model (for seasonal data use `ts_holt_winters`).
+Fit an ARIMA(p,d,q) or seasonal ARIMA(p,d,q)(P,D,Q)[period] model.
 
 ```
 /ts_arima_fit dataset:sales column:revenue p:1 d:1 q:1
 /ts_arima_fit dataset:sales column:revenue p:1 d:0 q:1 include_mean:true
 /ts_arima_fit dataset:sales column:revenue p:0 d:1 q:1 include_drift:true
+/ts_arima_fit dataset:sales column:revenue p:0 d:1 q:1 seasonal_p:0 seasonal_d:1 seasonal_q:1 period:12
 ```
 
 **Parameters:**
 - `p`: Autoregressive order
 - `d`: Differencing order
 - `q`: Moving average order
+- `seasonal_p`, `seasonal_d`, `seasonal_q` (optional, default 0) and `period`: the seasonal part; `period` is required with a seasonal order above 0
 - `include_mean` (optional): estimate the mean (R's `intercept`); default true when d = 0, and must be false or omitted when d > 0
 - `include_drift` (optional): estimate a drift, as R `forecast::Arima(include.drift = TRUE)`; only for d = 0 or 1, default false
 
@@ -1045,11 +1047,12 @@ Generate forecasts from a fitted ARIMA model.
 
 ```
 /ts_arima_forecast dataset:sales column:revenue p:1 d:1 q:1 horizon:12
+/ts_arima_forecast dataset:sales column:revenue p:0 d:1 q:1 seasonal_p:0 seasonal_d:1 seasonal_q:1 period:12 horizon:12
 ```
 
 **Parameters:**
 - `horizon`: Forecast horizon (number of periods ahead)
-- `include_mean`, `include_drift` (optional): as for `ts_arima_fit`
+- `seasonal_p`, `seasonal_d`, `seasonal_q`, `period`, `include_mean`, `include_drift` (optional): as for `ts_arima_fit`
 
 **Output includes:** the fitted model, point forecasts, standard errors and 80% / 95% prediction intervals, as R `forecast(Arima(x, order, method = 'CSS'))`. The history and forecasts are saved as the dataset `<dataset>_forecast_<column>` (`time`, `actual`, `forecast`, `lower_95`, `upper_95`, `lower_80`, `upper_80`); `time` continues the dataset's regular date or year column, else counts 1, 2, ... `ts_holt_winters` with a horizon saves its forecasts the same way.
 
@@ -1536,6 +1539,7 @@ Time series or multi-series line chart.
 
 ```
 /viz_line dataset:sales x_column:date y_columns:revenue,costs
+/viz_line dataset:panel x_column:year y_columns:invest group_column:firm
 /viz_line dataset:sales_forecast_revenue x_column:time y_columns:actual,forecast lower_column:lower_95 upper_column:upper_95
 ```
 

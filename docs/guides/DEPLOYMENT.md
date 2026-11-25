@@ -646,7 +646,7 @@ Named budgets:
 | `response_bytes` | one tool's result (text, image and other content items), measured after the call ran | 16 MiB | none |
 | `session_disk_bytes` | bytes in one session's data directory | 64 MiB | none |
 | `spatial_links` | total links of a `spatial_neighbors` structure | 2,000,000 | none |
-| `arima_fit_work` | work of an ARIMA fit, observations × ((p + q + 3)² + d), checked before the fit starts; while set, a series holding a nonzero value below 1e-100 is refused as well | 7,500,000 | none |
+| `arima_fit_work` | work of an ARIMA fit, observations × ((p + q + 3)² + d), checked before the fit starts (a seasonal model counts the terms of its expanded polynomials, and a seasonal forecast also steps × states² / 100); while set, a series holding a nonzero value below 1e-100 is refused as well | 7,500,000 | none |
 | `scpi_work` | work of an `scpi` call, simulations × post-treatment periods × max(donors, 8)² (× 8 with the lasso constraint), checked before the simulations start | 512,000 | none |
 | `ctree_permutation_work` | work of an `ml_ctree` call with Monte Carlo p-values (`testtype` `montecarlo`), permutations × rows × (features + 20), checked before the fit starts | 2,000,000,000 | none |
 | `probit_impact_rows` | dataset rows of a `sar_probit_model` call with `compute_impacts` (on by default), checked before the sampler starts; `cubic_rows` bounds every call | 1,500 | none |

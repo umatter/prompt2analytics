@@ -214,6 +214,61 @@ fn text_axis_error(df: &DataFrame, name: &str) -> String {
     )
 }
 
+/// Lines a chart can hold: the palette's six colours, solid and dashed.
+const MAX_LINES: usize = 12;
+
+/// A label with its x and y values.
+type Line = (String, Vec<f64>, Vec<f64>);
+
+/// The plotted rows split by the values of `group`, in factor order, each sorted by x; and the
+/// number of rows without a group.
+fn grouped_lines(
+    df: &DataFrame,
+    group: &str,
+    plotted: &Plotted,
+    x: &[f64],
+    y: &[f64],
+) -> Result<(Vec<Line>, usize), String> {
+    let groups = ColumnRequest::new(df)
+        .factor(group)
+        .na(NaPolicy::Omit)
+        .extract()
+        .map_err(|e| e.to_string())?;
+    let factor = groups.factor(group);
+    let mut code_of: Vec<Option<u32>> = vec![None; df.height()];
+    for (&row, &code) in groups.rows().iter().zip(&factor.codes) {
+        code_of[row] = Some(code);
+    }
+    let mut points: std::collections::BTreeMap<u32, Vec<(f64, f64)>> = Default::default();
+    let mut unlabelled = 0;
+    for ((&row, &x), &y) in plotted.rows().iter().zip(x).zip(y) {
+        match code_of[row] {
+            Some(code) => points.entry(code).or_default().push((x, y)),
+            None => unlabelled += 1,
+        }
+        if points.len() > MAX_LINES {
+            return Err(format!(
+                "'{group}' has {} values; at most {MAX_LINES} lines can be told apart. Filter \
+                 the data to fewer groups first.",
+                factor.n_levels()
+            ));
+        }
+    }
+    let lines = points
+        .into_iter()
+        .map(|(code, mut points)| {
+            points.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let (x, y) = points.into_iter().unzip();
+            (
+                p2a_text::ellipsize(&factor.levels[code as usize], 40).to_string(),
+                x,
+                y,
+            )
+        })
+        .collect();
+    Ok((lines, unlabelled))
+}
+
 /// A numeric column over every row, a missing value as NaN (for an optional band whose gaps
 /// are drawn as gaps); ±Inf kept.
 fn numeric_with_gaps(df: &DataFrame, name: &str) -> Result<Vec<f64>, String> {
@@ -498,7 +553,7 @@ impl AnalyticsServer {
 
     /// Generate a line chart for time series or sequential data.
     #[tool(
-        description = "Generate a line chart visualization for time series or sequential data. Supports multiple Y series. The x column is numeric or holds dates (date columns, or text such as 1949-01, 1949-01-31 or 1949Q1). lower_column and upper_column shade a band, such as the intervals of a saved forecast. Rows with a missing value in a plotted column are left out and counted, each series on its own. Returns a base64-encoded PNG image."
+        description = "Generate a line chart visualization for time series or sequential data. Supports multiple Y series, and one line per value of group_column (panel data: the unit column). The x column is numeric or holds dates (date columns, or text such as 1949-01, 1949-01-31 or 1949Q1). lower_column and upper_column shade a band, such as the intervals of a saved forecast. Rows with a missing value in a plotted column are left out and counted, each series on its own. Returns a base64-encoded PNG image."
     )]
     pub async fn viz_line(
         &self,
@@ -520,6 +575,8 @@ impl AnalyticsServer {
         let mut series_names = Vec::new();
         let mut missing = Vec::new();
         let mut x_dates = false;
+        let mut doubles_back = false;
+        let mut no_group = 0;
         for y_col_name in &request.y_columns {
             let plotted = match plotted_columns(
                 dataset.df(),
@@ -532,12 +589,47 @@ impl AnalyticsServer {
             };
             x_dates = plotted.dates;
             series_names.push(y_col_name.clone());
-            series.push((
-                y_col_name.clone(),
+            let (x, y) = (
                 plotted.values(&request.x_column),
                 plotted.values(y_col_name),
-            ));
+            );
             missing.push(plotted.missing().clone());
+            let Some(group) = &request.group_column else {
+                doubles_back |= x.windows(2).any(|w| w[1] <= w[0]);
+                series.push((y_col_name.clone(), x, y));
+                continue;
+            };
+            let several = request.y_columns.len() > 1;
+            match grouped_lines(dataset.df(), group, &plotted, &x, &y) {
+                Ok((lines, unlabelled)) => {
+                    no_group = no_group.max(unlabelled);
+                    series.extend(lines.into_iter().map(|(label, x, y)| {
+                        let label = if several {
+                            format!("{y_col_name}: {label}")
+                        } else {
+                            label
+                        };
+                        (label, x, y)
+                    }));
+                }
+                Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+            }
+        }
+
+        if request.group_column.is_some() && series.len() > MAX_LINES {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "{} lines are too many to tell apart (at most {MAX_LINES}): filter the data to \
+                 fewer groups, or plot fewer y_columns",
+                series.len()
+            ))]));
+        }
+
+        if request.group_column.is_some()
+            && (request.lower_column.is_some() || request.upper_column.is_some())
+        {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "a band cannot be drawn with group_column: filter the data to one group",
+            )]));
         }
 
         let mut config = ChartConfig::default();
@@ -580,6 +672,22 @@ impl AnalyticsServer {
                     series_names.join(", "),
                     result.n_points
                 );
+                if let Some(group) = &request.group_column {
+                    description.push_str(&format!("\nOne line per value of {group}"));
+                }
+                if no_group > 0 {
+                    description.push_str(&format!(
+                        "\nWarning: {no_group} rows without a group were left out"
+                    ));
+                }
+                if doubles_back {
+                    description.push_str(&format!(
+                        "\nWarning: {} repeats or goes backwards, so one line jumps back and forth. For \
+                         panel data set group_column to the unit's column; otherwise sort or \
+                         aggregate the data by {}.",
+                        request.x_column, request.x_column
+                    ));
+                }
                 for m in &missing {
                     append_missing_note(&mut description, m);
                 }
@@ -1545,6 +1653,7 @@ mod tests {
                 dataset: "d".into(),
                 x_column: "t".into(),
                 y_columns: vec!["y1".into(), "y2".into()],
+                group_column: None,
                 lower_column: None,
                 upper_column: None,
                 title: None,
@@ -1717,6 +1826,7 @@ mod tests {
                 dataset: "d".into(),
                 x_column: "day".into(),
                 y_columns: vec!["y".into()],
+                group_column: None,
                 lower_column: None,
                 upper_column: None,
                 title: None,
@@ -1741,6 +1851,45 @@ mod tests {
                 && t.contains("y, ms, month, day, stamp"),
             "{t}"
         );
+    }
+
+    /// Panel data: one line per group, a warning when one line doubles back, a cap on lines.
+    #[test]
+    fn line_charts_split_panels_by_group() {
+        let n = 26usize;
+        let df = df!(
+            "unit" => (0..n).map(|i| if i < 13 { "a" } else { "b" }).collect::<Vec<_>>(),
+            "id" => (0..n as i64).collect::<Vec<_>>(),
+            "t" => (0..n).map(|i| (i % 13) as i64).collect::<Vec<_>>(),
+            "y" => (0..n).map(|i| (i as f64 * 1.7).sin()).collect::<Vec<_>>()
+        )
+        .unwrap();
+        let server = server_with(vec![("d", df)]);
+        let line = |group: Option<&str>| {
+            run(
+                Limits::off(),
+                server.viz_line(Parameters(LineChartRequest {
+                    dataset: "d".into(),
+                    x_column: "t".into(),
+                    y_columns: vec!["y".into()],
+                    group_column: group.map(Into::into),
+                    lower_column: None,
+                    upper_column: None,
+                    title: None,
+                })),
+            )
+        };
+        assert!(text(&line(None)).contains("set group_column"));
+        let r = line(Some("unit"));
+        assert_ne!(r.is_error, Some(true), "{}", text(&r));
+        let t = text(&r);
+        assert!(
+            t.contains("One line per value of unit") && !t.contains("Warning"),
+            "{t}"
+        );
+        let r = line(Some("id"));
+        assert_eq!(r.is_error, Some(true));
+        assert!(text(&r).contains("'id' has 26 values"), "{}", text(&r));
     }
 
     fn heatmap(server: &AnalyticsServer, columns: Option<Vec<&str>>) -> CallToolResult {

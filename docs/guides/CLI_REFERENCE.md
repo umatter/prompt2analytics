@@ -2502,6 +2502,8 @@ p2a timeseries arima [OPTIONS] --col <COL> <DATASET>
 | `-p, --ar <AR>` | Autoregressive order (p) [default: 1] |
 | `-d, --diff <DIFF>` | Differencing order (d) [default: 0] |
 | `-q, --ma <MA>` | Moving average order (q) [default: 1] |
+| `--seasonal <P> <D> <Q>` | Seasonal orders P D Q of a seasonal ARIMA (needs --period) |
+| `--period <PERIOD>` | Observations per season, e.g. 12 for monthly data (needs --seasonal) |
 | `--horizon <HORIZON>` | Forecast horizon (optional) |
 | `--include-mean <BOOL>` | Estimate the mean (default: true when d = 0, as R); --include-mean false drops it [possible values: true, false] |
 | `--drift` | Fit a drift (linear trend in the levels), as forecast::Arima(include.drift = TRUE); d = 0 or 1 |

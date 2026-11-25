@@ -117,7 +117,8 @@ mod distinct;
 mod rules;
 pub use rules::{
     ARIMA_MIN_MAGNITUDE, CTREE_FIXED_INPUTS, PARAM_RULES, PIVOT_RULES, ROW_RULES,
-    SCPI_LASSO_WEIGHT, SCPI_MIN_DONORS, arima_fit_work, ctree_permutation_work, scpi_work,
+    SCPI_LASSO_WEIGHT, SCPI_MIN_DONORS, arima_filter_work, arima_fit_work, ctree_permutation_work,
+    scpi_work,
 };
 
 /// Generates [`Family`], [`Family::ALL`], [`Family::key`] and `Family::hosted_cap` from one list
@@ -1479,6 +1480,35 @@ impl Limits {
                 "`{tool}` with p = {p}, d = {d} and q = {q} on {n_obs} observations needs {work} \
                  ({KNOB}: observations x ((p + q + 3)^2 + d)), which exceeds this server's limit \
                  of {limit} for one ARIMA fit, checked before the fit starts. {advice}"
+            ),
+            tool: tool.to_string(),
+            parameter: KNOB.to_string(),
+            requested: work.to_string(),
+            limit: limit.to_string(),
+            override_key: KNOB,
+        })
+    }
+
+    /// Checks the Kalman filter of a seasonal ARIMA forecast (`steps` observations and forecast
+    /// steps, `states` states; [`arima_filter_work`]) against the same budget as the fit
+    /// (`None` passes).
+    pub fn check_arima_filter(
+        &self,
+        tool: &str,
+        steps: usize,
+        states: usize,
+    ) -> Result<(), LimitViolation> {
+        const KNOB: &str = "arima_fit_work";
+        let work = arima_filter_work(steps, states);
+        let Some(limit) = self.arima_fit_work.filter(|limit| work > *limit) else {
+            return Ok(());
+        };
+        let tool = echo(tool);
+        Err(LimitViolation {
+            message: format!(
+                "`{tool}` with {states} states over {steps} steps needs {work} ({KNOB}: steps x \
+                 states^2 / 100), which exceeds this server's limit of {limit} for one ARIMA \
+                 forecast. Use fewer observations, a shorter period or lower seasonal orders."
             ),
             tool: tool.to_string(),
             parameter: KNOB.to_string(),

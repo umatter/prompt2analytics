@@ -18,7 +18,7 @@ use p2a_core::econometrics::timeseries::varma::{VarmaConfig, run_varma_with};
 use p2a_core::econometrics::timeseries::vecm::{VecmConfig, run_vecm_with};
 use p2a_core::forecasting::garch::GarchDistribution;
 use p2a_core::forecasting::tsutils::{arima_sim_with_sd, lag_padded};
-use p2a_core::forecasting::{ArimaSpec, forecast_arima_with, run_arima_with};
+use p2a_core::forecasting::{ArimaSpec, SeasonalOrder, forecast_arima_with, run_arima_with};
 use p2a_core::{
     ArConfig,
     ArMethod,
@@ -681,7 +681,7 @@ impl AnalyticsServer {
 
     /// Fit an ARIMA model by conditional sum of squares.
     #[tool(
-        description = "Fit a NON-SEASONAL ARIMA(p,d,q) model to a univariate time series (no seasonal terms are available: for seasonal data use ts_holt_winters, and never call the result a seasonal ARIMA) by conditional sum of squares (as R arima(method = 'CSS') and forecast::Arima(method = 'CSS')). Returns the AR and MA coefficients, the mean (R's 'intercept', estimated by default when d = 0) or a drift (include_drift, d = 0 or 1), sigma^2, the CSS log-likelihood and AIC, and whether the optimiser converged. The series must have no missing values. If the user does not specify p, d, q, use reasonable defaults like ARIMA(1,0,1) or ARIMA(1,1,1). Do NOT call timeseries_acf first — call this tool directly."
+        description = "Fit an ARIMA(p,d,q) or seasonal ARIMA(p,d,q)(P,D,Q)[period] model (seasonal_p, seasonal_d, seasonal_q, period; without them the model has no seasonal terms, so do not call it seasonal) to a univariate time series by conditional sum of squares (as R arima(method = 'CSS') and forecast::Arima(method = 'CSS')). Returns the AR and MA coefficients, the mean (R's 'intercept', estimated by default when d = 0) or a drift (include_drift, d = 0 or 1), sigma^2, the CSS log-likelihood and AIC, and whether the optimiser converged. The series must have no missing values. If the user does not specify p, d, q, use reasonable defaults like ARIMA(1,0,1) or ARIMA(1,1,1). Do NOT call timeseries_acf first — call this tool directly."
     )]
     pub async fn ts_arima_fit(
         &self,
@@ -690,20 +690,31 @@ impl AnalyticsServer {
         let datasets = self.datasets.read().await;
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
-        let orders = (request.p, request.d, request.q);
-        if let Some(refusal) = arima_refusal("ts_arima_fit", dataset, &request.column, orders) {
+        let seasonal = match seasonal_order(
+            request.seasonal_p,
+            request.seasonal_d,
+            request.seasonal_q,
+            request.period,
+        ) {
+            Ok(seasonal) => seasonal,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
+        let spec = ArimaSpec {
+            p: request.p,
+            d: request.d,
+            q: request.q,
+            seasonal,
+            include_mean: request.include_mean,
+            include_drift: request.include_drift.unwrap_or(false),
+        };
+        if let Some(refusal) = arima_refusal("ts_arima_fit", dataset, &request.column, &spec, None)
+        {
             return Ok(refusal);
         }
-        let spec = arima_spec(
-            request.p,
-            request.d,
-            request.q,
-            request.include_mean,
-            request.include_drift,
-        );
         match run_arima_with(dataset, &request.column, &spec) {
             Ok(fit) => Ok(CallToolResult::success(vec![Content::text(format!(
-                "{fit}\n{NON_SEASONAL}"
+                "{fit}{}",
+                seasonal_note(&spec)
             ))])),
             Err(e) => Ok(ts_error("ARIMA fitting failed", &e)),
         }
@@ -711,7 +722,7 @@ impl AnalyticsServer {
 
     /// Forecast with an ARIMA model fitted by conditional sum of squares.
     #[tool(
-        description = "Forecast h steps ahead with a NON-SEASONAL ARIMA(p,d,q) model (no seasonal terms are available: for seasonal data use ts_holt_winters, and never call the result a seasonal ARIMA) fitted by conditional sum of squares. Returns the fitted model, point forecasts, standard errors and 80% / 95% prediction intervals computed as R's forecast(Arima(x, order, method = 'CSS')). Accepts include_mean and include_drift like ts_arima_fit. The series must have no missing values. The history and forecasts are also saved as a dataset named in the reply's first line, which viz_line plots."
+        description = "Forecast h steps ahead with an ARIMA(p,d,q) or seasonal ARIMA(p,d,q)(P,D,Q)[period] model (seasonal_p, seasonal_d, seasonal_q, period; without them the model has no seasonal terms, so do not call it seasonal) fitted by conditional sum of squares. Returns the fitted model, point forecasts, standard errors and 80% / 95% prediction intervals computed as R's forecast(Arima(x, order, method = 'CSS')). Accepts include_mean and include_drift like ts_arima_fit. The series must have no missing values. The history and forecasts are also saved as a dataset named in the reply's first line, which viz_line plots."
     )]
     pub async fn ts_arima_forecast(
         &self,
@@ -720,18 +731,33 @@ impl AnalyticsServer {
         let datasets = self.datasets.read().await;
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
-        let orders = (request.p, request.d, request.q);
-        if let Some(refusal) = arima_refusal("ts_arima_forecast", dataset, &request.column, orders)
-        {
+        let seasonal = match seasonal_order(
+            request.seasonal_p,
+            request.seasonal_d,
+            request.seasonal_q,
+            request.period,
+        ) {
+            Ok(seasonal) => seasonal,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
+        let spec = ArimaSpec {
+            p: request.p,
+            d: request.d,
+            q: request.q,
+            seasonal,
+            include_mean: request.include_mean,
+            include_drift: request.include_drift.unwrap_or(false),
+        };
+        let horizon = Some(request.horizon);
+        if let Some(refusal) = arima_refusal(
+            "ts_arima_forecast",
+            dataset,
+            &request.column,
+            &spec,
+            horizon,
+        ) {
             return Ok(refusal);
         }
-        let spec = arima_spec(
-            request.p,
-            request.d,
-            request.q,
-            request.include_mean,
-            request.include_drift,
-        );
         match forecast_arima_with(dataset, &request.column, &spec, request.horizon) {
             Ok(fc) => {
                 let fit = fc.fit.as_ref().map(|f| f.to_string()).unwrap_or_default();
@@ -751,7 +777,10 @@ impl AnalyticsServer {
                     .save_forecast_table(&request.dataset, &request.column, table)
                     .await;
                 Ok(CallToolResult::success(vec![Content::text(
-                    with_saved_forecast_line(saved, format!("{fit}\n\n{fc}\n{NON_SEASONAL}")),
+                    with_saved_forecast_line(
+                        saved,
+                        format!("{fit}\n\n{fc}{}", seasonal_note(&spec)),
+                    ),
                 )]))
             }
             Err(e) => Ok(ts_error("ARIMA forecasting failed", &e)),
@@ -2164,13 +2193,34 @@ fn arima_refusal(
     tool: &str,
     dataset: &p2a_core::Dataset,
     column: &str,
-    (p, d, q): (usize, usize, usize),
+    spec: &ArimaSpec,
+    horizon: Option<usize>,
 ) -> Option<CallToolResult> {
+    // The terms of the expanded polynomials.
+    let s = &spec.seasonal;
+    let terms = |low: usize, high: usize| {
+        low.saturating_add(high)
+            .saturating_add(low.saturating_mul(high))
+    };
+    let (p, q) = (terms(spec.p, s.p), terms(spec.q, s.q));
+    let d = spec.d.saturating_add(s.d);
     let values = p2a_core::data::columns::numeric_options(dataset.df(), column).ok()?;
     let limits = crate::tools::limits::current();
     limits
         .check_arima_fit(tool, values.len(), p, d, q)
         .err()
+        .or_else(|| {
+            let horizon = horizon.filter(|_| s.is_seasonal())?;
+            let reach = |order: usize, seasonal: usize| {
+                order.saturating_add(seasonal.saturating_mul(s.period))
+            };
+            let states = reach(spec.p, s.p)
+                .max(reach(spec.q, s.q).saturating_add(1))
+                .saturating_add(reach(spec.d, s.d));
+            limits
+                .check_arima_filter(tool, values.len().saturating_add(horizon), states)
+                .err()
+        })
         .or_else(|| {
             limits
                 .check_arima_series(tool, column, values.iter().flatten().copied())
@@ -2179,9 +2229,18 @@ fn arima_refusal(
         .map(limit_refusal)
 }
 
-/// The last line of every ARIMA reply.
-const NON_SEASONAL: &str = "Note: this is a non-seasonal ARIMA; it has no seasonal terms. For a \
-                            series with a seasonal pattern use ts_holt_winters.";
+/// The last line of a non-seasonal ARIMA reply.
+const NON_SEASONAL: &str = "\nNote: this is a non-seasonal ARIMA. For a series with a seasonal \
+                            pattern set seasonal_p, seasonal_d, seasonal_q and period.";
+
+/// The note after an ARIMA reply: that the model has no seasonal terms, if so.
+fn seasonal_note(spec: &ArimaSpec) -> &'static str {
+    if spec.seasonal.is_seasonal() {
+        ""
+    } else {
+        NON_SEASONAL
+    }
+}
 
 /// The first columns of a saved forecast; the interval columns follow.
 const FORECAST_COLUMNS: [&str; 3] = ["time", "actual", "forecast"];
@@ -2284,20 +2343,30 @@ impl AnalyticsServer {
     }
 }
 
-/// The ARIMA specification of a request: R's defaults unless the options are given.
-fn arima_spec(
-    p: usize,
-    d: usize,
-    q: usize,
-    include_mean: Option<bool>,
-    include_drift: Option<bool>,
-) -> ArimaSpec {
-    ArimaSpec {
-        p,
-        d,
-        q,
-        include_mean,
-        include_drift: include_drift.unwrap_or(false),
+/// The seasonal part of a request.
+fn seasonal_order(
+    p: Option<usize>,
+    d: Option<usize>,
+    q: Option<usize>,
+    period: Option<usize>,
+) -> Result<SeasonalOrder, String> {
+    let seasonal = SeasonalOrder {
+        p: p.unwrap_or(0),
+        d: d.unwrap_or(0),
+        q: q.unwrap_or(0),
+        period: period.unwrap_or(0),
+    };
+    match (seasonal.is_seasonal(), period) {
+        (true, None) => Err(
+            "seasonal_p, seasonal_d and seasonal_q need period: the observations \
+                             per season, such as 12 for monthly data"
+                .to_string(),
+        ),
+        (false, Some(2..)) => Err("period needs a seasonal order above 0: set seasonal_p, \
+                                   seasonal_d or seasonal_q (a common choice is seasonal_d = 1 \
+                                   and seasonal_q = 1), or leave period out"
+            .to_string()),
+        _ => Ok(seasonal),
     }
 }
 
@@ -2473,7 +2542,7 @@ mod tests {
             let t = text_of(&r);
             assert!(
                 t.starts_with("Forecast saved with the history as dataset 'air_forecast_y_2'")
-                    && t.ends_with(NON_SEASONAL),
+                    && t.ends_with(NON_SEASONAL.trim_start()),
                 "{t}"
             );
         }
@@ -2487,6 +2556,28 @@ mod tests {
             assert_eq!(df.column("actual").unwrap().null_count(), 3);
             assert_eq!(df.column("upper_95").unwrap().null_count(), 48);
         }
+        let mut sarima = arima.clone();
+        for (k, v) in [("p", 0), ("seasonal_d", 1), ("seasonal_q", 1)] {
+            sarima[k] = v.into();
+        }
+        let call = |v: &serde_json::Value| serde_json::from_value(v.clone()).unwrap();
+        let r = server
+            .ts_arima_forecast(Parameters(call(&sarima)))
+            .await
+            .unwrap();
+        assert!(text_of(&r).contains("need period"), "{}", text_of(&r));
+        sarima["period"] = 12.into();
+        let r = server
+            .ts_arima_forecast(Parameters(call(&sarima)))
+            .await
+            .unwrap();
+        let t = text_of(&r);
+        assert!(
+            t.contains("ARIMA(0,1,1)(0,1,1)[12]")
+                && t.contains("sma1")
+                && !t.contains("non-seasonal"),
+            "{t}"
+        );
         for seasonal in ["additive", "multiplicative"] {
             let req = serde_json::from_value(serde_json::json!({
                 "dataset": "air", "column": "y", "period": 12, "seasonal": seasonal, "horizon": 12
@@ -2637,6 +2728,10 @@ mod tests {
             p: 1,
             d,
             q: 1,
+            seasonal_p: None,
+            seasonal_d: None,
+            seasonal_q: None,
+            period: None,
             include_mean: None,
             include_drift: None,
         };
@@ -2647,6 +2742,10 @@ mod tests {
             d,
             q: 1,
             horizon: 5,
+            seasonal_p: None,
+            seasonal_d: None,
+            seasonal_q: None,
+            period: None,
             include_mean: None,
             include_drift: None,
         };
@@ -2825,6 +2924,10 @@ mod tests {
             p: 1,
             d: 0,
             q: 1,
+            seasonal_p: None,
+            seasonal_d: None,
+            seasonal_q: None,
+            period: None,
             include_mean: None,
             include_drift: None,
         };

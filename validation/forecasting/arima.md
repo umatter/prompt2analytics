@@ -26,6 +26,13 @@ theta(B) = 1 + theta_1 B + ... + theta_q B^q
 `drift`). Coefficients are reported in R's order and names: `ar1..arp`, `ma1..maq`,
 `intercept`, `drift`.
 
+A seasonal model ARIMA(p,d,q)(P,D,Q)[s] (`ArimaSpec::seasonal`) multiplies `phi(B)` by
+`Phi(B^s)` and `theta(B)` by `Theta(B^s)` and adds the factor `(1 - B^s)^D`; the coefficients
+`sar1..`, `sma1..` follow the `ma`s. The fit works on the expanded polynomials, as R's
+`ARIMA_transPars`; p, q and d below then stand for p + s P, q + s Q and d + s D. A drift needs
+d + D <= 1. Each of the three may be at most 400 (a cap of p2a; R's `arima` stops at lag 350 for
+its exact likelihood).
+
 ## Estimation
 
 Conditional sum of squares, as `stats::arima(method = "CSS")` and
@@ -74,6 +81,7 @@ implement (known difference 1).
 | Option | Default | Rule |
 |---|---|---|
 | `include_mean` | true when d = 0 (R) | `true` with d > 0 is an error: after differencing a mean has no effect (R ignores it) |
+| `seasonal` (P, D, Q, period) | none | period >= 2; p + s P, d + s D, q + s Q at most 400 each |
 | `include_drift` | false | d = 0 (mean plus a linear trend) or d = 1; d >= 2 is an error (forecast::Arima drops the drift with a warning) |
 
 ## Reported quantities
@@ -108,6 +116,14 @@ ARMA(1,1) with theta -0.8 and n = 40 (h = 1: 18.6047685874 against 18.6044047523
 planning check.
 
 ## Reference cases
+
+- `arima_seasonal`: seven seasonal models (log AirPassengers (0,1,1)(0,1,1)[12] and
+  (1,1,0)(1,1,0)[12]; simulated quarterly and monthly series with mean, without mean and with
+  drift), fits re-solved as `*_tight` below, forecasts to h = 15; test
+  `test_validate_arima_seasonal`. The case centres the no-mean series: on one with mean 20 the
+  sum of squares has several minima, and optim stopped at a worse one (6092.7) than p2a (5282.6).
+  A seasonal forecast filters max(p + s P, q + s Q + 1) + d + s D states, so its time grows with
+  the square of the period.
 
 - `arima_css_forecast`: 13 fits on the generated series (a: AR(1) around 100; c: random
   walk; m: ARMA(1,1) around 20; b: AR(2); dr: drift plus MA(1) in differences; ai: `a` x 10

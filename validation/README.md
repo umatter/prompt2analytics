@@ -447,7 +447,7 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 ### Forecasting
 | Method | File | Status |
 |--------|------|--------|
-| ARIMA | [arima.md](forecasting/arima.md) | R-pinned |
+| ARIMA, seasonal ARIMA | [arima.md](forecasting/arima.md) | R-pinned |
 | STL (stats::stl: periodic and numeric s.window, series at a large level) | [stl.md](forecasting/stl.md) | R-pinned |
 | MSTL | [mstl.md](forecasting/mstl.md) | not R-pinned |
 | Structural time series (StructTS) | [structts.md](forecasting/structts.md) | R-pinned, known deviations (TS-27) |

@@ -876,9 +876,17 @@ pub static PARAM_RULES: &[ParamRule] = {
         p("ts_arima_fit", "p", Max(ModelOrder)),
         p("ts_arima_fit", "d", Max(ModelOrder)),
         p("ts_arima_fit", "q", Max(ModelOrder)),
+        p("ts_arima_fit", "seasonal_p", Max(ModelOrder)),
+        p("ts_arima_fit", "seasonal_d", Max(ModelOrder)),
+        p("ts_arima_fit", "seasonal_q", Max(ModelOrder)),
+        p("ts_arima_fit", "period", Max(Lags)),
         p("ts_arima_forecast", "p", Max(ModelOrder)),
         p("ts_arima_forecast", "d", Max(ModelOrder)),
         p("ts_arima_forecast", "q", Max(ModelOrder)),
+        p("ts_arima_forecast", "seasonal_p", Max(ModelOrder)),
+        p("ts_arima_forecast", "seasonal_d", Max(ModelOrder)),
+        p("ts_arima_forecast", "seasonal_q", Max(ModelOrder)),
+        p("ts_arima_forecast", "period", Max(Lags)),
         p(
             "ts_changepoint",
             "penalty",
@@ -1102,6 +1110,17 @@ pub fn arima_fit_work(n_obs: usize, p: usize, d: usize, q: usize) -> u64 {
     let terms = (p as u128).saturating_add(q as u128).saturating_add(3);
     let per_obs = terms.saturating_mul(terms).saturating_add(d as u128);
     let work = (n_obs as u128).saturating_mul(per_obs);
+    u64::try_from(work).unwrap_or(u64::MAX)
+}
+
+/// Steps of an ARIMA forecast's Kalman filter times the square of its states, in the units of
+/// [`arima_fit_work`]: a step updates a covariance of that size once, which took about 5 ns per
+/// entry on a release build, against at most 1 us per unit of a fit (all its iterations).
+pub fn arima_filter_work(steps: usize, states: usize) -> u64 {
+    let work = (steps as u128)
+        .saturating_mul(states as u128)
+        .saturating_mul(states as u128)
+        / 100;
     u64::try_from(work).unwrap_or(u64::MAX)
 }
 
@@ -2393,6 +2412,33 @@ mod tests {
         assert!(
             super::super::Limits::off()
                 .check_scpi("scpi", usize::MAX, usize::MAX, usize::MAX, true)
+                .is_ok()
+        );
+    }
+
+    /// The filter of a seasonal forecast is bounded by steps x states^2.
+    #[test]
+    fn arima_filter_work_is_bounded() {
+        use super::arima_filter_work;
+        assert_eq!(arima_filter_work(1_000, 27), 7_290);
+        assert_eq!(arima_filter_work(usize::MAX, usize::MAX), u64::MAX);
+        let h = Limits::hosted();
+        assert!(
+            h.check_arima_filter("ts_arima_forecast", 10_000, 27)
+                .is_ok()
+        );
+        let v = h
+            .check_arima_filter("ts_arima_forecast", 10_000, 732)
+            .unwrap_err();
+        assert_eq!(v.override_key, "arima_fit_work");
+        assert!(
+            v.message.contains("732 states over 10000 steps"),
+            "{}",
+            v.message
+        );
+        assert!(
+            Limits::off()
+                .check_arima_filter("ts_arima_forecast", usize::MAX, usize::MAX)
                 .is_ok()
         );
     }

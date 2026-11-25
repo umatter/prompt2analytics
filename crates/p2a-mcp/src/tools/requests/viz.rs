@@ -71,6 +71,12 @@ pub struct LineChartRequest {
     )]
     pub y_columns: Vec<String>,
 
+    /// Column that splits the rows into one line each (optional)
+    #[schemars(
+        description = "Optional column whose values get one line each (at most 12): the unit column of panel data, such as firm or country."
+    )]
+    pub group_column: Option<String>,
+
     /// Lower edge of a shaded band (optional)
     #[schemars(
         description = "Optional column with the lower edge of a shaded band (with upper_column), e.g. lower_95 of a saved forecast."
