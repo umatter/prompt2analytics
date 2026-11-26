@@ -464,6 +464,27 @@ mod tests {
         Dataset::new(df)
     }
 
+    /// The marginal-effects table says it is at the mean (not the average marginal
+    /// effect) and has no row for the intercept, which has no marginal effect.
+    #[test]
+    fn logit_text_lists_marginal_effects_at_the_mean_without_the_intercept() {
+        let text = run_logit(&create_binary_dataset(), "y", &["x"])
+            .unwrap()
+            .to_string();
+        let table = text
+            .split("Marginal Effects at the Mean")
+            .nth(1)
+            .expect(&text);
+        assert!(
+            table.starts_with(" (MEM, not the average marginal effect):"),
+            "{text}"
+        );
+        assert!(
+            !table.contains("(Intercept)") && table.contains("\nx "),
+            "{text}"
+        );
+    }
+
     #[test]
     fn test_logit_basic() {
         let dataset = create_binary_dataset();

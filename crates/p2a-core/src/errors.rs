@@ -166,7 +166,10 @@ pub enum EconError {
         available: Vec<String>,
     },
 
-    #[error("Column '{column}' contains non-numeric values. Ensure all values are numeric.")]
+    #[error(
+        "Column '{column}' contains non-numeric values. Use a numeric column, or encode a \
+         categorical one as 0/1 indicator columns (one per level) first."
+    )]
     NonNumericColumn { column: String },
 
     /// Missing cells (null, or NaN in a float column) where the method allows none.

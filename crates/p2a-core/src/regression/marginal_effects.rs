@@ -240,7 +240,13 @@ impl fmt::Display for MarginalEffectsResult {
         )?;
         writeln!(f, "{}", "-".repeat(80))?;
 
-        for me in &self.average_marginal {
+        // The intercept has no marginal effect (margins lists none); its row stays in the
+        // result for the JSON consumers that index it, but the text leaves it out.
+        for me in self
+            .average_marginal
+            .iter()
+            .filter(|m| m.variable != "(Intercept)")
+        {
             writeln!(f, "{}", me)?;
         }
 
@@ -250,7 +256,7 @@ impl fmt::Display for MarginalEffectsResult {
             writeln!(f)?;
             writeln!(f, "Marginal Effects at the Mean:")?;
             writeln!(f, "{}", "-".repeat(80))?;
-            for me in mem {
+            for me in mem.iter().filter(|m| m.variable != "(Intercept)") {
                 writeln!(f, "{}", me)?;
             }
             writeln!(f, "{}", "-".repeat(80))?;
@@ -1269,6 +1275,8 @@ mod tests {
         assert_eq!(me.model_type, ModelType::Ols);
         assert_eq!(me.n_obs, 10);
         assert_eq!(me.average_marginal.len(), 3); // Intercept + x1 + x2
+        // the text lists the regressors only
+        assert!(!me.to_string().contains("(Intercept)"), "{me}");
 
         // For OLS, marginal effects equal coefficients
         for (i, coef) in ols.coefficients.iter().enumerate() {
