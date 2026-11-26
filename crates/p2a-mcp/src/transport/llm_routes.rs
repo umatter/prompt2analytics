@@ -902,6 +902,7 @@ fn llm_error_status(e: &LlmError) -> StatusCode {
         LlmError::EgressDenied(_) | LlmError::InvalidApiKey => StatusCode::BAD_REQUEST,
         LlmError::ToolError(_) => StatusCode::INTERNAL_SERVER_ERROR,
         LlmError::Upstream { .. }
+        | LlmError::ModelRejected { .. }
         | LlmError::StreamFailed { .. }
         | LlmError::StreamIncomplete { .. }
         | LlmError::NetworkError(_)
@@ -961,6 +962,7 @@ fn llm_error_code(e: &LlmError) -> &'static str {
         LlmError::EgressDenied(_) | LlmError::InvalidApiKey => "invalid_provider",
         LlmError::ToolError(_) => "internal",
         LlmError::Upstream { .. }
+        | LlmError::ModelRejected { .. }
         | LlmError::StreamFailed { .. }
         | LlmError::StreamIncomplete { .. }
         | LlmError::NetworkError(_)
