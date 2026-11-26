@@ -103,7 +103,7 @@ pub trait StorageBackend {
 #[cfg(target_arch = "wasm32")]
 mod web {
     use super::*;
-    use gloo_storage::{LocalStorage, Storage};
+    use gloo_storage::{LocalStorage, SessionStorage, Storage};
 
     /// Web storage backend using localStorage
     pub struct WebStorage;
@@ -136,6 +136,30 @@ mod web {
 
         fn contains_key(&self, key: &str) -> bool {
             LocalStorage::get::<serde_json::Value>(key).is_ok()
+        }
+    }
+
+    /// Storage that lasts as long as the browser tab: it survives a reload
+    /// and is gone when the tab is closed (`sessionStorage`).
+    #[derive(Default)]
+    pub struct TabStorage;
+
+    impl StorageBackend for TabStorage {
+        fn get<T: DeserializeOwned>(&self, key: &str) -> Result<T, StorageError> {
+            SessionStorage::get(key).map_err(|e| StorageError(e.to_string()))
+        }
+
+        fn set<T: Serialize>(&self, key: &str, value: &T) -> Result<(), StorageError> {
+            SessionStorage::set(key, value).map_err(|e| StorageError(e.to_string()))
+        }
+
+        fn remove(&self, key: &str) -> Result<(), StorageError> {
+            SessionStorage::delete(key);
+            Ok(())
+        }
+
+        fn contains_key(&self, key: &str) -> bool {
+            SessionStorage::get::<serde_json::Value>(key).is_ok()
         }
     }
 }
@@ -304,6 +328,20 @@ impl StorageBackend for StubStorage {
 
 /// Create a new platform-appropriate storage backend
 pub fn create_storage() -> PlatformStorage {
+    PlatformStorage::new()
+}
+
+/// Where the app keeps what belongs to one working session (the session id,
+/// the open conversation): the browser tab on web, so a reload keeps it and
+/// closing the tab ends it; the app's own storage on desktop and mobile.
+#[cfg(target_arch = "wasm32")]
+pub fn create_session_storage() -> web::TabStorage {
+    web::TabStorage
+}
+
+/// See the web version: the platform storage elsewhere.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn create_session_storage() -> PlatformStorage {
     PlatformStorage::new()
 }
 

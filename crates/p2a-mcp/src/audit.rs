@@ -142,7 +142,9 @@ impl ResultSummary {
         for item in &result.content {
             match item {
                 ContentItem::Text { text } => summary.text_bytes += text.len(),
-                ContentItem::Image { data, .. } => summary.image_bytes += data.len(),
+                ContentItem::Image { data, svg, .. } => {
+                    summary.image_bytes += data.len() + svg.as_ref().map_or(0, String::len)
+                }
             }
         }
         summary

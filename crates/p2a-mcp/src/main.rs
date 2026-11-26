@@ -45,6 +45,7 @@ fn main() -> Result<()> {
     // one-CPU machine while tool work runs on the blocking pool.
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(config.worker_threads())
+        .thread_stack_size(p2a_mcp::RUNTIME_STACK_BYTES)
         .enable_all()
         .build()?;
 

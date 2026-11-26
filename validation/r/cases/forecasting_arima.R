@@ -239,3 +239,72 @@ case("ts_granger_int", "econometrics/timeseries", "Granger causality F test, int
   list(values = v, reference = "lmtest::grangertest(x = m, y = ai, order = 2 | 3)",
        call = "grangertest(d$m, d$ai, order = 2)", packages = "lmtest")
 })
+
+# Seasonal models ARIMA(p,d,q)(P,D,Q)[s]: forecast::Arima(seasonal = ..., method = "CSS"), re-solved to
+# the exact CSS optimum as above (Gauss-Newton on R's own CSS residuals for fixed coefficients).
+.sar_tight <- function(x, order, seas, start, mean_used, drift) {
+  f <- function(p) {
+    xr <- if (drift) cbind(drift = seq_along(x)) else NULL
+    as.numeric(residuals(suppressWarnings(arima(x, order = order, seasonal = seas, fixed = p, method = "CSS",
+                                                transform.pars = FALSE, include.mean = mean_used, xreg = xr))))
+  }
+  par <- start
+  for (i in 1:200) {
+    J <- numDeriv::jacobian(f, par)
+    step <- drop(solve(crossprod(J), -crossprod(J, f(par))))
+    par <- par + step
+    if (max(abs(step) / pmax(abs(par), 1)) < 1e-11) break
+  }
+  e <- f(par); J <- numDeriv::jacobian(f, par)
+  g <- max(abs(crossprod(J, e))) / sum(e^2)
+  stopifnot(g < 1e-6)
+  list(par = par, ssr = sum(e^2))
+}
+.sar_values <- function(x, order, sorder, s, prefix, include.mean = TRUE, drift = FALSE, h = 15) {
+  x <- ts(x, frequency = s)
+  seas <- list(order = sorder, period = s)
+  dd <- order[2] + s * sorder[2]
+  mean_used <- include.mean && dd == 0
+  f <- forecast::Arima(x, order = order, seasonal = seas, include.mean = include.mean, include.drift = drift,
+                       method = "CSS", optim.control = .ctl)
+  tt <- .sar_tight(x, order, seas, unname(coef(f)), mean_used, drift)
+  k <- length(coef(f)); n <- length(x)
+  ft <- suppressWarnings(forecast::Arima(x, order = order, seasonal = seas, include.mean = mean_used, include.drift = drift,
+                                         method = "CSS", fixed = tt$par, transform.pars = FALSE))
+  ft$sigma2 <- tt$ssr / (n - dd - k)
+  fc <- forecast::forecast(ft, h = h, level = c(80, 95))
+  out <- list()
+  out[[paste0(prefix, "_coef")]] <- named(coef(f))
+  out[[paste0(prefix, "_coef_tight")]] <- named(setNames(tt$par, names(coef(f))))
+  out[[paste0(prefix, "_ssr_tight")]] <- tt$ssr
+  out[[paste0(prefix, "_sigma2_tight")]] <- ft$sigma2
+  out[[paste0(prefix, "_loglik_tight")]] <- ft$loglik
+  out[[paste0(prefix, "_aic_css_tight")]] <- -2 * ft$loglik + 2 * (k + 1)
+  out[[paste0(prefix, "_n_cond")]] <- dd + order[1] + s * sorder[1]
+  out[[paste0(prefix, "_resid_tail_tight")]] <- vec(tail(as.numeric(residuals(ft)), 3))
+  c(out, .fc_values(fc, prefix, "_tight"))
+}
+case("arima_seasonal", "forecasting/arima", "Seasonal ARIMA CSS fits and forecasts (forecast::Arima, seasonal = ..., method = 'CSS')", function(ctx) {
+  set.seed(20261125)
+  n <- 240
+  e <- rnorm(n + 60)
+  q4 <- stats::filter(e, c(1, 0.4, 0, 0, 0.5, 0.2), sides = 1)                     # MA (1 + .4B)(1 + .5B^4)
+  q4[is.na(q4)] <- 0
+  q4 <- as.numeric(stats::filter(q4, c(0.5, 0, 0, 0.3, -0.15), method = "recursive"))   # (1 - .5B)(1 - .3B^4)
+  q4 <- 20 + tail(q4, n)
+  u <- as.numeric(arima.sim(list(ar = 0.4), n))
+  sea <- 0.2 * seq_len(n) + 5 * sin(2 * pi * seq_len(n) / 12) + 0.6 * u
+  air <- rep(NA_real_, n); air[seq_along(AirPassengers)] <- log(as.numeric(AirPassengers))
+  d <- ctx$gen_dataset("arima_seasonal", data.frame(q4 = round(q4, 8), sea = round(sea, 8), q0 = round(q4 - 20, 8)))
+  da <- ctx$gen_dataset("arima_seasonal_air", data.frame(lair = round(air[1:144], 10)))
+  v <- c(.sar_values(da$lair, c(0, 1, 1), c(0, 1, 1), 12, "air_011_011"),
+         .sar_values(da$lair, c(1, 1, 0), c(1, 1, 0), 12, "air_110_110"),
+         .sar_values(d$q4, c(1, 0, 1), c(1, 0, 1), 4, "q4_101_101"),
+         .sar_values(d$q0, c(0, 0, 2), c(0, 0, 1), 4, "q0_002_001_nomean", include.mean = FALSE),
+         .sar_values(d$q4, c(0, 0, 0), c(2, 0, 0), 4, "q4_000_200"),
+         .sar_values(d$sea, c(1, 0, 0), c(0, 1, 1), 12, "sea_100_011_drift", drift = TRUE),
+         .sar_values(d$sea, c(1, 0, 0), c(1, 0, 0), 12, "sea_100_100_drift", drift = TRUE))
+  list(values = v,
+       reference = "forecast::Arima(seasonal = list(order, period), method = 'CSS'), forecast::forecast(h = 15); *_tight: Gauss-Newton on stats::arima(fixed = ...) CSS residuals with numDeriv::jacobian",
+       call = "forecast(Arima(x, order, seasonal = list(order = c(P, D, Q), period = s), method = 'CSS'), h = 15)", packages = c("forecast", "numDeriv"))
+})

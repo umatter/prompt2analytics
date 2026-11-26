@@ -3,16 +3,17 @@
 use dioxus::prelude::*;
 
 use crate::api::{DatasetMeta, ReloadResult, api};
-use crate::components::{DatasetInspectorModal, P2aIconMinimal};
-use crate::state::SessionState;
+use crate::components::DatasetInspectorModal;
+use crate::state::{AddDataRequest, DatasetInfo, SessionState};
 
 /// Dataset sidebar component
 #[component]
 pub fn DatasetSidebar() -> Element {
-    let session_state = use_context::<Signal<SessionState>>();
+    let mut session_state = use_context::<Signal<SessionState>>();
     let mut datasets = use_signal(Vec::<DatasetMeta>::new);
     let mut is_loading = use_signal(|| false);
     let mut is_reloading = use_signal(|| false);
+    let add_data = use_context::<AddDataRequest>().0;
     let mut error = use_signal(|| None::<String>);
     let mut reload_result = use_signal(|| None::<ReloadResult>);
     let mut selected_dataset = use_signal(|| None::<DatasetMeta>);
@@ -32,6 +33,20 @@ pub fn DatasetSidebar() -> Element {
                 let client = api();
                 match client.list_session_datasets(&sid).await {
                     Ok(ds) => {
+                        // The session's datasets as the server lists them, so
+                        // the status bar counts them after a reload too.
+                        let known: Vec<DatasetInfo> = ds
+                            .iter()
+                            .filter(|d| d.in_memory)
+                            .map(|d| DatasetInfo {
+                                name: d.name.clone(),
+                                rows: usize::try_from(d.row_count).unwrap_or(0),
+                                cols: usize::try_from(d.column_count).unwrap_or(0),
+                            })
+                            .collect();
+                        if session_state.peek().datasets_differ(&known) {
+                            session_state.write().loaded_datasets = known;
+                        }
                         datasets.set(ds);
                     }
                     Err(e) => {
@@ -57,10 +72,8 @@ pub fn DatasetSidebar() -> Element {
                     Ok(result) => {
                         reload_result.set(Some(result.clone()));
 
-                        // Refresh dataset list
-                        if let Ok(ds) = client.list_session_datasets(&sid).await {
-                            datasets.set(ds);
-                        }
+                        // Refresh the dataset list, here and in the status bar
+                        session_state.write().trigger_datasets_refresh();
                     }
                     Err(e) => {
                         error.set(Some(e));
@@ -72,31 +85,31 @@ pub fn DatasetSidebar() -> Element {
     };
 
     let datasets_list = datasets.read();
+    let n_results = datasets_list
+        .iter()
+        .filter(|d| is_coefficient_table(d))
+        .count();
     let loading = *is_loading.read();
     let reloading = *is_reloading.read();
     let err = error.read().clone();
     let result = reload_result.read().clone();
 
     rsx! {
-        div { class: "h-full flex flex-col bg-white dark:bg-gray-900 border-l border-gray-300 dark:border-gray-800",
-            // Header - fixed height matching ChatPanel
-            div { class: "flex-shrink-0 h-16 px-6 border-b border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-900",
+        div { class: "h-full flex flex-col k-paper",
+            // Header, as tall as the chat header
+            div { class: "flex-shrink-0 h-[60px] px-[18px] k-rule-b",
                 div { class: "h-full w-full flex items-center justify-between",
-                    div { class: "flex items-center gap-2",
-                        P2aIconMinimal { size: 20.0 }
-                        h1 { class: "text-xl font-bold text-gray-900 dark:text-white",
-                            "Datasets"
-                        }
-                    }
+                    h2 { class: "text-[22px] font-extrabold k-cond", "Datasets" }
                     // Reload button
                     button {
-                        class: "p-2 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors disabled:opacity-50",
+                        class: "k-icon-btn disabled:opacity-30 disabled:cursor-not-allowed",
                         disabled: reloading || datasets_list.is_empty(),
-                        title: "Reload all datasets from source files",
+                        title: "Reload all datasets from their source files",
+                        "aria-label": "Reload all datasets from their source files",
                         onclick: reload_datasets,
                         if reloading {
                             svg {
-                                class: "w-5 h-5 text-gray-600 dark:text-gray-400 animate-spin",
+                                class: "w-[18px] h-[18px] animate-spin",
                                 fill: "none",
                                 view_box: "0 0 24 24",
                                 circle {
@@ -115,7 +128,7 @@ pub fn DatasetSidebar() -> Element {
                             }
                         } else {
                             svg {
-                                class: "w-5 h-5 text-gray-600 dark:text-gray-400",
+                                class: "w-[18px] h-[18px]",
                                 fill: "none",
                                 stroke: "currentColor",
                                 view_box: "0 0 24 24",
@@ -132,30 +145,30 @@ pub fn DatasetSidebar() -> Element {
             }
 
             // Content
-            div { class: "flex-1 overflow-y-auto p-4",
+            div { class: "flex-1 overflow-y-auto",
                 // Error display
                 if let Some(ref e) = err {
-                    div { class: "mb-4 p-3 rounded-lg bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-400 text-sm",
+                    div { class: "m-[18px] mb-0 pl-3 py-1 border-l-4 border-[var(--k-orange)] text-sm", role: "alert",
                         "{e}"
                     }
                 }
 
                 // Reload result display
                 if let Some(ref res) = result {
-                    div { class: "mb-4 p-3 rounded-lg bg-teal-50 dark:bg-teal-900/30 text-sm",
+                    div { class: "m-[18px] mb-0 pl-3 py-1 border-l-4 border-[var(--k-rule)] text-sm",
                         if !res.succeeded.is_empty() {
-                            div { class: "text-green-700 dark:text-green-400 mb-1",
+                            div { class: "mb-1",
                                 "Reloaded: {res.succeeded.join(\", \")}"
                             }
                         }
                         if !res.failed.is_empty() {
-                            div { class: "text-red-700 dark:text-red-400 mb-1",
+                            div { class: "mb-1 k-orange-text",
                                 "Failed: {res.failed.iter().map(|f| f.name.as_str()).collect::<Vec<_>>().join(\", \")}"
                             }
                         }
                         if !res.skipped.is_empty() {
-                            div { class: "text-gray-600 dark:text-gray-400",
-                                "Skipped: {res.skipped.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join(\", \")}"
+                            div { class: "k-muted",
+                                {skipped_text(&res.skipped)}
                             }
                         }
                     }
@@ -163,53 +176,58 @@ pub fn DatasetSidebar() -> Element {
 
                 // Loading state
                 if loading {
-                    div { class: "flex items-center justify-center py-8",
-                        svg {
-                            class: "w-6 h-6 text-gray-400 animate-spin",
-                            fill: "none",
-                            view_box: "0 0 24 24",
-                            circle {
-                                class: "opacity-25",
-                                cx: "12",
-                                cy: "12",
-                                r: "10",
-                                stroke: "currentColor",
-                                stroke_width: "4"
-                            }
-                            path {
-                                class: "opacity-75",
-                                fill: "currentColor",
-                                d: "M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
-                            }
-                        }
+                    div { class: "m-[18px] k-mono text-xs k-muted",
+                        span { class: "k-orange k-spin" }
+                        " loading datasets"
                     }
                 } else if datasets_list.is_empty() {
                     // Empty state
-                    div { class: "text-center py-8 px-2 text-gray-500 dark:text-gray-400",
-                        svg {
-                            class: "w-8 h-8 mx-auto mb-3 text-gray-300 dark:text-gray-600",
-                            fill: "none",
-                            stroke: "currentColor",
-                            view_box: "0 0 24 24",
-                            path {
-                                stroke_linecap: "round",
-                                stroke_linejoin: "round",
-                                stroke_width: "2",
-                                d: "M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4"
-                            }
+                    div { class: "m-[18px] text-[13px] k-muted",
+                        div { class: "k-mono text-[11.5px] k-ink border border-dashed border-[var(--k-rule)] px-4 py-[22px] mb-2.5",
+                            "no data yet"
                         }
-                        p { class: "break-words", "No datasets loaded" }
-                        p { class: "text-sm mt-1 break-words", "Load a dataset using the chat" }
+                        p { "Add a CSV, Excel, Parquet, Stata or SAS file, or load an example from the welcome screen. Data stays in this session." }
+                        button {
+                            class: "k-btn-pri mt-3",
+                            onclick: move |_| {
+                                let mut request = add_data;
+                                *request.write() += 1;
+                            },
+                            "Add data"
+                        }
                     }
                 } else {
                     // Dataset list
-                    div { class: "space-y-3",
-                        for dataset in datasets_list.iter() {
+                    if datasets_list.iter().any(|d| !d.in_memory) {
+                        div { class: "m-[18px] mb-0 pl-3 py-1 border-l-4 border-[var(--k-orange)] text-[13px]", role: "status",
+                            "The server restarted, and the data marked below is no longer loaded. Reload it with the button above, or add the file again."
+                        }
+                    }
+                    div {
+                        for dataset in datasets_list.iter().filter(|d| !is_coefficient_table(d)) {
                             DatasetCard {
                                 key: "{dataset.id}",
                                 dataset: dataset.clone(),
                                 on_inspect: move |ds: DatasetMeta| {
                                     selected_dataset.set(Some(ds));
+                                }
+                            }
+                        }
+                    }
+                    // Coefficient tables the regressions save for viz_coefficient, folded
+                    // away below the data
+                    if n_results > 0 {
+                        details { class: "mx-[18px] mt-2 text-[13px]",
+                            summary { class: "cursor-pointer k-muted py-1",
+                                "Model results ({n_results})"
+                            }
+                            for dataset in datasets_list.iter().filter(|d| is_coefficient_table(d)) {
+                                DatasetCard {
+                                    key: "{dataset.id}",
+                                    dataset: dataset.clone(),
+                                    on_inspect: move |ds: DatasetMeta| {
+                                        selected_dataset.set(Some(ds));
+                                    }
                                 }
                             }
                         }
@@ -228,6 +246,37 @@ pub fn DatasetSidebar() -> Element {
             }
         }
     }
+}
+
+/// The columns of the coefficient table a regression tool saves (the server's
+/// `COEFFICIENT_TABLE_COLUMNS`).
+const COEFFICIENT_TABLE_COLUMNS: [&str; 7] = [
+    "term",
+    "estimate",
+    "std_error",
+    "t_value",
+    "p_value",
+    "ci_lower",
+    "ci_upper",
+];
+
+/// Whether `d` is a coefficient table a regression saved: a dataset made in the session
+/// with exactly those columns.
+fn is_coefficient_table(d: &DatasetMeta) -> bool {
+    d.source_path.is_none()
+        && d.column_names
+            .iter()
+            .map(String::as_str)
+            .eq(COEFFICIENT_TABLE_COLUMNS)
+}
+
+/// "Skipped: name (reason), ...".
+fn skipped_text(skipped: &[crate::api::ReloadSkip]) -> String {
+    let items: Vec<String> = skipped
+        .iter()
+        .map(|s| format!("{} ({})", s.name, s.reason))
+        .collect();
+    format!("Skipped: {}", items.join(", "))
 }
 
 /// Props for DatasetCard
@@ -250,35 +299,26 @@ fn DatasetCard(props: DatasetCardProps) -> Element {
         .map(super::dataset_inspector::size_label);
 
     rsx! {
-        div { class: "rounded-lg border border-gray-300 dark:border-gray-700 overflow-hidden bg-white dark:bg-gray-800",
+        div { class: "k-line-b",
             // Header
             button {
-                class: "w-full px-3 py-2 flex items-center justify-between bg-gray-50 dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors",
+                class: "w-full px-[18px] pt-3.5 pb-1 flex items-center justify-between text-left hover:bg-[var(--k-fill)]",
                 onclick: move |_| {
                     let current = *is_expanded.read();
                     is_expanded.set(!current);
                 },
                 div { class: "flex items-center gap-2 min-w-0",
-                    // Database icon
-                    svg {
-                        class: "w-4 h-4 text-teal-500 flex-shrink-0",
-                        fill: "none",
-                        stroke: "currentColor",
-                        view_box: "0 0 24 24",
-                        path {
-                            stroke_linecap: "round",
-                            stroke_linejoin: "round",
-                            stroke_width: "2",
-                            d: "M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4"
-                        }
-                    }
-                    span { class: "font-medium text-gray-900 dark:text-white truncate",
+                    span { class: "k-orange text-xs", "aria-hidden": "true", "●" }
+                    span { class: "k-mono text-[13px] font-bold truncate",
                         "{dataset.name}"
+                    }
+                    if !dataset.in_memory {
+                        span { class: "k-mono text-[11px] k-muted flex-shrink-0", "not loaded" }
                     }
                 }
                 // Expand icon
                 svg {
-                    class: "w-4 h-4 text-gray-400 flex-shrink-0 transition-transform duration-200",
+                    class: "w-4 h-4 k-muted flex-shrink-0",
                     class: if expanded { "rotate-180" } else { "" },
                     fill: "none",
                     stroke: "currentColor",
@@ -294,7 +334,7 @@ fn DatasetCard(props: DatasetCardProps) -> Element {
 
             // Details (expandable)
             if expanded {
-                div { class: "px-3 py-2 text-sm border-t border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800",
+                div { class: "px-[18px] pb-3.5 pt-1 text-[12.5px]",
                     // Dimensions
                     div { class: "flex items-center gap-2 mb-1",
                         span { class: "text-gray-500 dark:text-gray-400", "Size:" }
@@ -306,7 +346,7 @@ fn DatasetCard(props: DatasetCardProps) -> Element {
                     // File type
                     div { class: "flex items-center gap-2 mb-1",
                         span { class: "text-gray-500 dark:text-gray-400", "Type:" }
-                        span { class: "text-gray-900 dark:text-white uppercase",
+                        span { class: "k-mono",
                             "{dataset.source_type}"
                         }
                     }
@@ -342,7 +382,7 @@ fn DatasetCard(props: DatasetCardProps) -> Element {
                                 for col in dataset.column_names.iter().take(10) {
                                     span {
                                         key: "{col}",
-                                        class: "px-1.5 py-0.5 text-xs bg-gray-200 dark:bg-gray-700 rounded text-gray-700 dark:text-gray-300",
+                                        class: "k-mono text-[11.5px] pr-2",
                                         "{col}"
                                     }
                                 }
@@ -364,7 +404,7 @@ fn DatasetCard(props: DatasetCardProps) -> Element {
                     // Inspect button
                     div { class: "mt-3 pt-2 border-t border-gray-100 dark:border-gray-700",
                         button {
-                            class: "w-full px-3 py-1.5 text-xs font-medium text-teal-700 dark:text-teal-300 bg-teal-50 dark:bg-teal-900/30 rounded-lg hover:bg-teal-100 dark:hover:bg-teal-900/50 transition-colors flex items-center justify-center gap-1.5",
+                            class: "k-btn w-full justify-center",
                             onclick: {
                                 let dataset = dataset_for_inspect.clone();
                                 move |evt: Event<MouseData>| {
@@ -384,11 +424,51 @@ fn DatasetCard(props: DatasetCardProps) -> Element {
                                     d: "M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
                                 }
                             }
-                            "View Details"
+                            "Inspect columns"
                         }
                     }
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn meta(source_path: Option<&str>, columns: &[&str]) -> DatasetMeta {
+        DatasetMeta {
+            id: "dataset_meta:x".into(),
+            session_id: "s".into(),
+            name: "d_ols_y".into(),
+            source_path: source_path.map(Into::into),
+            source_type: "derived".into(),
+            row_count: 2,
+            column_count: columns.len() as i32,
+            column_names: columns.iter().map(|c| c.to_string()).collect(),
+            loaded_at: "2026-11-26T00:00:00Z".into(),
+            file_size_bytes: None,
+            in_memory: true,
+            column_types: Vec::new(),
+        }
+    }
+
+    /// Only a session-made dataset with exactly the coefficient columns is folded away.
+    #[test]
+    fn coefficient_tables_are_recognised_by_their_columns() {
+        assert!(is_coefficient_table(&meta(
+            None,
+            &COEFFICIENT_TABLE_COLUMNS
+        )));
+        assert!(!is_coefficient_table(&meta(
+            Some("coef.csv"),
+            &COEFFICIENT_TABLE_COLUMNS
+        )));
+        assert!(!is_coefficient_table(&meta(
+            None,
+            &COEFFICIENT_TABLE_COLUMNS[..6]
+        )));
+        assert!(!is_coefficient_table(&meta(None, &["term", "estimate"])));
     }
 }

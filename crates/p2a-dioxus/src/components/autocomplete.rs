@@ -25,7 +25,7 @@ pub fn AutocompleteDropdown(props: AutocompleteDropdownProps) -> Element {
 
     rsx! {
         div {
-            class: "autocomplete-dropdown absolute bottom-full left-0 right-0 mb-1 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg max-h-64 overflow-y-auto z-50",
+            class: "autocomplete-dropdown",
 
             // Group suggestions by type if mixing
             for (idx, suggestion) in state.suggestions.iter().enumerate() {
@@ -60,17 +60,11 @@ fn AutocompleteSuggestionItem(props: AutocompleteSuggestionItemProps) -> Element
     let suggestion = &props.suggestion;
     let is_selected = props.is_selected;
 
-    let base_class =
-        "autocomplete-item flex items-center gap-2 px-3 py-2 cursor-pointer transition-colors";
-    let selected_class = if is_selected {
-        "bg-teal-50 dark:bg-teal-900/30"
-    } else {
-        "hover:bg-gray-50 dark:hover:bg-gray-700"
-    };
+    let selected_class = if is_selected { "selected" } else { "" };
 
     rsx! {
         div {
-            class: "{base_class} {selected_class}",
+            class: "autocomplete-item {selected_class}",
             onclick: move |_| props.on_click.call(()),
 
             // Icon based on type
@@ -80,13 +74,13 @@ fn AutocompleteSuggestionItem(props: AutocompleteSuggestionItemProps) -> Element
             div { class: "flex-1 min-w-0",
                 div { class: "flex items-center gap-2",
                     span {
-                        class: "font-medium text-sm text-gray-900 dark:text-gray-100 truncate",
+                        class: "k-mono k-ink text-[12.5px] font-semibold truncate",
                         "{suggestion.display_text}"
                     }
                 }
                 if let Some(ref desc) = suggestion.description {
                     div {
-                        class: "text-xs text-gray-500 dark:text-gray-400 truncate",
+                        class: "k-muted text-xs truncate",
                         "{desc}"
                     }
                 }
@@ -94,7 +88,7 @@ fn AutocompleteSuggestionItem(props: AutocompleteSuggestionItemProps) -> Element
 
             // Type badge
             span {
-                class: "text-xs px-1.5 py-0.5 rounded {type_badge_class(suggestion.suggestion_type)}",
+                class: "{type_badge_class(suggestion.suggestion_type)}",
                 "{type_label(suggestion.suggestion_type)}"
             }
         }
@@ -106,20 +100,17 @@ fn render_type_icon(suggestion_type: SuggestionType) -> Element {
     let (path, color_class) = match suggestion_type {
         SuggestionType::Dataset => (
             "M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4",
-            "text-teal-600 dark:text-teal-400",
+            "k-ink",
         ),
         SuggestionType::Column => (
             "M9 17V7m0 10a2 2 0 01-2 2H5a2 2 0 01-2-2V7a2 2 0 012-2h2a2 2 0 012 2m0 10a2 2 0 002 2h2a2 2 0 002-2M9 7a2 2 0 012-2h2a2 2 0 012 2m0 10V7m0 10a2 2 0 002 2h2a2 2 0 002-2V7a2 2 0 00-2-2h-2a2 2 0 00-2 2",
-            "text-blue-600 dark:text-blue-400",
+            "k-ink",
         ),
         SuggestionType::Tool => (
             "M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z M15 12a3 3 0 11-6 0 3 3 0 016 0z",
-            "text-orange-600 dark:text-orange-400",
+            "k-orange-text",
         ),
-        SuggestionType::History => (
-            "M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z",
-            "text-gray-500 dark:text-gray-400",
-        ),
+        SuggestionType::History => ("M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z", "k-muted"),
     };
 
     rsx! {
@@ -138,19 +129,13 @@ fn render_type_icon(suggestion_type: SuggestionType) -> Element {
     }
 }
 
-/// Get badge class for suggestion type
+/// Get badge class for suggestion type: a mono label, muted except for tools
 fn type_badge_class(suggestion_type: SuggestionType) -> &'static str {
     match suggestion_type {
-        SuggestionType::Dataset => {
-            "bg-teal-100 text-teal-700 dark:bg-teal-900/30 dark:text-teal-300"
+        SuggestionType::Tool => "k-mono text-[11px] k-orange-text flex-shrink-0",
+        SuggestionType::Dataset | SuggestionType::Column | SuggestionType::History => {
+            "k-mono text-[11px] k-muted flex-shrink-0"
         }
-        SuggestionType::Column => {
-            "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300"
-        }
-        SuggestionType::Tool => {
-            "bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-300"
-        }
-        SuggestionType::History => "bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-300",
     }
 }
 

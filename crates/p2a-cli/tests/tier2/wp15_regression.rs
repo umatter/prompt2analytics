@@ -55,6 +55,37 @@ fn json_and_text(s: &TempSession, args: &[&str]) -> (String, Value) {
     (text, value)
 }
 
+/// `reg ols` drops the rows missing in the response or a regressor, as lm's na.omit:
+/// the text ends with the drop, `-F json` carries it as a `missing` object.
+#[test]
+fn test_validate_cli_reg_ols_na() {
+    let case = Case::load("ols_na");
+    let s = temp_session();
+    let name = s.load(&case);
+    let args = [
+        "reg", "ols", &name, "-y", "y", "-x", "x1", "x2", "--robust", "hc1",
+    ];
+    let text = s.ok(&args);
+    assert!(
+        text.trim_end()
+            .ends_with("Note: 8 of 120 rows dropped because of missing values (y: 5, x1: 4)"),
+        "{text}"
+    );
+    let j = s.json(&args);
+    let rows = j["coefficients"].as_array().unwrap();
+    let names: Vec<&str> = rows.iter().map(|r| r["name"].as_str().unwrap()).collect();
+    let pick = |key: &str| -> Vec<f64> { rows.iter().map(|r| r[key].as_f64().unwrap()).collect() };
+    Check::new(&case)
+        .named("coef", &names, &pick("coefficient"), Tol::coef(112))
+        .named("se_hc1", &names, &pick("std_error"), Tol::se(112))
+        .scalar("n_obs", j["n_observations"].as_f64().unwrap(), Tol::exact())
+        .finish();
+    assert_eq!(
+        j["missing"],
+        json!({"n_total": 120, "n_used": 112, "n_dropped": 8, "by_column": {"y": 5, "x1": 4}})
+    );
+}
+
 /// REG-21: rows with a missing cluster id are dropped and the model re-estimated;
 /// the text shows the drop as a warning, `-F json` as a `missing` object.
 #[test]
@@ -299,4 +330,71 @@ fn test_cli_reg_line_supsmu_too_few_complete_rows() {
             "{err}"
         );
     }
+}
+
+/// `reg hac` and `reg diagnostics` fit on the rows complete in the response and the
+/// regressors (lm's na.omit), match R there, and report the dropped rows in text and JSON.
+#[test]
+fn test_validate_cli_reg_hac_diagnostics_na() {
+    let case = Case::load("reg_lm_tests_na");
+    let s = temp_session();
+    let name = s.load(&case);
+    let note = "Note: 5 of 200 rows dropped because of missing values (inv: 3, value: 2)";
+    let hac = [
+        "reg", "hac", &name, "-y", "inv", "-x", "value", "capital", "--lags", "3",
+    ];
+    let text = s.ok(&hac);
+    assert!(
+        text.contains("Observations: 195\n") && text.contains(note),
+        "{text}"
+    );
+    let j = s.json(&hac);
+    let names: Vec<&str> = j["names"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    let nums = |key: &str| -> Vec<f64> {
+        j[key]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_f64().unwrap())
+            .collect()
+    };
+    assert!(j["r_squared"].as_f64().unwrap().is_finite(), "{j}");
+    assert_eq!(j["missing"]["n_dropped"], 5, "{j}");
+    Check::new(&case)
+        .named("coef", &names, &nums("coefficients"), Tol::coef(195))
+        .named("se_nw_lag3", &names, &nums("std_errors"), Tol::se(195))
+        .scalar("n_used", j["n_obs"].as_f64().unwrap(), Tol::exact())
+        .finish();
+
+    let diag = [
+        "reg",
+        "diagnostics",
+        &name,
+        "-y",
+        "inv",
+        "-x",
+        "value",
+        "capital",
+    ];
+    let text = s.ok(&diag);
+    assert!(text.contains(note), "{text}");
+    let j = s.json(&diag);
+    assert_eq!(j["missing"]["n_dropped"], 5, "{j}");
+    Check::new(&case)
+        .scalar(
+            "dw_stat",
+            j["durbin_watson"].as_f64().unwrap(),
+            Tol::stat(195),
+        )
+        .scalar(
+            "bp_stat",
+            j["breusch_pagan"]["statistic"].as_f64().unwrap(),
+            Tol::stat(195),
+        )
+        .finish();
 }

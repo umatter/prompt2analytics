@@ -40,6 +40,21 @@
       "supersedes_legacy": []
     },
     {
+      "id": "arima_seasonal",
+      "name": "Seasonal ARIMA(p,d,q)(P,D,Q)[s] by conditional sum of squares, and its forecasts",
+      "category": "forecasting",
+      "reference": "forecast::Arima(seasonal = list(order, period), method = 'CSS'), re-solved to the exact CSS optimum (Gauss-Newton on stats::arima(fixed) residuals, numDeriv::jacobian); forecast::forecast(h, level = c(80, 95))",
+      "doc": "validation/forecasting/arima.md",
+      "cases": ["arima_seasonal"],
+      "tests": [
+        "p2a-core::forecasting::arima_model::tests::test_validate_arima_seasonal"
+      ],
+      "quantities": ["coefficients (R names: ar, ma, sar, sma, mean, drift)", "SSR", "sigma2", "CSS log-likelihood", "AIC -2 loglik + 2 (k + 1)", "n_cond", "residuals (tail)", "point forecasts", "standard errors", "80% and 95% limits", "package optimum (cross-check)"],
+      "tolerance": "coefficients Tol::iterative(1e-6) against the exact CSS optimum, forecast::Arima's own optimum at 1e-3; SSR, sigma2, loglik, AIC and standard errors Tol::stat(n) (n = 144, 240); forecasts, limits and residuals rel 1e-6 or abs 1e-7",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
       "id": "granger_test",
       "name": "Granger causality F test",
       "category": "econometrics",

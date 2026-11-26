@@ -809,8 +809,8 @@ async fn test_mcp_boxplot_reports_whiskers_and_n() {
         "{t}"
     );
     for line in [
-        "a (n = 8):\n  Lower whisker: 1.0000, Q1 (lower hinge): 9.5000, Median: 15.0000, Q3 (upper hinge): 17.0000, Upper whisker: 18.0000\n  Outliers: none",
-        "b (n = 7):\n  Lower whisker: 1.0000, Q1 (lower hinge): 3.2500, Median: 4.0000, Q3 (upper hinge): 8.1250, Upper whisker: 9.7500\n  Outliers: 30.0000",
+        "a (n = 8):\n  Lower whisker: 1, Q1 (lower hinge): 9.5, Median: 15, Q3 (upper hinge): 17, Upper whisker: 18\n  Outliers: none",
+        "b (n = 7):\n  Lower whisker: 1, Q1 (lower hinge): 3.25, Median: 4, Q3 (upper hinge): 8.125, Upper whisker: 9.75\n  Outliers: 30",
         "z (n = 0): no values",
         "Missing values: 1 of 8 rows dropped because of missing values (b: 1)",
         "Missing values: 8 of 8 rows dropped because of missing values (z: 8)",
@@ -872,12 +872,93 @@ async fn test_mcp_upload_dataset_jsonl() {
     );
 }
 
-/// upload_dataset reads CSV, Parquet, JSON Lines and JSON only: a declared Excel, Stata or SAS
-/// file_type passed the extension check and failed later with a format error.
+/// A semicolon-separated Latin-1 CSV with decimal commas is split, decoded and its numbers read,
+/// and the answer says how it was read.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_mcp_upload_dataset_refuses_declared_types_it_cannot_read() {
+async fn test_mcp_upload_dataset_reads_a_european_csv() {
     use base64::Engine as _;
     let (session, server) = session_with_datasets(vec![]);
+    let content =
+        base64::engine::general_purpose::STANDARD.encode(b"Ort;Wert\nZ\xFCrich;1,5\nBern;2,25\n");
+    let r = call(
+        &server,
+        &session,
+        "upload_dataset",
+        json!({"filename": "eu.csv", "name": "eu", "content": content}),
+    )
+    .await;
+    let t = text(&r);
+    assert!(
+        r.success && t.contains("Windows-1252") && t.contains("semicolon"),
+        "{t}"
+    );
+    let eu = dataset(&session, "eu").await;
+    assert_eq!(nums(&eu, "Wert"), [1.5, 2.25]);
+    assert_eq!(
+        labels(&eu, "Ort"),
+        ["Z\u{FC}rich".to_string(), "Bern".to_string()]
+    );
+}
+
+/// A second upload under a name in use says that it replaced the dataset, and a column that is
+/// text only because of a missing-value code is named with the way to convert it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_mcp_upload_dataset_notes_a_replacement_and_missing_codes() {
+    use base64::Engine as _;
+    let (session, server) = session_with_datasets(vec![]);
+    let upload = |bytes: &'static [u8]| {
+        let content = base64::engine::general_purpose::STANDARD.encode(bytes);
+        json!({"filename": "d.csv", "name": "d", "content": content})
+    };
+    let r = call(
+        &server,
+        &session,
+        "upload_dataset",
+        upload(b"a,b\n1,2\n3,4\n"),
+    )
+    .await;
+    assert!(r.success && !text(&r).contains("replaced"), "{}", text(&r));
+    let r = call(
+        &server,
+        &session,
+        "upload_dataset",
+        upload(b"a,b\n1,.\n3,4.5\n"),
+    )
+    .await;
+    let t = text(&r);
+    assert!(r.success, "{t}");
+    assert!(t.contains("it replaced the dataset 'd'"), "{t}");
+    assert!(t.contains("column 'b'") && t.contains("munge_cast"), "{t}");
+    assert!(t.lines().next().unwrap().ends_with("'d'"), "{t}");
+}
+
+/// upload_dataset reads Stata and SAS files from the request's bytes, a declared type that matches
+/// the extension included; a workbook that is not one is answered with the reader's error.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_mcp_upload_dataset_reads_stata_and_sas() {
+    use base64::Engine as _;
+    let (session, server) = session_with_datasets(vec![]);
+    let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
+    let file = |name: &str| {
+        std::fs::read(p2a_validation::repo_path(&format!(
+            "validation/datasets/files/{name}"
+        )))
+        .unwrap()
+    };
+    for (name, file_type, fixture) in [
+        ("iris_dta", "stata", "dta118_stata_iris.dta"),
+        ("iris_sas", "sas", "sas32_iris.sas7bdat"),
+    ] {
+        let bytes = file(fixture);
+        let r = call(&server, &session, "upload_dataset",
+            json!({"filename": fixture, "name": name, "file_type": file_type, "content": b64(&bytes)})).await;
+        assert!(r.success, "{fixture}: {}", text(&r));
+        let want = p2a_core::data::DataLoader::load(p2a_validation::repo_path(&format!(
+            "validation/datasets/files/{fixture}"
+        )))
+        .unwrap();
+        assert_eq!(dataset(&session, name).await.df(), want.df(), "{fixture}");
+    }
     let content = base64::engine::general_purpose::STANDARD.encode("not a spreadsheet");
     let r = call(
         &server,
@@ -887,10 +968,7 @@ async fn test_mcp_upload_dataset_refuses_declared_types_it_cannot_read() {
     )
     .await;
     let t = text(&r);
-    assert!(
-        !r.success && t.contains("file_type 'excel'") && t.contains("auto, csv, parquet"),
-        "{t}"
-    );
+    assert!(!r.success && t.contains("workbook"), "{t}");
     assert!(session.datasets.read().await.get("u").is_none());
     // An unparseable file_type is refused with the parse error, never read as auto.
     let csv = base64::engine::general_purpose::STANDARD.encode("x\n1\n2\n");

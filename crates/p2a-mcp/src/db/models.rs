@@ -186,6 +186,15 @@ pub struct ToolCall {
     pub completed_at: Option<Datetime>,
     /// Duration in milliseconds
     pub duration_ms: Option<i32>,
+    /// Images the call returned (base64 PNG), shown again when the
+    /// conversation is reopened; never sent to the model. Absent from rows
+    /// stored before images were kept.
+    #[serde(default)]
+    pub images: Option<Vec<String>>,
+    /// The vector version (SVG) of each image, empty for one without. None
+    /// when no image has one, and on rows stored before they were kept.
+    #[serde(default)]
+    pub image_svgs: Option<Vec<String>>,
 }
 
 /// Tool call status enumeration
@@ -220,6 +229,8 @@ impl ToolCall {
             started_at: Datetime::now(),
             completed_at: None,
             duration_ms: None,
+            images: None,
+            image_svgs: None,
         }
     }
 

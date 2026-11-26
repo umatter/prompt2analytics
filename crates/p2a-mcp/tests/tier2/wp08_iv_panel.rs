@@ -186,6 +186,43 @@ async fn test_validate_mcp_panel_hdfe_grunfeld_na() {
     );
 }
 
+/// `cluster` gives fixest's cluster-robust SEs (one- and two-way); p-values on G - 1 df.
+#[tokio::test]
+async fn test_validate_mcp_panel_hdfe_clustered() {
+    let case = Case::load("panel_hdfe_grunfeld");
+    let (session, server) = session_with("panel_hdfe_grunfeld");
+    let names = ["value", "capital"];
+    for (cluster, se_key, p_key, label) in [
+        (
+            json!(["firm"]),
+            "se_cluster_firm",
+            "p_cluster_firm",
+            "clustered by firm (10 clusters); t on 9 df",
+        ),
+        (
+            json!(["firm", "year"]),
+            "se_cluster_firm_year",
+            "p_cluster_firm_year",
+            "clustered by firm (10 clusters) and year (20 clusters); t on 9 df",
+        ),
+    ] {
+        let args = json!({
+            "dataset": "grunfeld", "y": "inv", "x": ["value", "capital"],
+            "fe": ["firm", "year"], "cluster": cluster
+        });
+        let r = call(&server, &session, "panel_hdfe", args).await;
+        let t = text(&r);
+        assert!(r.success, "{t}");
+        assert!(t.contains(&format!("Covariance Type: {label}\n")), "{t}");
+        let se: Vec<f64> = names.iter().map(|n| row(&t, n)[1]).collect();
+        let p: Vec<f64> = names.iter().map(|n| row(&t, n)[3]).collect();
+        Check::new(&case)
+            .named(se_key, &names, &se, Tol::printed(4))
+            .named(p_key, &names, &p, Tol::printed(3))
+            .finish();
+    }
+}
+
 #[tokio::test]
 async fn test_validate_mcp_panel_pmg_grunfeld_na() {
     let case = Case::load("panel_grunfeld_na");

@@ -131,12 +131,17 @@
       "tests": [
         "p2a-core::econometrics::hdfe::tests::test_validate_hdfe_grunfeld",
         "p2a-core::econometrics::hdfe::tests::test_validate_hdfe_grunfeld_hc1",
-        "p2a-core::econometrics::hdfe::tests::test_validate_hdfe_grunfeld_firm_only"
+        "p2a-core::econometrics::hdfe::tests::test_validate_hdfe_grunfeld_firm_only",
+        "p2a-core::econometrics::hdfe::tests::test_validate_hdfe_grunfeld_clustered",
+        "p2a-mcp::tier2::wp08_iv_panel::test_validate_mcp_panel_hdfe_clustered",
+        "p2a-cli::tier3::wp60_models::test_validate_cli_panel_hdfe_cluster"
       ],
       "quantities": [
         "coefficients",
         "SE iid",
         "SE HC1",
+        "SE and p clustered (one-way by firm or year, two-way by firm and year, firm-only model by year)",
+        "t df with clusters",
         "t and p (HC1)",
         "within R2",
         "adj. within R2 (plm)",

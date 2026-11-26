@@ -50,6 +50,63 @@ case("ols_mtcars", "regression", "OLS with HC0-HC3 SEs, mtcars mpg ~ wt + hp + d
        call = "lm(mpg ~ wt + hp + disp, data = mtcars)", packages = c("sandwich"))
 })
 
+case("wls_sim", "regression", "Weighted least squares with HC0-HC3 SEs: lm(weights = w), weights with zeros as matching gives", function(ctx) {
+  set.seed(20261126)
+  n <- 300
+  x1 <- rnorm(n); x2 <- runif(n, 0, 10); d <- rbinom(n, 1, 0.4)
+  y <- 2 + 1.5 * x1 - 0.3 * x2 + 0.8 * d + rnorm(n, sd = 1 + 0.5 * abs(x1))
+  w <- sample(c(0, 0.25, 1, 1, 1, 2.5, 4), n, replace = TRUE)
+  dd <- ctx$gen_dataset("wls_sim", data.frame(id = seq_len(n), y = y, x1 = x1, x2 = x2, d = d, w = w))
+  m0 <- lm(y ~ x1 + x2 + d, data = dd, weights = w)
+  # With a weight of 0, sandwich mixes all n rows with nobs (the rows with w > 0): HC0/HC1
+  # scale by the wrong n, and HC2/HC3 recycle the n residuals against the hat values. The
+  # reference is therefore the fit on the positive-weight rows, which equals lm's own fit
+  # with zero weights in every lm quantity (checked here).
+  m <- lm(y ~ x1 + x2 + d, data = dd[dd$w > 0, ], weights = w)
+  stopifnot(all.equal(coef(m0), coef(m), tolerance = 1e-12),
+            all.equal(as.numeric(logLik(m0)), as.numeric(logLik(m)), tolerance = 1e-12),
+            all.equal(summary(m0)$r.squared, summary(m)$r.squared, tolerance = 1e-12),
+            nobs(m0) == nobs(m), m0$df.residual == m$df.residual)
+  v <- .ols_values(m)
+  wt <- lmtest::waldtest(m, vcov = vcovHC(m, type = "HC1"), test = "F")
+  v$wald_f_hc1 <- wt$F[2]; v$wald_f_hc1_p <- wt[["Pr(>F)"]][2]
+  v$resid_positive <- unname(residuals(m))
+  list(values = v, reference = "stats::lm(weights = ); sandwich::vcovHC; lmtest::waldtest",
+       call = "lm(y ~ x1 + x2 + d, data = wls_sim, weights = w)", packages = c("sandwich", "lmtest"))
+})
+
+# lm's default na.action (na.omit): rows missing in the response, a regressor or the
+# weights are left out jointly, unweighted (ols_na) and weighted (ols_na_wls).
+.ols_na_data <- function(ctx, name) {
+  set.seed(20261127)
+  n <- 120
+  x1 <- rnorm(n); x2 <- round(runif(n, 0, 20))
+  y <- 1 + 0.7 * x1 + 0.15 * x2 + rnorm(n, sd = 1 + 0.4 * abs(x1))
+  w <- sample(c(0.5, 1, 1, 2, 3), n, replace = TRUE)
+  y[c(3, 17, 40, 41, 88)] <- NA
+  x1[c(17, 25, 60, 99)] <- NA
+  w[c(5, 25, 70)] <- NA
+  dd <- ctx$gen_dataset(name, data.frame(id = seq_len(n), y = y, x1 = x1, x2 = x2, w = w))
+  stopifnot(is.integer(dd$x2))
+  dd
+}
+
+case("ols_na", "regression", "OLS on the rows complete in y and the regressors (lm, na.action = na.omit)", function(ctx) {
+  dd <- .ols_na_data(ctx, "ols_na")
+  m <- lm(y ~ x1 + x2, data = dd)
+  stopifnot(nobs(m) == 112)
+  list(values = .ols_values(m), reference = "stats::lm (na.action = na.omit); sandwich::vcovHC",
+       call = "lm(y ~ x1 + x2, data = ols_na)", packages = c("sandwich"))
+})
+
+case("ols_na_wls", "regression", "WLS on the rows complete in y, the regressors and the weights (lm, na.action = na.omit)", function(ctx) {
+  dd <- .ols_na_data(ctx, "ols_na_wls")
+  m <- lm(y ~ x1 + x2, data = dd, weights = w)
+  stopifnot(nobs(m) == 110)
+  list(values = .ols_values(m), reference = "stats::lm (weights = , na.action = na.omit); sandwich::vcovHC",
+       call = "lm(y ~ x1 + x2, data = ols_na_wls, weights = w)", packages = c("sandwich"))
+})
+
 case("ols_diagnostics_grunfeld", "regression", "Regression diagnostics printed by `p2a reg diagnostics`, Grunfeld pooled", function(ctx) {
   g <- ctx$dataset("datasets/grunfeld.csv")
   m <- lm(inv ~ value + capital, data = g)

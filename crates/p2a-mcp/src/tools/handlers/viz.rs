@@ -10,7 +10,7 @@ use rmcp::{
 };
 
 use crate::server::AnalyticsServer;
-use crate::tools::common::{append_missing_note, append_notes, limit_refusal};
+use crate::tools::common::{append_missing_note, append_notes, chart_content, limit_refusal};
 use crate::tools::handlers::data::format_significant;
 use crate::tools::limits;
 use crate::tools::requests::viz::*;
@@ -18,10 +18,12 @@ use crate::tools::requests::viz::*;
 use p2a_core::{
     ChartConfig,
     data::columns::{ColumnRequest, Columns, MissingSummary, NaPolicy},
+    data::dates::as_date_column,
     polars::prelude::{DataFrame, DataType},
     visualization::{
-        box_plot, coefficient_plot, correlation_heatmap, dendrogram, event_study_plot, histogram,
-        irf_plot, line_chart, residual_diagnostics, scatter_plot,
+        Band, MAX_SCATTER_GROUPS, box_plot, coefficient_plot, correlation_heatmap, dendrogram,
+        event_study_plot, histogram, irf_plot, line_chart_with_band, residual_diagnostics,
+        scatter_plot_grouped,
     },
 };
 
@@ -112,8 +114,8 @@ fn linkage_rows(matrix: &[Vec<f64>]) -> Result<Vec<(usize, usize, f64, usize)>, 
 enum Role {
     /// A number (integers, floats, Decimal; Boolean as 0/1).
     Numeric,
-    /// An axis: a `Date` column as days since 1970-01-01, anything else as a number (a
-    /// `Datetime` is refused as not numeric).
+    /// An axis: dates (a `Date` or `Datetime` column, or text such as "1949-01") as days since
+    /// 1970-01-01, anything else as a number.
     Axis,
 }
 
@@ -123,6 +125,8 @@ enum Role {
 struct Plotted {
     cols: Columns,
     days: Vec<String>,
+    /// Whether the axis is in days.
+    dates: bool,
 }
 
 impl Plotted {
@@ -157,6 +161,22 @@ fn plotted_columns(
     min_rows: usize,
     context: &str,
 ) -> Result<Plotted, String> {
+    let mut df = df.clone();
+    let mut dates = false;
+    for &(name, _) in columns.iter().filter(|(_, role)| *role == Role::Axis) {
+        let Some(i) = df.get_column_index(name) else {
+            continue;
+        };
+        let column = &df.get_columns()[i];
+        if let Some(days) = as_date_column(column) {
+            dates = true;
+            df.replace_column(i, days.take_materialized_series())
+                .map_err(|e| e.to_string())?;
+        } else if column.dtype() == &DataType::String {
+            return Err(text_axis_error(&df, name));
+        }
+    }
+    let df = &df;
     let mut request = ColumnRequest::new(df)
         .na(NaPolicy::Omit)
         .allow_infinite(true)
@@ -175,15 +195,115 @@ fn plotted_columns(
         };
     }
     let cols = request.extract().map_err(|e| e.to_string())?;
-    Ok(Plotted { cols, days })
+    Ok(Plotted { cols, days, dates })
+}
+
+/// The refusal of a text x axis that does not hold dates, with the columns that would do.
+fn text_axis_error(df: &DataFrame, name: &str) -> String {
+    let usable: Vec<String> = df
+        .get_columns()
+        .iter()
+        .filter(|c| c.dtype().is_integer() || c.dtype().is_float() || as_date_column(c).is_some())
+        .map(|c| c.name().to_string())
+        .collect();
+    format!(
+        "Column '{name}' contains non-numeric values that are not all dates, so it cannot be the \
+         x axis. Text is read as dates when every value looks like 1949-01, 1949-01-31 or 1949Q1. \
+         Do not repeat this call: use another x column (numeric or date columns: {}), or \
+         viz_boxplot to compare groups.",
+        crate::tools::common::echo_list(&usable, ", ", 20)
+    )
+}
+
+/// Lines a chart can hold: the palette's six colours, solid and dashed.
+const MAX_LINES: usize = 12;
+
+/// A label with its x and y values.
+type Line = (String, Vec<f64>, Vec<f64>);
+
+/// The plotted rows split by the values of `group`, in factor order, each sorted by x; and the
+/// number of rows without a group.
+fn grouped_lines(
+    df: &DataFrame,
+    group: &str,
+    plotted: &Plotted,
+    x: &[f64],
+    y: &[f64],
+) -> Result<(Vec<Line>, usize), String> {
+    let (mut lines, unlabelled) = grouped_points(df, group, plotted, x, y, MAX_LINES, "lines")?;
+    for (_, xs, ys) in &mut lines {
+        let mut points: Vec<(f64, f64)> = xs.iter().copied().zip(ys.iter().copied()).collect();
+        points.sort_by(|a, b| a.0.total_cmp(&b.0));
+        (*xs, *ys) = points.into_iter().unzip();
+    }
+    Ok((lines, unlabelled))
+}
+
+/// The plotted rows split by the levels of `group` (in R `factor()` order, labels cut to 40
+/// characters), and the number of rows without a group. More than `max` groups is an error
+/// naming the `noun` drawn per group.
+fn grouped_points(
+    df: &DataFrame,
+    group: &str,
+    plotted: &Plotted,
+    x: &[f64],
+    y: &[f64],
+    max: usize,
+    noun: &str,
+) -> Result<(Vec<Line>, usize), String> {
+    let groups = ColumnRequest::new(df)
+        .factor(group)
+        .na(NaPolicy::Omit)
+        .extract()
+        .map_err(|e| e.to_string())?;
+    let factor = groups.factor(group);
+    let mut code_of: Vec<Option<u32>> = vec![None; df.height()];
+    for (&row, &code) in groups.rows().iter().zip(&factor.codes) {
+        code_of[row] = Some(code);
+    }
+    let mut points: std::collections::BTreeMap<u32, (Vec<f64>, Vec<f64>)> = Default::default();
+    let mut unlabelled = 0;
+    for ((&row, &x), &y) in plotted.rows().iter().zip(x).zip(y) {
+        match code_of[row] {
+            Some(code) => {
+                let entry = points.entry(code).or_default();
+                entry.0.push(x);
+                entry.1.push(y);
+            }
+            None => unlabelled += 1,
+        }
+        if points.len() > max {
+            return Err(format!(
+                "'{group}' has {} values; at most {max} {noun} can be told apart. Filter \
+                 the data to fewer groups first.",
+                factor.n_levels()
+            ));
+        }
+    }
+    let lines = points
+        .into_iter()
+        .map(|(code, (x, y))| {
+            (
+                p2a_text::ellipsize(&factor.levels[code as usize], 40).to_string(),
+                x,
+                y,
+            )
+        })
+        .collect();
+    Ok((lines, unlabelled))
 }
 
 /// A numeric column over every row, a missing value as NaN (for an optional band whose gaps
 /// are drawn as gaps); ±Inf kept.
 fn numeric_with_gaps(df: &DataFrame, name: &str) -> Result<Vec<f64>, String> {
-    let plotted = plotted_columns(df, &[(name, Role::Numeric)], 0, name)?;
+    with_gaps(df, name, Role::Numeric)
+}
+
+/// [`numeric_with_gaps`] for a column in any role.
+fn with_gaps(df: &DataFrame, name: &str, role: Role) -> Result<Vec<f64>, String> {
+    let plotted = plotted_columns(df, &[(name, role)], 0, name)?;
     let mut out = vec![f64::NAN; df.height()];
-    for (&row, &v) in plotted.rows().iter().zip(plotted.cols.numeric(name)) {
+    for (&row, v) in plotted.rows().iter().zip(plotted.values(name)) {
         out[row] = v;
     }
     Ok(out)
@@ -215,7 +335,7 @@ fn heatmap_reply(
     dataset: &p2a_core::Dataset,
     selection: Option<&[String]>,
     title: Option<&str>,
-) -> Result<(String, String), String> {
+) -> Result<(String, String, Option<String>), String> {
     use p2a_core::visualization::heatmap::heatmap_capacity;
     let df = dataset.df();
     // The dtypes stats::correlation_matrix correlates.
@@ -310,12 +430,15 @@ fn heatmap_reply(
         description.push_str(&note);
     }
     append_notes(&mut description, None, &result.warnings);
-    Ok((description, result.image_base64))
+    Ok((description, result.image_base64, result.svg))
 }
 
 /// Outliers listed per column in the viz_boxplot reply (in the core's order); the rest are
 /// counted, so a heavy-tailed column cannot push later columns past the chat loop's cut.
 const BOXPLOT_OUTLIERS_LISTED: usize = 20;
+
+/// At most this many boxes when one column is split by a group column.
+const MAX_BOXES: usize = 30;
 #[tool_router(router = viz_router, vis = "pub")]
 impl AnalyticsServer {
     // ========================================================================
@@ -383,7 +506,7 @@ impl AnalyticsServer {
                 append_missing_note(&mut description, plotted.missing());
                 Ok(CallToolResult::success(vec![
                     Content::text(description),
-                    Content::image(result.image_base64, "image/png"),
+                    chart_content(result.image_base64, result.svg),
                 ]))
             }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
@@ -395,7 +518,7 @@ impl AnalyticsServer {
 
     /// Generate a scatter plot for two numeric columns.
     #[tool(
-        description = "Generate a scatter plot visualization showing the relationship between two numeric columns (a Date x column plots as days). Rows with a missing value in a plotted column are left out and counted. Returns a base64-encoded PNG image."
+        description = "Generate a scatter plot visualization showing the relationship between two numeric columns (a date x column, or text such as 1949-01, plots as dates). group_column colours the points by group, with a different marker shape per group (at most 12 groups), such as treated and control. Rows with a missing value in a plotted column are left out and counted. Returns a base64-encoded PNG image."
     )]
     pub async fn viz_scatter(
         &self,
@@ -427,12 +550,29 @@ impl AnalyticsServer {
         let x_values = plotted.values(&request.x_column);
         let y_values = plotted.values(&request.y_column);
 
+        let (groups, unlabelled) = match &request.group_column {
+            None => (vec![(String::new(), x_values, y_values)], 0),
+            Some(group) => match grouped_points(
+                dataset.df(),
+                group,
+                &plotted,
+                &x_values,
+                &y_values,
+                MAX_SCATTER_GROUPS,
+                "groups of points",
+            ) {
+                Ok(split) => split,
+                Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+            },
+        };
+
         let mut config = ChartConfig::default();
         config.title = request.title;
         config.x_label = Some(request.x_column.clone());
         config.y_label = Some(request.y_column.clone());
+        config.x_dates = plotted.dates;
 
-        match scatter_plot(&x_values, &y_values, config) {
+        match scatter_plot_grouped(&groups, config) {
             Ok(result) => {
                 let mut description = format!(
                     "Scatter plot of {} vs {} generated successfully.\nPoints: {}\nCorrelation: {:.4}",
@@ -441,10 +581,25 @@ impl AnalyticsServer {
                     result.n_points,
                     result.correlation.unwrap_or(f64::NAN)
                 );
+                if let Some(group) = &request.group_column {
+                    let counts: Vec<String> = groups
+                        .iter()
+                        .map(|(label, x, _)| format!("{label} ({})", x.len()))
+                        .collect();
+                    description.push_str(&format!(
+                        "\nColour and marker by {group}: {}\nThe correlation is over all points.",
+                        counts.join(", ")
+                    ));
+                }
+                if unlabelled > 0 {
+                    description.push_str(&format!(
+                        "\nWarning: {unlabelled} rows without a group were left out"
+                    ));
+                }
                 append_missing_note(&mut description, plotted.missing());
                 Ok(CallToolResult::success(vec![
                     Content::text(description),
-                    Content::image(result.image_base64, "image/png"),
+                    chart_content(result.image_base64, result.svg),
                 ]))
             }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
@@ -456,7 +611,7 @@ impl AnalyticsServer {
 
     /// Generate a line chart for time series or sequential data.
     #[tool(
-        description = "Generate a line chart visualization for time series or sequential data. Supports multiple Y series. Rows with a missing value in a plotted column are left out and counted, each series on its own. Returns a base64-encoded PNG image."
+        description = "Generate a line chart visualization for time series or sequential data. Supports multiple Y series, and one line per value of group_column (panel data: the unit column). The x column is numeric or holds dates (date columns, or text such as 1949-01, 1949-01-31 or 1949Q1). lower_column and upper_column shade a band, such as the intervals of a saved forecast. Rows with a missing value in a plotted column are left out and counted, each series on its own. Returns a base64-encoded PNG image."
     )]
     pub async fn viz_line(
         &self,
@@ -477,6 +632,9 @@ impl AnalyticsServer {
         let mut series: Vec<(String, Vec<f64>, Vec<f64>)> = Vec::new();
         let mut series_names = Vec::new();
         let mut missing = Vec::new();
+        let mut x_dates = false;
+        let mut doubles_back = false;
+        let mut no_group = 0;
         for y_col_name in &request.y_columns {
             let plotted = match plotted_columns(
                 dataset.df(),
@@ -487,20 +645,84 @@ impl AnalyticsServer {
                 Ok(p) => p,
                 Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
             };
+            x_dates = plotted.dates;
             series_names.push(y_col_name.clone());
-            series.push((
-                y_col_name.clone(),
+            let (x, y) = (
                 plotted.values(&request.x_column),
                 plotted.values(y_col_name),
-            ));
+            );
             missing.push(plotted.missing().clone());
+            let Some(group) = &request.group_column else {
+                doubles_back |= x.windows(2).any(|w| w[1] <= w[0]);
+                series.push((y_col_name.clone(), x, y));
+                continue;
+            };
+            let several = request.y_columns.len() > 1;
+            match grouped_lines(dataset.df(), group, &plotted, &x, &y) {
+                Ok((lines, unlabelled)) => {
+                    no_group = no_group.max(unlabelled);
+                    series.extend(lines.into_iter().map(|(label, x, y)| {
+                        let label = if several {
+                            format!("{y_col_name}: {label}")
+                        } else {
+                            label
+                        };
+                        (label, x, y)
+                    }));
+                }
+                Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+            }
+        }
+
+        if request.group_column.is_some() && series.len() > MAX_LINES {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "{} lines are too many to tell apart (at most {MAX_LINES}): filter the data to \
+                 fewer groups, or plot fewer y_columns",
+                series.len()
+            ))]));
+        }
+
+        if request.group_column.is_some()
+            && (request.lower_column.is_some() || request.upper_column.is_some())
+        {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "a band cannot be drawn with group_column: filter the data to one group",
+            )]));
         }
 
         let mut config = ChartConfig::default();
         config.title = request.title;
         config.x_label = Some(request.x_column.clone());
+        config.x_dates = x_dates;
+        if let [y] = request.y_columns.as_slice() {
+            config.y_label = Some(y.clone());
+        }
 
-        match line_chart(&series, config) {
+        let band = match (&request.lower_column, &request.upper_column) {
+            (None, None) => None,
+            (Some(lower), Some(upper)) => {
+                let df = dataset.df();
+                let read = || -> Result<Band, String> {
+                    Ok(Band {
+                        label: format!("{lower} to {upper}"),
+                        x: with_gaps(df, &request.x_column, Role::Axis)?,
+                        lower: numeric_with_gaps(df, lower)?,
+                        upper: numeric_with_gaps(df, upper)?,
+                    })
+                };
+                match read() {
+                    Ok(band) => Some(band),
+                    Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+                }
+            }
+            _ => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    "lower_column and upper_column go together: give both or neither",
+                )]));
+            }
+        };
+
+        match line_chart_with_band(&series, band.as_ref(), config) {
             Ok(result) => {
                 let mut description = format!(
                     "Line chart generated successfully.\nX: {}\nSeries: {}\nPoints: {}",
@@ -508,12 +730,28 @@ impl AnalyticsServer {
                     series_names.join(", "),
                     result.n_points
                 );
+                if let Some(group) = &request.group_column {
+                    description.push_str(&format!("\nOne line per value of {group}"));
+                }
+                if no_group > 0 {
+                    description.push_str(&format!(
+                        "\nWarning: {no_group} rows without a group were left out"
+                    ));
+                }
+                if doubles_back {
+                    description.push_str(&format!(
+                        "\nWarning: {} repeats or goes backwards, so one line jumps back and forth. For \
+                         panel data set group_column to the unit's column; otherwise sort or \
+                         aggregate the data by {}.",
+                        request.x_column, request.x_column
+                    ));
+                }
                 for m in &missing {
                     append_missing_note(&mut description, m);
                 }
                 Ok(CallToolResult::success(vec![
                     Content::text(description),
-                    Content::image(result.image_base64, "image/png"),
+                    chart_content(result.image_base64, result.svg),
                 ]))
             }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
@@ -525,7 +763,7 @@ impl AnalyticsServer {
 
     /// Generate a box plot for comparing distributions.
     #[tool(
-        description = "Box plots of one or more numeric columns with Tukey hinges and whiskers to the most extreme values within 1.5 IQR, as R's boxplot.stats; values beyond them are listed as outliers (at most 20 per column, then the count of the rest). Missing values are left out and counted per column; ±Inf count as values and are listed as outliers but not drawn. Returns a PNG image and the statistics with n per column."
+        description = "Box plots of one or more numeric columns, or of one column split by group_column (one box per group, as R's boxplot(y ~ group)), with Tukey hinges and whiskers to the most extreme values within 1.5 IQR, as R's boxplot.stats; values beyond them are listed as outliers (at most 20 per column, then the count of the rest). Missing values are left out and counted per column; ±Inf count as values and are listed as outliers but not drawn. Returns a PNG image and the statistics with n per column."
     )]
     pub async fn viz_boxplot(
         &self,
@@ -544,11 +782,53 @@ impl AnalyticsServer {
 
         let df = dataset.df();
 
+        // One column split by a group column: one box per level, rows with a missing value
+        // or group dropped and counted.
+        let mut unlabelled = 0;
+        let grouped = if let Some(group) = &request.group_column {
+            let [col_name] = request.columns.as_slice() else {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "group_column splits one column into boxes: give exactly one column in \
+                     columns, not {}",
+                    request.columns.len()
+                ))]));
+            };
+            let plotted = match plotted_columns(df, &[(col_name, Role::Numeric)], 0, "viz_boxplot")
+            {
+                Ok(p) => p,
+                Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+            };
+            let values = plotted.values(col_name);
+            let (split, without) =
+                match grouped_points(df, group, &plotted, &values, &values, MAX_BOXES, "boxes") {
+                    Ok(split) => split,
+                    Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+                };
+            unlabelled = without;
+            Some((
+                split
+                    .into_iter()
+                    .map(|(label, v, _)| (label, v))
+                    .collect::<Vec<_>>(),
+                plotted.missing().clone(),
+            ))
+        } else {
+            None
+        };
+
         // Each column on its own: its missing values are dropped and counted; ±Inf are values,
         // as in R's boxplot.stats. A column with no type at all (every cell empty) has n = 0.
         let mut groups = Vec::new();
         let mut missing = Vec::new();
-        for col_name in &request.columns {
+        if let Some((boxes, dropped)) = grouped {
+            groups = boxes;
+            missing.push(dropped);
+        }
+        for col_name in request
+            .columns
+            .iter()
+            .filter(|_| request.group_column.is_none())
+        {
             if df
                 .column(col_name)
                 .is_ok_and(|c| matches!(c.dtype(), DataType::Null))
@@ -584,7 +864,13 @@ impl AnalyticsServer {
 
         let mut config = ChartConfig::default();
         config.title = request.title;
-        config.y_label = Some("Value".to_string());
+        match (&request.group_column, request.columns.as_slice()) {
+            (Some(group), [col]) => {
+                config.y_label = Some(col.clone());
+                config.x_label = Some(group.clone());
+            }
+            _ => config.y_label = Some("Value".to_string()),
+        }
 
         match box_plot(&groups, config) {
             Ok(result) => {
@@ -604,7 +890,7 @@ impl AnalyticsServer {
                             .outliers
                             .iter()
                             .take(BOXPLOT_OUTLIERS_LISTED)
-                            .map(|v| format!("{v:.4}"))
+                            .map(|&v| format_significant(v))
                             .collect::<Vec<_>>()
                             .join(", ");
                         match stat.outliers.len().saturating_sub(BOXPLOT_OUTLIERS_LISTED) {
@@ -612,10 +898,24 @@ impl AnalyticsServer {
                             more => format!("{shown}, and {more} more"),
                         }
                     };
+                    // 7 significant digits, as R prints them: at 4 decimals a value such as
+                    // 1.404994 printed as 1.4050, which a reader then rounded again to 1.41.
+                    let f = format_significant;
                     description.push_str(&format!(
-                        "\n{} (n = {}):\n  Lower whisker: {:.4}, Q1 (lower hinge): {:.4}, Median: {:.4}, \
-                         Q3 (upper hinge): {:.4}, Upper whisker: {:.4}\n  Outliers: {outliers}",
-                        stat.label, stat.n, stat.min, stat.q1, stat.median, stat.q3, stat.max
+                        "\n{} (n = {}):\n  Lower whisker: {}, Q1 (lower hinge): {}, Median: {}, \
+                         Q3 (upper hinge): {}, Upper whisker: {}\n  Outliers: {outliers}",
+                        stat.label,
+                        stat.n,
+                        f(stat.min),
+                        f(stat.q1),
+                        f(stat.median),
+                        f(stat.q3),
+                        f(stat.max)
+                    ));
+                }
+                if unlabelled > 0 {
+                    description.push_str(&format!(
+                        "\nWarning: {unlabelled} rows without a group were left out"
                     ));
                 }
                 for m in &missing {
@@ -623,7 +923,7 @@ impl AnalyticsServer {
                 }
                 Ok(CallToolResult::success(vec![
                     Content::text(description),
-                    Content::image(result.image_base64, "image/png"),
+                    chart_content(result.image_base64, result.svg),
                 ]))
             }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
@@ -657,9 +957,9 @@ impl AnalyticsServer {
             request.columns.as_deref(),
             request.title.as_deref(),
         ) {
-            Ok((description, image)) => Ok(CallToolResult::success(vec![
+            Ok((description, image, svg)) => Ok(CallToolResult::success(vec![
                 Content::text(description),
-                Content::image(image, "image/png"),
+                chart_content(image, svg),
             ])),
             Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
         }
@@ -888,7 +1188,7 @@ impl AnalyticsServer {
                 append_missing_note(&mut description, plotted.missing());
                 Ok(CallToolResult::success(vec![
                     Content::text(description),
-                    Content::image(result.image_base64, "image/png"),
+                    chart_content(result.image_base64, result.svg),
                 ]))
             }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
@@ -979,7 +1279,7 @@ impl AnalyticsServer {
                 append_missing_note(&mut description, plotted.missing());
                 Ok(CallToolResult::success(vec![
                     Content::text(description),
-                    Content::image(result.image_base64, "image/png"),
+                    chart_content(result.image_base64, result.svg),
                 ]))
             }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
@@ -1069,7 +1369,7 @@ impl AnalyticsServer {
                 append_missing_note(&mut description, plotted.missing());
                 Ok(CallToolResult::success(vec![
                     Content::text(description),
-                    Content::image(result.image_base64, "image/png"),
+                    chart_content(result.image_base64, result.svg),
                 ]))
             }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
@@ -1161,10 +1461,13 @@ impl AnalyticsServer {
                 append_missing_note(&mut description, plotted.missing());
                 Ok(CallToolResult::success(vec![
                     Content::text(description),
-                    Content::image(result.residuals_vs_fitted, "image/png"),
-                    Content::image(result.qq_plot, "image/png"),
-                    Content::image(result.scale_location, "image/png"),
-                    Content::image(result.residuals_vs_leverage, "image/png"),
+                    chart_content(result.residuals_vs_fitted, result.residuals_vs_fitted_svg),
+                    chart_content(result.qq_plot, result.qq_plot_svg),
+                    chart_content(result.scale_location, result.scale_location_svg),
+                    chart_content(
+                        result.residuals_vs_leverage,
+                        result.residuals_vs_leverage_svg,
+                    ),
                 ]))
             }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
@@ -1227,7 +1530,7 @@ impl AnalyticsServer {
                 );
                 Ok(CallToolResult::success(vec![
                     Content::text(description),
-                    Content::image(result.image_base64, "image/png"),
+                    chart_content(result.image_base64, result.svg),
                 ]))
             }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
@@ -1417,7 +1720,8 @@ mod tests {
             "f" => [1.0, 2.1, 2.9, 4.2, 5.1, 5.8],
             "r" => [Some(0.3), None, Some(-0.25), Some(0.2), Some(0.5), Some(-0.35)],
             "h" => [0.3, 0.2, 0.3, 0.3, 0.8, 0.3],
-            "h_bad" => [0.3, 0.2, 0.3, 0.3, 0.8, 1.3]
+            "h_bad" => [0.3, 0.2, 0.3, 0.3, 0.8, 1.3],
+            "g" => [Some("a"), Some("b"), Some("a"), None, Some("b"), Some("a")]
         )
         .unwrap();
         df.with_column(Column::full_null("z".into(), 6, &DataType::Null))
@@ -1442,6 +1746,7 @@ mod tests {
                 dataset: "d".into(),
                 x_column: "x".into(),
                 y_column: "y".into(),
+                group_column: None,
                 title: None,
             })),
         ));
@@ -1470,6 +1775,9 @@ mod tests {
                 dataset: "d".into(),
                 x_column: "t".into(),
                 y_columns: vec!["y1".into(), "y2".into()],
+                group_column: None,
+                lower_column: None,
+                upper_column: None,
                 title: None,
             })),
         ));
@@ -1481,16 +1789,60 @@ mod tests {
             "{t}"
         );
 
+        // A group column: points coloured by group, one box per group, rows without a
+        // group counted, and the one-column rule of a grouped box plot.
+        let t = ok(run(
+            Limits::off(),
+            server.viz_scatter(Parameters(ScatterPlotRequest {
+                dataset: "d".into(),
+                x_column: "x".into(),
+                y_column: "f".into(),
+                group_column: Some("g".into()),
+                title: None,
+            })),
+        ));
+        assert!(t.contains("Colour and marker by g: a (3), b (1)"), "{t}");
+        assert!(
+            t.contains("Warning: 1 rows without a group were left out"),
+            "{t}"
+        );
+        let t = ok(run(
+            Limits::off(),
+            server.viz_boxplot(Parameters(BoxPlotRequest {
+                dataset: "d".into(),
+                columns: vec!["w".into()],
+                group_column: Some("g".into()),
+                title: None,
+            })),
+        ));
+        assert!(t.contains("a (n = 3):") && t.contains("b (n = 2):"), "{t}");
+        assert!(
+            t.contains("Warning: 1 rows without a group were left out"),
+            "{t}"
+        );
+        let r = run(
+            Limits::off(),
+            server.viz_boxplot(Parameters(BoxPlotRequest {
+                dataset: "d".into(),
+                columns: vec!["w".into(), "x".into()],
+                group_column: Some("g".into()),
+                title: None,
+            })),
+        );
+        assert_eq!(r.is_error, Some(true));
+        assert!(text(&r).contains("exactly one column"), "{}", text(&r));
+
         let t = ok(run(
             Limits::off(),
             server.viz_boxplot(Parameters(BoxPlotRequest {
                 dataset: "d".into(),
                 columns: vec!["x".into(), "w".into(), "z".into()],
+                group_column: None,
                 title: None,
             })),
         ));
         assert!(t.contains("x (n = 5):") && t.contains("w (n = 6):"), "{t}");
-        assert!(t.contains("Outliers: inf"), "{t}");
+        assert!(t.contains("Outliers: Inf"), "{t}");
         assert!(t.contains("z (n = 0): no values"), "{t}");
         assert!(
             t.contains("Missing values: 1 of 6 rows dropped because of missing values (x: 1)")
@@ -1579,6 +1931,7 @@ mod tests {
                 dataset: "d".into(),
                 x_column: "x".into(),
                 y_column: "names".into(),
+                group_column: None,
                 title: None,
             })),
         );
@@ -1586,10 +1939,10 @@ mod tests {
         assert!(text(&r).contains("Column 'names'"), "{}", text(&r));
     }
 
-    /// A `Date` x axis is plotted as days since 1970-01-01, a missing date dropping its row; a
-    /// `Datetime` x axis is refused as not numeric, naming the column.
+    /// A `Date` x axis is plotted as days since 1970-01-01, a missing date dropping its row;
+    /// so are a `Datetime` and text dates, while other text is refused with the usable columns.
     #[test]
-    fn date_axes_are_plotted_and_datetime_axes_refused() {
+    fn date_axes_are_plotted_and_other_text_refused() {
         let days = [
             Some(19_000i32),
             Some(19_001),
@@ -1599,7 +1952,9 @@ mod tests {
         ];
         let mut df = df!(
             "y" => [1.3, 1.9, 3.2, 3.8, 5.1],
-            "ms" => [1_000i64, 2_000, 3_000, 4_000, 5_000]
+            "ms" => [1_000i64, 2_000, 3_000, 4_000, 5_000],
+            "month" => ["1949-01", "1949-02", "1949-03", "1949-04", "1949-05"],
+            "name" => ["a", "b", "c", "1949-04", "1949-05"]
         )
         .unwrap();
         let date = Series::new("day".into(), days.as_slice())
@@ -1623,6 +1978,7 @@ mod tests {
                     dataset: "d".into(),
                     x_column: x.into(),
                     y_column: "y".into(),
+                    group_column: None,
                     title: None,
                 })),
             )
@@ -1638,6 +1994,9 @@ mod tests {
                 dataset: "d".into(),
                 x_column: "day".into(),
                 y_columns: vec!["y".into()],
+                group_column: None,
+                lower_column: None,
+                upper_column: None,
                 title: None,
             })),
         );
@@ -1645,12 +2004,60 @@ mod tests {
         assert!(text(&r).ends_with(note), "{}", text(&r));
 
         let r = scatter("stamp");
+        assert_ne!(r.is_error, Some(true), "{}", text(&r));
+        assert!(text(&r).contains("Points: 5"), "{}", text(&r));
+
+        let r = scatter("month");
+        assert_ne!(r.is_error, Some(true), "{}", text(&r));
+        assert!(text(&r).contains("Points: 5"), "{}", text(&r));
+
+        let r = scatter("name");
         assert_eq!(r.is_error, Some(true), "{}", text(&r));
         let t = text(&r);
         assert!(
-            t.contains("Column 'stamp'") && t.contains("non-numeric"),
+            t.contains("Column 'name' contains non-numeric")
+                && t.contains("y, ms, month, day, stamp"),
             "{t}"
         );
+    }
+
+    /// Panel data: one line per group, a warning when one line doubles back, a cap on lines.
+    #[test]
+    fn line_charts_split_panels_by_group() {
+        let n = 26usize;
+        let df = df!(
+            "unit" => (0..n).map(|i| if i < 13 { "a" } else { "b" }).collect::<Vec<_>>(),
+            "id" => (0..n as i64).collect::<Vec<_>>(),
+            "t" => (0..n).map(|i| (i % 13) as i64).collect::<Vec<_>>(),
+            "y" => (0..n).map(|i| (i as f64 * 1.7).sin()).collect::<Vec<_>>()
+        )
+        .unwrap();
+        let server = server_with(vec![("d", df)]);
+        let line = |group: Option<&str>| {
+            run(
+                Limits::off(),
+                server.viz_line(Parameters(LineChartRequest {
+                    dataset: "d".into(),
+                    x_column: "t".into(),
+                    y_columns: vec!["y".into()],
+                    group_column: group.map(Into::into),
+                    lower_column: None,
+                    upper_column: None,
+                    title: None,
+                })),
+            )
+        };
+        assert!(text(&line(None)).contains("set group_column"));
+        let r = line(Some("unit"));
+        assert_ne!(r.is_error, Some(true), "{}", text(&r));
+        let t = text(&r);
+        assert!(
+            t.contains("One line per value of unit") && !t.contains("Warning"),
+            "{t}"
+        );
+        let r = line(Some("id"));
+        assert_eq!(r.is_error, Some(true));
+        assert!(text(&r).contains("'id' has 26 values"), "{}", text(&r));
     }
 
     fn heatmap(server: &AnalyticsServer, columns: Option<Vec<&str>>) -> CallToolResult {

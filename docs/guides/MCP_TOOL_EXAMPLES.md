@@ -1,6 +1,6 @@
 # MCP Tool Usage Examples
 
-Chat-shorthand examples for many of the server's 270 tools
+Chat-shorthand examples for many of the server's 272 tools
 ([docs/mcp/tools-reference.md](../mcp/tools-reference.md) lists all of them, with descriptions generated from the
 tool router). A line `/tool key:value ...` is what you type in the web app's chat box: typing `/` autocompletes a
 tool name, and the message, with the tool and its arguments, goes to the model, which calls the tool. Lists are
@@ -674,6 +674,9 @@ Fixed Effects (within) estimation for panel data.
 - Coefficients represent within-entity effects
 - Controls for time-invariant unobserved heterogeneity
 
+The coefficients are saved as a dataset named `<dataset>_fe_<y>` (here `panel_fe_wage`), with the
+same columns as the table `regression_ols` saves; `viz_coefficient` plots it directly.
+
 ### panel_random_effects
 Random Effects (GLS) estimation for panel data.
 
@@ -684,6 +687,9 @@ Random Effects (GLS) estimation for panel data.
 **When to use:**
 - When unobserved effects are uncorrelated with regressors
 - More efficient than FE if RE assumptions hold
+
+The coefficients are saved as `<dataset>_re_<y>` (here `panel_re_wage`); its `t_value` column holds
+the z statistics random effects reports, and the 95% interval uses the normal quantile.
 
 ### hausman_test
 Specification test to choose between Fixed and Random Effects.
@@ -821,6 +827,40 @@ Bandwidth selection for Regression Discontinuity.
 **Output includes:**
 - Optimal bandwidth(s)
 - Number of observations within bandwidth
+
+### rd_plot
+RD plot as `rdrobust::rdplot`: binned means of the outcome on each side of the cutoff and a global polynomial fitted on each side.
+
+```
+/rd_plot dataset:mydata outcome:test_score running_var:age cutoff:65
+/rd_plot dataset:mydata outcome:outcome running_var:score cutoff:0 p:2 nbins:20,20
+```
+
+**Parameters:**
+- `cutoff` (optional): Cutoff, strictly inside the range of the running variable (default: 0)
+- `p` (optional): Order of the global polynomial on each side (default: 4, at most 8)
+- `nbins` (optional): Evenly spaced bins, one value for both sides or two (left, right); by default the number mimics the variance of the outcome (`binselect = "esmv"`, or `"esmvpr"` with many repeated values)
+
+**Output includes:** the chart, the bins per side, the polynomial coefficients and the bins (midpoint, mean, n). The gap between the curves is descriptive; estimate the effect with `rd_estimate`.
+
+### rd_density
+Manipulation test of the running variable's density at the cutoff, as `rddensity::rddensity` (Cattaneo, Jansson & Ma 2020).
+
+```
+/rd_density dataset:mydata running_var:score cutoff:0
+/rd_density dataset:mydata running_var:score cutoff:0 kernel:uniform bwselect:each
+/rd_density dataset:mydata running_var:score cutoff:0 h:0.3,0.4 vce:plugin
+```
+
+**Parameters:**
+- `p` (optional): Order of the density fit for the bandwidths, 1 to 7 (default: 2; the test uses p + 1)
+- `kernel` (optional): `triangular` (default), `epanechnikov` or `uniform`
+- `vce` (optional): `jackknife` (default) or `plugin`
+- `bwselect` (optional): `comb` (default), `each`, `diff` or `sum`
+- `h` (optional): Bandwidth by hand, one value or two (left, right)
+- `mass_points` (optional): Treat repeated values as mass points (default: true)
+
+**Output includes:** the densities left and right of the cutoff with standard errors, their difference, T and its p-value, the bandwidths and observations used, and binomial tests in ten windows around the cutoff.
 
 ### rd_fuzzy
 Fuzzy Regression Discontinuity (LATE estimation via Wald estimator).
@@ -1017,18 +1057,20 @@ Probit regression for binary outcomes.
 ## Time Series
 
 ### ts_arima_fit
-Fit an ARIMA(p,d,q) model.
+Fit an ARIMA(p,d,q) or seasonal ARIMA(p,d,q)(P,D,Q)[period] model.
 
 ```
 /ts_arima_fit dataset:sales column:revenue p:1 d:1 q:1
 /ts_arima_fit dataset:sales column:revenue p:1 d:0 q:1 include_mean:true
 /ts_arima_fit dataset:sales column:revenue p:0 d:1 q:1 include_drift:true
+/ts_arima_fit dataset:sales column:revenue p:0 d:1 q:1 seasonal_p:0 seasonal_d:1 seasonal_q:1 period:12
 ```
 
 **Parameters:**
 - `p`: Autoregressive order
 - `d`: Differencing order
 - `q`: Moving average order
+- `seasonal_p`, `seasonal_d`, `seasonal_q` (optional, default 0) and `period`: the seasonal part; `period` is required with a seasonal order above 0
 - `include_mean` (optional): estimate the mean (R's `intercept`); default true when d = 0, and must be false or omitted when d > 0
 - `include_drift` (optional): estimate a drift, as R `forecast::Arima(include.drift = TRUE)`; only for d = 0 or 1, default false
 
@@ -1039,13 +1081,14 @@ Generate forecasts from a fitted ARIMA model.
 
 ```
 /ts_arima_forecast dataset:sales column:revenue p:1 d:1 q:1 horizon:12
+/ts_arima_forecast dataset:sales column:revenue p:0 d:1 q:1 seasonal_p:0 seasonal_d:1 seasonal_q:1 period:12 horizon:12
 ```
 
 **Parameters:**
 - `horizon`: Forecast horizon (number of periods ahead)
-- `include_mean`, `include_drift` (optional): as for `ts_arima_fit`
+- `seasonal_p`, `seasonal_d`, `seasonal_q`, `period`, `include_mean`, `include_drift` (optional): as for `ts_arima_fit`
 
-**Output includes:** the fitted model, point forecasts, standard errors and 80% / 95% prediction intervals, as R `forecast(Arima(x, order, method = 'CSS'))`.
+**Output includes:** the fitted model, point forecasts, standard errors and 80% / 95% prediction intervals, as R `forecast(Arima(x, order, method = 'CSS'))`. The history and forecasts are saved as the dataset `<dataset>_forecast_<column>` (`time`, `actual`, `forecast`, `lower_95`, `upper_95`, `lower_80`, `upper_80`); `time` continues the dataset's regular date or year column, else counts 1, 2, ... `ts_holt_winters` with a horizon saves its forecasts the same way.
 
 ### ts_mstl
 MSTL seasonal-trend decomposition.
@@ -1523,21 +1566,31 @@ Scatter plot with correlation coefficient.
 
 ```
 /viz_scatter dataset:housing x_column:sqft y_column:price
+/viz_scatter dataset:lalonde x_column:age y_column:re78 group_column:treat
 ```
+
+`group_column` gives each group its own colour and marker shape (at most 12 groups).
 
 ### viz_line
 Time series or multi-series line chart.
 
 ```
 /viz_line dataset:sales x_column:date y_columns:revenue,costs
+/viz_line dataset:panel x_column:year y_columns:invest group_column:firm
+/viz_line dataset:sales_forecast_revenue x_column:time y_columns:actual,forecast lower_column:lower_95 upper_column:upper_95
 ```
+
+The x column is numeric or holds dates: a date column, or text in which every value looks like `1949-01`, `1949-01-31` or `1949Q1`.
 
 ### viz_boxplot
 Box plots for comparing distributions.
 
 ```
 /viz_boxplot dataset:survey columns:income,spending,savings
+/viz_boxplot dataset:lalonde columns:re78 group_column:treat
 ```
+
+With `group_column`, one column is split into one box per group, as R's `boxplot(y ~ group)` (at most 30 groups).
 
 ### viz_heatmap
 Correlation heatmap.

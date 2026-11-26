@@ -28,6 +28,33 @@
       "supersedes_legacy": []
     },
     {
+      "id": "lm_based_covariances_tests_missing",
+      "name": "HAC, clustered and Driscoll-Kraay SEs and the lmtest tests on data with missing response or regressor cells (rows dropped, as lm's na.omit)",
+      "category": "regression",
+      "reference": "stats::lm (na.action = na.omit) + sandwich::NeweyWest / vcovCL(type = 'HC1') / vcovPL(adjust = FALSE); lmtest::bgtest, resettest, harvtest, waldtest, bptest on the same fit",
+      "doc": "validation/regression/ols_clustered.md",
+      "cases": [
+        "reg_lm_tests_na"
+      ],
+      "tests": [
+        "p2a-core::regression::ols::tests::test_validate_reg_lm_tests_na",
+        "p2a-mcp::tools::handlers::regression::tests::test_validate_mcp_regression_lm_tests_na",
+        "p2a-cli::tier2::wp15_regression::test_validate_cli_reg_hac_diagnostics_na"
+      ],
+      "quantities": [
+        "coefficients",
+        "SE Newey-West (lag 3)",
+        "SE CR1 one-way",
+        "SE Driscoll-Kraay (lag 2)",
+        "Breusch-Godfrey, RESET, Harvey-Collier, Wald F statistics and p-values",
+        "Breusch-Pagan and Durbin-Watson statistics",
+        "rows used/dropped"
+      ],
+      "tolerance": "validation/README.md, n = 194-195: coefficients 1e-8, SEs and statistics 1e-6 relative, p-values 1e-6 relative (abs 1e-12); counts exact; MCP text 4-6 decimals",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
       "id": "regression_wrappers_columns",
       "name": "Missing values in run_loess and quantreg (incomplete rows dropped, R's na.omit)",
       "category": "regression",

@@ -228,9 +228,9 @@ pub struct OlsResult {
     // ═══════════════════════════════════════════════════════════════════════
     /// Any warnings generated during estimation
     pub warnings: Vec<String>,
-    /// Rows dropped because an identifier (a cluster id) was missing. Empty for
-    /// `run_ols` and `run_ols_raw`, which refuse missing values; absent from JSON when
-    /// nothing was dropped.
+    /// Rows dropped because of a missing value (response, regressor, weight or cluster id;
+    /// `run_ols_complete_cases`, `run_ols_clustered`). Empty for `run_ols` and `run_ols_raw`,
+    /// which refuse missing values; absent from JSON when nothing was dropped.
     #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
     pub missing: MissingSummary,
     /// Names of the aliased (linearly dependent) design columns, in column order; their
@@ -245,6 +245,10 @@ pub struct OlsResult {
     /// [`f_statistic`](Self::f_statistic) stays the classical `summary.lm` F.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wald_f: Option<WaldF>,
+    /// The weights column of a weighted fit ([`run_wls`]); `None` for OLS. Absent from JSON
+    /// for OLS.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weights: Option<String>,
 
     // ═══════════════════════════════════════════════════════════════════════
     // Internal caches (not serialized)
@@ -368,6 +372,28 @@ fn intercept_column(x: ndarray::ArrayView2<'_, f64>, intercept: bool) -> Option<
     })
 }
 
+/// [`intercept_column`] of a design whose rows were multiplied by `sqrt_weights`: the column
+/// that is constant once the weights are divided out.
+fn weighted_intercept_column(
+    x: ndarray::ArrayView2<'_, f64>,
+    sqrt_weights: &Array1<f64>,
+    intercept: bool,
+) -> Option<usize> {
+    if !intercept || x.nrows() == 0 {
+        return None;
+    }
+    x.columns().into_iter().position(|col| {
+        let v0 = col[0] / sqrt_weights[0];
+        if !v0.is_finite() || v0 == 0.0 {
+            return false;
+        }
+        let tol = 1e-10 * v0.abs().max(1.0);
+        col.iter()
+            .zip(sqrt_weights)
+            .all(|(&v, &s)| (v / s - v0).abs() <= tol)
+    })
+}
+
 impl LinearEstimator for OlsResult {
     fn coefficients(&self) -> &Array1<f64> {
         &self.beta
@@ -391,6 +417,12 @@ impl LinearEstimator for OlsResult {
 
     fn degrees_of_freedom(&self) -> usize {
         self.df_resid
+    }
+
+    /// The fit's sigma: `sqrt(sum(w e^2) / df)` for a weighted fit, whose stored residuals
+    /// are on the original scale (the trait's default would leave the weights out).
+    fn residual_std_error(&self) -> f64 {
+        self.residual_std_error
     }
 
     fn n_obs(&self) -> usize {
@@ -425,9 +457,19 @@ impl LinearEstimator for OlsResult {
 
 impl std::fmt::Display for OlsResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "OLS Regression Results")?;
-        writeln!(f, "======================")?;
-        writeln!(f, "Dependent Variable: {}", self.dependent_var)?;
+        match &self.weights {
+            None => {
+                writeln!(f, "OLS Regression Results")?;
+                writeln!(f, "======================")?;
+                writeln!(f, "Dependent Variable: {}", self.dependent_var)?;
+            }
+            Some(w) => {
+                writeln!(f, "Weighted Least Squares Results")?;
+                writeln!(f, "==============================")?;
+                writeln!(f, "Dependent Variable: {}", self.dependent_var)?;
+                writeln!(f, "Weights: {w}")?;
+            }
+        }
         writeln!(f, "Observations: {}", self.n_obs)?;
         writeln!(f, "R-squared: {:.4}", self.r_squared)?;
         writeln!(f, "Adj. R-squared: {:.4}", self.adj_r_squared)?;
@@ -649,6 +691,63 @@ fn fit_summary(
     }
 }
 
+/// [`fit_summary`] of a weighted fit, as `summary.lm` with weights: `y` and `residuals` are
+/// the transformed `sqrt(w) * y` and `sqrt(w) * e`. The explained sum of squares is
+/// `sum(w (f - m)^2)` about the weighted mean `m = sum(w f) / sum(w)` of the fitted values
+/// `f` with an intercept, `sum(w f^2)` without; the total is explained plus residual.
+fn weighted_fit_summary(
+    y: &Array1<f64>,
+    residuals: &Array1<f64>,
+    sqrt_weights: &Array1<f64>,
+    k: usize,
+    df_resid: usize,
+    intercept: bool,
+) -> FitSummary {
+    let n = y.len();
+    let ssr: f64 = residuals.iter().map(|e| e * e).sum();
+    // fitted values on the original scale and the weights
+    let fw: Vec<(f64, f64)> = (0..n)
+        .map(|i| {
+            let s = sqrt_weights[i];
+            ((y[i] - residuals[i]) / s, s * s)
+        })
+        .collect();
+    let (mss, df_int) = if intercept {
+        let sum_w: f64 = fw.iter().map(|(_, w)| w).sum();
+        let m = fw.iter().map(|(f, w)| w * f).sum::<f64>() / sum_w;
+        (fw.iter().map(|(f, w)| w * (f - m).powi(2)).sum::<f64>(), 1)
+    } else {
+        (fw.iter().map(|(f, w)| w * f * f).sum::<f64>(), 0)
+    };
+    let sst = mss + ssr;
+    let df_model = k.saturating_sub(df_int);
+    let sigma_squared = ssr / df_resid as f64;
+    let r_squared = if sst > 0.0 { mss / sst } else { 0.0 };
+    let adj_r_squared = if sst > 0.0 && df_resid > 0 {
+        1.0 - (1.0 - r_squared) * ((n - df_int) as f64) / (df_resid as f64)
+    } else {
+        0.0
+    };
+    let f_statistic = if df_model > 0 && ssr > 0.0 {
+        (mss / df_model as f64) / sigma_squared
+    } else {
+        0.0
+    };
+    let f_p_value = if df_model > 0 && df_resid > 0 {
+        f_test_p_value(f_statistic, df_model as f64, df_resid as f64)
+    } else {
+        f64::NAN
+    };
+    FitSummary {
+        sst,
+        r_squared,
+        adj_r_squared,
+        df_model,
+        f_statistic,
+        f_p_value,
+    }
+}
+
 /// Run OLS regression on pre-extracted ndarray data.
 ///
 /// This is the core computation function that operates directly on arrays,
@@ -704,6 +803,7 @@ pub fn run_ols_raw(
         has_intercept,
         cov_type,
         true,
+        None,
     )
 }
 
@@ -757,7 +857,116 @@ pub fn run_ols(
         intercept,
         cov_type,
         false,
+        None,
     )
+}
+
+/// OLS, or WLS with `weights_col`, on the rows complete in the response, the regressors
+/// and the weights, as R's `lm` with its default `na.action = na.omit`: a row with a
+/// missing (null or NaN) value in any of those columns is left out, and `missing` says how
+/// many rows were dropped and in which columns. ±Inf is still refused, and text columns
+/// are not numeric, as in [`run_ols`]. Without a missing value this is [`run_ols`] (or
+/// [`run_wls`]) on the dataset itself.
+pub fn run_ols_complete_cases(
+    dataset: &Dataset,
+    y_col: &str,
+    x_cols: &[&str],
+    weights_col: Option<&str>,
+    intercept: bool,
+    cov_type: CovarianceType,
+) -> EconResult<OlsResult> {
+    let mut request = ColumnRequest::new(dataset.df())
+        .numeric(y_col)
+        .numerics(x_cols);
+    if let Some(w) = weights_col {
+        request = request.numeric(w);
+    }
+    let complete = request.na(NaPolicy::Omit).min_rows(1, "OLS").extract()?;
+    let mut names: Vec<&str> = Vec::with_capacity(x_cols.len() + 2);
+    names.push(y_col);
+    names.extend_from_slice(x_cols);
+    names.extend(weights_col);
+    let sample = estimation_sample(dataset, &names, &complete)?;
+    let mut result = match weights_col {
+        None => run_ols(&sample, y_col, x_cols, intercept, cov_type)?,
+        Some(w) => run_wls(&sample, y_col, x_cols, w, intercept, cov_type)?,
+    };
+    result.missing = complete.missing().clone();
+    Ok(result)
+}
+
+/// Weighted least squares on a dataset, as R's `lm(y ~ x, weights = w)` (with `summary`,
+/// `logLik` and `sandwich::vcovHC` for the robust covariances).
+///
+/// The weights must be finite and non-negative, with at least one positive; a missing
+/// weight is refused like any missing value. Rows with weight 0 are left out of the fit,
+/// as `lm` leaves them out of the residual degrees of freedom and `nobs`. The fit is OLS
+/// on `sqrt(w) * y` and `sqrt(w) * X`; R², F and the log-likelihood are the weighted ones
+/// of `summary.lm` and `logLik.lm`, and the residuals are `y - X b`. Weights that are
+/// matching weights (`propensity_matching`'s `weights` column) give MatchIt's recommended
+/// outcome model on the matched sample.
+pub fn run_wls(
+    dataset: &Dataset,
+    y_col: &str,
+    x_cols: &[&str],
+    weights_col: &str,
+    intercept: bool,
+    cov_type: CovarianceType,
+) -> EconResult<OlsResult> {
+    let df = dataset.df();
+    let design = DesignMatrix::from_dataframe(df, x_cols, intercept)
+        .map_err(|e| econ_error_from_design(e, df))?;
+    let y = DesignMatrix::extract_column(df, y_col).map_err(|e| econ_error_from_design(e, df))?;
+    let w =
+        DesignMatrix::extract_column(df, weights_col).map_err(|e| econ_error_from_design(e, df))?;
+    if let Some((i, v)) = w
+        .iter()
+        .enumerate()
+        .find(|(_, v)| !(v.is_finite() && **v >= 0.0))
+    {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "weights column '{weights_col}' must be finite and non-negative (row {} is {v})",
+                i + 1
+            ),
+        });
+    }
+    let keep: Vec<usize> = (0..w.len()).filter(|&i| w[i] > 0.0).collect();
+    if keep.is_empty() {
+        return Err(EconError::InvalidSpecification {
+            message: format!("weights column '{weights_col}' has no positive weight"),
+        });
+    }
+    let k = design.data.ncols();
+    let mut xs = crate::resource::try_zeros2(keep.len(), k, "weighted design")?;
+    let mut ys = crate::resource::try_zeros1(keep.len(), "weighted response")?;
+    let mut sw = crate::resource::try_zeros1(keep.len(), "square-root weights")?;
+    for (r, &i) in keep.iter().enumerate() {
+        let s = w[i].sqrt();
+        sw[r] = s;
+        ys[r] = s * y[i];
+        for j in 0..k {
+            xs[[r, j]] = s * design.data[[i, j]];
+        }
+    }
+    let mut result = fit_ols(
+        xs.view(),
+        &ys,
+        &design.column_names,
+        y_col,
+        intercept,
+        cov_type,
+        false,
+        Some(&sw),
+    )?;
+    result.weights = Some(weights_col.to_string());
+    let dropped = w.len() - keep.len();
+    if dropped > 0 {
+        result.warnings.push(format!(
+            "{dropped} row(s) with weight 0 were left out of the fit (as lm)"
+        ));
+    }
+    Ok(result)
 }
 
 /// Which solve an OLS fit took (decision D1, variant B).
@@ -1183,6 +1392,7 @@ fn fit_ols(
     intercept: bool,
     cov_type: CovarianceType,
     check_finite: bool,
+    sqrt_weights: Option<&Array1<f64>>,
 ) -> EconResult<OlsResult> {
     let (n, k) = x.dim();
     // lm.fit refuses NA/NaN/Inf. With `check_finite` (a raw matrix) X'X, which the
@@ -1273,9 +1483,19 @@ fn fit_ols(
         df_model,
         f_statistic,
         f_p_value,
-    } = fit_summary(y, ssr, rank, df_resid, sigma_squared, intercept);
+    } = match sqrt_weights {
+        None => fit_summary(y, ssr, rank, df_resid, sigma_squared, intercept),
+        Some(sw) => weighted_fit_summary(y, &residuals, sw, rank, df_resid, intercept),
+    };
 
-    let (log_likelihood, aic, bic) = gaussian_fit_criteria(ssr, n, rank);
+    let (mut log_likelihood, mut aic, mut bic) = gaussian_fit_criteria(ssr, n, rank);
+    if let Some(sw) = sqrt_weights {
+        // logLik.lm: + sum(log(w)) / 2
+        let half_log_w: f64 = sw.iter().map(|s| s.ln()).sum();
+        log_likelihood += half_log_w;
+        aic -= 2.0 * half_log_w;
+        bic -= 2.0 * half_log_w;
+    }
 
     // Covariance on the identified columns; aliased rows and columns are NaN.
     let vcov = if aliased.is_empty() {
@@ -1302,7 +1522,10 @@ fn fit_ols(
             match robust_wald_f(
                 &beta,
                 &vcov,
-                intercept_column(x, intercept),
+                match sqrt_weights {
+                    None => intercept_column(x, intercept),
+                    Some(sw) => weighted_intercept_column(x, sw, intercept),
+                },
                 df_resid,
                 label,
             )? {
@@ -1368,9 +1591,14 @@ fn fit_ols(
         missing: MissingSummary::none(n),
         aliased,
         wald_f,
+        weights: None,
         beta,
         se,
-        resid: residuals,
+        resid: match sqrt_weights {
+            // lm's residuals: y - X b on the original scale
+            Some(sw) => &residuals / sw,
+            None => residuals,
+        },
         vcov,
         xtx_inv,
         ssr,
@@ -1632,8 +1860,9 @@ impl std::fmt::Display for OlsClusteredResult {
 /// model is re-estimated on the remaining rows, as `fixest::feols(cluster = )` does
 /// (`sandwich::vcovCL` refuses missing clusters). The drop is reported in
 /// `OlsResult::missing` and as the first warning; when no row has an id the error is
-/// `InsufficientData` naming the id column(s). A missing value of `y_col` or of an
-/// `x_cols` column in a kept row is an error, as in [`run_ols`].
+/// `InsufficientData` naming the id column(s). A row with a missing value of `y_col` or of
+/// an `x_cols` column is dropped too, as `lm`'s `na.omit` drops it, and counted in the same
+/// report.
 ///
 /// # Arguments
 /// * `dataset` - The dataset containing the data
@@ -1696,14 +1925,18 @@ impl OlsClusteredResult {
         intercept: bool,
         opts: ClusteredOptions,
     ) -> EconResult<OlsClusteredResult> {
-        // Cluster ids, with the rows whose id is missing left out.
-        let mut request = ColumnRequest::new(dataset.df()).factor(cluster1);
+        // The rows complete in y, x and the cluster ids (lm's na.omit, and fixest's drop
+        // of a missing id).
+        let mut request = ColumnRequest::new(dataset.df())
+            .numeric(y_col)
+            .numerics(x_cols)
+            .factor(cluster1);
         let context = match cluster2 {
             Some(c2) => {
                 request = request.factor(c2);
-                format!("clustered OLS (rows with ids in '{cluster1}' and '{c2}')")
+                format!("clustered OLS (complete rows with ids in '{cluster1}' and '{c2}')")
             }
-            None => format!("clustered OLS (rows with an id in '{cluster1}')"),
+            None => format!("clustered OLS (complete rows with an id in '{cluster1}')"),
         };
         let ids = request.na(NaPolicy::Omit).min_rows(1, &context).extract()?;
 
@@ -1880,7 +2113,7 @@ pub struct ClusteredOptions {
 /// reported. With `fix` the covariance is rebuilt as `Q max(Λ, 0) Q'` whenever an eigenvalue
 /// is negative, rounding-level ones included. Without `fix` a reported covariance is
 /// indefinite: the caller withholds the Wald F, which the warning says.
-fn twoway_psd_check(vcov: &mut Array2<f64>, fix: bool) -> EconResult<Option<String>> {
+pub(crate) fn twoway_psd_check(vcov: &mut Array2<f64>, fix: bool) -> EconResult<Option<String>> {
     let sym = (&*vcov + &vcov.t()) * 0.5;
     // A Cholesky factorisation with positive pivots shows the covariance is positive
     // definite, so without `fix` the eigenvalues are not needed (they are with `fix`, which
@@ -1982,6 +2215,84 @@ fn estimation_sample<'a>(
         .and_then(|selected| selected.take(&IdxCa::new("rows".into(), idx)))
         .map_err(|e| EconError::Internal(e.to_string()))?;
     Ok(Cow::Owned(Dataset::new(sample)))
+}
+
+/// The rows of `dataset` complete in `y_col` and `x_cols`, as R's `lm` with its default
+/// `na.action = na.omit`: a row with a missing (null or NaN) value in any of them is left
+/// out, and the summary says how many rows were dropped and in which columns. ±Inf and
+/// text columns are refused as in [`run_ols`]. Without a missing value the dataset itself
+/// is returned (borrowed). The estimators and tests R computes from an `lm` fit
+/// (`sandwich`'s covariances, `lmtest`'s tests) start here; [`run_ols`] itself refuses
+/// missing values.
+pub(crate) fn complete_sample<'a>(
+    dataset: &'a Dataset,
+    y_col: &str,
+    x_cols: &[&str],
+    context: &str,
+) -> EconResult<(Cow<'a, Dataset>, MissingSummary)> {
+    // Fast path: no null and no NaN in any of the columns (the common case) leaves the
+    // dataset as it is, and run_ols then sees exactly what it saw before (±Inf and text
+    // columns are refused there). Checking costs a scan of the float columns only.
+    let df = dataset.df();
+    let complete_already = std::iter::once(y_col)
+        .chain(x_cols.iter().copied())
+        .all(|name| df.column(name).is_ok_and(column_has_no_missing));
+    if complete_already {
+        return Ok((Cow::Borrowed(dataset), MissingSummary::none(df.height())));
+    }
+    let complete = ColumnRequest::new(dataset.df())
+        .numeric(y_col)
+        .numerics(x_cols)
+        .na(NaPolicy::Omit)
+        .min_rows(1, context)
+        .extract()?;
+    let mut names: Vec<&str> = Vec::with_capacity(x_cols.len() + 1);
+    names.push(y_col);
+    names.extend_from_slice(x_cols);
+    let sample = estimation_sample(dataset, &names, &complete)?;
+    Ok((sample, complete.missing().clone()))
+}
+
+/// Whether a column has no null and, if it is a float column, no NaN.
+fn column_has_no_missing(c: &Column) -> bool {
+    if c.null_count() > 0 {
+        return false;
+    }
+    match c.dtype() {
+        // na-ok: null_count is 0, so the values buffers hold every cell
+        DataType::Float64 => c.f64().is_ok_and(|ca| {
+            ca.downcast_iter()
+                .all(|arr| !arr.values().iter().any(|v| v.is_nan()))
+        }),
+        DataType::Float32 => c.f32().is_ok_and(|ca| {
+            ca.downcast_iter()
+                .all(|arr| !arr.values().iter().any(|v| v.is_nan()))
+        }),
+        _ => true,
+    }
+}
+
+/// The `Missing values: <note>` line of a result fitted on [`complete_sample`] (nothing when
+/// no row was dropped). `ordered` marks a statistic that uses the row order (lags, recursive
+/// residuals, kernel weights): its series is joined across the dropped rows, as R's
+/// `na.omit` joins it, and the line says so.
+pub(crate) fn write_missing_line(
+    f: &mut std::fmt::Formatter<'_>,
+    missing: &MissingSummary,
+    ordered: bool,
+) -> std::fmt::Result {
+    if let Some(note) = missing.note() {
+        if ordered {
+            writeln!(
+                f,
+                "Missing values: {note}; the other rows are used in their order, joined \
+                 across the dropped ones (as R's na.omit)"
+            )?;
+        } else {
+            writeln!(f, "Missing values: {note}")?;
+        }
+    }
+    Ok(())
 }
 
 /// Row indices of each level of `f` (indices into the rows `f` was extracted from).
@@ -2129,6 +2440,10 @@ pub struct HacResult {
     /// for Truncated, up to n for Quadratic Spectral.
     #[serde(default)]
     pub n_lag_weights: usize,
+    /// Rows dropped because of a missing value in the response or a regressor (as `lm`'s
+    /// `na.omit`); absent from JSON when none was.
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
 }
 
 impl std::fmt::Display for HacResult {
@@ -2148,6 +2463,7 @@ impl std::fmt::Display for HacResult {
                 name, self.coefficients[i], self.std_errors[i]
             )?;
         }
+        write_missing_line(f, &self.missing, true)?;
         write_warnings(f, &self.warnings)
     }
 }
@@ -2588,6 +2904,7 @@ pub fn vcov_hac(
         df_resid: ols_result.df_resid,
         warnings,
         n_lag_weights,
+        missing: MissingSummary::default(),
     })
 }
 
@@ -2924,7 +3241,9 @@ pub fn run_vcov_hac(
 
 impl HacResult {
     /// OLS with HAC (Newey-West family) standard errors, as [`run_vcov_hac`], with or without an
-    /// intercept (`intercept = false`: `NeweyWest(lm(y ~ 0 + x), ..)`). [`run_vcov_hac`] is
+    /// intercept (`intercept = false`: `NeweyWest(lm(y ~ 0 + x), ..)`). Rows with a missing
+    /// response or regressor are left out, as `lm`'s `na.omit`, and reported in `missing`;
+    /// the kernel weights then run over the other rows in their order. [`run_vcov_hac`] is
     /// `fit(.., true)`.
     pub fn fit(
         dataset: &Dataset,
@@ -2935,6 +3254,10 @@ impl HacResult {
         prewhiten: bool,
         intercept: bool,
     ) -> EconResult<HacResult> {
+        // The rows complete in y and x (lm's na.omit)
+        let (sample, missing) = complete_sample(dataset, y_col, x_cols, "HAC regression")?;
+        let dataset = sample.as_ref();
+
         // First run OLS
         let ols_result = run_ols(dataset, y_col, x_cols, intercept, CovarianceType::Standard)?;
 
@@ -2945,7 +3268,9 @@ impl HacResult {
         // Parse kernel (unknown names are an error)
         let kernel_type = crate::options::parse_or(kernel, HacKernel::Bartlett)?;
 
-        vcov_hac(&ols_result, &x, bandwidth, kernel_type, prewhiten)
+        let mut result = vcov_hac(&ols_result, &x, bandwidth, kernel_type, prewhiten)?;
+        result.missing = missing;
+        Ok(result)
     }
 }
 
@@ -3079,6 +3404,10 @@ pub struct BootstrapResult {
     /// because the resampled design lost rank. Absent from JSON when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    /// Rows dropped because of a missing value in the response or a regressor (as `lm`'s
+    /// `na.omit`); absent from JSON when none was.
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
 }
 
 impl std::fmt::Display for BootstrapResult {
@@ -3097,6 +3426,7 @@ impl std::fmt::Display for BootstrapResult {
                 name, self.coefficients[i], self.std_errors[i]
             )?;
         }
+        write_missing_line(f, &self.missing, false)?;
         f.write_str(&notes_text(self))
     }
 }
@@ -3340,6 +3670,7 @@ pub fn vcov_bootstrap(
         boot_samples: Some(boot_samples),
         convergence_rate: successful_reps as f64 / replications as f64,
         warnings,
+        missing: MissingSummary::default(),
     })
 }
 
@@ -3375,11 +3706,15 @@ pub fn run_vcov_bootstrap(
     bootstrap_type: Option<&str>,
     seed: Option<u64>,
 ) -> EconResult<BootstrapResult> {
+    // The rows complete in y and x (lm's na.omit)
+    let (sample, missing) = complete_sample(dataset, y_col, x_cols, "bootstrap covariance")?;
+    let dataset = sample.as_ref();
+
     // First run OLS
     let ols_result = run_ols(dataset, y_col, x_cols, true, CovarianceType::Standard)?;
 
-    // X and y as run_ols reads them (integer and boolean columns are numbers; run_ols
-    // has already refused missing values)
+    // X and y as run_ols reads them (integer and boolean columns are numbers; the sample
+    // has no missing value)
     let df = dataset.df();
     let dm = DesignMatrix::from_dataframe(df, x_cols, true)
         .map_err(|e| econ_error_from_design(e, df))?;
@@ -3389,7 +3724,9 @@ pub fn run_vcov_bootstrap(
     // Parse bootstrap type (unknown names are an error)
     let boot_type = crate::options::parse_or(bootstrap_type, BootstrapType::Pairs)?;
 
-    vcov_bootstrap(&ols_result, &x, &y, n_boot, boot_type, seed)
+    let mut result = vcov_bootstrap(&ols_result, &x, &y, n_boot, boot_type, seed)?;
+    result.missing = missing;
+    Ok(result)
 }
 
 // ============================================================================
@@ -3428,7 +3765,8 @@ pub struct DriscollKraayResult {
     /// Warnings about the estimate
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
-    /// Rows dropped because their time id was missing ([`run_vcov_driscoll_kraay`]);
+    /// Rows dropped because their time id, response or a regressor was missing
+    /// ([`run_vcov_driscoll_kraay`]);
     /// absent from JSON when nothing was dropped.
     #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
     pub missing: MissingSummary,
@@ -3718,8 +4056,9 @@ pub fn vcov_driscoll_kraay(
 /// * `x_cols` - Names of independent variable columns
 /// * `time_col` - Name of the time period identifier column: whole numbers (integers or
 ///   integral floats) or dates. A fractional or text id is an `InvalidSpecification`; a row
-///   whose id is missing is dropped, the model is re-estimated on the other rows, and the
-///   drop is reported in `DriscollKraayResult::missing` and as the first warning (no row
+///   whose id is missing is dropped (as a row with a missing response or regressor is, as
+///   `lm`'s `na.omit`), the model is re-estimated on the other rows, and the drop is
+///   reported in `DriscollKraayResult::missing` and as the first warning (no row
 ///   with an id is `InsufficientData` naming the column).
 /// * `bandwidth` - Optional lag count L (None: floor(T^(1/4))). Must be smaller than the number
 ///   of time periods T; one above T/4 adds a warning (see [`vcov_driscoll_kraay`]).
@@ -3748,13 +4087,15 @@ pub fn run_vcov_driscoll_kraay(
     kernel: Option<&str>,
 ) -> EconResult<DriscollKraayResult> {
     // Time ids: whole numbers (integers or integral floats) or dates. A fractional or
-    // text id is an error; a row whose id is missing is dropped.
+    // text id is an error; a row whose id, response or regressor is missing is dropped.
     let ids = ColumnRequest::new(dataset.df())
+        .numeric(y_col)
+        .numerics(x_cols)
         .time_index(time_col)
         .na(NaPolicy::Omit)
         .min_rows(
             1,
-            &format!("Driscoll-Kraay (rows with a time id in '{time_col}')"),
+            &format!("Driscoll-Kraay (complete rows with a time id in '{time_col}')"),
         )
         .extract()?;
     let mut names: Vec<&str> = Vec::with_capacity(x_cols.len() + 2);
@@ -4720,6 +5061,148 @@ mod tests {
         pin_fit(&mut check, &r);
         pin_trait(&mut check, &r, "classical");
         check.finish();
+    }
+
+    /// Weighted least squares (case `wls_sim`): `lm(y ~ x1 + x2 + d, weights = w)` with 51
+    /// zero weights among 300 rows, classical and HC0-HC3 SEs, the weighted R², F,
+    /// log-likelihood, AIC and BIC, the HC1 Wald F (`lmtest::waldtest`) and the residuals
+    /// `y - X b` of the rows with positive weight.
+    #[test]
+    fn test_validate_wls_sim() {
+        let (case, ds) = crate::test_support::load_case("wls_sim");
+        let fit = |cov| run_wls(&ds, "y", &["x1", "x2", "d"], "w", true, cov).unwrap();
+        let mut check = Check::new(&case);
+        for (cov, tag) in [
+            (CovarianceType::Standard, "classical"),
+            (CovarianceType::HC0, "hc0"),
+            (CovarianceType::HC1, "hc1"),
+            (CovarianceType::HC2, "hc2"),
+            (CovarianceType::HC3, "hc3"),
+        ] {
+            let r = fit(cov);
+            pin_inference(&mut check, &r, tag);
+            pin_trait(&mut check, &r, tag);
+            if cov == CovarianceType::Standard {
+                pin_fit(&mut check, &r);
+                let n = r.n_obs;
+                check.vector(
+                    "resid_positive",
+                    &LinearEstimator::residuals(&r).to_vec(),
+                    Tol::stat(n),
+                );
+            }
+            if cov == CovarianceType::HC1 {
+                let w = r.wald_f.as_ref().expect("HC1 Wald F");
+                check
+                    .scalar("wald_f_hc1", w.statistic, Tol::stat(r.n_obs))
+                    .scalar("wald_f_hc1_p", w.p_value, Tol::p_value(r.n_obs));
+                assert_eq!((w.df1, w.df2), (3, 245));
+            }
+        }
+        check.finish();
+    }
+
+    /// Missing cells in y, a regressor and the weights drop their rows jointly, as lm's
+    /// na.omit: the fits match R on the complete rows, and `missing` names the columns.
+    #[test]
+    fn test_validate_ols_na() {
+        let (case, ds) = crate::test_support::load_case("ols_na");
+        let mut check = Check::new(&case);
+        for (cov, tag) in [
+            (CovarianceType::Standard, "classical"),
+            (CovarianceType::HC0, "hc0"),
+            (CovarianceType::HC1, "hc1"),
+            (CovarianceType::HC2, "hc2"),
+            (CovarianceType::HC3, "hc3"),
+        ] {
+            let r = run_ols_complete_cases(&ds, "y", &["x1", "x2"], None, true, cov).unwrap();
+            pin_inference(&mut check, &r, tag);
+            pin_trait(&mut check, &r, tag);
+            if cov == CovarianceType::Standard {
+                pin_fit(&mut check, &r);
+                assert_eq!((r.missing.n_total, r.missing.n_used), (120, 112));
+                assert_eq!(
+                    r.missing.note().unwrap(),
+                    "8 of 120 rows dropped because of missing values (y: 5, x1: 4)"
+                );
+            }
+        }
+        check.finish();
+    }
+
+    #[test]
+    fn test_validate_ols_na_wls() {
+        let (case, ds) = crate::test_support::load_case("ols_na_wls");
+        let mut check = Check::new(&case);
+        for (cov, tag) in [
+            (CovarianceType::Standard, "classical"),
+            (CovarianceType::HC0, "hc0"),
+            (CovarianceType::HC1, "hc1"),
+            (CovarianceType::HC2, "hc2"),
+            (CovarianceType::HC3, "hc3"),
+        ] {
+            let r = run_ols_complete_cases(&ds, "y", &["x1", "x2"], Some("w"), true, cov).unwrap();
+            pin_inference(&mut check, &r, tag);
+            pin_trait(&mut check, &r, tag);
+            if cov == CovarianceType::Standard {
+                pin_fit(&mut check, &r);
+                assert_eq!((r.missing.n_total, r.missing.n_used), (120, 110));
+            }
+        }
+        check.finish();
+    }
+
+    /// Weights are checked: negative, non-finite or all-zero weights are refused, and a
+    /// weight of 1 everywhere is OLS.
+    #[test]
+    fn test_wls_checks_weights_and_unit_weights_are_ols() {
+        let n = 40;
+        let x1: Vec<f64> = (0..n).map(|i| (i as f64 * 0.37).sin() * 2.0).collect();
+        let x2: Vec<f64> = (0..n).map(|i| (i % 7) as f64).collect();
+        let d: Vec<f64> = (0..n).map(|i| ((i * 5) % 3 == 0) as u8 as f64).collect();
+        let y: Vec<f64> = (0..n)
+            .map(|i| 1.0 + 0.8 * x1[i] - 0.2 * x2[i] + d[i] + ((i * 13) % 11) as f64 * 0.1)
+            .collect();
+        let ds = Dataset::new(
+            df! { "y" => y, "x1" => x1, "x2" => x2, "d" => d, "w" => vec![1.0; n] }.unwrap(),
+        );
+        let with_w = |w: Vec<f64>| {
+            let mut df = ds.df().clone();
+            df.with_column(polars::prelude::Series::new("w".into(), w))
+                .unwrap();
+            Dataset::new(df)
+        };
+        let run = |d: &Dataset| run_wls(d, "y", &["x1", "x2", "d"], "w", true, CovarianceType::HC1);
+        let mut neg = vec![1.0; n];
+        neg[4] = -0.5;
+        let err = run(&with_w(neg)).unwrap_err().to_string();
+        assert!(
+            err.contains("row 5") && err.contains("non-negative"),
+            "{err}"
+        );
+        let err = run(&with_w(vec![0.0; n])).unwrap_err().to_string();
+        assert!(err.contains("no positive weight"), "{err}");
+        let unit = run(&with_w(vec![1.0; n])).unwrap();
+        let ols = run_ols(&ds, "y", &["x1", "x2", "d"], true, CovarianceType::HC1).unwrap();
+        for (a, b) in unit.coefficients.iter().zip(&ols.coefficients) {
+            assert!((a.estimate - b.estimate).abs() <= 1e-12 * (1.0 + b.estimate.abs()));
+            assert!((a.std_error - b.std_error).abs() <= 1e-12 * b.std_error);
+        }
+        for (a, b) in [
+            (unit.r_squared, ols.r_squared),
+            (unit.f_statistic, ols.f_statistic),
+            (unit.log_likelihood, ols.log_likelihood),
+            (
+                unit.wald_f.as_ref().unwrap().statistic,
+                ols.wald_f.as_ref().unwrap().statistic,
+            ),
+        ] {
+            assert!((a - b).abs() <= 1e-10 * (1.0 + b.abs()), "{a} vs {b}");
+        }
+        assert!(
+            unit.to_string()
+                .starts_with("Weighted Least Squares Results")
+        );
     }
 
     /// OLS on the ill-conditioned Longley (1967) data (case `ols_longley`), classical SEs.
@@ -6046,6 +6529,128 @@ mod tests {
             .finish();
     }
 
+    /// The covariances and tests R computes from an `lm` fit drop the rows with a missing
+    /// response or regressor, as `lm`'s `na.omit` (5 of 200 rows here; the clustered fit
+    /// also drops the row with no firm label), and match R on the rest.
+    #[test]
+    fn test_validate_reg_lm_tests_na() {
+        use crate::regression::{
+            BgTestType, ResetType, bg_test, harvey_collier_test, reset_test, run_diagnostics,
+            wald_test,
+        };
+        let (case, ds) = crate::test_support::load_case("reg_lm_tests_na");
+        let x = ["value", "capital"];
+        let n = 195;
+        let hac = run_vcov_hac(&ds, "inv", &x, Some(3), None, false).unwrap();
+        let cl = run_ols_clustered(&ds, "inv", &x, "firm_label", None).unwrap();
+        let dk = run_vcov_driscoll_kraay(&ds, "inv", &x, "year", Some(2), None).unwrap();
+        let bg = bg_test(&ds, "inv", &x, 2, BgTestType::Chisq, 0.0).unwrap();
+        let rs = reset_test(&ds, "inv", &x, &[2, 3], ResetType::Fitted).unwrap();
+        let hc = harvey_collier_test(&ds, "inv", &x).unwrap();
+        let w = wald_test(&ds, "inv", &x, &["value"], true).unwrap();
+        let dg = run_diagnostics(&ds, "inv", &x).unwrap();
+        for m in [
+            &hac.missing,
+            &dk.missing,
+            &bg.missing,
+            &rs.missing,
+            &hc.missing,
+            &w.missing,
+        ] {
+            assert_eq!((m.n_total, m.n_used, m.n_dropped), (200, n, 5));
+            assert_eq!(
+                m.note().unwrap(),
+                "5 of 200 rows dropped because of missing values (inv: 3, value: 2)"
+            );
+        }
+        assert_eq!(dg.missing, hac.missing);
+        assert_eq!(
+            (cl.ols.missing.n_used, cl.ols.missing.n_dropped),
+            (194, 6),
+            "{:?}",
+            cl.ols.missing
+        );
+        assert_eq!(
+            (hac.n_obs, bg.n_obs, rs.n_obs, w.n_obs, dg.n_obs),
+            (n, n, n, n, n)
+        );
+        let cl_names: Vec<String> = cl.ols.coefficients.iter().map(|c| c.name.clone()).collect();
+        let cl_se: Vec<f64> = cl.ols.coefficients.iter().map(|c| c.std_error).collect();
+        Check::new(&case)
+            .named("coef", &hac.names, &hac.coefficients, Tol::coef(n))
+            .scalar("n_used", hac.n_obs as f64, Tol::exact())
+            .scalar("n_dropped", hac.missing.n_dropped as f64, Tol::exact())
+            .named("se_nw_lag3", &hac.names, &hac.std_errors, Tol::se(n))
+            .named("se_cluster_hc1", &cl_names, &cl_se, Tol::se(194))
+            .scalar("n_used_cluster", cl.ols.n_obs as f64, Tol::exact())
+            .named("se_dk_lag2", &dk.names, &dk.std_errors, Tol::se(n))
+            .scalar("bg_stat", bg.statistic, Tol::stat(n))
+            .scalar("bg_p", bg.p_value, Tol::p_value(n))
+            .scalar("reset_stat", rs.statistic, Tol::stat(n))
+            .scalar("reset_p", rs.p_value, Tol::p_value(n))
+            // harvtest reports |t|; p2a's statistic keeps the sign of the mean (a known
+            // difference, validation/diagnostics/harvtest.md)
+            .scalar("harv_stat", hc.statistic.abs(), Tol::stat(n))
+            .scalar("harv_p", hc.p_value, Tol::p_value(n))
+            .scalar("wald_f", w.statistic, Tol::stat(n))
+            .scalar("wald_p", w.p_value, Tol::p_value(n))
+            .scalar(
+                "bp_stat",
+                dg.breusch_pagan.as_ref().unwrap().statistic,
+                Tol::stat(n),
+            )
+            .scalar(
+                "dw_stat",
+                dg.durbin_watson.as_ref().unwrap().statistic,
+                Tol::stat(n),
+            )
+            .finish();
+    }
+
+    /// The bootstrap covariance fits on the complete rows too (its draws are not R's, so
+    /// only the sample and the point estimates are compared), and every result above says
+    /// in its text which rows were dropped; the order-dependent ones say the series is
+    /// joined across them. Without a missing value nothing is reported.
+    #[test]
+    fn lm_based_results_report_the_dropped_rows() {
+        use crate::regression::{BgTestType, bg_test, harvey_collier_test};
+        let (_, ds) = crate::test_support::load_case("reg_lm_tests_na");
+        let x = ["value", "capital"];
+        let boot = run_vcov_bootstrap(&ds, "inv", &x, Some(50), None, Some(1)).unwrap();
+        let ols =
+            run_ols_complete_cases(&ds, "inv", &x, None, true, CovarianceType::Standard).unwrap();
+        assert_eq!(boot.n_obs, 195);
+        assert_eq!(boot.missing, ols.missing);
+        for (b, c) in boot.coefficients.iter().zip(&ols.coefficients) {
+            assert!(
+                (b - c.estimate).abs() <= 1e-10 * c.estimate.abs(),
+                "{b} vs {c:?}"
+            );
+        }
+        let line =
+            "Missing values: 5 of 200 rows dropped because of missing values (inv: 3, value: 2)";
+        let joined = format!("{line}; the other rows are used in their order");
+        let boot_text = boot.to_string();
+        assert!(
+            boot_text.contains(line) && !boot_text.contains(&joined),
+            "{boot_text}"
+        );
+        let hac = run_vcov_hac(&ds, "inv", &x, Some(3), None, false).unwrap();
+        let bg = bg_test(&ds, "inv", &x, 2, BgTestType::Chisq, 0.0).unwrap();
+        let hc = harvey_collier_test(&ds, "inv", &x).unwrap();
+        for text in [hac.to_string(), bg.to_string(), hc.to_string()] {
+            assert!(text.contains(&joined), "{text}");
+        }
+        let json = serde_json::to_value(&hac).unwrap();
+        assert_eq!(json["missing"]["n_dropped"], 5);
+
+        // a dataset with no missing value: nothing reported, nothing in the JSON
+        let (_, full) = crate::test_support::load_case("reg_cluster_na");
+        let hac = run_vcov_hac(&full, "inv", &x, Some(3), None, false).unwrap();
+        assert!(hac.missing.is_empty() && !hac.to_string().contains("Missing values"));
+        assert!(serde_json::to_value(&hac).unwrap().get("missing").is_none());
+    }
+
     /// REG-21: rows with a missing cluster id are dropped and the model is re-estimated
     /// on the rest, one- and two-way; the CR1 SEs then equal lm + vcovCL(type = "HC1")
     /// on those rows (and fixest's one-way SEs).
@@ -6140,11 +6745,11 @@ mod tests {
         let none = with_all_null(&ds, "no_id", DataType::String);
         assert_eq!(
             insufficient_context(run_ols_clustered(&none, "inv", &x, "no_id", None)),
-            "clustered OLS (rows with an id in 'no_id'): 0 of 200 rows have no missing value"
+            "clustered OLS (complete rows with an id in 'no_id'): 0 of 200 rows have no missing value"
         );
         assert_eq!(
             insufficient_context(run_ols_clustered(&none, "inv", &x, "firm", Some("no_id"))),
-            "clustered OLS (rows with ids in 'firm' and 'no_id'): \
+            "clustered OLS (complete rows with ids in 'firm' and 'no_id'): \
              0 of 200 rows have no missing value"
         );
     }
@@ -6229,7 +6834,7 @@ mod tests {
             insufficient_context(run_vcov_driscoll_kraay(
                 &none, "inv", &x, "no_t", None, None
             )),
-            "Driscoll-Kraay (rows with a time id in 'no_t'): 0 of 200 rows have no missing value"
+            "Driscoll-Kraay (complete rows with a time id in 'no_t'): 0 of 200 rows have no missing value"
         );
     }
 

@@ -22,7 +22,21 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
 /// The name used in upstream error messages.
-const PROVIDER: &str = "OpenAI";
+/// The provider's name in errors: OpenRouter for its host, OpenAI for the default
+/// endpoint, otherwise a generic name (any other OpenAI-compatible server).
+fn provider_name(base_url: &str) -> &'static str {
+    let host = reqwest::Url::parse(base_url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
+        .unwrap_or_default();
+    if host == "openrouter.ai" || host.ends_with(".openrouter.ai") {
+        "OpenRouter"
+    } else if host == "api.openai.com" {
+        "OpenAI"
+    } else {
+        "The OpenAI-compatible provider"
+    }
+}
 
 /// OpenAI provider for LLM inference.
 pub struct OpenAIProvider {
@@ -179,6 +193,15 @@ impl OpenAIProvider {
                                 tool_call_id: Some(tr.tool_call_id.clone()),
                             });
                         }
+                        // The tool loop's note about the results, after them.
+                        if !msg.content.is_empty() {
+                            result.push(OpenAIMessage {
+                                role: "user".to_string(),
+                                content: Some(msg.content.clone()),
+                                tool_calls: None,
+                                tool_call_id: None,
+                            });
+                        }
                     }
                 }
             }
@@ -244,7 +267,7 @@ impl OpenAIProvider {
         .await?;
 
         if !response.status().is_success() {
-            return Err(upstream_error(PROVIDER, response).await);
+            return Err(upstream_error(provider_name(self.base_url()), response).await);
         }
 
         let chat_response: OpenAIChatResponse =
@@ -323,7 +346,7 @@ impl OpenAIProvider {
         .await?;
 
         if !response.status().is_success() {
-            return Err(upstream_error(PROVIDER, response).await);
+            return Err(upstream_error(provider_name(self.base_url()), response).await);
         }
 
         // Process SSE stream
@@ -339,6 +362,7 @@ impl OpenAIProvider {
 
         // One line of the stream: an error object fails the call; true once `[DONE]` or a finish
         // reason has arrived (an OpenAI-compatible endpoint may send only one of them).
+        let provider = provider_name(self.base_url());
         let mut handle = |line: &str| -> Result<bool, LlmError> {
             let Some(data) = sse_data(line) else {
                 return Ok(false);
@@ -351,7 +375,7 @@ impl OpenAIProvider {
             };
             if let Some(error) = chunk_response.error {
                 return Err(stream_failed(
-                    PROVIDER,
+                    provider,
                     error.kind.as_deref(),
                     error.message.as_deref().unwrap_or_default(),
                 ));
@@ -402,7 +426,7 @@ impl OpenAIProvider {
             finished |= handle(&line?)?;
         }
         if !finished {
-            return Err(LlmError::StreamIncomplete { provider: PROVIDER });
+            return Err(LlmError::StreamIncomplete { provider });
         }
 
         // Convert accumulated tool calls to our format
@@ -504,7 +528,7 @@ impl LlmProvider for OpenAIProvider {
             .await?;
 
         if !response.status().is_success() {
-            return Err(upstream_error(PROVIDER, response).await);
+            return Err(upstream_error(provider_name(self.base_url()), response).await);
         }
 
         let models_response: OpenAIModelsResponse =
@@ -713,6 +737,21 @@ struct OpenAIStreamFunctionCall {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Errors name OpenRouter and OpenAI by their hosts, any other server generically.
+    #[test]
+    fn errors_name_the_provider_by_its_host() {
+        assert_eq!(provider_name("https://openrouter.ai/api/v1"), "OpenRouter");
+        assert_eq!(provider_name("https://api.openai.com/v1"), "OpenAI");
+        assert_eq!(
+            provider_name("http://localhost:8000/v1"),
+            "The OpenAI-compatible provider"
+        );
+        assert_eq!(
+            provider_name("https://openrouter.ai.example.com/v1"),
+            "The OpenAI-compatible provider"
+        );
+    }
     use crate::llm::ToolResult;
 
     /// The message /api/llm/chat returns with interpret=false (calls and results on one assistant
@@ -757,6 +796,41 @@ mod tests {
                                  "function": {"name": "list_datasets", "arguments": "{}"}}]},
                 {"role": "tool", "content": "No datasets", "tool_call_id": "call_r1_1"},
                 {"role": "user", "content": "next"}
+            ])
+        );
+    }
+
+    /// The tool loop's note on a tool-results message is sent after the results it is about.
+    #[test]
+    fn the_tool_loop_note_follows_the_results() {
+        fn loop_shaped() -> Vec<Message> {
+            let call = ToolCall {
+                id: "c1".into(),
+                name: "list_datasets".into(),
+                arguments: serde_json::json!({}),
+            };
+            let mut results = Message::tool_result(vec![ToolResult {
+                tool_call_id: "c1".into(),
+                content: "No datasets".into(),
+                is_error: false,
+            }]);
+            results.content = "note".into();
+            vec![
+                Message::user("list"),
+                Message::assistant_with_tools(String::new(), vec![call]),
+                results,
+            ]
+        }
+        let p = OpenAIProvider::new(ProviderConfig::default());
+        assert_eq!(
+            serde_json::to_value(p.to_openai_messages(&loop_shaped())).unwrap(),
+            serde_json::json!([
+                {"role": "user", "content": "list"},
+                {"role": "assistant",
+                 "tool_calls": [{"id": "c1", "type": "function",
+                                 "function": {"name": "list_datasets", "arguments": "{}"}}]},
+                {"role": "tool", "content": "No datasets", "tool_call_id": "c1"},
+                {"role": "user", "content": "note"}
             ])
         );
     }

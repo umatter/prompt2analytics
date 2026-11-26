@@ -988,8 +988,16 @@ pub struct ToolResult {
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum ContentItem {
-    Text { text: String },
-    Image { data: String, mime_type: String },
+    Text {
+        text: String,
+    },
+    Image {
+        data: String,
+        mime_type: String,
+        /// The vector version (SVG) of a static chart, when there is one.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        svg: Option<String>,
+    },
 }
 
 /// Tool definition for discovery.

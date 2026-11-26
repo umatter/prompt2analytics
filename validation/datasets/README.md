@@ -177,7 +177,8 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/shapiro_cases.csv` | 5000 × 18 (id and 17 sample columns n3_124 ... n5000_rnorm, each padded with NA to 5000 rows; n3_124, n3_123, n25_int read as Int64) | `stat_shapiro_wilk` | `r/cases/stats_onesample.R` | seed 42; `qnorm(ppoints(100))` for `n100_qnorm` |
 | `generated/two_sample_na.csv` | 22 × 8 (id, x, y, xi, yi, g, mi, mj; xi, yi, mi, mj Int64 with NA, g text with one NA) | `stat_two_sample_na`; read by `cli_stat_descriptive_na` | `r/cases/stats_onesample.R`; read by `r/cases/cli_stats.R` | fixed x, y; seed 3 (xi, yi), seed 17 (mi, mj) |
 | `generated/pairwise_mahalanobis_na.csv` | 30 × 5 (id, y, g, a, b; y Int64 with NA in rows 4 and 18, a NA in row 7) | `stat_pairwise_mahalanobis_na` | `r/cases/stats_onesample.R` | seed 9 |
-| `generated/rd_sim.csv` | 1000 × 6 (x, y, d, yf, xm, ym) | `rd_sharp_fixed_bw`, `rd_mass_points_nn`, `rd_fuzzy_fixed_bw` | `r/cases/causal_rd.R` | seed 42, cutoff 0, fuzzy take-up 0.2/0.8, x on a 0.01 grid in xm |
+| `generated/rd_sim.csv` | 1000 × 6 (x, y, d, yf, xm, ym) | `rd_sharp_fixed_bw`, `rd_mass_points_nn`, `rd_fuzzy_fixed_bw`, `rdplot_sim` | `r/cases/causal_rd.R` | seed 42, cutoff 0, fuzzy take-up 0.2/0.8, x on a 0.01 grid in xm |
+| `generated/rddensity_sim.csv` | 1500 × 4 (id, x, s, xm) | `rddensity_sim` | `r/cases/causal_rddensity.R` | seed 7, x ~ N(0, 0.5), s moves 30% of the units in (-0.15, 0) above the cutoff, x on a 0.01 grid in xm |
 | `generated/iv_weak_controls.csv` | 500 × 5 (y, x, w, z1, z2) | `iv_weak_controls` | `r/cases/econ_iv.R` | seed 20261021 |
 | `generated/iv_two_endog.csv` | 400 × 8 (y, x1, x2, w1, w2, z1, z2, z3) | `iv_two_endog` | `r/cases/econ_iv.R` | seed 77 |
 | `generated/iv_no_controls.csv` | 300 × 4 (y, x, z1, z2) | `iv_no_controls` | `r/cases/econ_iv.R` | seed 5 |
@@ -191,6 +192,10 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/bacon_always_panel.csv` | 400 × 4 (unit, time, D, y) | `bacon_always_treated` | `r/cases/causal_did_t4.R` | seed 20261113, 40 units x periods 0-9, 8 never, 8 always treated (first treated at 0), cohorts 3/5/7 |
 | `generated/grunfeld_cluster_na.csv` | 200 × 7 (firm, year, firm_label, year_na, inv, value, capital) | `reg_cluster_na` | `r/cases/regression_na.R` | `grunfeld.csv` with `firm_label` (`firm_01` ... `firm_10`) missing in rows 3, 44, 101 and `year_na` (the year) missing in rows 10, 190 |
 | `generated/smoothers_na.csv` | 60 × 3 (id, x, y) | `reg_smoothers_na` | `r/cases/regression_na.R` | seed 8; x ~ U(0, 10), y = sin(x) + 0.1 x + N(0, 0.3²), rounded to 4 decimals; x missing in rows 5, 33 and y in rows 12, 48 |
+| `generated/grunfeld_lm_na.csv` | 200 × 6 (firm, year, firm_label, inv, value, capital) | `reg_lm_tests_na` | `r/cases/regression_na.R` | `grunfeld.csv` with `inv` missing in rows 7, 58, 133, `value` in rows 21, 150 and `firm_label` (`firm_01` ... `firm_10`) in row 90 |
+| `generated/ols_na.csv` | 120 × 5 (id, y, x1, x2, w) | `ols_na` | `r/cases/regression.R` | seed 20261127; x1 ~ N(0, 1), x2 whole numbers in [0, 20], y = 1 + 0.7 x1 + 0.15 x2 + N(0, (1 + 0.4 \|x1\|)²), w in {0.5, 1, 2, 3}; y missing in rows 3, 17, 40, 41, 88, x1 in 17, 25, 60, 99, w in 5, 25, 70 |
+| `generated/ols_na_wls.csv` | 120 × 5 (id, y, x1, x2, w) | `ols_na_wls` | `r/cases/regression.R` | the same data as `ols_na.csv`, written under the WLS case's name |
+| `generated/wls_sim.csv` | 300 × 6 (id, y, x1, x2, d, w) | `wls_sim` | `r/cases/regression.R` | seed 20261126; y = 2 + 1.5 x1 - 0.3 x2 + 0.8 d + N(0, (1 + 0.5 \|x1\|)²), weights drawn from {0, 0.25, 1, 2.5, 4} (zeros included) |
 | `generated/ordered.csv` | 400 × 7 (y, y_label, x1, x2, y_wide, y_na, x1_na) | `disc_ordered` | `r/cases/discrete.R` | seed 2026, 3 ordered categories, 13-level y_wide, 7 incomplete rows |
 | `generated/negbin.csv` | 400 × 5 (y, x1, x2, y_na, x1_na) | `disc_negbin` | `r/cases/discrete.R` | seed 404, NB2 with size 1.8, 5 incomplete rows |
 | `generated/zeroinfl.csv` | 500 × 6 (y, y_nb, x1, x2, y_na, x2_na) | `disc_zeroinfl` | `r/cases/discrete.R` | seed 808, zero-inflated Poisson and NB, 5 incomplete rows |
@@ -206,6 +211,8 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/surv_cr_cont.csv` | 200 × 3 (id, time, event_type) | `surv_competing_risks` | `r/cases/surv_cox_aft.R` | simulated (seed 20261101): exponential causes 1 (rate 0.10) and 2 (0.06), uniform(2, 18) censoring; times rounded to 6 decimals, no ties |
 | `generated/surv_cr_ties.csv` | 40 × 3 (id, time, event_type) | `surv_competing_risks` | `r/cases/surv_cox_aft.R` | simulated (same seed, after `surv_cr_cont`): causes 1 (rate 0.08) and 2 (0.05), uniform(5, 30) censoring; integer times (ceiling) with ties |
 | `generated/km_median_rules.csv` | 16 × 6 (time, event, group, time_early, event_early, group_no_mid) | `surv_km_median_rules` | `r/cases/survival.R` | fixed values; group_no_mid has 7 empty cells |
+| `generated/arima_seasonal.csv` | 240 × 3 (q4, sea, q0) | `arima_seasonal` | `r/cases/forecasting_arima.R` | seed 20261125; q4: ARMA(1,1)(1,1)[4] around 20; sea: 0.2 t + 5 sin(2 pi t / 12) + 0.6 AR(1); q0 = q4 - 20 |
+| `generated/arima_seasonal_air.csv` | 144 × 1 (lair) | `arima_seasonal` | `r/cases/forecasting_arima.R` | log(AirPassengers), 10 decimals |
 | `generated/arima_misspecified_seasonal.csv` | 1000 × 1 (y) | `arima_misspecified_seasonal` | `r/cases/forecasting_arima.R` | seed 42; y = 0.01 t + 2 sin(pi t / 6) + runif(1000, 0, 0.5), t = 0..999 (the unified benchmark's time-series DGP); the n = 100 fit reads the first 100 rows |
 | `generated/mixed_logit.csv` | 900 × 6 (person, id, alt, choice, x, w) | `disc_mixed_logit` | `r/cases/discrete_mixed.R` | seed 1234, 300 choice situations × 3 alternatives, normal coefficient on x |
 | `generated/mixed_logit_panel.csv` | 1200 × 6 (person, id, alt, choice, x, w) | `disc_mixed_logit_panel` | `r/cases/discrete_mixed.R` | seed 1234, 100 people × 4 situations × 3 alternatives |

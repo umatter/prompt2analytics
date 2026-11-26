@@ -1,6 +1,8 @@
 //! Chart generation: histograms, scatter plots, box plots, line charts.
 
+use super::axis::XAxis;
 use super::colors::{CHART_PALETTE, DEFAULT_SERIES_COLOR, OUTLIER_COLOR, TREND_LINE_COLOR};
+use super::vector::{FigureBackend, SvgRecorder};
 use super::{DEFAULT_HEIGHT, DEFAULT_WIDTH, VisualizationError};
 use crate::resource;
 use crate::traits::convergence::{ResultNotes, notes_text};
@@ -21,6 +23,9 @@ pub struct ChartConfig {
     pub label_font_size: u32,
     /// Font size for tick labels (default: 16)
     pub tick_font_size: u32,
+    /// The x values of a line chart or scatter plot are days since 1970-01-01 and are labelled
+    /// as dates (default: false)
+    pub x_dates: bool,
 }
 
 impl Default for ChartConfig {
@@ -34,6 +39,7 @@ impl Default for ChartConfig {
             title_font_size: 32,
             label_font_size: 20,
             tick_font_size: 16,
+            x_dates: false,
         }
     }
 }
@@ -42,6 +48,9 @@ impl Default for ChartConfig {
 pub struct HistogramResult {
     /// Base64-encoded PNG image
     pub image_base64: String,
+    /// Vector version of the image (SVG); None when it would be larger than
+    /// [`MAX_SVG_BYTES`](super::MAX_SVG_BYTES)
+    pub svg: Option<String>,
     /// Number of bins used
     pub bins: usize,
     /// Minimum value in data
@@ -188,9 +197,10 @@ pub fn histogram(
 
     // Create image buffer
     let mut buffer = rgb_buffer(config.width, config.height)?;
+    let mut recorder = SvgRecorder::new(config.width, config.height);
 
     {
-        let root = BitMapBackend::with_buffer(&mut buffer, (config.width, config.height))
+        let root = FigureBackend::new(&mut buffer, &mut recorder, (config.width, config.height))
             .into_drawing_area();
         root.fill(&WHITE)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
@@ -201,11 +211,12 @@ pub fn histogram(
 
         let y_range = 0u32..(max_count + max_count / 10 + 1);
 
+        let caption = fitted_caption(title, config.width, config.title_font_size);
         let mut chart = ChartBuilder::on(&root)
-            .caption(title, ("sans-serif", config.title_font_size))
+            .caption(&caption.0, ("sans-serif", caption.1))
             .margin(15)
             .x_label_area_size(50)
-            .y_label_area_size(60)
+            .y_label_area_size(y_label_area(&y_range, 60, config.tick_font_size))
             .build_cartesian_2d(x_range, y_range)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
@@ -237,9 +248,11 @@ pub fn histogram(
 
     // Encode as PNG then base64
     let image_base64 = encode_rgb_to_png_base64(&buffer, config.width, config.height)?;
+    let svg = recorder.finish();
 
     Ok(HistogramResult {
         image_base64,
+        svg,
         bins: n_bins,
         min: min_val,
         max: max_val,
@@ -253,6 +266,9 @@ pub fn histogram(
 pub struct ScatterResult {
     /// Base64-encoded PNG image
     pub image_base64: String,
+    /// Vector version of the image (SVG); None when it would be larger than
+    /// [`MAX_SVG_BYTES`](super::MAX_SVG_BYTES)
+    pub svg: Option<String>,
     /// Number of points plotted
     pub n_points: usize,
     /// Correlation coefficient (if calculated)
@@ -290,21 +306,52 @@ pub fn scatter_plot(
             y.len()
         )));
     }
+    scatter_plot_grouped(&[(String::new(), x.to_vec(), y.to_vec())], config)
+}
 
-    if x.is_empty() {
+/// At most this many groups in one scatter plot: each has its own colour and marker
+/// shape (six colours times four shapes repeat only after twelve).
+pub const MAX_SCATTER_GROUPS: usize = 12;
+
+/// A scatter plot of several groups of points, `(label, x, y)` each, with a legend when
+/// there is more than one. Group `i` has colour `i mod 6` of the palette and marker shape
+/// `i mod 4` (circle, triangle, square, cross), so groups differ in shape as well as
+/// colour up to [`MAX_SCATTER_GROUPS`]. Pairs with a non-finite value are left out; the
+/// correlation is over every plotted point.
+pub fn scatter_plot_grouped(
+    groups: &[(String, Vec<f64>, Vec<f64>)],
+    config: ChartConfig,
+) -> Result<ScatterResult, VisualizationError> {
+    if groups.len() > MAX_SCATTER_GROUPS {
+        return Err(VisualizationError::InvalidData(format!(
+            "{} groups are too many to tell apart (at most {MAX_SCATTER_GROUPS})",
+            groups.len()
+        )));
+    }
+    let mut sets: Vec<(&str, Vec<(f64, f64)>)> = Vec::with_capacity(groups.len());
+    for (label, x, y) in groups {
+        if x.len() != y.len() {
+            return Err(VisualizationError::InvalidData(format!(
+                "X and Y must have same length: {} vs {}",
+                x.len(),
+                y.len()
+            )));
+        }
+        let points = x
+            .iter()
+            .zip(y)
+            .filter(|(xi, yi)| xi.is_finite() && yi.is_finite())
+            .map(|(xi, yi)| (*xi, *yi))
+            .collect();
+        sets.push((label.as_str(), points));
+    }
+
+    if groups.iter().all(|(_, x, _)| x.is_empty()) {
         return Err(VisualizationError::InvalidData(
             "Empty data arrays".to_string(),
         ));
     }
-
-    // Filter out pairs with NaN
-    let points: Vec<(f64, f64)> = x
-        .iter()
-        .zip(y.iter())
-        .filter(|(xi, yi)| xi.is_finite() && yi.is_finite())
-        .map(|(xi, yi)| (*xi, *yi))
-        .collect();
-
+    let points: Vec<(f64, f64)> = sets.iter().flat_map(|(_, p)| p.iter().copied()).collect();
     if points.is_empty() {
         return Err(VisualizationError::InvalidData(
             "No finite value pairs".to_string(),
@@ -328,9 +375,11 @@ pub fn scatter_plot(
 
     // Create image buffer
     let mut buffer = rgb_buffer(config.width, config.height)?;
+    let mut recorder = SvgRecorder::new(config.width, config.height);
+    let several = sets.len() > 1;
 
     {
-        let root = BitMapBackend::with_buffer(&mut buffer, (config.width, config.height))
+        let root = FigureBackend::new(&mut buffer, &mut recorder, (config.width, config.height))
             .into_drawing_area();
         root.fill(&WHITE)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
@@ -339,12 +388,13 @@ pub fn scatter_plot(
         let x_label = config.x_label.as_deref().unwrap_or("X");
         let y_label = config.y_label.as_deref().unwrap_or("Y");
 
+        let caption = fitted_caption(title, config.width, config.title_font_size);
         let mut chart = ChartBuilder::on(&root)
-            .caption(title, ("sans-serif", config.title_font_size))
+            .caption(&caption.0, ("sans-serif", caption.1))
             .margin(10)
             .x_label_area_size(40)
-            .y_label_area_size(50)
-            .build_cartesian_2d(x_range, y_range)
+            .y_label_area_size(y_label_area(&y_range, 50, config.tick_font_size))
+            .build_cartesian_2d(XAxis::new(x_range, config.x_dates), y_range)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
         chart
@@ -356,32 +406,187 @@ pub fn scatter_plot(
             .draw()
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
-        // Draw points
-        chart
-            .draw_series(
-                points.iter().map(|(xi, yi)| {
-                    Circle::new((*xi, *yi), 4, DEFAULT_SERIES_COLOR.mix(0.7).filled())
-                }),
-            )
-            .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+        let plot_err =
+            |e: DrawingAreaErrorKind<_>| VisualizationError::PlottingError(e.to_string());
+        for (idx, (label, pts)) in sets.iter().enumerate() {
+            let color = if several {
+                CHART_PALETTE[idx % CHART_PALETTE.len()]
+            } else {
+                DEFAULT_SERIES_COLOR
+            };
+            let style = color.mix(0.7).filled();
+            let stroke = color.stroke_width(2);
+            let label = label.to_string();
+            match idx % 4 {
+                0 => {
+                    let drawn = chart
+                        .draw_series(pts.iter().map(|p| Circle::new(*p, 4, style)))
+                        .map_err(plot_err)?;
+                    if several {
+                        drawn
+                            .label(label)
+                            .legend(move |(x, y)| Circle::new((x + 10, y), 4, style));
+                    }
+                }
+                1 => {
+                    chart
+                        .draw_series(pts.iter().map(|p| TriangleMarker::new(*p, 5, style)))
+                        .map_err(plot_err)?
+                        .label(label)
+                        .legend(move |(x, y)| TriangleMarker::new((x + 10, y), 5, style));
+                }
+                2 => {
+                    chart
+                        .draw_series(pts.iter().map(|p| {
+                            EmptyElement::at(*p) + Rectangle::new([(-4, -4), (4, 4)], style)
+                        }))
+                        .map_err(plot_err)?
+                        .label(label)
+                        .legend(move |(x, y)| {
+                            Rectangle::new([(x + 6, y - 4), (x + 14, y + 4)], style)
+                        });
+                }
+                _ => {
+                    chart
+                        .draw_series(pts.iter().map(|p| Cross::new(*p, 4, stroke)))
+                        .map_err(plot_err)?
+                        .label(label)
+                        .legend(move |(x, y)| Cross::new((x + 10, y), 4, stroke));
+                }
+            }
+        }
+
+        if several {
+            let series: Vec<(String, Vec<f64>, Vec<f64>)> = sets
+                .iter()
+                .map(|(l, p)| {
+                    (
+                        l.to_string(),
+                        p.iter().map(|q| q.0).collect(),
+                        p.iter().map(|q| q.1).collect(),
+                    )
+                })
+                .collect();
+            chart
+                .configure_series_labels()
+                .position(emptiest_corner(&series, (x_min, x_max), (y_min, y_max)))
+                .background_style(WHITE.mix(0.8))
+                .border_style(BLACK)
+                .draw()
+                .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+        }
 
         root.present()
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
     }
 
     let image_base64 = encode_rgb_to_png_base64(&buffer, config.width, config.height)?;
+    let svg = recorder.finish();
 
     Ok(ScatterResult {
         image_base64,
+        svg,
         n_points: points.len(),
         correlation,
     })
+}
+
+/// Result of an RD plot chart.
+pub struct RdPlotChart {
+    /// Base64-encoded PNG image
+    pub image_base64: String,
+    /// Vector version of the image (SVG); None when it would be larger than
+    /// [`MAX_SVG_BYTES`](super::MAX_SVG_BYTES)
+    pub svg: Option<String>,
+}
+
+/// The chart of an RD plot (as `rdrobust::rdplot` draws it): binned means as dots at their
+/// bins' midpoints, the fitted polynomial of each side as a line, and a vertical line at the
+/// cutoff. `bins` are `(midpoint, mean)` pairs; non-finite pairs are left out.
+pub fn rd_plot_chart(
+    bins: &[(f64, f64)],
+    curve_left: &[(f64, f64)],
+    curve_right: &[(f64, f64)],
+    cutoff: f64,
+    config: ChartConfig,
+) -> Result<RdPlotChart, VisualizationError> {
+    let finite = |p: &&(f64, f64)| p.0.is_finite() && p.1.is_finite();
+    let dots: Vec<(f64, f64)> = bins.iter().filter(finite).copied().collect();
+    let left: Vec<(f64, f64)> = curve_left.iter().filter(finite).copied().collect();
+    let right: Vec<(f64, f64)> = curve_right.iter().filter(finite).copied().collect();
+    let all = || dots.iter().chain(&left).chain(&right);
+    if dots.is_empty() {
+        return Err(VisualizationError::InvalidData(
+            "No finite binned means".to_string(),
+        ));
+    }
+    let x_min = all().map(|p| p.0).fold(cutoff, f64::min);
+    let x_max = all().map(|p| p.0).fold(cutoff, f64::max);
+    let y_min = all().map(|p| p.1).fold(f64::INFINITY, f64::min);
+    let y_max = all().map(|p| p.1).fold(f64::NEG_INFINITY, f64::max);
+    let x_pad = (x_max - x_min).max(0.1) * 0.03;
+    let y_pad = (y_max - y_min).max(0.1) * 0.05;
+    let x_range = checked_axis_range(x_min - x_pad, x_max + x_pad, "x")?;
+    let y_range = checked_axis_range(y_min - y_pad, y_max + y_pad, "y")?;
+
+    let mut buffer = rgb_buffer(config.width, config.height)?;
+    let mut recorder = SvgRecorder::new(config.width, config.height);
+    {
+        let root = FigureBackend::new(&mut buffer, &mut recorder, (config.width, config.height))
+            .into_drawing_area();
+        root.fill(&WHITE)
+            .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+        let title = config.title.as_deref().unwrap_or("RD Plot");
+        let caption = fitted_caption(title, config.width, config.title_font_size);
+        let mut chart = ChartBuilder::on(&root)
+            .caption(&caption.0, ("sans-serif", caption.1))
+            .margin(10)
+            .x_label_area_size(40)
+            .y_label_area_size(y_label_area(&y_range, 50, config.tick_font_size))
+            .build_cartesian_2d(x_range, y_range.clone())
+            .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+        chart
+            .configure_mesh()
+            .x_desc(config.x_label.as_deref().unwrap_or("X"))
+            .y_desc(config.y_label.as_deref().unwrap_or("Y"))
+            .label_style(("sans-serif", config.tick_font_size))
+            .axis_desc_style(("sans-serif", config.label_font_size))
+            .draw()
+            .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+        let plot_err =
+            |e: DrawingAreaErrorKind<_>| VisualizationError::PlottingError(e.to_string());
+        chart
+            .draw_series(std::iter::once(PathElement::new(
+                vec![(cutoff, y_range.start), (cutoff, y_range.end)],
+                BLACK.stroke_width(1),
+            )))
+            .map_err(plot_err)?;
+        for curve in [left, right] {
+            chart
+                .draw_series(LineSeries::new(curve, TREND_LINE_COLOR.stroke_width(2)))
+                .map_err(plot_err)?;
+        }
+        chart
+            .draw_series(
+                dots.iter()
+                    .map(|p| Circle::new(*p, 4, DEFAULT_SERIES_COLOR.mix(0.85).filled())),
+            )
+            .map_err(plot_err)?;
+        root.present()
+            .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+    }
+    let image_base64 = encode_rgb_to_png_base64(&buffer, config.width, config.height)?;
+    let svg = recorder.finish();
+    Ok(RdPlotChart { image_base64, svg })
 }
 
 /// Result of box plot generation.
 pub struct BoxPlotResult {
     /// Base64-encoded PNG image
     pub image_base64: String,
+    /// Vector version of the image (SVG); None when it would be larger than
+    /// [`MAX_SVG_BYTES`](super::MAX_SVG_BYTES)
+    pub svg: Option<String>,
     /// Statistics for each group
     pub statistics: Vec<BoxPlotStats>,
 }
@@ -480,9 +685,10 @@ pub fn box_plot(
 
     // Create image buffer
     let mut buffer = rgb_buffer(config.width, config.height)?;
+    let mut recorder = SvgRecorder::new(config.width, config.height);
 
     {
-        let root = BitMapBackend::with_buffer(&mut buffer, (config.width, config.height))
+        let root = FigureBackend::new(&mut buffer, &mut recorder, (config.width, config.height))
             .into_drawing_area();
         root.fill(&WHITE)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
@@ -491,18 +697,22 @@ pub fn box_plot(
         let y_label = config.y_label.as_deref().unwrap_or("Value");
 
         let labels: Vec<String> = statistics.iter().map(|s| s.label.clone()).collect();
+        // An x title (the group column of a grouped box plot) needs room under the labels.
+        let x_label = config.x_label.as_deref().unwrap_or("");
 
+        let caption = fitted_caption(title, config.width, config.title_font_size);
         let mut chart = ChartBuilder::on(&root)
-            .caption(title, ("sans-serif", config.title_font_size))
+            .caption(&caption.0, ("sans-serif", caption.1))
             .margin(10)
-            .x_label_area_size(40)
-            .y_label_area_size(50)
+            .x_label_area_size(if x_label.is_empty() { 40 } else { 55 })
+            .y_label_area_size(y_label_area(&y_range, 50, config.tick_font_size))
             .build_cartesian_2d(x_range, y_range)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
         chart
             .configure_mesh()
             .y_desc(y_label)
+            .x_desc(x_label)
             .x_labels(labels.len())
             .x_label_formatter(&|x| category_label(&labels, *x))
             .draw()
@@ -583,9 +793,11 @@ pub fn box_plot(
     }
 
     let image_base64 = encode_rgb_to_png_base64(&buffer, config.width, config.height)?;
+    let svg = recorder.finish();
 
     Ok(BoxPlotResult {
         image_base64,
+        svg,
         statistics,
     })
 }
@@ -594,6 +806,9 @@ pub fn box_plot(
 pub struct LineChartResult {
     /// Base64-encoded PNG image
     pub image_base64: String,
+    /// Vector version of the image (SVG); None when it would be larger than
+    /// [`MAX_SVG_BYTES`](super::MAX_SVG_BYTES)
+    pub svg: Option<String>,
     /// Number of data points
     pub n_points: usize,
     /// Number of series
@@ -618,6 +833,64 @@ impl std::fmt::Display for LineChartResult {
 /// * `config` - Chart configuration
 pub fn line_chart(
     series: &[(String, Vec<f64>, Vec<f64>)],
+    config: ChartConfig,
+) -> Result<LineChartResult, VisualizationError> {
+    line_chart_with_band(series, None, config)
+}
+
+/// A shaded band of a line chart; a NaN in any of the three values ends a stretch of it.
+pub struct Band {
+    pub label: String,
+    pub x: Vec<f64>,
+    pub lower: Vec<f64>,
+    pub upper: Vec<f64>,
+}
+
+impl Band {
+    /// The stretches of consecutive finite points, as (x, lower, upper).
+    fn stretches(&self) -> Vec<Vec<(f64, f64, f64)>> {
+        let mut out = vec![Vec::new()];
+        for ((&x, &lo), &hi) in self.x.iter().zip(&self.lower).zip(&self.upper) {
+            if x.is_finite() && lo.is_finite() && hi.is_finite() {
+                if let Some(stretch) = out.last_mut() {
+                    stretch.push((x, lo, hi));
+                }
+            } else {
+                out.push(Vec::new());
+            }
+        }
+        out.retain(|s: &Vec<_>| !s.is_empty());
+        out
+    }
+}
+
+/// The corner of the plot with the fewest points, for the legend (upper left first).
+fn emptiest_corner(
+    series: &[(String, Vec<f64>, Vec<f64>)],
+    (x_min, x_max): (f64, f64),
+    (y_min, y_max): (f64, f64),
+) -> SeriesLabelPosition {
+    use SeriesLabelPosition as P;
+    let corners = [P::UpperLeft, P::UpperRight, P::LowerLeft, P::LowerRight];
+    let mut counts = [0usize; 4];
+    for (_, xs, ys) in series {
+        for (x, y) in xs.iter().zip(ys) {
+            let (u, v) = ((x - x_min) / (x_max - x_min), (y - y_min) / (y_max - y_min));
+            for (i, count) in counts.iter_mut().enumerate() {
+                let across = if i % 2 == 0 { u < 0.3 } else { u > 0.7 };
+                let down = if i < 2 { v > 0.75 } else { v < 0.25 };
+                *count += usize::from(across && down);
+            }
+        }
+    }
+    let best = (0..4).min_by_key(|&i| counts[i]).unwrap_or(0);
+    corners.into_iter().nth(best).unwrap_or(P::UpperLeft)
+}
+
+/// [`line_chart`] with a shaded band behind the lines, such as prediction intervals.
+pub fn line_chart_with_band(
+    series: &[(String, Vec<f64>, Vec<f64>)],
+    band: Option<&Band>,
     config: ChartConfig,
 ) -> Result<LineChartResult, VisualizationError> {
     if series.is_empty() {
@@ -645,6 +918,14 @@ pub fn line_chart(
         }
     }
 
+    let stretches = band.map(Band::stretches).unwrap_or_default();
+    for (x, lo, hi) in stretches.iter().flatten() {
+        x_min = x_min.min(*x);
+        x_max = x_max.max(*x);
+        y_min = y_min.min(lo.min(*hi));
+        y_max = y_max.max(lo.max(*hi));
+    }
+
     if total_points == 0 {
         return Err(VisualizationError::InvalidData(
             "No valid data points".to_string(),
@@ -662,9 +943,10 @@ pub fn line_chart(
 
     // Create image buffer
     let mut buffer = rgb_buffer(config.width, config.height)?;
+    let mut recorder = SvgRecorder::new(config.width, config.height);
 
     {
-        let root = BitMapBackend::with_buffer(&mut buffer, (config.width, config.height))
+        let root = FigureBackend::new(&mut buffer, &mut recorder, (config.width, config.height))
             .into_drawing_area();
         root.fill(&WHITE)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
@@ -673,12 +955,13 @@ pub fn line_chart(
         let x_label = config.x_label.as_deref().unwrap_or("X");
         let y_label = config.y_label.as_deref().unwrap_or("Y");
 
+        let caption = fitted_caption(title, config.width, config.title_font_size);
         let mut chart = ChartBuilder::on(&root)
-            .caption(title, ("sans-serif", config.title_font_size))
+            .caption(&caption.0, ("sans-serif", caption.1))
             .margin(10)
             .x_label_area_size(40)
-            .y_label_area_size(50)
-            .build_cartesian_2d(x_range, y_range)
+            .y_label_area_size(y_label_area(&y_range, 50, config.tick_font_size))
+            .build_cartesian_2d(XAxis::new(x_range, config.x_dates), y_range)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
         chart
@@ -690,6 +973,22 @@ pub fn line_chart(
             .draw()
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
+        // The band, behind the lines
+        if let Some(band) = band {
+            // The colour of the last line, which the band belongs to.
+            let fill = colors[(series.len() - 1) % colors.len()].mix(0.25).filled();
+            let shapes = stretches.iter().map(|s| {
+                let upper = s.iter().map(|(x, _, hi)| (*x, *hi));
+                let lower = s.iter().rev().map(|(x, lo, _)| (*x, *lo));
+                Polygon::new(upper.chain(lower).collect::<Vec<_>>(), fill)
+            });
+            chart
+                .draw_series(shapes)
+                .map_err(|e| VisualizationError::PlottingError(e.to_string()))?
+                .label(&band.label)
+                .legend(move |(x, y)| Rectangle::new([(x, y - 5), (x + 20, y + 5)], fill));
+        }
+
         // Draw each series
         for (idx, (label, x_vals, y_vals)) in series.iter().enumerate() {
             let color = colors[idx % colors.len()];
@@ -700,19 +999,35 @@ pub fn line_chart(
                 .map(|(xi, yi)| (*xi, *yi))
                 .collect();
 
-            chart
-                .draw_series(LineSeries::new(points, color.stroke_width(2)))
+            // Past the palette the colours come again, dashed.
+            let drawn = if idx < colors.len() {
+                chart.draw_series(LineSeries::new(points, color.stroke_width(2)))
+            } else {
+                chart.draw_series(DashedLineSeries::new(points, 8, 5, color.stroke_width(2)))
+            };
+            drawn
                 .map_err(|e| VisualizationError::PlottingError(e.to_string()))?
                 .label(label)
                 .legend(move |(x, y)| {
-                    PathElement::new(vec![(x, y), (x + 20, y)], color.stroke_width(2))
+                    // Two strokes stand for a dashed line.
+                    let ends = if idx < colors.len() {
+                        [20, 20]
+                    } else {
+                        [8, 12]
+                    };
+                    EmptyElement::at((x, y))
+                        + PathElement::new(vec![(0, 0), (ends[0], 0)], color.stroke_width(2))
+                        + PathElement::new(vec![(ends[1], 0), (20, 0)], color.stroke_width(2))
                 });
         }
 
         // Draw legend if multiple series
-        if series.len() > 1 {
-            chart
-                .configure_series_labels()
+        if series.len() > 1 || band.is_some() {
+            let mut legend = chart.configure_series_labels();
+            if band.is_some() || config.x_dates || series.len() > 2 {
+                legend.position(emptiest_corner(series, (x_min, x_max), (y_min, y_max)));
+            }
+            legend
                 .background_style(WHITE.mix(0.8))
                 .border_style(BLACK)
                 .draw()
@@ -724,9 +1039,11 @@ pub fn line_chart(
     }
 
     let image_base64 = encode_rgb_to_png_base64(&buffer, config.width, config.height)?;
+    let svg = recorder.finish();
 
     Ok(LineChartResult {
         image_base64,
+        svg,
         n_points: total_points,
         n_series: series.len(),
     })
@@ -736,6 +1053,9 @@ pub fn line_chart(
 pub struct EventStudyResult {
     /// Base64-encoded PNG image
     pub image_base64: String,
+    /// Vector version of the image (SVG); None when it would be larger than
+    /// [`MAX_SVG_BYTES`](super::MAX_SVG_BYTES)
+    pub svg: Option<String>,
     /// Number of time periods
     pub n_periods: usize,
     /// Treatment period (if identified)
@@ -830,9 +1150,10 @@ pub fn event_study_plot(
 
     // Create image buffer
     let mut buffer = rgb_buffer(config.width, config.height)?;
+    let mut recorder = SvgRecorder::new(config.width, config.height);
 
     {
-        let root = BitMapBackend::with_buffer(&mut buffer, (config.width, config.height))
+        let root = FigureBackend::new(&mut buffer, &mut recorder, (config.width, config.height))
             .into_drawing_area();
         root.fill(&WHITE)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
@@ -844,11 +1165,12 @@ pub fn event_study_plot(
             .unwrap_or("Time Relative to Treatment");
         let y_label = config.y_label.as_deref().unwrap_or("Treatment Effect");
 
+        let caption = fitted_caption(title, config.width, config.title_font_size);
         let mut chart = ChartBuilder::on(&root)
-            .caption(title, ("sans-serif", config.title_font_size))
+            .caption(&caption.0, ("sans-serif", caption.1))
             .margin(10)
             .x_label_area_size(40)
-            .y_label_area_size(60)
+            .y_label_area_size(y_label_area(&y_range, 60, config.tick_font_size))
             .build_cartesian_2d(x_range, y_range)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
@@ -927,9 +1249,11 @@ pub fn event_study_plot(
     }
 
     let image_base64 = encode_rgb_to_png_base64(&buffer, config.width, config.height)?;
+    let svg = recorder.finish();
 
     Ok(EventStudyResult {
         image_base64,
+        svg,
         n_periods: valid_points.len(),
         treatment_period,
     })
@@ -939,6 +1263,9 @@ pub fn event_study_plot(
 pub struct CoefficientPlotResult {
     /// Base64-encoded PNG image
     pub image_base64: String,
+    /// Vector version of the image (SVG); None when it would be larger than
+    /// [`MAX_SVG_BYTES`](super::MAX_SVG_BYTES)
+    pub svg: Option<String>,
     /// Number of coefficients plotted
     pub n_coefficients: usize,
 }
@@ -1022,9 +1349,10 @@ pub fn coefficient_plot(
 
     // Create image buffer
     let mut buffer = rgb_buffer(config.width, config.height)?;
+    let mut recorder = SvgRecorder::new(config.width, config.height);
 
     {
-        let root = BitMapBackend::with_buffer(&mut buffer, (config.width, config.height))
+        let root = FigureBackend::new(&mut buffer, &mut recorder, (config.width, config.height))
             .into_drawing_area();
         root.fill(&WHITE)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
@@ -1034,8 +1362,9 @@ pub fn coefficient_plot(
 
         if horizontal {
             // Horizontal layout: coefficients on Y-axis, values on X-axis
+            let caption = fitted_caption(title, config.width, config.title_font_size);
             let mut chart = ChartBuilder::on(&root)
-                .caption(title, ("sans-serif", config.title_font_size))
+                .caption(&caption.0, ("sans-serif", caption.1))
                 .margin(10)
                 .x_label_area_size(40)
                 .y_label_area_size(120) // More space for variable names
@@ -1096,11 +1425,12 @@ pub fn coefficient_plot(
             }
         } else {
             // Vertical layout: coefficients on X-axis, values on Y-axis
+            let caption = fitted_caption(title, config.width, config.title_font_size);
             let mut chart = ChartBuilder::on(&root)
-                .caption(title, ("sans-serif", config.title_font_size))
+                .caption(&caption.0, ("sans-serif", caption.1))
                 .margin(10)
                 .x_label_area_size(60)
-                .y_label_area_size(60)
+                .y_label_area_size(y_label_area(&value_range, 60, config.tick_font_size))
                 .build_cartesian_2d(coef_range, value_range)
                 .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
@@ -1163,9 +1493,11 @@ pub fn coefficient_plot(
     }
 
     let image_base64 = encode_rgb_to_png_base64(&buffer, config.width, config.height)?;
+    let svg = recorder.finish();
 
     Ok(CoefficientPlotResult {
         image_base64,
+        svg,
         n_coefficients: valid_coefs.len(),
     })
 }
@@ -1174,6 +1506,9 @@ pub fn coefficient_plot(
 pub struct IrfPlotResult {
     /// Base64-encoded PNG image
     pub image_base64: String,
+    /// Vector version of the image (SVG); None when it would be larger than
+    /// [`MAX_SVG_BYTES`](super::MAX_SVG_BYTES)
+    pub svg: Option<String>,
     /// Number of horizons
     pub n_horizons: usize,
     /// Shock variable name
@@ -1308,9 +1643,10 @@ pub fn irf_plot(
 
     // Create image buffer
     let mut buffer = rgb_buffer(config.width, config.height)?;
+    let mut recorder = SvgRecorder::new(config.width, config.height);
 
     {
-        let root = BitMapBackend::with_buffer(&mut buffer, (config.width, config.height))
+        let root = FigureBackend::new(&mut buffer, &mut recorder, (config.width, config.height))
             .into_drawing_area();
         root.fill(&WHITE)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
@@ -1325,11 +1661,12 @@ pub fn irf_plot(
         let x_label = config.x_label.as_deref().unwrap_or("Horizon");
         let y_label = config.y_label.as_deref().unwrap_or("Response");
 
+        let caption = fitted_caption(title, config.width, config.title_font_size);
         let mut chart = ChartBuilder::on(&root)
-            .caption(title, ("sans-serif", config.title_font_size))
+            .caption(&caption.0, ("sans-serif", caption.1))
             .margin(10)
             .x_label_area_size(40)
-            .y_label_area_size(60)
+            .y_label_area_size(y_label_area(&y_range, 60, config.tick_font_size))
             .build_cartesian_2d(x_range, y_range)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
@@ -1404,9 +1741,11 @@ pub fn irf_plot(
     }
 
     let image_base64 = encode_rgb_to_png_base64(&buffer, config.width, config.height)?;
+    let svg = recorder.finish();
 
     Ok(IrfPlotResult {
         image_base64,
+        svg,
         n_horizons: valid_points.len(),
         shock: shock_label.map(String::from),
         response: response_label.map(String::from),
@@ -1417,12 +1756,20 @@ pub fn irf_plot(
 pub struct ResidualDiagnosticsResult {
     /// Residuals vs Fitted values plot (base64 PNG)
     pub residuals_vs_fitted: String,
+    /// Its vector version (SVG), as [`ScatterResult::svg`]
+    pub residuals_vs_fitted_svg: Option<String>,
     /// Q-Q plot for normality (base64 PNG)
     pub qq_plot: String,
+    /// Its vector version (SVG), as [`ScatterResult::svg`]
+    pub qq_plot_svg: Option<String>,
     /// Scale-Location plot (base64 PNG)
     pub scale_location: String,
+    /// Its vector version (SVG), as [`ScatterResult::svg`]
+    pub scale_location_svg: Option<String>,
     /// Residuals vs Leverage plot (base64 PNG)
     pub residuals_vs_leverage: String,
+    /// Its vector version (SVG), as [`ScatterResult::svg`]
+    pub residuals_vs_leverage_svg: Option<String>,
     /// Number of observations
     pub n_observations: usize,
     /// Standardized residuals (R's `rstandard`); NaN at leverage one
@@ -1645,11 +1992,12 @@ pub fn residual_diagnostics_with(
     let fitted_plotted = pick(&fitted_valid);
     let standardized_plotted = pick(&standardized_residuals);
 
-    let residuals_vs_fitted =
+    let (residuals_vs_fitted, residuals_vs_fitted_svg) =
         generate_residuals_vs_fitted(&fitted_valid, &residuals_valid, &config)?;
-    let qq_plot = generate_qq_plot(&standardized_plotted, &config)?;
-    let scale_location = generate_scale_location(&fitted_plotted, &standardized_plotted, &config)?;
-    let residuals_vs_leverage = generate_residuals_vs_leverage(
+    let (qq_plot, qq_plot_svg) = generate_qq_plot(&standardized_plotted, &config)?;
+    let (scale_location, scale_location_svg) =
+        generate_scale_location(&fitted_plotted, &standardized_plotted, &config)?;
+    let (residuals_vs_leverage, residuals_vs_leverage_svg) = generate_residuals_vs_leverage(
         &pick(&leverage_valid),
         &standardized_plotted,
         &pick(&cooks_distance),
@@ -1659,9 +2007,13 @@ pub fn residual_diagnostics_with(
 
     Ok(ResidualDiagnosticsResult {
         residuals_vs_fitted,
+        residuals_vs_fitted_svg,
         qq_plot,
+        qq_plot_svg,
         scale_location,
+        scale_location_svg,
         residuals_vs_leverage,
+        residuals_vs_leverage_svg,
         n_observations: n_valid,
         standardized_residuals,
         cooks_distance,
@@ -1738,7 +2090,7 @@ fn generate_residuals_vs_fitted(
     fitted: &[f64],
     residuals: &[f64],
     config: &ChartConfig,
-) -> Result<String, VisualizationError> {
+) -> Result<(String, Option<String>), VisualizationError> {
     let x_min = fitted.iter().copied().fold(f64::INFINITY, f64::min);
     let x_max = fitted.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     let y_min = residuals.iter().copied().fold(f64::INFINITY, f64::min);
@@ -1755,9 +2107,10 @@ fn generate_residuals_vs_fitted(
     let y_range = checked_axis_range(y_min_adj, y_max_adj, "y")?;
 
     let mut buffer = rgb_buffer(config.width, config.height)?;
+    let mut recorder = SvgRecorder::new(config.width, config.height);
 
     {
-        let root = BitMapBackend::with_buffer(&mut buffer, (config.width, config.height))
+        let root = FigureBackend::new(&mut buffer, &mut recorder, (config.width, config.height))
             .into_drawing_area();
         root.fill(&WHITE)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
@@ -1766,7 +2119,7 @@ fn generate_residuals_vs_fitted(
             .caption("Residuals vs Fitted", ("sans-serif", 24))
             .margin(10)
             .x_label_area_size(40)
-            .y_label_area_size(50)
+            .y_label_area_size(y_label_area(&y_range, 50, config.tick_font_size))
             .build_cartesian_2d(x_range, y_range)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
@@ -1811,7 +2164,8 @@ fn generate_residuals_vs_fitted(
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
     }
 
-    encode_rgb_to_png_base64(&buffer, config.width, config.height)
+    let png = encode_rgb_to_png_base64(&buffer, config.width, config.height)?;
+    Ok((png, recorder.finish()))
 }
 
 /// The abscissae of a normal Q-Q plot: R's `qnorm(ppoints(n))`.
@@ -1829,7 +2183,7 @@ fn qq_theoretical_quantiles(n: usize) -> Result<Vec<f64>, VisualizationError> {
 fn generate_qq_plot(
     standardized_residuals: &[f64],
     config: &ChartConfig,
-) -> Result<String, VisualizationError> {
+) -> Result<(String, Option<String>), VisualizationError> {
     // Sort residuals
     let mut sorted_residuals: Vec<f64> = standardized_residuals.to_vec();
     sorted_residuals.sort_by(f64::total_cmp);
@@ -1855,9 +2209,10 @@ fn generate_qq_plot(
     let y_range = checked_axis_range(y_min - y_pad, y_max + y_pad, "y")?;
 
     let mut buffer = rgb_buffer(config.width, config.height)?;
+    let mut recorder = SvgRecorder::new(config.width, config.height);
 
     {
-        let root = BitMapBackend::with_buffer(&mut buffer, (config.width, config.height))
+        let root = FigureBackend::new(&mut buffer, &mut recorder, (config.width, config.height))
             .into_drawing_area();
         root.fill(&WHITE)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
@@ -1866,7 +2221,7 @@ fn generate_qq_plot(
             .caption("Normal Q-Q", ("sans-serif", 24))
             .margin(10)
             .x_label_area_size(40)
-            .y_label_area_size(50)
+            .y_label_area_size(y_label_area(&y_range, 50, config.tick_font_size))
             .build_cartesian_2d(x_range, y_range)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
@@ -1905,7 +2260,8 @@ fn generate_qq_plot(
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
     }
 
-    encode_rgb_to_png_base64(&buffer, config.width, config.height)
+    let png = encode_rgb_to_png_base64(&buffer, config.width, config.height)?;
+    Ok((png, recorder.finish()))
 }
 
 /// Generate Scale-Location plot.
@@ -1913,7 +2269,7 @@ fn generate_scale_location(
     fitted: &[f64],
     standardized_residuals: &[f64],
     config: &ChartConfig,
-) -> Result<String, VisualizationError> {
+) -> Result<(String, Option<String>), VisualizationError> {
     // Calculate sqrt of absolute standardized residuals
     let sqrt_abs_resid: Vec<f64> = standardized_residuals
         .iter()
@@ -1934,9 +2290,10 @@ fn generate_scale_location(
     let y_range = checked_axis_range(0.0, y_max + y_pad, "y")?;
 
     let mut buffer = rgb_buffer(config.width, config.height)?;
+    let mut recorder = SvgRecorder::new(config.width, config.height);
 
     {
-        let root = BitMapBackend::with_buffer(&mut buffer, (config.width, config.height))
+        let root = FigureBackend::new(&mut buffer, &mut recorder, (config.width, config.height))
             .into_drawing_area();
         root.fill(&WHITE)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
@@ -1945,7 +2302,7 @@ fn generate_scale_location(
             .caption("Scale-Location", ("sans-serif", 24))
             .margin(10)
             .x_label_area_size(40)
-            .y_label_area_size(50)
+            .y_label_area_size(y_label_area(&y_range, 50, config.tick_font_size))
             .build_cartesian_2d(x_range, y_range)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
@@ -1982,7 +2339,8 @@ fn generate_scale_location(
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
     }
 
-    encode_rgb_to_png_base64(&buffer, config.width, config.height)
+    let png = encode_rgb_to_png_base64(&buffer, config.width, config.height)?;
+    Ok((png, recorder.finish()))
 }
 
 /// Generate Residuals vs Leverage plot.
@@ -1992,7 +2350,7 @@ fn generate_residuals_vs_leverage(
     cooks_distance: &[f64],
     n_params: usize,
     config: &ChartConfig,
-) -> Result<String, VisualizationError> {
+) -> Result<(String, Option<String>), VisualizationError> {
     let x_min = 0.0;
     let x_max = leverage.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     let y_min = standardized_residuals
@@ -2015,9 +2373,10 @@ fn generate_residuals_vs_leverage(
     let y_range = checked_axis_range(y_min - y_pad, y_max + y_pad, "y")?;
 
     let mut buffer = rgb_buffer(config.width, config.height)?;
+    let mut recorder = SvgRecorder::new(config.width, config.height);
 
     {
-        let root = BitMapBackend::with_buffer(&mut buffer, (config.width, config.height))
+        let root = FigureBackend::new(&mut buffer, &mut recorder, (config.width, config.height))
             .into_drawing_area();
         root.fill(&WHITE)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
@@ -2026,7 +2385,7 @@ fn generate_residuals_vs_leverage(
             .caption("Residuals vs Leverage", ("sans-serif", 24))
             .margin(10)
             .x_label_area_size(40)
-            .y_label_area_size(50)
+            .y_label_area_size(y_label_area(&y_range, 50, config.tick_font_size))
             .build_cartesian_2d(x_range, y_range)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
@@ -2098,7 +2457,8 @@ fn generate_residuals_vs_leverage(
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
     }
 
-    encode_rgb_to_png_base64(&buffer, config.width, config.height)
+    let png = encode_rgb_to_png_base64(&buffer, config.width, config.height)?;
+    Ok((png, recorder.finish()))
 }
 
 /// Calculate a simple smoothing line (local regression approximation).
@@ -2316,6 +2676,9 @@ pub(super) fn encode_rgb_to_png_base64(
 pub struct DendrogramResult {
     /// Base64-encoded PNG image
     pub image_base64: String,
+    /// Vector version of the image (SVG); None when it would be larger than
+    /// [`MAX_SVG_BYTES`](super::MAX_SVG_BYTES)
+    pub svg: Option<String>,
     /// Number of original samples
     pub n_samples: usize,
     /// Number of merges shown
@@ -2359,8 +2722,10 @@ pub fn dendrogram(
 
     // Create drawing area
     let mut buffer = rgb_buffer(width, height)?;
+    let mut recorder = SvgRecorder::new(width, height);
     {
-        let root = BitMapBackend::with_buffer(&mut buffer, (width, height)).into_drawing_area();
+        let root =
+            FigureBackend::new(&mut buffer, &mut recorder, (width, height)).into_drawing_area();
         root.fill(&WHITE)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
@@ -2523,9 +2888,11 @@ pub fn dendrogram(
     }
 
     let image_base64 = encode_rgb_to_png_base64(&buffer, width, height)?;
+    let svg = recorder.finish();
 
     Ok(DendrogramResult {
         image_base64,
+        svg,
         n_samples,
         n_merges,
         max_distance,
@@ -2609,9 +2976,111 @@ fn compute_leaf_order(
     order
 }
 
+/// The title and its font size for a chart `width` pixels wide: the configured size when the
+/// title fits (about 0.45 em per character), else a size down to 60% of it, and below that
+/// the title cut with an ellipsis.
+fn fitted_caption(title: &str, width: u32, font: u32) -> (String, u32) {
+    let avail = f64::from(width.saturating_sub(24).max(80));
+    let chars = title.chars().count().max(1) as f64;
+    let fits = |size: f64| chars * 0.45 * size <= avail;
+    let font_f = f64::from(font);
+    if fits(font_f) {
+        return (title.to_string(), font);
+    }
+    let size = (avail / (chars * 0.45)).floor().max((font_f * 0.6).ceil());
+    if fits(size) {
+        return (title.to_string(), size as u32);
+    }
+    let keep = (avail / (0.45 * size)).floor().max(4.0) as usize;
+    (p2a_text::ellipsize(title, keep).into_owned(), size as u32)
+}
+
+/// The width of the y label area: room for the widest tick label of `range` at `tick_font`
+/// (about 0.6 em per character, digits of the larger bound plus a sign and two decimals) and
+/// for the axis title beside it, and at least `base`.
+fn y_label_area<T: Copy + Into<f64>>(range: &std::ops::Range<T>, base: u32, tick_font: u32) -> u32 {
+    let (lo, hi): (f64, f64) = (range.start.into(), range.end.into());
+    let big = lo.abs().max(hi.abs());
+    let chars = if !big.is_finite() || big >= 1e7 || (big > 0.0 && big < 1e-3) {
+        8.0 // scientific notation, e.g. "1.25e7"
+    } else {
+        let digits = if big >= 1.0 {
+            big.log10().floor() + 1.0
+        } else {
+            1.0
+        };
+        digits + 3.0 + f64::from(u8::from(lo < 0.0))
+    };
+    let need = chars * 0.6 * f64::from(tick_font) + f64::from(tick_font) * 1.6 + 12.0;
+    base.max(need.ceil() as u32)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An RD plot chart draws; without binned means it is refused.
+    #[test]
+    fn rd_plot_chart_draws_and_needs_bins() {
+        let curve: Vec<(f64, f64)> = (0..50).map(|i| (-1.0 + f64::from(i) / 49.0, 0.1)).collect();
+        let right: Vec<(f64, f64)> = curve.iter().map(|(x, y)| (-x, y + 0.5)).collect();
+        let bins = [(-0.5, 0.2), (0.5, 0.7)];
+        assert!(rd_plot_chart(&bins, &curve, &right, 0.0, ChartConfig::default()).is_ok());
+        assert!(rd_plot_chart(&[], &curve, &right, 0.0, ChartConfig::default()).is_err());
+    }
+
+    /// Groups are drawn with a legend, counted together, and refused past twelve.
+    #[test]
+    fn grouped_scatter_counts_all_groups_and_caps_them() {
+        let group = |label: &str, shift: f64| {
+            let x: Vec<f64> = (0..20).map(f64::from).collect();
+            let y = x
+                .iter()
+                .map(|v| v * 0.5 + shift + (v * 1.7).sin())
+                .collect();
+            (label.to_string(), x, y)
+        };
+        let groups: Vec<_> = (0..5)
+            .map(|i| group(&format!("g{i}"), f64::from(i)))
+            .collect();
+        let result = scatter_plot_grouped(&groups, ChartConfig::default()).unwrap();
+        assert_eq!(result.n_points, 100);
+        assert!(result.svg.as_deref().is_some_and(|s| s.contains("g4")));
+        let one = scatter_plot(&groups[0].1, &groups[0].2, ChartConfig::default()).unwrap();
+        assert_eq!(one.n_points, 20);
+        let many: Vec<_> = (0..13).map(|i| group(&format!("g{i}"), 0.0)).collect();
+        assert!(scatter_plot_grouped(&many, ChartConfig::default()).is_err());
+    }
+
+    #[test]
+    fn long_titles_shrink_then_are_cut() {
+        // 32 px is ChartConfig's default title size
+        assert_eq!(
+            fitted_caption("Histogram", 800, 32),
+            ("Histogram".to_string(), 32)
+        );
+        let long = "Distribution of earnings in 1978 by treatment status, group and survey wave";
+        let (t, size) = fitted_caption(long, 800, 32);
+        assert_eq!(t, long);
+        assert!((20..32).contains(&size), "{size}");
+        let (t, size) = fitted_caption(&long.repeat(3), 800, 32);
+        assert_eq!(size, 20);
+        assert!(
+            t.ends_with("...") && t.chars().count() < long.len() * 3,
+            "{t}"
+        );
+    }
+
+    #[test]
+    fn y_label_area_widens_for_wide_tick_labels() {
+        // "0.25" at a 16 px font plus the axis title: wider than the old fixed 60 px
+        let narrow = y_label_area(&(0.0..1.0), 60, 16);
+        assert!((60..90).contains(&narrow), "{narrow}");
+        assert_eq!(y_label_area(&(0.0..1.0), 120, 16), 120);
+        let wide = y_label_area(&(-25000.0..250000.0), 60, 16);
+        assert!(wide > 100, "{wide}");
+        assert!(y_label_area(&(0u32..50), 50, 16) >= 50);
+    }
 
     #[test]
     fn category_label_names_only_category_positions() {
@@ -2686,6 +3155,103 @@ mod tests {
             e.contains("only p = 2 (one regressor and an intercept)"),
             "{e}"
         );
+    }
+
+    /// Every static chart has a vector version, and recording it leaves the PNG as the bitmap
+    /// backend alone draws it.
+    #[test]
+    fn charts_have_a_vector_version() {
+        let x = wavy(60);
+        let y: Vec<f64> = x.iter().map(|v| v * 0.5 + (v * 9.0).sin()).collect();
+        let mut config = ChartConfig::default();
+        config.title = Some("a < b & \"c\"".to_string());
+        let scatter = scatter_plot(&x, &y, config).unwrap().svg.unwrap();
+        assert!(scatter.starts_with("<svg ") && scatter.ends_with("</svg>"));
+        assert_eq!(scatter.matches("<circle").count(), 60);
+        assert!(scatter.contains(">a &lt; b &amp; &quot;c&quot;</text>"));
+        assert!(scatter.contains("rotate(270 ")); // the y-axis title
+        assert_eq!(
+            scatter.matches("<g ").count(),
+            scatter.matches("</g>").count()
+        );
+
+        let config = ChartConfig::default();
+        assert!(histogram(&x, None, config.clone()).unwrap().svg.is_some());
+        let r = residual_diagnostics(&x, &y, None, config).unwrap();
+        for svg in [
+            r.residuals_vs_fitted_svg,
+            r.qq_plot_svg,
+            r.scale_location_svg,
+            r.residuals_vs_leverage_svg,
+        ] {
+            assert!(svg.unwrap().contains("<circle"));
+        }
+    }
+
+    /// A gap ends a stretch of the band, and the band is in the vector version.
+    #[test]
+    fn bands_are_drawn_per_stretch() {
+        let x: Vec<f64> = (0..6).map(f64::from).collect();
+        let series = [("y".to_string(), x.clone(), wavy(6))];
+        let band = Band {
+            label: "b".into(),
+            x,
+            lower: vec![0.0, 0.0, f64::NAN, 0.0, 0.0, 0.0],
+            upper: vec![1.0; 6],
+        };
+        let r = line_chart_with_band(&series, Some(&band), ChartConfig::default()).unwrap();
+        assert_eq!(r.svg.unwrap().matches("Z\"/>").count(), 2);
+    }
+
+    /// A chart with too many shapes keeps its PNG and has no vector version.
+    #[test]
+    fn a_chart_too_large_for_svg_has_only_its_png() {
+        let x = wavy(60_000);
+        let y: Vec<f64> = x.iter().map(|v| v * 0.5 + (v * 9.0).sin()).collect();
+        let r = scatter_plot(&x, &y, ChartConfig::default()).unwrap();
+        assert!(r.svg.is_none());
+        assert!(!r.image_base64.is_empty());
+    }
+
+    #[test]
+    fn recording_does_not_change_the_bitmap() {
+        use plotters::coord::Shift;
+        use plotters::style::text_anchor::{HPos, Pos, VPos};
+        fn draw<B: DrawingBackend>(root: DrawingArea<B, Shift>) {
+            root.fill(&WHITE).unwrap();
+            root.draw(&Circle::new((60, 60), 9, RED.mix(0.6).filled()))
+                .unwrap();
+            root.draw(&Circle::new((60, 60), 20, BLUE.stroke_width(2)))
+                .unwrap();
+            root.draw(&Rectangle::new([(90, 80), (20, 10)], BLACK.mix(0.4)))
+                .unwrap();
+            root.draw(&PathElement::new(
+                [(3, 4), (70, 33), (200, -8)],
+                RED.stroke_width(3),
+            ))
+            .unwrap();
+            root.draw(&PathElement::new([(3, 90), (99, 40)], RED))
+                .unwrap();
+            root.draw(&Polygon::new([(5, 5), (30, 9), (9, 40)], BLUE.mix(0.2)))
+                .unwrap();
+            root.draw(&Pixel::new((7, 7), BLACK)).unwrap();
+            let style = ("sans-serif", 18)
+                .into_font()
+                .transform(FontTransform::Rotate270)
+                .color(&BLACK)
+                .pos(Pos::new(HPos::Right, VPos::Center));
+            root.draw(&Text::new("Values, β", (40, 50), style)).unwrap();
+            root.present().unwrap();
+        }
+        let (mut plain, mut recorded) = (vec![0u8; 120 * 100 * 3], vec![0u8; 120 * 100 * 3]);
+        draw(BitMapBackend::with_buffer(&mut plain, (120, 100)).into_drawing_area());
+        let mut recorder = SvgRecorder::new(120, 100);
+        draw(FigureBackend::new(&mut recorded, &mut recorder, (120, 100)).into_drawing_area());
+        assert!(plain == recorded);
+        let svg = recorder.finish().unwrap();
+        // plotters clamps (200, -8) to the area before any backend sees it.
+        assert!(svg.contains("M3 4L70 33L120 0"), "{svg}");
+        assert!(svg.contains("text-anchor=\"end\""), "{svg}");
     }
 
     #[test]

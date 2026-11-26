@@ -132,6 +132,14 @@ impl OllamaProvider {
                                 tool_calls: None,
                             });
                         }
+                        // The tool loop's note about the results, after them.
+                        if !msg.content.is_empty() {
+                            result.push(OllamaMessage {
+                                role: "user".to_string(),
+                                content: msg.content.clone(),
+                                tool_calls: None,
+                            });
+                        }
                     }
                 }
             }

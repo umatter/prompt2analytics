@@ -13,14 +13,23 @@ pub fn trigger_download(
     filename: &str,
     format: ExportFormat,
 ) -> Result<Option<String>, String> {
+    download_bytes(content.as_bytes(), filename, format.mime_type())
+}
+
+/// Downloads `bytes` as `filename` with MIME type `mime`.
+///
+/// On web the browser downloads the file (`Ok(None)`); on desktop it is
+/// written to the downloads folder and its path is returned.
+pub fn download_bytes(bytes: &[u8], filename: &str, mime: &str) -> Result<Option<String>, String> {
     #[cfg(target_arch = "wasm32")]
     {
-        trigger_download_web(content, filename, format).map(|()| None)
+        trigger_download_web(bytes, filename, mime).map(|()| None)
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     {
-        trigger_download_native(content, filename, format).map(Some)
+        let _ = mime;
+        trigger_download_native(bytes, filename).map(Some)
     }
 }
 
@@ -45,7 +54,7 @@ pub fn copy_to_clipboard(content: &str) -> Result<(), String> {
 // ============================================================================
 
 #[cfg(target_arch = "wasm32")]
-fn trigger_download_web(content: &str, filename: &str, format: ExportFormat) -> Result<(), String> {
+fn trigger_download_web(bytes: &[u8], filename: &str, mime: &str) -> Result<(), String> {
     use wasm_bindgen::JsCast;
 
     let window = web_sys::window().ok_or("No window object")?;
@@ -53,12 +62,12 @@ fn trigger_download_web(content: &str, filename: &str, format: ExportFormat) -> 
 
     // Create blob with content
     let blob_parts = js_sys::Array::new();
-    blob_parts.push(&wasm_bindgen::JsValue::from_str(content));
+    blob_parts.push(&js_sys::Uint8Array::from(bytes));
 
     let mut blob_options = web_sys::BlobPropertyBag::new();
-    blob_options.type_(format.mime_type());
+    blob_options.type_(mime);
 
-    let blob = web_sys::Blob::new_with_str_sequence_and_options(&blob_parts, &blob_options)
+    let blob = web_sys::Blob::new_with_u8_array_sequence_and_options(&blob_parts, &blob_options)
         .map_err(|e| format!("Failed to create blob: {:?}", e))?;
 
     // Create object URL
@@ -153,11 +162,7 @@ fn export_target(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn trigger_download_native(
-    content: &str,
-    filename: &str,
-    _format: ExportFormat,
-) -> Result<String, String> {
+fn trigger_download_native(bytes: &[u8], filename: &str) -> Result<String, String> {
     use std::io::Write;
 
     #[cfg(any(feature = "desktop", feature = "mobile"))]
@@ -172,7 +177,7 @@ fn trigger_download_native(
         .create_new(true)
         .open(&path)
         .map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
-    file.write_all(content.as_bytes())
+    file.write_all(bytes)
         .map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
     tracing::info!("Exported to: {}", path.display());
     Ok(path.display().to_string())
@@ -265,7 +270,9 @@ pub fn generate_filename(title: Option<&str>, format: ExportFormat) -> String {
         .map(sanitize_filename)
         .unwrap_or_else(|| "conversation".to_string());
 
-    let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+    // Local time, as the figure and table downloads name theirs (`exhibit_filename`), so the
+    // files of one session sort together; the export's own "Created" line stays in UTC.
+    let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
 
     format!("{}_{}.{}", base, timestamp, format.extension())
 }

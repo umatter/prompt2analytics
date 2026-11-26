@@ -1935,9 +1935,11 @@ impl AnalyticsServer {
             profiler.track_dataset(&id, &dataset);
         }
 
+        let code_notes = p2a_core::data::DataLoader::missing_code_notes(dataset.df());
+
         // Store the dataset
         let mut datasets = self.datasets.write().await;
-        datasets.insert(id.clone(), dataset);
+        let replaced = datasets.insert(id.clone(), dataset).is_some();
 
         let result = format!(
             "Successfully loaded dataset '{}'\n\n\
@@ -1963,6 +1965,13 @@ impl AnalyticsServer {
                 .join("\n")
         );
         let result = result + &stata_label_report(&labels, value_labels) + &stata_notes(&notes);
+        let mut code_notes = code_notes;
+        code_notes.extend(replaced_note(replaced, &id));
+        let result = if code_notes.is_empty() {
+            result
+        } else {
+            format!("{result}\n\nNote: {}", code_notes.join("; "))
+        };
 
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
@@ -2040,32 +2049,17 @@ impl AnalyticsServer {
 
     /// Upload and load a dataset from base64-encoded content.
     #[tool(
-        description = "Upload and load a dataset from base64-encoded content. Useful when the client cannot access the filesystem directly. Supports CSV (.csv), Parquet (.parquet, .pq), JSON Lines (.jsonl, .ndjson) and JSON record arrays (.json), chosen by the extension. A declared file_type must match the extension and be auto, csv or parquet."
+        description = "Upload and load a dataset from base64-encoded content. Useful when the client cannot access the filesystem directly. Supports CSV (.csv; separator and encoding are recognised), Parquet (.parquet, .pq), JSON Lines (.jsonl, .ndjson), JSON record arrays (.json), Stata (.dta), SAS (.sas7bdat) and, on a server without dataset quotas, Excel (.xlsx, .xls, .xlsb, .ods), chosen by the extension. A declared file_type must match the extension."
     )]
     pub async fn upload_dataset(
         &self,
         Parameters(request): Parameters<UploadDatasetRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let declared = match crate::tools::common::check_declared_file_type(
+        if let Err(e) = crate::tools::common::check_declared_file_type(
             request.file_type.as_deref(),
             &request.filename,
         ) {
-            Ok(declared) => declared,
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
-        };
-        // The extension check passed; the tool itself reads only some of the declared types.
-        if !matches!(
-            declared,
-            crate::tools::common::DeclaredFileType::Auto
-                | crate::tools::common::DeclaredFileType::Csv
-                | crate::tools::common::DeclaredFileType::Parquet
-        ) {
-            return Ok(CallToolResult::error(vec![Content::text(format!(
-                "upload_dataset cannot read file_type '{}': it reads CSV, Parquet, JSON Lines and \
-                 JSON uploads (load_dataset reads the other types from the data directory). \
-                 Accepted file_type values here: auto, csv, parquet",
-                declared.canonical()
-            ))]));
+            return Ok(CallToolResult::error(vec![Content::text(e)]));
         }
         use base64::Engine;
 
@@ -2092,29 +2086,22 @@ impl AnalyticsServer {
                 .to_string()
         });
 
+        // What the reader recognised (encoding, separator), for the answer
+        let mut notes: Vec<String> = Vec::new();
+
         // Load based on format
         let dataset = match extension.to_lowercase().as_str() {
-            "csv" => {
-                // Convert bytes to string and use from_csv_string
-                let csv_str = match String::from_utf8(decoded.clone()) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        return Ok(CallToolResult::error(vec![Content::text(format!(
-                            "Failed to decode CSV as UTF-8: {}",
-                            e
-                        ))]));
-                    }
-                };
-                match DataLoader::from_csv_string(&csv_str) {
-                    Ok(df) => Dataset::new(df),
-                    Err(e) => {
-                        return Ok(CallToolResult::error(vec![Content::text(format!(
-                            "Failed to parse CSV: {}",
-                            e
-                        ))]));
-                    }
+            "csv" => match DataLoader::load_csv_bytes(&decoded) {
+                Ok((df, read)) => {
+                    notes = read;
+                    Dataset::new(df)
                 }
-            }
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Failed to parse CSV: {e}"
+                    ))]));
+                }
+            },
             "jsonl" | "ndjson" | "json" => {
                 let lines = matches!(extension.to_lowercase().as_str(), "jsonl" | "ndjson");
                 let what = if lines { "JSON Lines" } else { "JSON" };
@@ -2164,10 +2151,42 @@ impl AnalyticsServer {
                     }
                 }
             }
+            "xlsx" | "xls" | "xlsb" | "ods" => {
+                // A workbook's decoded size is not known before it is decoded, so a call under
+                // dataset quotas cannot bound it.
+                if session::dataset_admission_active() {
+                    return Ok(CallToolResult::error(vec![Content::text(
+                        "This server does not read uploaded Excel workbooks. Save the sheet as CSV \
+                         and upload that.",
+                    )]));
+                }
+                match DataLoader::load_excel_bytes(&decoded) {
+                    Ok(df) => Dataset::new(df),
+                    Err(e) => {
+                        return Ok(CallToolResult::error(vec![Content::text(format!(
+                            "Failed to read the workbook: {e}"
+                        ))]));
+                    }
+                }
+            }
+            "dta" | "sas7bdat" => {
+                let read = if extension.eq_ignore_ascii_case("dta") {
+                    DataLoader::load_stata_bytes(&decoded)
+                } else {
+                    DataLoader::load_sas_bytes(&decoded)
+                };
+                match read {
+                    Ok(df) => Dataset::new(df),
+                    Err(e) => {
+                        return Ok(CallToolResult::error(vec![Content::text(format!(
+                            "Failed to read the file: {e}"
+                        ))]));
+                    }
+                }
+            }
             other => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Unsupported file format '{}'. Upload supports CSV (.csv), Parquet (.parquet, .pq), JSON Lines (.jsonl, .ndjson) and JSON record arrays (.json).",
-                    other
+                    "Unsupported file format '{other}'. Upload supports CSV (.csv), Parquet (.parquet, .pq), JSON Lines (.jsonl, .ndjson), JSON record arrays (.json), Stata (.dta), SAS (.sas7bdat) and Excel (.xlsx, .xls, .xlsb, .ods).",
                 ))]));
             }
         };
@@ -2177,7 +2196,7 @@ impl AnalyticsServer {
 
         // Store
         let mut datasets = self.datasets.write().await;
-        datasets.insert(id.clone(), dataset);
+        let replaced = datasets.insert(id.clone(), dataset).is_some();
 
         let result = format!(
             "Successfully uploaded dataset '{}'\n\n\
@@ -2196,6 +2215,12 @@ impl AnalyticsServer {
                 .join("\n")
         );
 
+        notes.extend(replaced_note(replaced, &id));
+        let result = if notes.is_empty() {
+            result
+        } else {
+            format!("{result}\n\nNote: {}", notes.join("; "))
+        };
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
 
@@ -2229,7 +2254,7 @@ impl AnalyticsServer {
         let info: DatasetInfo = (&dataset).into();
 
         let mut datasets = self.datasets.write().await;
-        datasets.insert(request.name.clone(), dataset);
+        let replaced = datasets.insert(request.name.clone(), dataset).is_some();
 
         let result = format!(
             "Successfully created dataset '{}'\n\n\
@@ -2244,6 +2269,10 @@ impl AnalyticsServer {
                 .collect::<Vec<_>>()
                 .join("\n")
         );
+        let result = match replaced_note(replaced, &request.name) {
+            Some(note) => format!("{result}\n\nNote: {note}"),
+            None => result,
+        };
 
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
@@ -2529,6 +2558,11 @@ fn stata_label_report(
         ));
     }
     out
+}
+
+/// The note for a load that replaced a dataset of the same name.
+fn replaced_note(replaced: bool, name: &str) -> Option<String> {
+    replaced.then(|| format!("it replaced the dataset '{name}' that was loaded before"))
 }
 
 /// The notes of a Stata load ("Notes:" and one line each); empty when there are none.

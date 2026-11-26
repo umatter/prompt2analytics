@@ -16,7 +16,7 @@ use futures::future::{LocalBoxFuture, Shared};
 use crate::api::api;
 
 /// Information about a loaded dataset
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DatasetInfo {
     pub name: String,
     pub rows: usize,
@@ -204,6 +204,12 @@ impl SessionState {
     pub fn clear_datasets(&mut self) {
         self.loaded_datasets.clear();
     }
+
+    /// Whether `datasets`, the server's list for the session, differs from
+    /// the datasets this page knows of (after a reload it knows none).
+    pub fn datasets_differ(&self, datasets: &[DatasetInfo]) -> bool {
+        self.loaded_datasets != datasets
+    }
 }
 
 /// The tab's session id, created on first need. Concurrent callers (a send
@@ -257,12 +263,50 @@ pub fn session_lost_text(err: &str) -> bool {
     }
 }
 
-/// Storage key of the native app's session id.
+/// Storage key of the session id.
 const SESSION_KEY: &str = "p2a-session";
 
-/// Whether this build keeps its session id across restarts (desktop and
-/// mobile; the web build never stores it).
-const KEEPS_SESSION: bool = cfg!(any(feature = "desktop", feature = "mobile"));
+/// Storage key of the conversation that was open.
+const CONVERSATION_KEY: &str = "p2a-conversation";
+
+/// Whether this build keeps its session id: desktop and mobile across
+/// restarts, the web build for as long as the browser tab is open (a reload
+/// keeps the session and its conversations; closing the tab ends it, so
+/// nothing is left behind on a shared computer).
+const KEEPS_SESSION: bool = cfg!(any(
+    target_arch = "wasm32",
+    feature = "desktop",
+    feature = "mobile"
+));
+
+/// Remember `id` as the open conversation (or none), where the session id
+/// is kept.
+pub fn remember_conversation(id: Option<&str>) {
+    if !KEEPS_SESSION {
+        return;
+    }
+    use crate::platform::StorageBackend as _;
+    let storage = crate::platform::create_session_storage();
+    let result = match id {
+        Some(id) => storage.set(CONVERSATION_KEY, &id),
+        None => storage.remove(CONVERSATION_KEY),
+    };
+    if let Err(e) = result {
+        tracing::warn!("Cannot store the open conversation: {}", e);
+    }
+}
+
+/// The conversation that was open, if one was remembered.
+pub fn stored_conversation() -> Option<String> {
+    if !KEEPS_SESSION {
+        return None;
+    }
+    use crate::platform::StorageBackend as _;
+    crate::platform::create_session_storage()
+        .get::<String>(CONVERSATION_KEY)
+        .ok()
+        .filter(|id| !id.is_empty())
+}
 
 /// Store `id` as the session to restore at the next start, when `native`.
 pub fn remember_session_in<S: crate::platform::StorageBackend>(
@@ -294,13 +338,14 @@ pub fn forget_stored_session_in<S: crate::platform::StorageBackend>(storage: &S)
 
 fn remember_session(id: &str) {
     if KEEPS_SESSION {
-        remember_session_in(&crate::platform::create_storage(), true, id);
+        remember_session_in(&crate::platform::create_session_storage(), true, id);
     }
 }
 
 fn forget_stored_session() {
     if KEEPS_SESSION {
-        forget_stored_session_in(&crate::platform::create_storage());
+        forget_stored_session_in(&crate::platform::create_session_storage());
+        remember_conversation(None);
     }
 }
 
@@ -332,7 +377,7 @@ pub(crate) fn restore_refusal(err: &str) -> RestoreRefusal {
 async fn restore_or_create() -> Result<String, String> {
     let client = api();
     let stored = if KEEPS_SESSION {
-        stored_session_in(&crate::platform::create_storage())
+        stored_session_in(&crate::platform::create_session_storage())
     } else {
         None
     };
@@ -360,14 +405,14 @@ async fn restore_or_create() -> Result<String, String> {
     Ok(id)
 }
 
-/// Native start: restore the stored session through the gate (a send or
+/// Start: restore the stored session through the gate (a send or
 /// `+` during the restore waits for it instead of creating a second
 /// session). The server adopts a stored session within its lifetime; one
 /// it says is gone is forgotten and a new session is created; any other
 /// failure keeps the stored id and the next use tries again. Without a
 /// stored id nothing happens: the first use creates the session.
 pub async fn restore_session(session: Signal<SessionState>) {
-    if !KEEPS_SESSION || stored_session_in(&crate::platform::create_storage()).is_none() {
+    if !KEEPS_SESSION || stored_session_in(&crate::platform::create_session_storage()).is_none() {
         return;
     }
     if let Err(e) = ensure_session(session).await {
@@ -557,11 +602,11 @@ mod tests {
         forget_stored_session_in(&storage);
         assert_eq!(stored_session_in(&storage), None);
 
-        // The web build never stores the id.
-        let web = MemoryStorage::default();
-        remember_session_in(&web, false, "s-1");
-        assert!(web.0.borrow().is_empty());
-        assert_eq!(stored_session_in(&web), None);
+        // A build that does not keep its session stores nothing.
+        let none = MemoryStorage::default();
+        remember_session_in(&none, false, "s-1");
+        assert!(none.0.borrow().is_empty());
+        assert_eq!(stored_session_in(&none), None);
     }
 
     #[test]
@@ -770,3 +815,14 @@ mod tests {
         });
     }
 }
+
+/// Asks the chat panel to open the add-data dialog: the dataset sidebar's
+/// "Add data" button bumps the count, the chat panel (which owns the
+/// dialog) opens it on every change.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AddDataRequest(pub Signal<u64>);
+
+/// Asks the chat panel to open the settings dialog on its model tab, the
+/// same way: the welcome screen's "Connect a model" bumps the count.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ConnectModelRequest(pub Signal<u64>);

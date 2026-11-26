@@ -91,11 +91,12 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::data::Dataset;
+use crate::data::columns::MissingSummary;
 use crate::errors::{EconError, EconResult, EstimationWarning};
 use crate::linalg::DesignMatrix;
 use crate::linalg::solve::{LM_QR_TOL, least_squares};
 use crate::options::Choices;
-use crate::regression::ols::{OlsSolve, solve_ols};
+use crate::regression::ols::{OlsSolve, complete_sample, solve_ols, write_missing_line};
 use crate::regression::{CovarianceType, run_ols};
 use crate::resource;
 use crate::traits::chi_squared_p_value;
@@ -127,6 +128,10 @@ pub struct DiagnosticsResult {
     pub n_params: usize,
     /// Any warnings generated during diagnostics
     pub warnings: Vec<String>,
+    /// Rows dropped because of a missing value in the response or a regressor (as `lm`'s
+    /// `na.omit`); absent from JSON when none was.
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
 }
 
 /// A statistical test result with statistic and p-value.
@@ -220,6 +225,10 @@ pub struct BgTestResult {
     pub significant_at_05: bool,
     /// Interpretation of the result
     pub interpretation: String,
+    /// Rows dropped because of a missing value in the response or a regressor (as `lm`'s
+    /// `na.omit`); absent from JSON when none was.
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
 }
 
 /// Type of variables to use for RESET test augmentation.
@@ -291,6 +300,10 @@ pub struct ResetTestResult {
     /// Absent from JSON when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    /// Rows dropped because of a missing value in the response or a regressor (as `lm`'s
+    /// `na.omit`); absent from JSON when none was.
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
 }
 
 /// Result from the Wald test for comparing nested models.
@@ -327,6 +340,10 @@ pub struct WaldTestResult {
     /// empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    /// Rows dropped because of a missing value in the response or a regressor (as `lm`'s
+    /// `na.omit`); absent from JSON when none was.
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
 }
 
 impl ResultNotes for WaldTestResult {
@@ -358,6 +375,7 @@ impl std::fmt::Display for WaldTestResult {
         writeln!(f, "Number of restrictions: {}", self.df1)?;
         writeln!(f)?;
         writeln!(f, "{}", self.interpretation)?;
+        write_missing_line(f, &self.missing, false)?;
         f.write_str(&notes_text(self))
     }
 }
@@ -387,6 +405,7 @@ impl std::fmt::Display for ResetTestResult {
         writeln!(f, "Augmented R²: {:.4}", self.r2_augmented)?;
         writeln!(f)?;
         writeln!(f, "{}", self.interpretation)?;
+        write_missing_line(f, &self.missing, false)?;
         f.write_str(&notes_text(self))
     }
 }
@@ -422,6 +441,7 @@ impl std::fmt::Display for BgTestResult {
         writeln!(f, "Auxiliary R²: {:.4}", self.r_squared)?;
         writeln!(f)?;
         writeln!(f, "{}", self.interpretation)?;
+        write_missing_line(f, &self.missing, true)?;
         Ok(())
     }
 }
@@ -515,6 +535,7 @@ impl fmt::Display for DiagnosticsResult {
             }
         }
 
+        write_missing_line(f, &self.missing, true)?;
         if !self.warnings.is_empty() {
             writeln!(f)?;
             writeln!(f, "Warnings:")?;
@@ -541,6 +562,9 @@ pub fn run_diagnostics(
     y_col: &str,
     x_cols: &[&str],
 ) -> EconResult<DiagnosticsResult> {
+    // The rows complete in y and x (lm's na.omit)
+    let (sample, missing) = complete_sample(dataset, y_col, x_cols, "regression diagnostics")?;
+    let dataset = sample.as_ref();
     let df = dataset.df();
     let mut warnings = Vec::new();
 
@@ -593,6 +617,7 @@ pub fn run_diagnostics(
         n_obs: n,
         n_params: k,
         warnings,
+        missing,
     })
 }
 
@@ -1082,7 +1107,9 @@ pub fn reset_test(
     // Validate powers before fitting anything
     normalize_reset_powers(powers)?;
 
-    // Step 1: Run original OLS regression
+    // Step 1: Run original OLS regression on the rows complete in y and x (lm's na.omit)
+    let (sample, missing) = complete_sample(dataset, y_col, x_cols, "RESET test")?;
+    let dataset = sample.as_ref();
     let ols_result = run_ols(dataset, y_col, x_cols, true, CovarianceType::Standard)?;
 
     // Step 2: The design and y as run_ols read them
@@ -1093,7 +1120,9 @@ pub fn reset_test(
         DesignMatrix::extract_column(df, y_col).map_err(|e| EconError::Internal(e.to_string()))?;
 
     // Steps 3-4: augmentation, augmented fit and F test (one implementation)
-    reset_test_from_ols(&ols_result, &design.data.view(), &y, powers, reset_type)
+    let mut result = reset_test_from_ols(&ols_result, &design.data.view(), &y, powers, reset_type)?;
+    result.missing = missing;
+    Ok(result)
 }
 
 /// lmtest's first principal component of the regressors `z` (n x p): `v1` is the
@@ -1427,6 +1456,7 @@ pub fn reset_test_from_ols(
         significant_at_05: significant,
         interpretation,
         warnings,
+        missing: MissingSummary::default(),
     })
 }
 
@@ -1532,12 +1562,17 @@ pub fn wald_test(
     // Run both regressions
     let u_cols: Vec<&str> = unrestricted.iter().map(String::as_str).collect();
     let r_cols: Vec<&str> = restricted.iter().map(String::as_str).collect();
+    // Both models on the rows complete in y and the unrestricted model's regressors (the
+    // restricted ones are among them): lmtest::waldtest refuses fits on different rows.
+    let (sample, missing) = complete_sample(dataset, y_col, &u_cols, "Wald test")?;
+    let dataset = sample.as_ref();
     let ols_unrestricted = run_ols(dataset, y_col, &u_cols, true, CovarianceType::Standard)?;
     let ols_restricted = run_ols(dataset, y_col, &r_cols, true, CovarianceType::Standard)?;
 
     let mut result = wald_test_from_ols(&ols_unrestricted, &ols_restricted, use_f_test)?;
     warnings.append(&mut result.warnings);
     result.warnings = warnings;
+    result.missing = missing;
     Ok(result)
 }
 
@@ -1645,6 +1680,7 @@ pub fn wald_test_from_ols(
         significant_at_05: significant,
         interpretation,
         warnings,
+        missing: MissingSummary::default(),
     })
 }
 
@@ -1722,7 +1758,9 @@ pub fn bg_test(
         });
     }
 
-    // Step 1: Run original OLS regression
+    // Step 1: Run original OLS regression on the rows complete in y and x (lm's na.omit)
+    let (sample, missing) = complete_sample(dataset, y_col, x_cols, "Breusch-Godfrey test")?;
+    let dataset = sample.as_ref();
     let ols_result = run_ols(dataset, y_col, x_cols, true, CovarianceType::Standard)?;
 
     let residuals = &ols_result.resid;
@@ -1826,6 +1864,7 @@ pub fn bg_test(
         lag_coefficients: lag_coefs,
         significant_at_05: significant,
         interpretation,
+        missing,
     })
 }
 
@@ -1959,6 +1998,7 @@ pub fn bg_test_from_ols(
         lag_coefficients: lag_coefs,
         significant_at_05: significant,
         interpretation,
+        missing: MissingSummary::default(),
     })
 }
 
@@ -1994,6 +2034,10 @@ pub struct HarveyCollierResult {
     pub significant_at_05: bool,
     /// Interpretation of results
     pub interpretation: String,
+    /// Rows dropped because of a missing value in the response or a regressor (as `lm`'s
+    /// `na.omit`); absent from JSON when none was.
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
 }
 
 impl fmt::Display for HarveyCollierResult {
@@ -2014,7 +2058,8 @@ impl fmt::Display for HarveyCollierResult {
         writeln!(f, "Standard error: {:.6}", self.se_mean)?;
         writeln!(f, "Number of recursive residuals: {}", self.n_recursive)?;
         writeln!(f)?;
-        writeln!(f, "{}", self.interpretation)
+        writeln!(f, "{}", self.interpretation)?;
+        write_missing_line(f, &self.missing, true)
     }
 }
 
@@ -2180,14 +2225,18 @@ pub fn harvey_collier_test(
     y_col: &str,
     x_cols: &[&str],
 ) -> EconResult<HarveyCollierResult> {
-    let df = dataset.df();
+    // The rows complete in y and x (lm's na.omit)
+    let (sample, missing) = complete_sample(dataset, y_col, x_cols, "Harvey-Collier test")?;
+    let df = sample.df();
 
     // Build design matrix with intercept
     let design = DesignMatrix::from_dataframe(df, x_cols, true)?;
     let x = design.view();
     let y = DesignMatrix::extract_column(df, y_col)?;
 
-    harvey_collier_test_from_arrays(&x.view(), &y)
+    let mut result = harvey_collier_test_from_arrays(&x.view(), &y)?;
+    result.missing = missing;
+    Ok(result)
 }
 
 /// Perform Harvey-Collier test from pre-computed arrays.
@@ -2245,6 +2294,7 @@ pub fn harvey_collier_test_from_arrays(
         se_mean: se,
         significant_at_05: significant,
         interpretation,
+        missing: MissingSummary::default(),
     })
 }
 

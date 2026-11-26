@@ -68,6 +68,42 @@ pub fn status_label(success: Option<bool>, finished: bool) -> &'static str {
     }
 }
 
+/// The arguments of a call on one line, as the CLI would print them:
+/// `key=value` pairs in the map's order, strings bare unless they hold a
+/// space (then quoted), arrays joined by commas, nested objects as `{…}`;
+/// cut to `max_chars` characters with `...`.
+pub fn args_summary(arguments: &serde_json::Value, max_chars: usize) -> String {
+    fn scalar(v: &serde_json::Value) -> String {
+        match v {
+            serde_json::Value::String(s) if s.contains(char::is_whitespace) || s.is_empty() => {
+                format!("\"{s}\"")
+            }
+            serde_json::Value::String(s) => s.clone(),
+            serde_json::Value::Array(items) => {
+                items.iter().map(scalar).collect::<Vec<_>>().join(",")
+            }
+            serde_json::Value::Object(_) => "{…}".to_string(),
+            other => other.to_string(),
+        }
+    }
+    let line = match arguments {
+        serde_json::Value::Object(map) => map
+            .iter()
+            .map(|(k, v)| format!("{k}={}", scalar(v)))
+            .collect::<Vec<_>>()
+            .join(" "),
+        serde_json::Value::Null => String::new(),
+        other => scalar(other),
+    };
+    p2a_text::ellipsize(&line, max_chars).into_owned()
+}
+
+/// The first line of a failed call's result, shown under its tree line
+/// while the call is collapsed.
+fn first_line(result: &str) -> &str {
+    result.trim().lines().next().unwrap_or("")
+}
+
 /// Props for ToolCallDisplay
 #[derive(Props, Clone, PartialEq)]
 pub struct ToolCallProps {
@@ -86,170 +122,73 @@ pub struct ToolCallProps {
     /// Whether the call has ended (with no outcome: "status unknown")
     #[props(default)]
     pub finished: bool,
+    /// Whether this is the last call of its message (drawn `└─`, not `├─`)
+    #[props(default)]
+    pub last: bool,
 }
 
-/// ToolCall display component - expandable card showing tool invocation
+/// ToolCall display component - one line of the tool-call process tree,
+/// opening to the call's arguments and result
 #[component]
 pub fn ToolCallDisplay(props: ToolCallProps) -> Element {
     let mut is_expanded = use_signal(|| false);
     let mut result_expanded = use_signal(|| false);
     let mut copied = use_signal(|| false);
 
-    let (status_bg, status_text, status_icon) = match props.success {
-        Some(true) => (
-            "bg-green-100 dark:bg-green-900/30",
-            "text-green-700 dark:text-green-400",
-            rsx! {
-                svg {
-                    class: "w-4 h-4",
-                    fill: "none",
-                    stroke: "currentColor",
-                    view_box: "0 0 24 24",
-                    path {
-                        stroke_linecap: "round",
-                        stroke_linejoin: "round",
-                        stroke_width: "2",
-                        d: "M5 13l4 4L19 7"
-                    }
-                }
-            },
-        ),
-        Some(false) => (
-            "bg-red-100 dark:bg-red-900/30",
-            "text-red-700 dark:text-red-400",
-            rsx! {
-                svg {
-                    class: "w-4 h-4",
-                    fill: "none",
-                    stroke: "currentColor",
-                    view_box: "0 0 24 24",
-                    path {
-                        stroke_linecap: "round",
-                        stroke_linejoin: "round",
-                        stroke_width: "2",
-                        d: "M6 18L18 6M6 6l12 12"
-                    }
-                }
-            },
-        ),
-        // Ended without an outcome (an older server sends none).
-        None if props.finished => (
-            "bg-gray-100 dark:bg-gray-700",
-            "text-gray-600 dark:text-gray-300",
-            rsx! {
-                svg {
-                    class: "w-4 h-4",
-                    fill: "none",
-                    stroke: "currentColor",
-                    view_box: "0 0 24 24",
-                    path {
-                        stroke_linecap: "round",
-                        stroke_linejoin: "round",
-                        stroke_width: "2",
-                        d: "M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
-                    }
-                }
-            },
-        ),
-        None => (
-            "bg-orange-100 dark:bg-orange-900/30",
-            "text-orange-700 dark:text-orange-400",
-            rsx! {
-                svg {
-                    class: "w-4 h-4 animate-spin",
-                    fill: "none",
-                    view_box: "0 0 24 24",
-                    circle {
-                        class: "opacity-25",
-                        cx: "12",
-                        cy: "12",
-                        r: "10",
-                        stroke: "currentColor",
-                        stroke_width: "4"
-                    }
-                    path {
-                        class: "opacity-75",
-                        fill: "currentColor",
-                        d: "M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
-                    }
-                }
-            },
-        ),
+    let status_word = status_label(props.success, props.finished);
+    let args_pretty = serde_json::to_string_pretty(&props.arguments).unwrap_or_default();
+    let args_line = args_summary(&props.arguments, 80);
+    let expanded = *is_expanded.read();
+    let branch = if props.last { "└─ " } else { "├─ " };
+    let stem_class = if props.last {
+        "k-call-body k-call-last"
+    } else {
+        "k-call-body"
+    };
+    let failure_line = match (props.success, props.result.as_deref()) {
+        (Some(false), Some(r)) if !expanded => Some(first_line(r).to_string()),
+        _ => None,
     };
 
-    let status_word = status_label(props.success, props.finished);
-    let unknown = props.success.is_none() && props.finished;
-    let args_pretty = serde_json::to_string_pretty(&props.arguments).unwrap_or_default();
-    let expanded = *is_expanded.read();
-
     rsx! {
-        div { class: "my-3 rounded-lg border border-gray-300 dark:border-gray-700 overflow-hidden shadow-sm hover:shadow-md transition-shadow bg-white dark:bg-gray-800",
-            // Header (clickable)
+        div { class: "k-call",
+            // The tree line (clickable)
             button {
-                class: "w-full px-4 py-3 flex items-center justify-between {status_bg} cursor-pointer",
+                class: "k-call-line",
+                aria_expanded: if expanded { "true" } else { "false" },
+                title: "{props.name}: {status_word}",
                 onclick: move |_| {
                     let current = *is_expanded.read();
                     is_expanded.set(!current);
                 },
-
-                div { class: "flex items-center gap-3",
-                    // Status icon
-                    span { class: "{status_text}", title: "{status_word}",
-                        {status_icon}
-                    }
-                    // Tool name
-                    span { class: "font-medium text-gray-900 dark:text-white",
-                        "{props.name}"
-                    }
-                    // Small badge showing it's a tool
-                    span { class: "px-2 py-0.5 text-xs font-medium rounded bg-orange-100 dark:bg-orange-800 text-orange-700 dark:text-orange-300",
-                        "tool"
-                    }
-                    if unknown {
-                        span { class: "text-xs text-gray-500 dark:text-gray-400", "{status_word}" }
-                    }
+                span { class: "g", "{branch}" }
+                span { class: "tn", "{props.name}" }
+                if !args_line.is_empty() {
+                    span { class: "k-call-args", "{args_line}" }
                 }
+                span { class: "k-lead", aria_hidden: "true" }
+                match (props.success, props.finished) {
+                    (Some(true), _) => rsx! { span { class: "k-call-status", "done" } },
+                    (Some(false), _) => rsx! { span { class: "k-call-status bad", "failed" } },
+                    (None, true) => rsx! { span { class: "k-call-status g", "status unknown" } },
+                    (None, false) => rsx! { span { class: "k-call-status run k-spin", " running" } },
+                }
+            }
 
-                // Expand/collapse icon
-                svg {
-                    class: "w-5 h-5 text-gray-500 transition-transform duration-200",
-                    class: if expanded { "rotate-180" } else { "" },
-                    fill: "none",
-                    stroke: "currentColor",
-                    view_box: "0 0 24 24",
-                    path {
-                        stroke_linecap: "round",
-                        stroke_linejoin: "round",
-                        stroke_width: "2",
-                        d: "M19 9l-7 7-7-7"
-                    }
+            // A failed call's error, while collapsed
+            if let Some(ref why) = failure_line {
+                div { class: "{stem_class}",
+                    span { class: "g", "└ " }
+                    span { class: "k-why", "{why}" }
                 }
             }
 
             // Content (expandable)
             if expanded {
-                div { class: "px-4 py-3 bg-gray-50 dark:bg-gray-900 border-t border-gray-200 dark:border-gray-700",
+                div { class: "{stem_class}",
                     // Arguments section
-                    div { class: "mb-4",
-                        div { class: "flex items-center gap-2 mb-2",
-                            svg {
-                                class: "w-4 h-4 text-gray-400",
-                                fill: "none",
-                                stroke: "currentColor",
-                                view_box: "0 0 24 24",
-                                path {
-                                    stroke_linecap: "round",
-                                    stroke_linejoin: "round",
-                                    stroke_width: "2",
-                                    d: "M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z"
-                                }
-                            }
-                            span { class: "text-sm font-medium text-gray-600 dark:text-gray-400", "Arguments" }
-                        }
-                        pre { class: "text-sm bg-gray-50 dark:bg-gray-800 p-3 rounded-lg overflow-x-auto font-mono text-gray-800 dark:text-gray-200",
-                            "{args_pretty}"
-                        }
-                    }
+                    div { class: "k-call-sec", "Arguments" }
+                    pre { class: "k-call-pre", "{args_pretty}" }
 
                     // Result section (if available)
                     if let Some(ref result) = props.result {
@@ -304,142 +243,54 @@ pub fn ToolCallDisplay(props: ToolCallProps) -> Element {
                                 }
                             };
 
+                            let shown = match format {
+                                ResultFormat::Json => {
+                                    // Try to pretty-print JSON
+                                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&display_text) {
+                                        serde_json::to_string_pretty(&parsed).unwrap_or_else(|_| display_text.clone())
+                                    } else {
+                                        display_text.clone()
+                                    }
+                                }
+                                _ => display_text.clone(),
+                            };
+                            let pre_class = match format {
+                                // A table keeps its columns: scroll, do not wrap.
+                                ResultFormat::Table => "k-call-pre k-call-result k-call-nowrap",
+                                _ => "k-call-pre k-call-result",
+                            };
+
                             rsx! {
                                 div {
-                                    // Header with copy button
-                                    div { class: "flex items-center justify-between mb-2",
-                                        div { class: "flex items-center gap-2",
-                                            svg {
-                                                class: "w-4 h-4 text-gray-400",
-                                                fill: "none",
-                                                stroke: "currentColor",
-                                                view_box: "0 0 24 24",
-                                                path {
-                                                    stroke_linecap: "round",
-                                                    stroke_linejoin: "round",
-                                                    stroke_width: "2",
-                                                    d: "M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"
-                                                }
-                                            }
-                                            span { class: "text-sm font-medium text-gray-600 dark:text-gray-400", "Result" }
-                                            // Format badge
-                                            span {
-                                                class: match format {
-                                                    ResultFormat::Json => "px-1.5 py-0.5 text-xs rounded bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300",
-                                                    ResultFormat::Table => "px-1.5 py-0.5 text-xs rounded bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300",
-                                                    ResultFormat::PlainText => "px-1.5 py-0.5 text-xs rounded bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-400",
-                                                },
-                                                match format {
-                                                    ResultFormat::Json => "JSON",
-                                                    ResultFormat::Table => "Table",
-                                                    ResultFormat::PlainText => "Text",
-                                                }
+                                    // Header: label, format and copy
+                                    div { class: "k-call-sec",
+                                        span { "Result" }
+                                        span { class: "g",
+                                            match format {
+                                                ResultFormat::Json => "json",
+                                                ResultFormat::Table => "table",
+                                                ResultFormat::PlainText => "text",
                                             }
                                         }
-                                        // Copy button
                                         button {
-                                            class: "p-1.5 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 rounded hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors",
+                                            class: "k-call-act",
                                             onclick: handle_copy,
                                             title: "Copy result",
-                                            if *copied.read() {
-                                                svg {
-                                                    class: "w-4 h-4 text-green-500",
-                                                    fill: "none",
-                                                    stroke: "currentColor",
-                                                    view_box: "0 0 24 24",
-                                                    path {
-                                                        stroke_linecap: "round",
-                                                        stroke_linejoin: "round",
-                                                        stroke_width: "2",
-                                                        d: "M5 13l4 4L19 7"
-                                                    }
-                                                }
-                                            } else {
-                                                svg {
-                                                    class: "w-4 h-4",
-                                                    fill: "none",
-                                                    stroke: "currentColor",
-                                                    view_box: "0 0 24 24",
-                                                    path {
-                                                        stroke_linecap: "round",
-                                                        stroke_linejoin: "round",
-                                                        stroke_width: "2",
-                                                        d: "M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3"
-                                                    }
-                                                }
-                                            }
+                                            if *copied.read() { "copied" } else { "copy" }
                                         }
                                     }
 
-                                    // Result content with format-specific styling
-                                    div { class: "relative",
-                                        match format {
-                                            ResultFormat::Json => rsx! {
-                                                pre { class: "text-sm bg-slate-800 dark:bg-slate-900 p-3 rounded-lg overflow-x-auto font-mono text-slate-200 whitespace-pre-wrap max-h-96 overflow-y-auto",
-                                                    // Try to pretty-print JSON
-                                                    {
-                                                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&display_text) {
-                                                            serde_json::to_string_pretty(&parsed).unwrap_or_else(|_| display_text.clone())
-                                                        } else {
-                                                            display_text.clone()
-                                                        }
-                                                    }
-                                                }
-                                            },
-                                            ResultFormat::Table => rsx! {
-                                                div { class: "overflow-x-auto",
-                                                    pre { class: "text-sm bg-gray-50 dark:bg-gray-800 p-3 rounded-lg font-mono text-gray-800 dark:text-gray-200 whitespace-pre max-h-96 overflow-y-auto",
-                                                        "{display_text}"
-                                                    }
-                                                }
-                                            },
-                                            ResultFormat::PlainText => rsx! {
-                                                pre { class: "text-sm bg-gray-50 dark:bg-gray-800 p-3 rounded-lg overflow-x-auto font-mono text-gray-800 dark:text-gray-200 whitespace-pre-wrap max-h-96 overflow-y-auto",
-                                                    "{display_text}"
-                                                }
-                                            },
-                                        }
+                                    pre { class: "{pre_class}", "{shown}" }
 
-                                        // Show more/less button
-                                        if has_more {
-                                            div { class: "mt-2 flex justify-center",
-                                                button {
-                                                    class: "px-3 py-1 text-xs font-medium text-teal-600 dark:text-teal-400 bg-teal-50 dark:bg-teal-900/30 rounded-full hover:bg-teal-100 dark:hover:bg-teal-900/50 transition-colors flex items-center gap-1",
-                                                    onclick: move |_| {
-                                                        let current = *result_expanded.read();
-                                                        result_expanded.set(!current);
-                                                    },
-                                                    if is_result_expanded {
-                                                        svg {
-                                                            class: "w-3 h-3",
-                                                            fill: "none",
-                                                            stroke: "currentColor",
-                                                            view_box: "0 0 24 24",
-                                                            path {
-                                                                stroke_linecap: "round",
-                                                                stroke_linejoin: "round",
-                                                                stroke_width: "2",
-                                                                d: "M5 15l7-7 7 7"
-                                                            }
-                                                        }
-                                                        "Show less"
-                                                    } else {
-                                                        svg {
-                                                            class: "w-3 h-3",
-                                                            fill: "none",
-                                                            stroke: "currentColor",
-                                                            view_box: "0 0 24 24",
-                                                            path {
-                                                                stroke_linecap: "round",
-                                                                stroke_linejoin: "round",
-                                                                stroke_width: "2",
-                                                                d: "M19 9l-7 7-7-7"
-                                                            }
-                                                        }
-                                                        "Show more"
-                                                    }
-                                                }
-                                            }
+                                    // Show more/less button
+                                    if has_more {
+                                        button {
+                                            class: "k-call-act",
+                                            onclick: move |_| {
+                                                let current = *result_expanded.read();
+                                                result_expanded.set(!current);
+                                            },
+                                            if is_result_expanded { "Show less" } else { "Show more" }
                                         }
                                     }
                                 }
@@ -464,5 +315,28 @@ mod tests {
         assert_eq!(status_label(None, false), "running");
         assert_eq!(status_label(Some(true), false), "completed");
         assert_eq!(status_label(Some(false), false), "failed");
+    }
+
+    #[test]
+    fn args_summary_prints_one_cli_line() {
+        let args = serde_json::json!({
+            "dataset": "grunfeld",
+            "y": "inv",
+            "x": ["value", "capital"],
+            "path": "my data.csv",
+            "robust": true,
+            "level": 0.95,
+            "opts": {"a": 1}
+        });
+        let line = args_summary(&args, 200);
+        assert!(line.contains("dataset=grunfeld"), "{line}");
+        assert!(line.contains("x=value,capital"), "{line}");
+        assert!(line.contains("path=\"my data.csv\""), "{line}");
+        assert!(line.contains("robust=true"), "{line}");
+        assert!(line.contains("level=0.95"), "{line}");
+        assert!(line.contains("opts={…}"), "{line}");
+        assert_eq!(args_summary(&serde_json::Value::Null, 80), "");
+        let cut = args_summary(&args, 12);
+        assert!(cut.chars().count() <= 12, "{cut}");
     }
 }

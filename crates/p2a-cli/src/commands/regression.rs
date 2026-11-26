@@ -4,6 +4,7 @@ use clap::{Subcommand, ValueEnum};
 use p2a_core::regression::CovarianceType;
 use p2a_core::regression::gls::{GlsCorrelation, GlsMethod, GlsOptions, run_gls_with};
 use p2a_core::regression::quantreg::{QuantRegMethod, QuantRegSe};
+use p2a_core::regression::run_ols_complete_cases;
 use p2a_core::regression::smooth_spline::{SmoothSplineConfig, SplineCriterion, smooth_spline};
 use p2a_core::regression::step::StepDirection;
 use p2a_core::regression::{OlsClusteredResult, QuantRegConfig, quantreg};
@@ -757,7 +758,8 @@ fn execute_ols(
             // Show progress spinner for regression
             let progress = Progress::spinner("Running OLS regression...", quiet);
 
-            match run_ols(ds, dep_var, &x_cols, intercept, cov_type) {
+            // rows missing in the response or a regressor are dropped, as lm's na.omit
+            match run_ols_complete_cases(ds, dep_var, &x_cols, None, intercept, cov_type) {
                 Ok(result) => {
                     progress.finish_and_clear();
                     log::info!(
@@ -772,6 +774,10 @@ fn execute_ols(
                     // an aliased column prints the core's NaN, never a made-up 0.
                     let se_type = se_label(result.cov_type);
                     let r2 = R2Labels::new(intercept);
+                    let mut extra_json = serde_json::Map::new();
+                    if let Some(m) = missing_json(&result.missing) {
+                        extra_json.insert("missing".to_string(), m);
+                    }
                     let report = RegressionReport {
                         method: "OLS Regression",
                         coefficients: result.coefficients.iter().map(CoefRow::from).collect(),
@@ -784,10 +790,11 @@ fn execute_ols(
                         se_type: &se_type,
                         se_type_json: result.cov_type.short_label(),
                         r_squared_type: r2.json_type,
-                        extra_json: serde_json::Map::new(),
+                        extra_json,
                         warnings: &result.warnings,
                     };
                     println!("{}", format_regression_report(&report, format));
+                    print_missing_note(&result.missing, format);
                 }
                 Err(e) => {
                     progress.finish_and_clear();
@@ -973,6 +980,9 @@ fn execute_diagnostics(
                         });
                         let mut json = json;
                         add_notes(&mut json, None, &diag.warnings);
+                        if let Some(m) = missing_json(&diag.missing) {
+                            json["missing"] = m;
+                        }
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
@@ -1018,6 +1028,7 @@ fn execute_diagnostics(
                         if let Some(cond) = diag.condition_number {
                             println!("\nCondition Number: {:.4}", cond);
                         }
+                        print_missing_note(&diag.missing, format);
                         print_notes(None, &diag.warnings, format);
                     }
                 },
@@ -1828,9 +1839,15 @@ fn execute_hac(
                 intercept,
             ) {
                 Ok(hac_result) => {
-                    // Also run OLS for R-squared
-                    let ols_result =
-                        run_ols(ds, dep_var, &x_cols, intercept, CovarianceType::Standard);
+                    // Also run OLS for R-squared, on the same complete rows
+                    let ols_result = run_ols_complete_cases(
+                        ds,
+                        dep_var,
+                        &x_cols,
+                        None,
+                        intercept,
+                        CovarianceType::Standard,
+                    );
                     let (r_squared, n_obs_display) = match &ols_result {
                         Ok(ols) => (ols.r_squared, ols.n_obs),
                         Err(_) => (f64::NAN, hac_result.n_obs),
@@ -1868,6 +1885,9 @@ fn execute_hac(
                                 "r_squared": r_squared,
                             });
                             add_result_notes(&mut json, &hac_result);
+                            if let Some(m) = missing_json(&hac_result.missing) {
+                                json["missing"] = m;
+                            }
                             println!("{}", serde_json::to_string_pretty(&json)?);
                         }
                         _ => {
@@ -1902,6 +1922,7 @@ fn execute_hac(
                             let uncentered = if intercept { "" } else { " (uncentered)" };
                             println!("R-squared{uncentered}: {:.4}", r_squared);
                             println!("Observations: {}", n_obs_display);
+                            print_missing_note(&hac_result.missing, format);
                             crate::output::print_warnings(&hac_result.warnings);
                         }
                     }

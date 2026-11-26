@@ -449,6 +449,15 @@ pub enum LlmError {
     #[error("{provider} returned HTTP {status}; {}", upstream_hint(*.status))]
     Upstream { provider: &'static str, status: u16 },
 
+    /// The provider answered with a non-success status whose body says it does not know
+    /// the requested model. Recognised from the body (`retry::upstream_error`), which is
+    /// still never part of the error.
+    #[error(
+        "{provider} returned HTTP {status}: it does not offer the model set in Settings; \
+         check the model name (the provider's model list can fill it in)"
+    )]
+    ModelRejected { provider: &'static str, status: u16 },
+
     /// The provider did not answer within `llm_timeout_secs`.
     #[error("The LLM provider did not respond in time")]
     Timeout,
@@ -701,6 +710,20 @@ mod base_url_tests {
     #[test]
     fn rejects_malformed_url() {
         assert!(validate_base_url(ProviderType::OpenAI, "not a url").is_err());
+    }
+
+    #[test]
+    fn model_rejected_display_names_the_setting() {
+        use super::LlmError;
+        assert_eq!(
+            LlmError::ModelRejected {
+                provider: "OpenRouter",
+                status: 400
+            }
+            .to_string(),
+            "OpenRouter returned HTTP 400: it does not offer the model set in Settings; check \
+             the model name (the provider's model list can fill it in)"
+        );
     }
 
     #[test]

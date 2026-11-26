@@ -168,6 +168,9 @@ pub struct ModelsResponse {
 pub struct ImageData {
     pub data: String,
     pub mime_type: String,
+    /// The vector version of the figure, when the server has one.
+    #[serde(default)]
+    pub svg: Option<String>,
 }
 
 /// SSE stream event types
@@ -323,6 +326,14 @@ pub struct PersistedToolCall {
     pub completed_at: Option<String>,
     #[serde(default)]
     pub duration_ms: Option<i32>,
+    /// Images the call returned (base64 PNG), in order; absent from older
+    /// servers and from calls without images.
+    #[serde(default)]
+    pub images: Vec<String>,
+    /// The vector version (SVG) of each image, empty for one without; absent
+    /// from older servers and when no image has one.
+    #[serde(default)]
+    pub image_svgs: Vec<String>,
 }
 
 // === Dataset Metadata types ===
@@ -346,6 +357,17 @@ pub struct DatasetMeta {
     pub loaded_at: String,
     #[serde(default)]
     pub file_size_bytes: Option<i64>,
+    /// Whether the server holds the data now (older servers do not say: yes).
+    #[serde(default = "held")]
+    pub in_memory: bool,
+    /// The type of each listed column (`integer`, `number`, `text`, ...), when the server
+    /// holds the data; empty otherwise.
+    #[serde(default)]
+    pub column_types: Vec<String>,
+}
+
+fn held() -> bool {
+    true
 }
 
 impl DatasetMeta {
@@ -476,6 +498,8 @@ mod tests {
             column_names: (0..names).map(|i| format!("c{i}")).collect(),
             loaded_at: "2026-10-27T00:00:00Z".into(),
             file_size_bytes: None,
+            in_memory: true,
+            column_types: Vec::new(),
         }
     }
 

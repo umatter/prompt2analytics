@@ -18,6 +18,9 @@ use rmcp::{
 use crate::server::AnalyticsServer;
 use crate::tools::common::parse_option;
 use crate::tools::common::{append_unshown_notes, parse_choice};
+use crate::tools::handlers::regression::{
+    coefficient_table_from, save_coefficient_table, with_saved_table_line,
+};
 use crate::tools::requests::panel::{
     GmmRequest, HausmanRequest, PanelFERequest, PanelGlsRequest, PanelHdfeRequest, PanelRERequest,
     PanelUnitRootRequest, PvcmRequest,
@@ -26,12 +29,13 @@ use crate::tools::requests::panel::{
 use p2a_core::econometrics::panel_unit_root::LagSelection;
 use p2a_core::econometrics::{
     GmmConfig, GmmResult, GmmStep, GmmTransform, HdfeConfig, HdfeResult, PanelConfig,
-    PanelGlsModel, PanelGlsResult, PanelModel, PanelUnitRootConfig, PanelUnitRootTest, PanelVcov,
-    PvcmType, run_fixed_effects_with, run_gmm, run_hausman_test, run_hdfe, run_panel_gls,
-    run_panel_unit_root, run_pmg, run_pvcm, run_random_effects_with,
+    PanelGlsModel, PanelGlsResult, PanelModel, PanelResult, PanelUnitRootConfig, PanelUnitRootTest,
+    PanelVcov, PvcmType, run_fixed_effects_with, run_gmm, run_hausman_test, run_hdfe,
+    run_panel_gls, run_panel_unit_root, run_pmg, run_pvcm, run_random_effects_with,
 };
 use p2a_core::options::Choices;
 use p2a_core::regression::CovarianceType;
+use p2a_core::traits::LinearEstimator;
 
 const PVCM_MODEL: Choices<PvcmType> = Choices {
     option: "model",
@@ -121,11 +125,25 @@ fn panel_config(vcov: Option<&str>) -> Result<PanelConfig, String> {
         })
 }
 
+/// A panel fit's coefficients as a saved coefficient table (the 95% interval from the
+/// fit's own distribution: Student t for fixed effects, normal for random effects; the
+/// `t_value` column then holds z).
+fn panel_coefficient_table(result: &PanelResult) -> Result<p2a_core::data::Dataset, String> {
+    coefficient_table_from(
+        &result.variables,
+        &result.coefficients,
+        &result.std_errors,
+        &result.t_stats,
+        &result.p_values,
+        &result.confidence_intervals(0.95),
+    )
+}
+
 #[tool_router(router = panel_router, vis = "pub")]
 impl AnalyticsServer {
     /// Run Fixed Effects panel regression.
     #[tool(
-        description = "Run Fixed Effects (within) panel regression. Controls for time-invariant unobserved heterogeneity. Requires panel data with entity identifiers. Controls ONE fixed effect dimension. For multiple simultaneous FEs (e.g., firm + year), use panel_hdfe instead. Standard errors are classical by default (as plm); set vcov = 'cluster' for entity-clustered (Arellano) standard errors."
+        description = "Run Fixed Effects (within) panel regression. Controls for time-invariant unobserved heterogeneity. Requires panel data with entity identifiers. Controls ONE fixed effect dimension. For multiple simultaneous FEs (e.g., firm + year), use panel_hdfe instead. Standard errors are classical by default (as plm); set vcov = 'cluster' for entity-clustered (Arellano) standard errors. The coefficients are also saved as a dataset named in the reply's first line, which viz_coefficient plots directly."
     )]
     pub async fn panel_fixed_effects(
         &self,
@@ -136,19 +154,13 @@ impl AnalyticsServer {
             Err(msg) => return crate::tools::common::error_text(msg),
         };
 
-        let datasets = self.datasets.read().await;
-
-        let dataset = crate::get_dataset!(datasets, &request.dataset);
-
-        let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
-
-        let result = match run_fixed_effects_with(
-            dataset,
-            &request.y,
-            &x_refs,
-            &request.entity_var,
-            &config,
-        ) {
+        let fitted = {
+            let datasets = self.datasets.read().await;
+            let dataset = crate::get_dataset!(datasets, &request.dataset);
+            let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
+            run_fixed_effects_with(dataset, &request.y, &x_refs, &request.entity_var, &config)
+        };
+        let result = match fitted {
             Ok(r) => r,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -160,12 +172,21 @@ impl AnalyticsServer {
 
         let mut text = result.to_string();
         append_unshown_notes(&mut text, &result);
+        let saved = {
+            let mut datasets = self.datasets.write().await;
+            save_coefficient_table(
+                &mut datasets,
+                &format!("{}_fe_{}", request.dataset, request.y),
+                panel_coefficient_table(&result),
+            )
+        };
+        let text = with_saved_table_line(saved, text);
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
     /// Run Random Effects panel regression.
     #[tool(
-        description = "Run Random Effects (Swamy-Arora GLS) panel regression, as plm::plm(model = 'random'). Assumes individual effects are uncorrelated with regressors. More efficient than FE if assumption holds. Standard errors are classical by default (as plm), with z statistics and a Wald chi-squared test of the slopes; set vcov = 'cluster' for entity-clustered (Arellano) standard errors."
+        description = "Run Random Effects (Swamy-Arora GLS) panel regression, as plm::plm(model = 'random'). Assumes individual effects are uncorrelated with regressors. More efficient than FE if assumption holds. Standard errors are classical by default (as plm), with z statistics and a Wald chi-squared test of the slopes; set vcov = 'cluster' for entity-clustered (Arellano) standard errors. The coefficients are also saved as a dataset named in the reply's first line, which viz_coefficient plots directly."
     )]
     pub async fn panel_random_effects(
         &self,
@@ -176,19 +197,13 @@ impl AnalyticsServer {
             Err(msg) => return crate::tools::common::error_text(msg),
         };
 
-        let datasets = self.datasets.read().await;
-
-        let dataset = crate::get_dataset!(datasets, &request.dataset);
-
-        let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
-
-        let result = match run_random_effects_with(
-            dataset,
-            &request.y,
-            &x_refs,
-            &request.entity_var,
-            &config,
-        ) {
+        let fitted = {
+            let datasets = self.datasets.read().await;
+            let dataset = crate::get_dataset!(datasets, &request.dataset);
+            let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
+            run_random_effects_with(dataset, &request.y, &x_refs, &request.entity_var, &config)
+        };
+        let result = match fitted {
             Ok(r) => r,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -200,6 +215,15 @@ impl AnalyticsServer {
 
         let mut text = result.to_string();
         append_unshown_notes(&mut text, &result);
+        let saved = {
+            let mut datasets = self.datasets.write().await;
+            save_coefficient_table(
+                &mut datasets,
+                &format!("{}_re_{}", request.dataset, request.y),
+                panel_coefficient_table(&result),
+            )
+        };
+        let text = with_saved_table_line(saved, text);
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
@@ -486,7 +510,7 @@ impl AnalyticsServer {
 
     /// Run High-Dimensional Fixed Effects regression with multiple absorbed FE.
     #[tool(
-        description = "Run High-Dimensional Fixed Effects (HDFE) regression with multiple absorbed fixed effects (e.g., firm + year + industry). Uses the Method of Alternating Projections (MAP) for efficient estimation. Equivalent to R's lfe::felm() or Stata's reghdfe. tolerance is relative: ||delta|| / ||x|| (fixest); se_type 'hc1' (default), 'standard', 'hc0', 'hc2' or 'hc3'."
+        description = "Run High-Dimensional Fixed Effects (HDFE) regression with multiple absorbed fixed effects (e.g., firm + year + industry). Uses the Method of Alternating Projections (MAP) for efficient estimation. Equivalent to R's lfe::felm() or Stata's reghdfe. tolerance is relative: ||delta|| / ||x|| (fixest); se_type 'hc1' (default), 'standard', 'hc0', 'hc2' or 'hc3'; cluster = ['firm'] (or two columns) for cluster-robust SEs as fixest."
     )]
     pub async fn panel_hdfe(
         &self,
@@ -504,6 +528,7 @@ impl AnalyticsServer {
         config.tolerance = request.tolerance.unwrap_or(1e-8);
         config.max_iterations = request.max_iterations.unwrap_or(10000);
         config.accelerate = true;
+        config.cluster = request.cluster.clone().unwrap_or_default();
 
         let cov_type =
             match parse_option::<CovarianceType>(request.se_type.as_deref(), CovarianceType::HC1) {
@@ -556,6 +581,73 @@ mod tests {
             v[k] = x.clone();
         }
         serde_json::from_value(v).unwrap()
+    }
+
+    /// Fixed and random effects save their coefficients, as regression_ols does, so
+    /// "plot the coefficients" after a panel model plots that model.
+    #[test]
+    fn panel_models_save_a_coefficient_table_viz_coefficient_plots() {
+        let df =
+            p2a_core::data::DataLoader::load_csv(Case::load("panel_fe_grunfeld").dataset_path())
+                .unwrap();
+        let (rt, server) = server_with(vec![("grunfeld", df)]);
+
+        let fe = rt
+            .block_on(server.panel_fixed_effects(Parameters(request(json!({})))))
+            .unwrap();
+        assert_ne!(fe.is_error, Some(true), "{}", text(&fe));
+        assert!(
+            text(&fe).starts_with("Coefficients saved as dataset 'grunfeld_fe_inv'"),
+            "{}",
+            text(&fe)
+        );
+        let re = rt
+            .block_on(server.panel_random_effects(Parameters(request(json!({})))))
+            .unwrap();
+        assert!(
+            text(&re).starts_with("Coefficients saved as dataset 'grunfeld_re_inv'"),
+            "{}",
+            text(&re)
+        );
+
+        let (table, fit) = rt.block_on(async {
+            let datasets = server.datasets.read().await;
+            let fit = run_fixed_effects_with(
+                datasets.get("grunfeld").unwrap(),
+                "inv",
+                &["value", "capital"],
+                "firm",
+                &PanelConfig::default(),
+            )
+            .unwrap();
+            (datasets.get("grunfeld_fe_inv").cloned().unwrap(), fit)
+        });
+        assert!(crate::tools::handlers::regression::is_coefficient_table(
+            &table
+        ));
+        let df = table.df();
+        let terms: Vec<String> = df
+            .column("term")
+            .unwrap()
+            .str()
+            .unwrap()
+            .into_iter()
+            .map(|t| t.unwrap().to_string())
+            .collect();
+        assert_eq!(terms, fit.variables);
+        let ci = fit.confidence_intervals(0.95);
+        for (i, _) in terms.iter().enumerate() {
+            let get = |c: &str| df.column(c).unwrap().f64().unwrap().get(i).unwrap();
+            assert_eq!(get("estimate"), fit.coefficients[i]);
+            assert_eq!(get("ci_lower"), ci[i].0);
+            assert_eq!(get("ci_upper"), ci[i].1);
+        }
+
+        let args = json!({"dataset": "grunfeld_fe_inv"});
+        let r = rt
+            .block_on(server.viz_coefficient(Parameters(serde_json::from_value(args).unwrap())))
+            .unwrap();
+        assert!(text(&r).contains("Coefficients: 2"), "{}", text(&r));
     }
 
     #[test]

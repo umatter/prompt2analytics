@@ -1,279 +1,152 @@
-//! p2a Logo Components for Dioxus
+//! The p2a logo as Dioxus components.
 //!
-//! This module provides the p2a logo system as reusable Dioxus components.
+//! The logo is drawn on a grid of square cells: the letters p, 2 and a, each
+//! built from half-block cells, with the 2 in orange. Drawing it as SVG
+//! rectangles keeps it sharp at any size and needs no font.
 //!
-//! # Usage
-//! ```rust
-//! use crate::components::logo::{P2aIcon, P2aIconMinimal, P2aWordmark, P2aBadge};
+//! - [`P2aWordmark`]: the three letters, for the header and the welcome screen.
+//!   The letters take the current text colour, so they follow light and dark mode.
+//! - [`P2aIconMinimal`]: the orange tile with a black 2, as in the favicon and
+//!   the app icons (`assets/icons/`), for small places such as sidebar headers.
 //!
-//! fn MyComponent() -> Element {
-//!     rsx! {
-//!         // In your app header
-//!         P2aWordmark { width: 120.0 }
-//!
-//!         // As an icon
-//!         P2aIcon { size: 48.0 }
-//!
-//!         // For favicon/small contexts
-//!         P2aIconMinimal { size: 32.0 }
-//!
-//!         // For splash screens
-//!         P2aBadge { width: 200.0 }
-//!     }
-//! }
-//! ```
+//! The SVG and PNG files under `assets/icons/` and `docs/assets/` are drawn from
+//! the same cell paths.
 
 use dioxus::prelude::*;
 
-/// Brand colors
+/// Brand colours.
 pub mod colors {
-    pub const ORANGE: &str = "#FF6B35";
-    pub const CYAN: &str = "#00B4D8";
+    /// International orange, the colour of the 2.
+    pub const ORANGE: &str = "#F74C00";
 }
 
-/// Main square icon with "p2a" text (7J)
-/// Best for: app icons, taskbar, dock, avatars
-#[component]
-pub fn P2aIcon(
-    /// Size in pixels (width = height)
-    #[props(default = 120.0)]
-    size: f64,
-    /// Optional CSS class
-    #[props(default = "")]
-    class: &'static str,
-) -> Element {
-    rsx! {
-        svg {
-            xmlns: "http://www.w3.org/2000/svg",
-            view_box: "0 0 120 120",
-            width: "{size}",
-            height: "{size}",
-            class: "{class}",
-            defs {
-                linearGradient {
-                    id: "p2a-icon-grad",
-                    x1: "0%",
-                    y1: "0%",
-                    x2: "100%",
-                    y2: "100%",
-                    stop { offset: "0%", stop_color: "{colors::ORANGE}" }
-                    stop { offset: "100%", stop_color: "{colors::CYAN}" }
-                }
-            }
-            rect {
-                x: "10",
-                y: "10",
-                width: "100",
-                height: "100",
-                rx: "22",
-                fill: "url(#p2a-icon-grad)"
-            }
-            path {
-                d: "M25 45 C38 28 52 28 60 42 C68 56 82 56 95 40",
-                stroke: "#fff",
-                stroke_width: "4",
-                fill: "none",
-                stroke_linecap: "round"
-            }
-            text {
-                x: "60",
-                y: "85",
-                text_anchor: "middle",
-                font_family: "system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
-                font_size: "28",
-                font_weight: "700",
-                fill: "#fff",
-                "p2a"
-            }
-        }
-    }
-}
+/// Cell paths of the logo on its 14 x 6 grid: the black p and a.
+const LETTERS_PATH: &str = "M0 0h3v1h-3zM11 0h3v1h-3zM0 1h1v1h-1zM3 1h1v1h-1zM10 1h1v1h-1zM13 1h1v1h-1zM0 2h1v1h-1zM3 2h1v1h-1zM10 2h1v1h-1zM13 2h1v1h-1zM0 3h3v1h-3zM10 3h4v1h-4zM0 4h1v1h-1zM10 4h1v1h-1zM13 4h1v1h-1zM0 5h1v1h-1z";
+/// Cell paths of the orange 2 on the same grid.
+const TWO_PATH: &str = "M5 0h4v1h-4zM8 1h1v1h-1zM5 2h4v1h-4zM5 3h1v1h-1zM5 4h4v1h-4z";
+/// The 2 alone, on its own 4 x 5 grid.
+const TWO_ALONE_PATH: &str = "M0 0h4v1h-4zM3 1h1v1h-1zM0 2h4v1h-4zM0 3h1v1h-1zM0 4h4v1h-4z";
 
-/// Minimal icon with wave only, no text (for small sizes)
-/// Best for: favicon, 16-24px contexts
-#[component]
-pub fn P2aIconMinimal(
-    /// Size in pixels (width = height)
-    #[props(default = 32.0)]
-    size: f64,
-    /// Optional CSS class
-    #[props(default = "")]
-    class: &'static str,
-) -> Element {
-    rsx! {
-        svg {
-            xmlns: "http://www.w3.org/2000/svg",
-            view_box: "0 0 120 120",
-            width: "{size}",
-            height: "{size}",
-            class: "{class}",
-            defs {
-                linearGradient {
-                    id: "p2a-minimal-grad",
-                    x1: "0%",
-                    y1: "0%",
-                    x2: "100%",
-                    y2: "100%",
-                    stop { offset: "0%", stop_color: "{colors::ORANGE}" }
-                    stop { offset: "100%", stop_color: "{colors::CYAN}" }
-                }
-            }
-            rect {
-                x: "10",
-                y: "10",
-                width: "100",
-                height: "100",
-                rx: "22",
-                fill: "url(#p2a-minimal-grad)"
-            }
-            path {
-                d: "M25 60 C40 38 55 38 60 55 C65 72 80 72 95 50",
-                stroke: "#fff",
-                stroke_width: "6",
-                fill: "none",
-                stroke_linecap: "round"
-            }
-        }
-    }
-}
-
-/// Horizontal wordmark with wave accent (7K)
-/// Best for: headers, navigation bars, documentation
+/// The p2a wordmark: p and a in the current text colour, the 2 in orange.
 #[component]
 pub fn P2aWordmark(
-    /// Width in pixels (height auto-calculated)
-    #[props(default = 180.0)]
+    /// Width in pixels; the height follows from the 14 x 6 grid.
+    #[props(default = 140.0)]
     width: f64,
-    /// Optional CSS class
+    /// Extra CSS classes.
     #[props(default = "")]
     class: &'static str,
 ) -> Element {
-    let height = width * (63.0 / 180.0);
+    let height = width * 6.0 / 14.0;
     rsx! {
         svg {
             xmlns: "http://www.w3.org/2000/svg",
-            view_box: "0 0 180 63",
+            view_box: "0 0 14 6",
             width: "{width}",
             height: "{height}",
-            class: "{class}",
-            defs {
-                linearGradient {
-                    id: "p2a-wordmark-grad",
-                    x1: "0%",
-                    y1: "0%",
-                    x2: "100%",
-                    y2: "0%",
-                    stop { offset: "0%", stop_color: "{colors::ORANGE}" }
-                    stop { offset: "100%", stop_color: "{colors::CYAN}" }
-                }
-            }
-            text {
-                x: "90",
-                y: "48",
-                text_anchor: "middle",
-                font_family: "system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
-                font_size: "52",
-                font_weight: "800",
-                fill: "url(#p2a-wordmark-grad)",
-                "p2a"
-            }
-            path {
-                d: "M15 32 C40 15 70 15 90 32 C110 49 140 49 165 32",
-                stroke: "url(#p2a-wordmark-grad)",
-                stroke_width: "4",
-                fill: "none",
-                stroke_linecap: "round",
-                opacity: "0.3"
-            }
+            shape_rendering: "crispEdges",
+            role: "img",
+            "aria-label": "p2a",
+            class: "text-black dark:text-white {class}",
+            path { fill: "currentColor", d: LETTERS_PATH }
+            path { fill: colors::ORANGE, d: TWO_PATH }
         }
     }
 }
 
-/// Pill-shaped badge with wave and text (7L)
-/// Best for: splash screens, about dialogs, marketing
+/// The long logo: the wordmark, a rule, and "Prompt 2 / Analytics" in
+/// Archivo extra-wide, as in the README header.
 #[component]
-pub fn P2aBadge(
-    /// Width in pixels (height auto-calculated)
-    #[props(default = 160.0)]
-    width: f64,
-    /// Optional CSS class
-    #[props(default = "")]
-    class: &'static str,
+pub fn P2aLockup(
+    /// Cell size of the wordmark in pixels; the type scales with it.
+    #[props(default = 10.0)]
+    cell: f64,
 ) -> Element {
-    let height = width * 0.5;
+    let font = cell * 4.6;
+    let gap = cell * 2.2;
     rsx! {
-        svg {
-            xmlns: "http://www.w3.org/2000/svg",
-            view_box: "0 0 160 80",
-            width: "{width}",
-            height: "{height}",
-            class: "{class}",
-            defs {
-                linearGradient {
-                    id: "p2a-badge-grad",
-                    x1: "0%",
-                    y1: "0%",
-                    x2: "100%",
-                    y2: "100%",
-                    stop { offset: "0%", stop_color: "{colors::ORANGE}" }
-                    stop { offset: "100%", stop_color: "{colors::CYAN}" }
-                }
-            }
-            rect {
-                x: "5",
-                y: "5",
-                width: "150",
-                height: "70",
-                rx: "35",
-                fill: "url(#p2a-badge-grad)"
-            }
-            path {
-                d: "M25 40 C35 28 45 28 55 40 C65 52 75 52 85 40",
-                stroke: "#fff",
-                stroke_width: "3.5",
-                fill: "none",
-                stroke_linecap: "round"
-            }
-            text {
-                x: "118",
-                y: "50",
-                text_anchor: "middle",
-                font_family: "system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
-                font_size: "28",
-                font_weight: "700",
-                fill: "#fff",
-                "p2a"
+        div {
+            class: "inline-flex items-center text-black dark:text-white",
+            style: "gap: {gap}px;",
+            role: "img",
+            "aria-label": "p2a, Prompt 2 Analytics",
+            P2aWordmark { width: cell * 14.0, class: "shrink-0" }
+            span { class: "self-stretch w-[2px] bg-current", "aria-hidden": "true" }
+            span {
+                class: "font-extrabold leading-[0.95] tracking-[-0.015em]",
+                style: "font-size: {font}px; font-stretch: 125%;",
+                "aria-hidden": "true",
+                "Prompt "
+                span { style: "color: {colors::ORANGE};", "2" }
+                br {}
+                "Analytics"
             }
         }
     }
 }
 
-/// Raw SVG strings for use cases where you need the SVG as a string
-/// (e.g., writing to files, setting window icons)
-///
-/// Note: Adjust paths based on your project structure.
-/// These assume: src/components/logo.rs and assets/ at project root.
-pub mod raw {
-    /// Main icon SVG (7J) - square with wave and "p2a" text
-    pub const ICON: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120"><defs><linearGradient id="p2a-grad" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#FF6B35"/><stop offset="100%" stop-color="#00B4D8"/></linearGradient></defs><rect x="10" y="10" width="100" height="100" rx="22" fill="url(#p2a-grad)"/><path d="M25 45 C38 28 52 28 60 42 C68 56 82 56 95 40" stroke="#fff" stroke-width="4" fill="none" stroke-linecap="round"/><text x="60" y="85" text-anchor="middle" font-family="system-ui,-apple-system,sans-serif" font-size="28" font-weight="700" fill="#fff">p2a</text></svg>"##;
-
-    /// Minimal icon SVG - wave only, for small sizes (favicon)
-    pub const ICON_MINIMAL: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120"><defs><linearGradient id="p2a-grad" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#FF6B35"/><stop offset="100%" stop-color="#00B4D8"/></linearGradient></defs><rect x="10" y="10" width="100" height="100" rx="22" fill="url(#p2a-grad)"/><path d="M25 60 C40 38 55 38 60 55 C65 72 80 72 95 50" stroke="#fff" stroke-width="6" fill="none" stroke-linecap="round"/></svg>"##;
-
-    /// Wordmark SVG (7K) - horizontal "p2a" with wave accent
-    pub const WORDMARK: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 180 63"><defs><linearGradient id="p2a-grad" x1="0%" y1="0%" x2="100%" y2="0%"><stop offset="0%" stop-color="#FF6B35"/><stop offset="100%" stop-color="#00B4D8"/></linearGradient></defs><text x="90" y="48" text-anchor="middle" font-family="system-ui,-apple-system,sans-serif" font-size="52" font-weight="800" fill="url(#p2a-grad)">p2a</text><path d="M15 32 C40 15 70 15 90 32 C110 49 140 49 165 32" stroke="url(#p2a-grad)" stroke-width="4" fill="none" stroke-linecap="round" opacity="0.3"/></svg>"##;
-
-    /// Badge SVG (7L) - pill shape with wave and "p2a"
-    pub const BADGE: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 80"><defs><linearGradient id="p2a-grad" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#FF6B35"/><stop offset="100%" stop-color="#00B4D8"/></linearGradient></defs><rect x="5" y="5" width="150" height="70" rx="35" fill="url(#p2a-grad)"/><path d="M25 40 C35 28 45 28 55 40 C65 52 75 52 85 40" stroke="#fff" stroke-width="3.5" fill="none" stroke-linecap="round"/><text x="118" y="50" text-anchor="middle" font-family="system-ui,-apple-system,sans-serif" font-size="28" font-weight="700" fill="#fff">p2a</text></svg>"##;
+/// The orange tile with a black 2, as in the favicon.
+#[component]
+pub fn P2aIconMinimal(
+    /// Size in pixels (width = height).
+    #[props(default = 32.0)]
+    size: f64,
+    /// Extra CSS classes.
+    #[props(default = "")]
+    class: &'static str,
+) -> Element {
+    rsx! {
+        svg {
+            xmlns: "http://www.w3.org/2000/svg",
+            view_box: "0 0 8 8",
+            width: "{size}",
+            height: "{size}",
+            shape_rendering: "crispEdges",
+            role: "img",
+            "aria-label": "p2a",
+            class: "{class}",
+            rect { width: "8", height: "8", fill: colors::ORANGE }
+            path { fill: "#000", transform: "translate(2 1.5)", d: TWO_ALONE_PATH }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Cells covered by a path made of `Mx yhwv1h-wz` runs.
+    fn cells(path: &str) -> Vec<(u32, u32)> {
+        path.split('M')
+            .filter(|s| !s.is_empty())
+            .flat_map(|run| {
+                let (xy, rest) = run.split_once('h').unwrap();
+                let (x, y) = xy.split_once(' ').unwrap();
+                let w: u32 = rest.split_once('v').unwrap().0.parse().unwrap();
+                let (x, y): (u32, u32) = (x.parse().unwrap(), y.parse().unwrap());
+                (x..x + w).map(move |c| (c, y))
+            })
+            .collect()
+    }
+
     #[test]
-    fn test_colors() {
-        assert_eq!(colors::ORANGE, "#FF6B35");
-        assert_eq!(colors::CYAN, "#00B4D8");
+    fn the_two_alone_is_the_wordmarks_two_moved_to_the_origin() {
+        let mut moved: Vec<_> = cells(TWO_PATH)
+            .into_iter()
+            .map(|(x, y)| (x - 5, y))
+            .collect();
+        let mut alone = cells(TWO_ALONE_PATH);
+        moved.sort_unstable();
+        alone.sort_unstable();
+        assert_eq!(moved, alone);
+    }
+
+    #[test]
+    fn letters_and_two_stay_on_the_grid_and_do_not_overlap() {
+        let letters = cells(LETTERS_PATH);
+        let two = cells(TWO_PATH);
+        assert!(letters.iter().chain(&two).all(|&(x, y)| x < 14 && y < 6));
+        assert!(two.iter().all(|c| !letters.contains(c)));
+        assert!(two.iter().all(|&(x, _)| (5..=8).contains(&x)));
     }
 }

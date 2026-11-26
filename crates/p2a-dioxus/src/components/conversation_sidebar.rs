@@ -6,10 +6,10 @@
 use dioxus::prelude::*;
 
 use crate::api::Conversation;
-use crate::components::P2aIconMinimal;
+use crate::components::P2aWordmark;
 use crate::state::{
-    ChatState, ConversationState, SessionState, report_conversation_error, start_new_conversation,
-    switch_blocked,
+    ChatState, ConversationState, SessionState, remember_conversation, report_conversation_error,
+    start_new_conversation, stored_conversation, switch_blocked,
 };
 
 /// Whether a switch may run now; when not, the reason is shown in the
@@ -41,6 +41,12 @@ fn show_archived_toggle(count: usize) -> bool {
 }
 
 /// Conversation sidebar component
+/// Whether a key pressed on a row's action button stops there: Enter and Space press the
+/// button and must not also open the row; Escape and the rest reach the app's handler.
+fn stops_at_row_actions(key: &Key) -> bool {
+    *key == Key::Enter || *key == Key::Character(" ".into())
+}
+
 #[component]
 pub fn ConversationSidebar() -> Element {
     let session_state = use_context::<Signal<SessionState>>();
@@ -58,6 +64,11 @@ pub fn ConversationSidebar() -> Element {
     // Whether the archived conversations are listed
     let mut show_archived = use_signal(|| false);
 
+    // Whether the conversation open before a reload was looked for (once,
+    // with the first list), and the open conversation last remembered.
+    let mut reopen_done = use_signal(|| false);
+    let mut remembered = use_signal(|| None::<String>);
+
     // Load conversations when session is ready
     use_effect(move || {
         let session = session_state.read();
@@ -69,12 +80,47 @@ pub fn ConversationSidebar() -> Element {
                 let state = conv_state.read().clone();
                 match state.load_conversations(&session_id).await {
                     Ok(conversations) => {
+                        // After a reload: open the conversation that was open,
+                        // if it is still listed and nothing else was opened.
+                        let reopen = (!*reopen_done.peek())
+                            .then(stored_conversation)
+                            .flatten()
+                            .filter(|id| conversations.iter().any(|c| &c.id == id))
+                            .filter(|_| conv_state.peek().current_conversation_id.is_none());
+                        reopen_done.set(true);
                         conv_state.write().set_conversations(conversations);
                         conv_state.write().set_loading(false);
+                        if let Some(id) = reopen {
+                            conv_state
+                                .write()
+                                .set_current_conversation(Some(id.clone()));
+                            let state = conv_state.read().clone();
+                            match state.load_messages(&id).await {
+                                Ok(messages) => {
+                                    conv_state.write().set_current_messages(&id, messages);
+                                }
+                                Err(e) => report_conversation_error(
+                                    session_state,
+                                    conv_state,
+                                    chat_state,
+                                    e,
+                                ),
+                            }
+                        }
                     }
                     Err(e) => report_conversation_error(session_state, conv_state, chat_state, e),
                 }
             });
+        }
+    });
+
+    // Remember the open conversation for the next reload, once the one open
+    // before was looked for (until then the empty start would erase it).
+    use_effect(move || {
+        let current = conversation_state.read().current_conversation_id.clone();
+        if *reopen_done.read() && *remembered.peek() != current {
+            remember_conversation(current.as_deref());
+            remembered.set(current);
         }
     });
 
@@ -104,6 +150,11 @@ pub fn ConversationSidebar() -> Element {
         }
         if !may_switch(chat_state, conversation_state) {
             return;
+        }
+        // a phone's overlay closes on the choice, uncovering the chat
+        if crate::app::narrow_viewport() {
+            let mut visible = sidebar_visible;
+            visible.set(false);
         }
         let mut conv = conversation_state;
         spawn(async move {
@@ -299,21 +350,44 @@ pub fn ConversationSidebar() -> Element {
             div {
                 key: "{conv_id}",
                 class: if is_current {
-                    "group relative p-3 rounded-lg mb-1 cursor-pointer bg-teal-50 dark:bg-teal-900/30 border border-teal-400 dark:border-teal-700"
+                    "group relative py-[7px] pr-3 pl-[34px] cursor-pointer font-semibold"
                 } else {
-                    "group relative p-3 rounded-lg mb-1 cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-800 border border-gray-200 dark:border-transparent"
+                    "group relative py-[7px] pr-3 pl-[34px] cursor-pointer hover:bg-[var(--k-fill)]"
                 },
                 onclick: {
                     let id = conv_id.clone();
                     move |_| handle_select(id.clone())
                 },
+                // keyboard: Tab reaches the row, Enter or Space opens it
+                tabindex: "0",
+                role: "button",
+                "aria-current": if is_current { "true" } else { "false" },
+                onkeydown: {
+                    let id = conv_id.clone();
+                    move |e: Event<KeyboardData>| {
+                        let open = e.key() == Key::Enter || e.key() == Key::Character(" ".into());
+                        if open && !is_editing {
+                            e.prevent_default();
+                            handle_select(id.clone())
+                        }
+                    }
+                },
 
+                if is_current {
+                    span { class: "absolute left-4 top-[6px] k-mono font-bold k-orange", "aria-hidden": "true", "›" }
+                }
                 // Title row
                 div { class: "flex items-center gap-2",
                     if is_editing {
                         input {
                             class: "flex-1 px-2 py-1 text-sm rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-teal-500",
                             value: "{edit_title}",
+                            "aria-label": "Conversation title",
+                            // the field takes the focus, with its text selected
+                            onmounted: move |e: Event<MountedData>| async move {
+                                let _ = e.set_focus(true).await;
+                            },
+                            onfocus: move |_| select_focused_text(),
                             oninput: move |e| edit_title.set(e.value().clone()),
                             onkeydown: move |e| {
                                 if e.key() == Key::Enter {
@@ -326,6 +400,8 @@ pub fn ConversationSidebar() -> Element {
                         }
                         button {
                             class: "p-1 text-teal-600 hover:text-teal-700 dark:text-teal-400",
+                            "aria-label": "Save the title",
+                            title: "Save the title",
                             onclick: move |e| {
                                 e.stop_propagation();
                                 handle_save_rename(())
@@ -345,6 +421,8 @@ pub fn ConversationSidebar() -> Element {
                         }
                         button {
                             class: "p-1 text-gray-500 hover:text-gray-700 dark:text-gray-400",
+                            "aria-label": "Keep the old title",
+                            title: "Keep the old title",
                             onclick: move |e| {
                                 e.stop_propagation();
                                 handle_cancel_rename(())
@@ -366,22 +444,30 @@ pub fn ConversationSidebar() -> Element {
                         // Title
                         span {
                             class: if is_archived {
-                                "flex-1 text-sm font-medium text-gray-400 dark:text-gray-500 truncate italic"
+                                "flex-1 text-sm k-muted truncate italic"
                             } else {
-                                "flex-1 text-sm font-medium text-gray-800 dark:text-gray-200 truncate"
+                                "flex-1 text-sm truncate"
                             },
                             "{conv_title}"
                         }
 
                         // Archived badge
                         if is_archived {
-                            span { class: "px-1.5 py-0.5 text-xs rounded bg-gray-200 dark:bg-gray-700 text-gray-500 dark:text-gray-400",
+                            span { class: "k-mono text-[11px] k-muted",
                                 "archived"
                             }
                         }
 
                         // Action buttons (shown on hover)
-                        div { class: "opacity-0 group-hover:opacity-100 flex items-center gap-0.5 transition-opacity",
+                        // shown on hover, and while the row or a button has the keyboard focus
+                        div { class: "k-row-actions flex items-center gap-0.5 transition-opacity",
+                            // Enter or Space on a button acts on the button, not on the row; other
+                            // keys (Escape for an open dialog) go on to the app's handler
+                            onkeydown: |e: Event<KeyboardData>| {
+                                if stops_at_row_actions(&e.key()) {
+                                    e.stop_propagation();
+                                }
+                            },
                             // Rename button
                             button {
                                 class: "action-btn-rename p-1.5 rounded transition-all cursor-pointer hover:bg-teal-50 dark:hover:bg-teal-900/30",
@@ -461,8 +547,8 @@ pub fn ConversationSidebar() -> Element {
 
                 // Message count
                 if !is_editing {
-                    div { class: "mt-1 flex items-center gap-2",
-                        span { class: "text-xs text-gray-400 dark:text-gray-500",
+                    div { class: "flex items-center gap-2",
+                        span { class: "text-xs font-normal k-muted",
                             "{message_count} messages"
                         }
                     }
@@ -473,69 +559,48 @@ pub fn ConversationSidebar() -> Element {
 
     // Track if we need to show delete dialog (read outside of sidebar div)
     let show_delete_dialog = delete_confirm_id.read().is_some();
+    // The title of the conversation the dialog would delete, so the dialog names it
+    let delete_title = delete_confirm_id.read().as_ref().and_then(|id| {
+        conversation_state
+            .read()
+            .conversations
+            .iter()
+            .find(|c| &c.id == id)
+            .map(|c| c.title.clone())
+    });
 
     rsx! {
         // Use fragment to render sidebar and dialog as siblings
         // This ensures the dialog isn't constrained by sidebar's width
 
-        div { class: "flex flex-col h-full w-fit min-w-[180px] max-w-[320px] bg-white dark:bg-gray-900 border-r border-gray-300 dark:border-gray-800",
-            // Header - h-16 matches ChatPanel header height
-            div { class: "flex-shrink-0 h-16 px-4 border-b border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-900",
-                div { class: "h-full flex items-center justify-between",
-                    div { class: "flex items-center gap-2",
-                        P2aIconMinimal { size: 20.0 }
-                        h2 { class: "text-sm font-semibold text-gray-700 dark:text-gray-300 uppercase tracking-wider",
-                            "Conversations"
-                        }
-                    }
-                    div { class: "flex items-center gap-1",
-                        // New conversation button
-                        button {
-                            class: "p-1 text-gray-500 hover:text-teal-600 dark:text-gray-400 dark:hover:text-teal-400 hover:bg-gray-200 dark:hover:bg-gray-700 rounded transition-colors",
-                            disabled: new_blocked.is_some(),
-                            onclick: handle_new_conversation,
-                            title: new_blocked.unwrap_or("New Conversation"),
-                            svg {
-                                class: "w-4 h-4",
-                                fill: "none",
-                                stroke: "currentColor",
-                                view_box: "0 0 24 24",
-                                path {
-                                    stroke_linecap: "round",
-                                    stroke_linejoin: "round",
-                                    stroke_width: "2",
-                                    d: "M12 4v16m8-8H4"
-                                }
-                            }
-                        }
-                        // Collapse button
-                        button {
-                            class: "p-1 text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700 rounded transition-colors",
-                            onclick: move |_| sidebar_visible.set(false),
-                            title: "Hide sidebar",
-                            svg {
-                                class: "w-4 h-4",
-                                fill: "none",
-                                stroke: "currentColor",
-                                view_box: "0 0 24 24",
-                                path {
-                                    stroke_linecap: "round",
-                                    stroke_linejoin: "round",
-                                    stroke_width: "2",
-                                    d: "M11 19l-7-7 7-7m8 14l-7-7 7-7"
-                                }
-                            }
-                        }
-                    }
+        div { class: "flex flex-col h-full k-paper",
+            // Brand row, as tall as the chat header
+            div { class: "flex-shrink-0 h-[60px] px-[18px] k-rule-b flex items-center justify-between",
+                P2aWordmark { width: 56.0 }
+                button {
+                    class: "k-icon-btn",
+                    onclick: move |_| sidebar_visible.set(false),
+                    title: "Hide conversations",
+                    "aria-label": "Hide conversations",
+                    span { class: "k-mono text-sm k-muted", "«" }
                 }
+            }
+            // New conversation
+            button {
+                class: "flex-shrink-0 mx-[18px] mt-3.5 mb-2 text-left px-3 py-[7px] border border-[var(--k-rule)] font-semibold text-sm hover:bg-[var(--k-fill)] disabled:opacity-50 disabled:cursor-not-allowed",
+                disabled: new_blocked.is_some(),
+                onclick: handle_new_conversation,
+                title: new_blocked.unwrap_or("Start a new analysis"),
+                span { class: "k-mono k-orange-text mr-1", "+" }
+                "New analysis"
             }
 
             // A refused switch or a failed conversation call, dismissable
             if let Some(ref err) = sidebar_error {
-                div { class: "mx-2 mt-2 px-3 py-2 rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 flex items-start gap-2",
-                    p { class: "flex-1 text-xs text-red-700 dark:text-red-300", "{err}" }
+                div { class: "mx-[18px] mt-3 pl-3 py-1 border-l-4 border-[var(--k-orange)] flex items-start gap-2",
+                    p { class: "flex-1 text-xs", "{err}" }
                     button {
-                        class: "text-red-500 hover:text-red-700 dark:hover:text-red-300 text-xs",
+                        class: "k-muted hover:text-[var(--k-ink)] text-xs",
                         title: "Dismiss",
                         onclick: move |_| {
                             let mut conv = conversation_state;
@@ -547,15 +612,15 @@ pub fn ConversationSidebar() -> Element {
             }
 
             // Conversation list
-            div { class: "flex-1 overflow-y-auto p-2",
+            div { class: "flex-1 overflow-y-auto py-1.5",
                 if is_loading {
                     div { class: "flex items-center justify-center py-8",
-                        div { class: "w-6 h-6 border-2 border-gray-300 border-t-teal-500 rounded-full animate-spin" }
+                        span { class: "k-mono k-orange k-spin" }
                     }
                 } else if conversations.is_empty() {
-                    div { class: "text-center py-8 px-2 text-gray-500 dark:text-gray-400",
-                        p { class: "text-sm", "No conversations yet" }
-                        p { class: "text-xs mt-1", "Click + to start a new one" }
+                    div { class: "px-[18px] py-4 k-muted",
+                        p { class: "text-sm", "No analyses yet." }
+                        p { class: "text-xs mt-1", "Your conversations will appear here." }
                     }
                 } else {
                     for conv in conversations.iter() {
@@ -565,7 +630,7 @@ pub fn ConversationSidebar() -> Element {
                 // Archived conversations, collapsed under the list
                 if !is_loading && show_archived_toggle(archived.len()) {
                     button {
-                        class: "w-full mt-2 px-3 py-1.5 text-xs font-medium text-left text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg transition-colors",
+                        class: "w-full mt-2 px-[18px] py-1.5 text-xs k-mono text-left k-muted hover:text-[var(--k-ink)]",
                         onclick: move |_| show_archived.set(!archived_open),
                         "{archived_toggle_label(archived.len(), archived_open)}"
                     }
@@ -584,11 +649,15 @@ pub fn ConversationSidebar() -> Element {
             div { class: "fixed inset-0 z-[9999] flex items-center justify-center bg-black/50",
                 onclick: move |_| handle_cancel_delete(()),
                 div {
-                    class: "bg-white dark:bg-gray-800 rounded-xl shadow-2xl p-6 m-4 w-[90vw] max-w-md",
+                    class: "k-paper border-2 border-[var(--k-rule)] p-6 m-4 w-[90vw] max-w-md",
+                    role: "alertdialog",
+                    "aria-modal": "true",
+                    "aria-labelledby": "delete-dialog-title",
+                    "aria-describedby": "delete-dialog-text",
                     onclick: |e| e.stop_propagation(),
                     // Warning icon and title
                     div { class: "flex items-center gap-3 mb-4",
-                        div { class: "p-2 rounded-full bg-red-100 dark:bg-red-900/30",
+                        div { class: "hidden",
                             svg {
                                 class: "w-6 h-6 text-red-600 dark:text-red-400",
                                 fill: "none",
@@ -602,24 +671,27 @@ pub fn ConversationSidebar() -> Element {
                                 }
                             }
                         }
-                        h3 { class: "text-lg font-semibold text-gray-900 dark:text-white",
-                            "Delete Conversation?"
+                        h3 { id: "delete-dialog-title", class: "text-[22px] font-extrabold k-cond",
+                            "Delete this conversation?"
                         }
                     }
                     // Message
-                    p { class: "text-sm text-gray-600 dark:text-gray-400 mb-6",
-                        "This will permanently delete the conversation and all its messages. This action cannot be undone."
+                    p { id: "delete-dialog-text", class: "text-sm mb-6",
+                        if let Some(title) = delete_title {
+                            "This will permanently delete “{title}” and all its messages. This action cannot be undone."
+                        } else {
+                            "This will permanently delete the conversation and all its messages. This action cannot be undone."
+                        }
                     }
                     // Buttons - use grid to ensure both are always visible
                     div { class: "grid grid-cols-2 gap-3 mt-2",
                         button {
-                            class: "px-4 py-2.5 text-sm font-medium text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-gray-700 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-600 transition-colors cursor-pointer",
+                            class: "k-btn justify-center",
                             onclick: move |_| handle_cancel_delete(()),
                             "Cancel"
                         }
                         button {
-                            class: "px-4 py-2.5 text-sm font-medium rounded-lg transition-colors cursor-pointer border-2 border-red-600 bg-red-600 text-white hover:bg-red-700 hover:border-red-700",
-                            style: "background-color: #dc2626; color: white;",
+                            class: "k-btn-pri justify-center",
                             onclick: handle_confirm_delete,
                             "Delete"
                         }
@@ -632,6 +704,16 @@ pub fn ConversationSidebar() -> Element {
 
 #[cfg(test)]
 mod tests {
+    use dioxus::prelude::Key;
+
+    /// Escape on a focused Delete button reaches the app's handler and closes the dialog.
+    #[test]
+    fn escape_passes_the_row_action_buttons() {
+        assert!(!stops_at_row_actions(&Key::Escape));
+        assert!(stops_at_row_actions(&Key::Enter));
+        assert!(stops_at_row_actions(&Key::Character(" ".into())));
+    }
+
     use super::*;
 
     #[test]
@@ -641,4 +723,25 @@ mod tests {
         assert!(show_archived_toggle(1));
         assert!(!show_archived_toggle(0));
     }
+}
+
+/// Select the text of the focused input. The web build calls the DOM directly: the page's
+/// Content-Security-Policy forbids the string evaluation `document::eval` uses there, and the
+/// refused call panicked the app when a conversation was renamed.
+#[cfg(target_arch = "wasm32")]
+fn select_focused_text() {
+    use wasm_bindgen::JsCast;
+    if let Some(input) = web_sys::window()
+        .and_then(|w| w.document())
+        .and_then(|d| d.active_element())
+        .and_then(|el| el.dyn_into::<web_sys::HtmlInputElement>().ok())
+    {
+        input.select();
+    }
+}
+
+/// Select the text of the focused input (desktop: a script in the webview).
+#[cfg(not(target_arch = "wasm32"))]
+fn select_focused_text() {
+    let _ = document::eval("document.activeElement?.select?.()");
 }

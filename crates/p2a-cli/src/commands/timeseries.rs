@@ -3,7 +3,7 @@
 use clap::Subcommand;
 use p2a_core::data::columns::{NaPolicy, numeric_column};
 use p2a_core::econometrics::granger_test;
-use p2a_core::forecasting::{ArimaSpec, forecast_arima_with, run_arima_with};
+use p2a_core::forecasting::{ArimaSpec, SeasonalOrder, forecast_arima_with, run_arima_with};
 use p2a_core::{
     ArConfig,
     ArMethod,
@@ -128,6 +128,14 @@ EXAMPLES:
         /// Moving average order (q)
         #[arg(short = 'q', long, default_value = "1")]
         ma: usize,
+
+        /// Seasonal orders P D Q of a seasonal ARIMA (needs --period)
+        #[arg(long, num_args = 3, value_names = ["P", "D", "Q"], requires = "period")]
+        seasonal: Option<Vec<usize>>,
+
+        /// Observations per season, e.g. 12 for monthly data (needs --seasonal)
+        #[arg(long, requires = "seasonal")]
+        period: Option<usize>,
 
         /// Forecast horizon (optional)
         #[arg(long)]
@@ -573,14 +581,26 @@ pub fn execute(
             ar,
             diff,
             ma,
+            seasonal,
+            period,
             horizon,
             include_mean,
             drift,
         } => {
+            let seasonal = match (seasonal.as_deref(), period) {
+                (Some(&[p, d, q]), Some(period)) => SeasonalOrder {
+                    p,
+                    d,
+                    q,
+                    period: *period,
+                },
+                _ => SeasonalOrder::default(),
+            };
             let spec = ArimaSpec {
                 p: *ar,
                 d: *diff,
                 q: *ma,
+                seasonal,
                 include_mean: *include_mean,
                 include_drift: *drift,
             };
@@ -810,13 +830,15 @@ fn execute_arima(
                 .collect();
             let mut json = serde_json::json!({
                 // "model" keeps its earlier value; forecast::Arima's label is "label".
-                "model": format!("ARIMA({},{},{})", spec.p, spec.d, spec.q),
+                "model": spec.orders(),
                 "label": spec.label(),
                 "method": fit.method,
                 "column": fit.column,
                 "coefficients": coefficients,
                 "ar_coeffs": fit.ar_coeffs,
                 "ma_coeffs": fit.ma_coeffs,
+                "sar_coeffs": fit.sar_coeffs,
+                "sma_coeffs": fit.sma_coeffs,
                 "intercept": fit.intercept,
                 "constant": fit.constant,
                 "drift": fit.drift,

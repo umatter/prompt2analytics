@@ -56,7 +56,8 @@ pub fn ChatInput(on_send: EventHandler<String>) -> Element {
         if let Some(sid) = session_id {
             spawn(async move {
                 match api().list_session_datasets(&sid).await {
-                    Ok(datasets) => {
+                    Ok(mut datasets) => {
+                        datasets.retain(|d| d.in_memory);
                         tracing::info!(
                             "[ChatInput] Loaded {} datasets for autocomplete: {:?}",
                             datasets.len(),
@@ -215,101 +216,46 @@ pub fn ChatInput(on_send: EventHandler<String>) -> Element {
     };
 
     rsx! {
-        div { class: "px-4 py-4",
-            div { class: "flex gap-3 items-center",
-                // Textarea container with autocomplete dropdown
-                div { class: "flex-1 relative",
-                    // Autocomplete dropdown (positioned above)
-                    AutocompleteDropdown {
-                        state: autocomplete.read().clone(),
-                        on_select: handle_suggestion_select,
-                    }
-
+        div { class: "px-8 pt-3 pb-3.5",
+            // Box with the prompt mark, the text and Send; the autocomplete
+            // opens above it.
+            div { class: "relative",
+                AutocompleteDropdown {
+                    state: autocomplete.read().clone(),
+                    on_select: handle_suggestion_select,
+                }
+                div { class: "k-box",
+                    span { class: "pr", "aria-hidden": "true", "›" }
                     textarea {
-                        class: "w-full px-4 py-3 pr-12 text-sm bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-xl resize-none focus:outline-none focus:ring-2 focus:ring-orange-500 focus:border-transparent placeholder-gray-400 dark:placeholder-gray-500 text-gray-900 dark:text-white transition-all",
-                        placeholder: "Type a message... (@ for datasets, / for tools)",
+                        class: "flex-1 min-h-[42px] border-0 bg-transparent resize-none text-sm leading-6 outline-none placeholder:text-[var(--k-muted)] disabled:opacity-60",
+                        "aria-label": "Message",
+                        placeholder: "Ask a question in plain words, or add data first",
                         value: "{textarea_value}",
                         disabled: is_processing,
                         oninput: handle_input,
                         onkeydown: handle_keydown,
-                        rows: "1"
+                        rows: "2"
                     }
-                }
-
-                // Send button
-                button {
-                    class: if is_processing {
-                        "px-4 py-3 bg-gray-400 text-white rounded-xl cursor-not-allowed flex items-center gap-2"
-                    } else {
-                        "px-4 py-3 bg-orange-600 hover:bg-orange-700 text-white rounded-xl transition-colors flex items-center gap-2 shadow-sm hover:shadow-md"
-                    },
-                    onclick: handle_send,
-                    disabled: is_processing,
-
-                    if is_processing {
-                        // Loading spinner
-                        svg {
-                            class: "w-5 h-5 animate-spin",
-                            fill: "none",
-                            view_box: "0 0 24 24",
-                            circle {
-                                class: "opacity-25",
-                                cx: "12",
-                                cy: "12",
-                                r: "10",
-                                stroke: "currentColor",
-                                stroke_width: "4"
-                            }
-                            path {
-                                class: "opacity-75",
-                                fill: "currentColor",
-                                d: "M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
-                            }
+                    button {
+                        class: "k-btn-pri self-end",
+                        onclick: handle_send,
+                        disabled: is_processing,
+                        if is_processing {
+                            span { class: "k-spin" }
+                            "Working"
+                        } else {
+                            "Send"
                         }
-                        "Processing..."
-                    } else {
-                        // Send icon
-                        svg {
-                            class: "w-5 h-5",
-                            fill: "none",
-                            stroke: "currentColor",
-                            view_box: "0 0 24 24",
-                            path {
-                                stroke_linecap: "round",
-                                stroke_linejoin: "round",
-                                stroke_width: "2",
-                                d: "M12 19l9 2-9-18-9 18 9-2zm0 0v-8"
-                            }
-                        }
-                        "Send"
                     }
                 }
             }
 
-            // Hint text
-            div { class: "flex items-center gap-4 mt-2 text-xs text-gray-400 dark:text-gray-500 flex-wrap",
-                span { class: "flex items-center gap-1",
-                    kbd { class: "px-1.5 py-0.5 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded text-gray-600 dark:text-gray-400 font-mono", "Enter" }
-                    "to send"
-                }
-                span { class: "flex items-center gap-1",
-                    kbd { class: "px-1.5 py-0.5 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded text-gray-600 dark:text-gray-400 font-mono", "Shift" }
-                    "+"
-                    kbd { class: "px-1.5 py-0.5 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded text-gray-600 dark:text-gray-400 font-mono", "Enter" }
-                    "new line"
-                }
-                span { class: "flex items-center gap-1",
-                    kbd { class: "px-1.5 py-0.5 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded text-gray-600 dark:text-gray-400 font-mono", "@" }
-                    "datasets"
-                }
-                span { class: "flex items-center gap-1",
-                    kbd { class: "px-1.5 py-0.5 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded text-gray-600 dark:text-gray-400 font-mono", "/" }
-                    "tools"
-                }
-                span { class: "flex items-center gap-1",
-                    kbd { class: "px-1.5 py-0.5 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded text-gray-600 dark:text-gray-400 font-mono", "\u{2191}/\u{2193}" }
-                    "history"
-                }
+            // Hints
+            div { class: "k-hints mt-[7px]",
+                span { b { "@" } " datasets" }
+                span { b { "/" } " tools" }
+                span { b { "\u{2191} \u{2193}" } " history" }
+                span { b { "\u{21e7} \u{23ce}" } " new line" }
             }
         }
     }
@@ -455,6 +401,8 @@ mod accept_tests {
                 column_names: vec!["price".into(), "sqft".into()],
                 loaded_at: String::new(),
                 file_size_bytes: None,
+                in_memory: true,
+                column_types: Vec::new(),
             },
             DatasetMeta {
                 id: "ds-2".into(),
@@ -467,6 +415,8 @@ mod accept_tests {
                 column_names: vec!["unit price".into()],
                 loaded_at: String::new(),
                 file_size_bytes: None,
+                in_memory: true,
+                column_types: Vec::new(),
             },
         ]
     }

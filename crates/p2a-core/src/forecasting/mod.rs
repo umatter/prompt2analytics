@@ -129,8 +129,8 @@ pub mod tsutils;
 
 pub use ar::{ArConfig, ArMethod, ArResult, ar, run_ar, run_ar_with_order};
 pub use arima_model::{
-    ArimaForecastResult, ArimaResult, ArimaSpec, forecast_arima, forecast_arima_with, run_arima,
-    run_arima_with,
+    ArimaForecastResult, ArimaResult, ArimaSpec, SeasonalOrder, forecast_arima,
+    forecast_arima_with, run_arima, run_arima_with,
 };
 pub use causal_impact::{
     CausalImpactConfig, CausalImpactModel, CausalImpactResult, CausalImpactSeries,

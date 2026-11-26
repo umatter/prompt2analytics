@@ -145,11 +145,11 @@ A directory listing inside the server's data root. Registered as `GET /api/sessi
 GET /api/sessions/{session_id}/datasets
 ```
 
-The path id is the caller; it must be a live session (404 otherwise), and a `X-P2A-Session-Id` header that names another session answers 404. `column_names` holds the dataset's first column names, at most 1,000 of them and 64 KiB; `column_count` is its full width. A dataset loaded with `na_strings` lists them as `na_strings`, and a Stata file loaded with `value_labels` lists the option (`codes` or `text`) as `value_labels`. Every dataset a tool call on `POST /api/tools/{name}` or in the chat's tool loop puts in the session is listed, not only those of `load_dataset`, `upload_dataset` and `create_dataset`: after each such call the server records each dataset with no row, updates a row whose counts or column names changed, and removes the row of a dataset the call removed. A dataset a tool made in the session has no `source_path` and the `source_type` `generated` (`generate_random_data`) or `derived` (any other tool: a filter, a join, an import); so has a loaded dataset that a tool other than a loader changed in place. Where one session's calls can overlap (several calls at a time per session, as with limits off), a call during which a loader (`load_dataset`, `upload_dataset`, `create_dataset`) also ran takes no source away and deletes no loaded dataset's row, so a loaded dataset it changed in place keeps its source until a later call changes it again; a row another call wrote after this call read the list is left as that call wrote it. The rows count against the session's `session_db_bytes`, and under that budget a session keeps at most 1,000 rows; a dataset whose row would pass either has no row here. Rows of generated and derived datasets count as loaded ones do, so a session that makes many intermediate datasets can leave a later `load_dataset` unlisted, and not reloaded after a restart, and leaves less of the budget to its conversations. Tool calls over the WebSocket (`/ws`) neither write nor update rows: a dataset only such a call made or changed is not listed, or keeps the row it had.
+The path id is the caller; it must be a live session (404 otherwise), and a `X-P2A-Session-Id` header that names another session answers 404. `in_memory` says whether the session holds the data now: after a server restart a listed dataset is `false` until it is reloaded or added again. `column_types` gives the type of each listed column (`integer`, `number`, `text`, `logical`, `date`, `datetime`, `category` or `other`) from the data the session holds, and is absent when it holds none. `column_names` holds the dataset's first column names, at most 1,000 of them and 64 KiB; `column_count` is its full width. A dataset loaded with `na_strings` lists them as `na_strings`, and a Stata file loaded with `value_labels` lists the option (`codes` or `text`) as `value_labels`. Every dataset a tool call on `POST /api/tools/{name}` or in the chat's tool loop puts in the session is listed, not only those of `load_dataset`, `upload_dataset` and `create_dataset`: after each such call the server records each dataset with no row, updates a row whose counts or column names changed, and removes the row of a dataset the call removed. A dataset a tool made in the session has no `source_path` and the `source_type` `generated` (`generate_random_data`) or `derived` (any other tool: a filter, a join, an import); so has a loaded dataset that a tool other than a loader changed in place. Where one session's calls can overlap (several calls at a time per session, as with limits off), a call during which a loader (`load_dataset`, `upload_dataset`, `create_dataset`) also ran takes no source away and deletes no loaded dataset's row, so a loaded dataset it changed in place keeps its source until a later call changes it again; a row another call wrote after this call read the list is left as that call wrote it. The rows count against the session's `session_db_bytes`, and under that budget a session keeps at most 1,000 rows; a dataset whose row would pass either has no row here. Rows of generated and derived datasets count as loaded ones do, so a session that makes many intermediate datasets can leave a later `load_dataset` unlisted, and not reloaded after a restart, and leaves less of the budget to its conversations. Tool calls over the WebSocket (`/ws`) neither write nor update rows: a dataset only such a call made or changed is not listed, or keeps the row it had.
 
 **Response** (captured):
 ```json
-{"success":true,"data":[{"id":"37962139-…","session_id":"51963a14-…","name":"sales","source_path":"sales.csv","source_type":"csv","row_count":5,"column_count":3,"column_names":["price","sqft","bedrooms"],"loaded_at":"2026-10-22T18:50:10.614694894+00:00","file_size_bytes":85}]}
+{"success":true,"data":[{"id":"37962139-…","session_id":"51963a14-…","name":"sales","source_path":"sales.csv","source_type":"csv","row_count":5,"column_count":3,"column_names":["price","sqft","bedrooms"],"loaded_at":"2026-10-22T18:50:10.614694894+00:00","file_size_bytes":85,"in_memory":true,"column_types":["number","number","integer"]}]}
 ```
 
 ### Reload All Datasets in Session
@@ -398,11 +398,14 @@ An unknown or expired `session_id` does not change the HTTP status: the response
   "images": [
     {
       "data": "iVBORw0KGgoAAAANSUhEUgA...",
-      "mime_type": "image/png"
+      "mime_type": "image/png",
+      "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" ...>...</svg>"
     }
   ]
 }
 ```
+
+`svg` is the chart's vector version, at most 1 MiB; it is absent when the chart would need more. The tool routes answer it on an image item too, unless the result would then pass `response_bytes`. It is never sent to the model, and MCP clients (stdio) do not get it.
 
 #### Event 5: Content (streaming LLM response)
 ```json
@@ -721,7 +724,7 @@ GET /api/conversations/{conversation_id}/tool-calls
 GET /api/messages/{message_id}/tool-calls
 ```
 
-Both answer a list of the stored tool calls, oldest first; a conversation without any answers an empty `data` list. Every id is a string, and `arguments` and `result` are JSON text as the tool received and answered it (`result` and `completed_at` are null until the call ends, `error` holds the error text of a failed call):
+Both answer a list of the stored tool calls, oldest first; a conversation without any answers an empty `data` list. Every id is a string, and `arguments` and `result` are JSON text as the tool received and answered it (`result` and `completed_at` are null until the call ends, `error` holds the error text of a failed call). A call made in the chat that returned images (a chart tool's PNG) also has `images`, a list of the base64 PNGs in the order the call returned them, so a client can show them again when it reopens the conversation; the field is absent when there are none. `image_svgs` lists the vector version (SVG) of each image, an empty string for an image without one; it is absent when no image has one. Images and vector versions count against `session_db_bytes` like the texts; one that is longer than `message_bytes`, or than what the session has left, is not stored (an image is never cut), and a vector version gives way to the images. They are never sent to the model:
 
 ```json
 {"success":true,"data":[{"id":"9b1f0c2e-…","message_id":"4ea7256f-…","conversation_id":"e104f3c9-…","tool_name":"list_datasets","arguments":"{}","result":"No datasets currently loaded. Use the 'load_dataset' tool to load a data file.","error":null,"status":"success","started_at":"2026-10-22T18:50:11.021Z","completed_at":"2026-10-22T18:50:11.024Z","duration_ms":3}]}
@@ -922,7 +925,7 @@ type StreamEvent =
   | { type: "tool_start"; tool: string; arguments: Record<string, any> }
   | { type: "tool_end"; tool: string; elapsed_ms: number; result: string | null;
       status: "success" | "error" }   // "error": the call failed or the tool answered with an error result
-  | { type: "tool_result"; tool: string; images: { data: string; mime_type: string }[] }
+  | { type: "tool_result"; tool: string; images: { data: string; mime_type: string; svg?: string }[] }
   | { type: "content"; text: string }
   | { type: "done"; message: Message }
   | { type: "error"; error: string; code?: string };   // code: as the JSON routes give the same refusal
@@ -1017,7 +1020,7 @@ Supported formats, by extension:
 - JSON Lines (`.jsonl`, `.ndjson`): one flat JSON object per line
 - JSON records (`.json`): one array of flat JSON objects, the layout `export_dataset` writes
 
-`upload_dataset` (base64 `content` and a `filename`) reads CSV and Parquet only.
+`upload_dataset` (base64 `content` and a `filename`) reads CSV, Parquet, JSON, JSON Lines, Stata and SAS files, and Excel workbooks on a server without dataset quotas. A CSV's separator (comma, semicolon or tab), decimal comma and encoding (UTF-8, UTF-16 with a byte-order mark, else Windows-1252) are recognised; the answer names them when they are not comma and UTF-8.
 
 After loading, datasets are stored in the session and can be referenced by name in subsequent tool calls.
 

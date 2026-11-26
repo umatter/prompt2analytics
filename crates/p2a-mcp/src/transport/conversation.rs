@@ -270,6 +270,29 @@ pub struct DatasetMetaResponse {
     /// The `value_labels` a Stata file was loaded with, when it was.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value_labels: Option<String>,
+    /// Whether the session holds the dataset's data now. After a server restart the row is
+    /// listed but its data is gone until it is reloaded or added again.
+    pub in_memory: bool,
+    /// The type of each column in `column_names` (`integer`, `number`, `text`, `logical`,
+    /// `date`, `datetime`, `category` or `other`), from the data the session holds; empty when
+    /// it holds none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub column_types: Vec<String>,
+}
+
+/// The label of a column type in the dataset list.
+fn column_type_label(dtype: &p2a_core::polars::prelude::DataType) -> &'static str {
+    use p2a_core::polars::prelude::DataType as D;
+    match dtype {
+        d if d.is_integer() => "integer",
+        d if d.is_float() || d.is_decimal() => "number",
+        D::Boolean => "logical",
+        D::String => "text",
+        D::Date => "date",
+        D::Datetime(..) => "datetime",
+        d if d.is_categorical() || d.is_enum() => "category",
+        _ => "other",
+    }
 }
 
 impl From<DatasetMeta> for DatasetMetaResponse {
@@ -287,6 +310,8 @@ impl From<DatasetMeta> for DatasetMetaResponse {
             file_size_bytes: meta.file_size_bytes,
             na_strings: meta.na_strings,
             value_labels: meta.value_labels,
+            in_memory: false,
+            column_types: Vec::new(),
         }
     }
 }
@@ -410,6 +435,13 @@ pub(crate) struct ToolCallResponse {
     pub started_at: String,
     pub completed_at: Option<String>,
     pub duration_ms: Option<i32>,
+    /// Images the call returned (base64 PNG), in order; omitted when none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<String>,
+    /// The vector version (SVG) of each image, empty for one without; omitted
+    /// when no image has one.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub image_svgs: Vec<String>,
 }
 
 impl From<ToolCall> for ToolCallResponse {
@@ -427,6 +459,8 @@ impl From<ToolCall> for ToolCallResponse {
             started_at: utc_string(c.started_at),
             completed_at: c.completed_at.map(utc_string),
             duration_ms: c.duration_ms,
+            images: c.images.unwrap_or_default(),
+            image_svgs: c.image_svgs.unwrap_or_default(),
         }
     }
 }
@@ -826,9 +860,10 @@ async fn list_session_datasets(
         return mismatch;
     }
     let pm = &state.session_manager;
-    if let Err(e) = pm.get_session(&session_id).await {
-        return error_response(e);
-    }
+    let session = match pm.get_session(&session_id).await {
+        Ok(session) => session,
+        Err(e) => return error_response(e),
+    };
     match pm.get_datasets_for_session(&session_id).await {
         Ok(datasets) => {
             tracing::debug!(
@@ -836,7 +871,32 @@ async fn list_session_datasets(
                 num_datasets = datasets.len(),
                 "[LIST_DATASETS] Retrieved datasets from database"
             );
-            let response: Vec<DatasetMetaResponse> = datasets.into_iter().map(Into::into).collect();
+            let held = session.datasets.read().await;
+            let response: Vec<DatasetMetaResponse> = datasets
+                .into_iter()
+                .map(|meta| {
+                    let column_types = held
+                        .get(&meta.name)
+                        .map(|ds| {
+                            let df = ds.df();
+                            meta.column_names
+                                .iter()
+                                .map(|c| {
+                                    df.column(c)
+                                        .map_or("other", |col| column_type_label(col.dtype()))
+                                        .to_string()
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    DatasetMetaResponse {
+                        in_memory: held.contains_key(&meta.name),
+                        column_types,
+                        ..meta.into()
+                    }
+                })
+                .collect();
+            drop(held);
             ok(StatusCode::OK, response)
         }
         Err(e) => error_response(e),

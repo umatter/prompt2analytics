@@ -126,7 +126,7 @@ jobs:
           # images). Copy the source assets in to fill those literal paths.
           SRC="$GITHUB_WORKSPACE/crates/p2a-dioxus/assets"
           mkdir -p "$OUT/assets"
-          cp "$SRC/styles.css" "$OUT/assets/" 2>/dev/null || true
+          cp "$SRC"/*.css "$OUT/assets/" 2>/dev/null || true
           cp "$SRC"/*.png "$SRC"/*.gif "$OUT/assets/" 2>/dev/null || true
           cp -r "$SRC/icons" "$OUT/assets/" 2>/dev/null || true
           echo "--- assets in bundle ---"; ls "$OUT/assets"

@@ -114,6 +114,9 @@ EXAMPLES:
 
     # Three-way fixed effects
     p2a --session s.json panel hdfe mydata -y wage -x experience --fe worker_id firm_id year
+
+    # Standard errors clustered by firm (fixest's feols(vcov = ~firm_id))
+    p2a --session s.json panel hdfe mydata -y revenue -x employees --fe firm_id year --cluster firm_id
 ")]
     Hdfe {
         /// Dataset name
@@ -130,6 +133,12 @@ EXAMPLES:
         /// Fixed effect columns
         #[arg(long, num_args = 1..)]
         fe: Vec<String>,
+
+        /// Cluster the standard errors by one or two columns (fixest's default
+        /// small-sample correction; p-values on the smallest number of clusters minus 1
+        /// df); without it the standard errors are HC1
+        #[arg(long, num_args = 1..=2)]
+        cluster: Vec<String>,
     },
 
     /// Fixed Effects GLM (logit, probit, poisson with HDFE)
@@ -403,7 +412,8 @@ pub fn execute(
             dep_var,
             indep_vars,
             fe,
-        } => execute_hdfe(dataset, dep_var, indep_vars, fe, format, session),
+            cluster,
+        } => execute_hdfe(dataset, dep_var, indep_vars, fe, cluster, format, session),
         PanelCommands::Feglm {
             dataset,
             dep_var,
@@ -787,6 +797,7 @@ fn execute_hdfe(
     dep_var: &str,
     indep_vars: &[String],
     fe_cols: &[String],
+    cluster: &[String],
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
@@ -806,11 +817,40 @@ fn execute_hdfe(
             let x_cols: Vec<&str> = indep_vars.iter().map(|s| s.as_str()).collect();
             let fe_refs: Vec<&str> = fe_cols.iter().map(|s| s.as_str()).collect();
 
-            // run_hdfe takes 6 args: dataset, y_col, x_cols, fe_cols, config: Option<HdfeConfig>, cov_type
-            match run_hdfe(ds, dep_var, &x_cols, &fe_refs, None, CovarianceType::HC1) {
+            let mut config = p2a_core::econometrics::hdfe::HdfeConfig::default();
+            config.cluster = cluster.to_vec();
+            match run_hdfe(
+                ds,
+                dep_var,
+                &x_cols,
+                &fe_refs,
+                Some(config),
+                CovarianceType::HC1,
+            ) {
                 Ok(result) => {
                     let method = format!("High-Dimensional FE ({})", fe_cols.join(", "));
-                    let se_type = se_label(result.cov_type);
+                    // clustered: "clustered by firm (G = 10); t on 9 df", JSON "cluster:firm"
+                    let (se_type, se_type_json) = if result.cluster_vars.is_empty() {
+                        (
+                            se_label(result.cov_type),
+                            result.cov_type.short_label().to_string(),
+                        )
+                    } else {
+                        let parts: Vec<String> = result
+                            .cluster_vars
+                            .iter()
+                            .zip(&result.n_clusters)
+                            .map(|(c, g)| format!("{c} (G = {g})"))
+                            .collect();
+                        (
+                            format!(
+                                "clustered by {}; t on {} df",
+                                parts.join(" and "),
+                                result.df_t
+                            ),
+                            format!("cluster:{}", result.cluster_vars.join("+")),
+                        )
+                    };
                     let fe_dimensions: Vec<serde_json::Value> = result
                         .fe_dimensions
                         .iter()
@@ -856,7 +896,7 @@ fn execute_hdfe(
                         ],
                         n_obs: result.n_obs,
                         se_type: &se_type,
-                        se_type_json: result.cov_type.short_label(),
+                        se_type_json: &se_type_json,
                         r_squared_type: "within",
                         extra_json,
                         warnings: &result.warnings,

@@ -11,7 +11,7 @@ mod json;
 mod markdown;
 mod types;
 
-pub use download::{copy_to_clipboard, generate_filename, trigger_download};
+pub use download::{copy_to_clipboard, download_bytes, generate_filename, trigger_download};
 pub use html::export_to_html;
 pub use json::export_to_json;
 pub use markdown::export_to_markdown;

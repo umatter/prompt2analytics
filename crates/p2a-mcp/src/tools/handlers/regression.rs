@@ -29,7 +29,8 @@ use crate::tools::common::{
     MCP_DEFAULT_SEED, append_unshown_notes, json_compact, json_text, parse_choice,
 };
 use crate::tools::common::{
-    NaPolicy, missing_json, notes_json, numeric_column, numeric_columns, parse_option,
+    NaPolicy, append_missing_note, missing_json, notes_json, numeric_column, numeric_columns,
+    parse_option,
 };
 use crate::tools::requests::regression::{
     BgTestRequest, BootstrapCovRequest, CvGlmnetRequest, DiagnosticsRequest, DriscollKraayRequest,
@@ -44,9 +45,9 @@ use p2a_core::polars::prelude::{DataFrame, NamedFrom, Series};
 use p2a_core::regression::{
     BgTestType, CovarianceType, GlmnetConfig, GlmnetFamily, OlsResult, ResetType,
     SmoothSplineConfig, bg_test, harvey_collier_test, reset_test, run_cv_glmnet, run_diagnostics,
-    run_glmnet, run_lasso, run_line, run_loess, run_ols, run_ols_clustered, run_ridge, run_step,
-    run_vcov_bootstrap, run_vcov_driscoll_kraay, run_vcov_hac, smooth_spline,
-    smooth_spline_predict, supsmu, wald_test,
+    run_glmnet, run_lasso, run_line, run_loess, run_ols, run_ols_clustered, run_ols_complete_cases,
+    run_ridge, run_step, run_vcov_bootstrap, run_vcov_driscoll_kraay, run_vcov_hac, run_wls,
+    smooth_spline, smooth_spline_predict, supsmu, wald_test,
 };
 
 use p2a_core::EconError;
@@ -363,8 +364,16 @@ fn run_ols_request(
     (intercept, cov_type): (bool, CovarianceType),
 ) -> Result<OlsResult, String> {
     let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
-    run_ols(dataset, &request.y, &x_refs, intercept, cov_type)
-        .map_err(|e| format!("Regression failed: {e}"))
+    // rows missing in y, a regressor or the weights are dropped jointly, as lm's na.omit
+    run_ols_complete_cases(
+        dataset,
+        &request.y,
+        &x_refs,
+        request.weights.as_deref(),
+        intercept,
+        cov_type,
+    )
+    .map_err(|e| format!("Regression failed: {e}"))
 }
 
 /// The columns of a saved coefficient table, in order; `viz_coefficient(model = ...)`
@@ -403,6 +412,56 @@ fn coefficient_table(result: &OlsResult) -> Result<Dataset, String> {
     .map_err(|e| e.to_string())
 }
 
+/// A coefficient table from parallel columns (any estimator): one row per term.
+pub(crate) fn coefficient_table_from(
+    terms: &[String],
+    estimate: &[f64],
+    std_error: &[f64],
+    statistic: &[f64],
+    p_value: &[f64],
+    ci: &[(f64, f64)],
+) -> Result<Dataset, String> {
+    let n = terms.len();
+    if [
+        estimate.len(),
+        std_error.len(),
+        statistic.len(),
+        p_value.len(),
+        ci.len(),
+    ]
+    .iter()
+    .any(|&len| len != n)
+    {
+        return Err("the coefficient columns differ in length".to_string());
+    }
+    let col = |name: &str, v: Vec<f64>| Series::new(name.into(), v).into();
+    DataFrame::new(vec![
+        Series::new("term".into(), terms.to_vec()).into(),
+        col("estimate", estimate.to_vec()),
+        col("std_error", std_error.to_vec()),
+        col("t_value", statistic.to_vec()),
+        col("p_value", p_value.to_vec()),
+        col("ci_lower", ci.iter().map(|c| c.0).collect()),
+        col("ci_upper", ci.iter().map(|c| c.1).collect()),
+    ])
+    .map(Dataset::new)
+    .map_err(|e| e.to_string())
+}
+
+/// The reply with the saved-table line first (the chat loop keeps only the start of an
+/// earlier turn's tool result, and a later "plot the coefficients" needs it), or a note
+/// at the end when the table could not be saved.
+pub(crate) fn with_saved_table_line(saved: Result<String, String>, text: String) -> String {
+    match saved {
+        Ok(name) => format!(
+            "Coefficients saved as dataset '{name}' (columns {}); plot them with \
+             viz_coefficient(model = '{name}').\n\n{text}",
+            COEFFICIENT_TABLE_COLUMNS.join(", ")
+        ),
+        Err(e) => format!("{text}\n\nNote: the coefficient table was not saved: {e}"),
+    }
+}
+
 /// Whether `ds` has exactly the columns of a saved coefficient table.
 pub(crate) fn is_coefficient_table(ds: &Dataset) -> bool {
     let names = ds.df().get_column_names();
@@ -416,26 +475,36 @@ pub(crate) fn is_coefficient_table(ds: &Dataset) -> bool {
 /// Saves `table` under `base`, replacing an earlier coefficient table of that name but
 /// never another dataset: if `base` holds one, the table goes to `base_2`, `base_3`, ...
 /// Returns the name it was saved under.
-fn save_coefficient_table(
+pub(crate) fn save_coefficient_table(
     datasets: &mut std::collections::HashMap<String, Dataset>,
     base: &str,
     table: Result<Dataset, String>,
 ) -> Result<String, String> {
-    let table = table?;
-    let free = |name: &str| datasets.get(name).is_none_or(is_coefficient_table);
+    Ok(save_table(datasets, base, table?, is_coefficient_table))
+}
+
+/// Saves `table` under `base`, or `base_2`, `base_3`, ... while that names a dataset that is
+/// not `replaceable`. Returns the name.
+pub(crate) fn save_table(
+    datasets: &mut std::collections::HashMap<String, Dataset>,
+    base: &str,
+    table: Dataset,
+    replaceable: fn(&Dataset) -> bool,
+) -> String {
+    let free = |name: &str| datasets.get(name).is_none_or(replaceable);
     let name = std::iter::once(base.to_string())
         .chain((2..).map(|i| format!("{base}_{i}")))
         .find(|n| free(n))
         .expect("an unbounded sequence of names has a free one");
     datasets.insert(name.clone(), table);
-    Ok(name)
+    name
 }
 
 #[tool_router(router = regression_router, vis = "pub")]
 impl AnalyticsServer {
     /// Run OLS regression.
     #[tool(
-        description = "Run Ordinary Least Squares (OLS) regression. Returns coefficients, standard errors, t-values, p-values, R-squared, and F-statistic. Standard errors default to HC1 (heteroskedasticity-robust); set cov_type = 'standard' for classical, or 'hc0', 'hc2', 'hc3'. Set intercept = false to omit the intercept. The coefficients are also saved as a dataset named in the reply's first line, which viz_coefficient plots directly. For comparing group means with a single categorical predictor, consider anova_one_way instead."
+        description = "Run Ordinary Least Squares (OLS) regression. Returns coefficients, standard errors, t-values, p-values, R-squared, and F-statistic. Standard errors default to HC1 (heteroskedasticity-robust); set cov_type = 'standard' for classical, or 'hc0', 'hc2', 'hc3'. Set intercept = false to omit the intercept. Set weights to a column for weighted least squares (lm(weights = w)), e.g. the 'weights' column of a matched sample. Rows with a missing value in y, a regressor or the weights are dropped, as lm does, and the reply says how many. The coefficients are also saved as a dataset named in the reply's first line, which viz_coefficient plots directly. For comparing group means with a single categorical predictor, consider anova_one_way instead."
     )]
     pub async fn regression_ols(
         &self,
@@ -463,8 +532,7 @@ impl AnalyticsServer {
                         .replace("\nAdj. R-squared: ", "\nAdj. R-squared (uncentered): ");
                 }
                 append_unshown_notes(&mut text, &result);
-                // The saved-table line goes first: the chat loop keeps only the start of
-                // an earlier turn's tool result, and a later "plot the coefficients" needs it.
+                append_missing_note(&mut text, &result.missing);
                 let saved = {
                     let mut datasets = self.datasets.write().await;
                     save_coefficient_table(
@@ -473,14 +541,7 @@ impl AnalyticsServer {
                         coefficient_table(&result),
                     )
                 };
-                let text = match saved {
-                    Ok(name) => format!(
-                        "Coefficients saved as dataset '{name}' (columns {}); plot them with \
-                         viz_coefficient(model = '{name}').\n\n{text}",
-                        COEFFICIENT_TABLE_COLUMNS.join(", ")
-                    ),
-                    Err(e) => format!("{text}\n\nNote: the coefficient table was not saved: {e}"),
-                };
+                let text = with_saved_table_line(saved, text);
                 Ok(CallToolResult::success(vec![Content::text(text)]))
             }
             Err(msg) => Ok(CallToolResult::error(vec![Content::text(msg)])),
@@ -489,7 +550,7 @@ impl AnalyticsServer {
 
     /// Run regression diagnostics.
     #[tool(
-        description = "Run comprehensive regression diagnostics. Tests include: Jarque-Bera (normality), Breusch-Pagan (heteroskedasticity), Durbin-Watson (autocorrelation), VIF (multicollinearity), and condition number."
+        description = "Run comprehensive regression diagnostics. Tests include: Jarque-Bera (normality), Breusch-Pagan (heteroskedasticity), Durbin-Watson (autocorrelation), VIF (multicollinearity), and condition number. Rows with a missing response or regressor are dropped, as R's lm (na.omit); the output reports how many."
     )]
     pub async fn regression_diagnostics(
         &self,
@@ -518,7 +579,7 @@ impl AnalyticsServer {
 
     /// Run Breusch-Godfrey test for serial correlation.
     #[tool(
-        description = "Breusch-Godfrey test for higher-order serial correlation in regression residuals. More general than Durbin-Watson as it: (1) tests for AR(p) or MA(p) correlation, (2) allows lagged dependent variables as regressors, (3) is valid regardless of regressor properties. Returns LM statistic and p-value. test_type 'chisq' (LM, default) or 'f', as lmtest::bgtest(type =); df from the rank of the augmented design (lmtest counts columns; they differ only when a term aliases)."
+        description = "Breusch-Godfrey test for higher-order serial correlation in regression residuals. More general than Durbin-Watson as it: (1) tests for AR(p) or MA(p) correlation, (2) allows lagged dependent variables as regressors, (3) is valid regardless of regressor properties. Returns LM statistic and p-value. test_type 'chisq' (LM, default) or 'f', as lmtest::bgtest(type =); df from the rank of the augmented design (lmtest counts columns; they differ only when a term aliases). Rows with a missing response or regressor are dropped, as R's lm (na.omit); the output reports how many."
     )]
     pub async fn regression_bgtest(
         &self,
@@ -555,7 +616,7 @@ impl AnalyticsServer {
 
     /// Run Ramsey's RESET test for functional form.
     #[tool(
-        description = "Ramsey's RESET test for functional form misspecification. Tests whether nonlinear terms (powers of fitted values) should be added to the model. Significant result suggests the linear model is misspecified and nonlinear terms may be needed. reset_type 'fitted' (default), 'regressor' or 'princomp' (powers of the first principal component of the regressors), as lmtest::resettest(type =); df from the rank of the augmented design (lmtest counts columns; they differ only when a term aliases)."
+        description = "Ramsey's RESET test for functional form misspecification. Tests whether nonlinear terms (powers of fitted values) should be added to the model. Significant result suggests the linear model is misspecified and nonlinear terms may be needed. reset_type 'fitted' (default), 'regressor' or 'princomp' (powers of the first principal component of the regressors), as lmtest::resettest(type =); df from the rank of the augmented design (lmtest counts columns; they differ only when a term aliases). Rows with a missing response or regressor are dropped, as R's lm (na.omit); the output reports how many."
     )]
     pub async fn regression_resettest(
         &self,
@@ -591,7 +652,7 @@ impl AnalyticsServer {
 
     /// Wald test for comparing nested linear models.
     #[tool(
-        description = "Wald test (F-test) for comparing nested linear models. Tests whether variables excluded from the restricted model are jointly significant. Common uses: testing joint significance of multiple coefficients, testing nested model hypotheses, comparing model specifications."
+        description = "Wald test (F-test) for comparing nested linear models. Tests whether variables excluded from the restricted model are jointly significant. Common uses: testing joint significance of multiple coefficients, testing nested model hypotheses, comparing model specifications. Rows with a missing response or regressor are dropped, as R's lm (na.omit); the output reports how many."
     )]
     pub async fn regression_waldtest(
         &self,
@@ -630,7 +691,7 @@ impl AnalyticsServer {
 
     /// Harvey-Collier test for linearity using recursive residuals.
     #[tool(
-        description = "Harvey-Collier test for detecting departure from linearity. Uses recursive residuals to test whether the mean of one-step-ahead forecast errors differs from zero. A significant result suggests convex or concave functional misspecification - the linear model may need polynomial terms. Equivalent to R's lmtest::harvtest()."
+        description = "Harvey-Collier test for detecting departure from linearity. Uses recursive residuals to test whether the mean of one-step-ahead forecast errors differs from zero. A significant result suggests convex or concave functional misspecification - the linear model may need polynomial terms. Equivalent to R's lmtest::harvtest(). Rows with a missing response or regressor are dropped, as R's lm (na.omit); the output reports how many."
     )]
     pub async fn regression_harvtest(
         &self,
@@ -659,7 +720,7 @@ impl AnalyticsServer {
 
     /// HAC (Newey-West) standard errors for time series regression.
     #[tool(
-        description = "Compute HAC (Heteroskedasticity and Autocorrelation Consistent) standard errors using the Newey-West estimator. Essential for time series regression where errors may be both heteroskedastic and autocorrelated. Supports multiple kernel functions and automatic bandwidth selection. kernel 'bartlett' (default), 'parzen', 'qs' (Quadratic Spectral), 'truncated' or 'tukey-hanning' (sandwich's spellings are accepted)."
+        description = "Compute HAC (Heteroskedasticity and Autocorrelation Consistent) standard errors using the Newey-West estimator. Essential for time series regression where errors may be both heteroskedastic and autocorrelated. Supports multiple kernel functions and automatic bandwidth selection. kernel 'bartlett' (default), 'parzen', 'qs' (Quadratic Spectral), 'truncated' or 'tukey-hanning' (sandwich's spellings are accepted). Rows with a missing response or regressor are dropped, as R's lm (na.omit); the output reports how many."
     )]
     pub async fn regression_hac(
         &self,
@@ -696,7 +757,7 @@ impl AnalyticsServer {
 
     /// Bootstrap covariance estimation (vcovBS).
     #[tool(
-        description = "Compute bootstrap covariance matrix and standard errors for OLS regression. Supports pairs bootstrap (most robust, resamples observations), residual bootstrap (assumes homoskedasticity), and wild bootstrap (robust to heteroskedasticity). Useful when asymptotic standard errors may be unreliable. As sandwich::vcovBS with type 'pairs' (default), 'residual', 'wild' (Rademacher), 'mammen' or 'webb'. Seeded: seed, else the session seed (set_seed), else 42."
+        description = "Compute bootstrap covariance matrix and standard errors for OLS regression. Supports pairs bootstrap (most robust, resamples observations), residual bootstrap (assumes homoskedasticity), and wild bootstrap (robust to heteroskedasticity). Useful when asymptotic standard errors may be unreliable. As sandwich::vcovBS with type 'pairs' (default), 'residual', 'wild' (Rademacher), 'mammen' or 'webb'. Seeded: seed, else the session seed (set_seed), else 42. Rows with a missing response or regressor are dropped, as R's lm (na.omit); the output reports how many."
     )]
     pub async fn regression_bootstrap_cov(
         &self,
@@ -737,7 +798,7 @@ impl AnalyticsServer {
 
     /// Driscoll-Kraay panel-robust standard errors.
     #[tool(
-        description = "Compute Driscoll-Kraay (1998) panel-robust standard errors. Robust to arbitrary cross-sectional correlation (spatial dependence) and serial correlation in panel data. Aggregates score vectors by time period and applies Newey-West HAC correction. Best for panels with large T (many time periods). Returns coefficient estimates with panel-robust SEs, t-stats, and p-values. time_col must hold whole numbers or dates; rows with a missing time id are dropped and the model is re-estimated (reported in the output). kernel 'bartlett' (default), 'parzen', 'qs' (Quadratic Spectral), 'truncated' or 'tukey-hanning' (sandwich's spellings are accepted)."
+        description = "Compute Driscoll-Kraay (1998) panel-robust standard errors. Robust to arbitrary cross-sectional correlation (spatial dependence) and serial correlation in panel data. Aggregates score vectors by time period and applies Newey-West HAC correction. Best for panels with large T (many time periods). Returns coefficient estimates with panel-robust SEs, t-stats, and p-values. time_col must hold whole numbers or dates; rows with a missing time id are dropped and the model is re-estimated (reported in the output). kernel 'bartlett' (default), 'parzen', 'qs' (Quadratic Spectral), 'truncated' or 'tukey-hanning' (sandwich's spellings are accepted). Rows with a missing response or regressor are dropped, as R's lm (na.omit); the output reports how many."
     )]
     pub async fn regression_driscoll_kraay(
         &self,
@@ -843,7 +904,7 @@ impl AnalyticsServer {
 
     /// Run OLS with clustered standard errors.
     #[tool(
-        description = "Run OLS regression with clustered standard errors. Supports one-way (firm, state) or two-way (firm + time) clustering. Essential for panel data with correlated errors. Rows with a missing cluster id are dropped and the model is re-estimated on the remaining rows (as fixest); the output reports how many."
+        description = "Run OLS regression with clustered standard errors. Supports one-way (firm, state) or two-way (firm + time) clustering. Essential for panel data with correlated errors. Rows with a missing cluster id, response or regressor are dropped and the model is re-estimated on the remaining rows (as fixest, and lm's na.omit); the output reports how many."
     )]
     pub async fn regression_clustered(
         &self,
@@ -2039,6 +2100,65 @@ mod tests {
         assert!(!t.contains(&"x".repeat(65)), "{t}");
     }
 
+    /// `regression_ols` with `weights` is weighted least squares (case `wls_sim`,
+    /// `lm(y ~ x1 + x2 + d, weights = w)`): the printed coefficients and HC1 SEs, the
+    /// weighted title and the note on the rows with weight 0.
+    #[test]
+    fn test_validate_mcp_regression_ols_weights() {
+        let (case, rt, server) = case_server("wls_sim");
+        let r = call(
+            &rt,
+            &server,
+            json!({"y": "y", "x": ["x1", "x2", "d"], "weights": "w"}),
+        );
+        assert_ne!(r.is_error, Some(true));
+        let t = text(&r);
+        assert!(
+            t.starts_with("Weighted Least Squares Results")
+                || t.contains("\nWeighted Least Squares Results"),
+            "{t}"
+        );
+        assert!(
+            t.contains("Weights: w") && t.contains("51 row(s) with weight 0"),
+            "{t}"
+        );
+        let (names, values): (Vec<String>, Vec<Vec<f64>>) = rows(&t).into_iter().unzip();
+        let coef: Vec<f64> = values.iter().map(|v| v[0]).collect();
+        let se: Vec<f64> = values.iter().map(|v| v[1]).collect();
+        Check::new(&case)
+            .named("coef", &names, &coef, Tol::printed(4))
+            .named("se_hc1", &names, &se, Tol::printed(4))
+            .finish();
+        let r = call(&rt, &server, json!({"weights": "nope"}));
+        assert_eq!(r.is_error, Some(true));
+    }
+
+    /// Missing cells drop their rows, as lm's na.omit, and the reply ends with the drop.
+    #[test]
+    fn test_validate_mcp_regression_ols_na() {
+        let (case, rt, server) = case_server("ols_na");
+        let r = call(&rt, &server, json!({"y": "y", "x": ["x1", "x2"]}));
+        assert_ne!(r.is_error, Some(true), "{}", text(&r));
+        let t = text(&r);
+        assert!(
+            t.trim_end().ends_with(
+                "Missing values: 8 of 120 rows dropped because of missing values (y: 5, x1: 4)"
+            ),
+            "{t}"
+        );
+        assert!(
+            t.starts_with("Coefficients saved as dataset 'grunfeld_ols_y'"),
+            "{t}"
+        );
+        let (names, values): (Vec<String>, Vec<Vec<f64>>) = rows(&t).into_iter().unzip();
+        let coef: Vec<f64> = values.iter().map(|v| v[0]).collect();
+        let se: Vec<f64> = values.iter().map(|v| v[1]).collect();
+        Check::new(&case)
+            .named("coef", &names, &coef, Tol::printed(4))
+            .named("se_hc1", &names, &se, Tol::printed(4))
+            .finish();
+    }
+
     /// No R case for the no-intercept model: this checks the option plumbing.
     #[test]
     fn test_mcp_regression_ols_intercept_false() {
@@ -2233,6 +2353,56 @@ mod tests {
         Check::new(&case)
             .named("coef_twoway", &names, &coef, Tol::printed(4))
             .named("se_cluster_twoway_hc1", &names, &se, Tol::printed(4))
+            .finish();
+    }
+
+    /// A missing response or regressor no longer stops the tools built on an lm fit: HAC and
+    /// the Breusch-Godfrey test run on the complete rows, match R there, and say which rows
+    /// were dropped.
+    #[test]
+    fn test_validate_mcp_regression_lm_tests_na() {
+        let case = Case::load("reg_lm_tests_na");
+        let (rt, server) = cases_server(&["reg_lm_tests_na"]);
+        let note = "Missing values: 5 of 200 rows dropped because of missing values \
+                    (inv: 3, value: 2); the other rows are used in their order";
+        let req: HacRequest = serde_json::from_value(json!({"dataset": "grunfeld_lm_na",
+            "y": "inv", "x": ["value", "capital"], "bandwidth": 3}))
+        .unwrap();
+        let r = rt.block_on(server.regression_hac(Parameters(req))).unwrap();
+        let t = text(&r);
+        assert_ne!(r.is_error, Some(true), "{t}");
+        assert!(t.contains(note), "{t}");
+        let (mut names, mut coef, mut se) = (Vec::new(), Vec::new(), Vec::new());
+        for l in t.lines().skip_while(|l| !l.starts_with("---")).skip(1) {
+            let tok: Vec<&str> = l.split_whitespace().collect();
+            if tok.len() != 3 {
+                break;
+            }
+            names.push(tok[0].to_string());
+            coef.push(tok[1].parse::<f64>().unwrap());
+            se.push(tok[2].parse::<f64>().unwrap());
+        }
+        Check::new(&case)
+            .named("coef", &names, &coef, Tol::printed(6))
+            .named("se_nw_lag3", &names, &se, Tol::printed(6))
+            .finish();
+        let req: BgTestRequest = serde_json::from_value(json!({"dataset": "grunfeld_lm_na",
+            "y": "inv", "x": ["value", "capital"], "order": 2}))
+        .unwrap();
+        let r = rt
+            .block_on(server.regression_bgtest(Parameters(req)))
+            .unwrap();
+        let t = text(&r);
+        assert_ne!(r.is_error, Some(true), "{t}");
+        assert!(t.contains(note), "{t}");
+        let stat: f64 = t
+            .lines()
+            .find_map(|l| l.strip_prefix("LM Statistic: "))
+            .unwrap()
+            .parse()
+            .unwrap();
+        Check::new(&case)
+            .scalar("bg_stat", stat, Tol::printed(4))
             .finish();
     }
 

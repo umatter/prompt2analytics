@@ -327,9 +327,16 @@ pub struct PanelHdfeRequest {
 
     /// Standard error type
     #[schemars(
-        description = "Standard error type: 'standard' (also 'classical'), 'hc0', 'hc1' (default), 'hc2' or 'hc3'. Other values are an error."
+        description = "Standard error type: 'standard' (also 'classical'), 'hc0', 'hc1' (default), 'hc2' or 'hc3'. Other values are an error. Ignored when cluster is set."
     )]
     pub se_type: Option<String>,
+
+    /// Cluster columns
+    #[serde(default)]
+    #[schemars(
+        description = "One or two columns to cluster the standard errors by (e.g. ['firm'], or ['firm', 'year'] for two-way), as fixest::feols(vcov = ~firm + year) with its default small-sample correction; p-values then use the smallest number of clusters minus 1 degrees of freedom. Rows with a missing cluster id are dropped."
+    )]
+    pub cluster: Option<Vec<String>>,
 }
 
 #[cfg(test)]

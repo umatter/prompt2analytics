@@ -46,6 +46,12 @@ pub struct ScatterPlotRequest {
     #[schemars(description = "Name of the column for Y-axis values.")]
     pub y_column: String,
 
+    /// Column whose values colour the points (optional)
+    #[schemars(
+        description = "Optional column whose values get their own colour and marker shape (at most 12), such as a treatment indicator or a region."
+    )]
+    pub group_column: Option<String>,
+
     /// Chart title (optional)
     #[schemars(description = "Optional title for the chart.")]
     pub title: Option<String>,
@@ -60,7 +66,9 @@ pub struct LineChartRequest {
     pub dataset: String,
 
     /// X-axis column name
-    #[schemars(description = "Name of the column for X-axis values (e.g., time index).")]
+    #[schemars(
+        description = "Name of the column for X-axis values: numeric, or dates (date columns or text such as 1949-01)."
+    )]
     pub x_column: String,
 
     /// Y-axis column names (one or more series)
@@ -68,6 +76,24 @@ pub struct LineChartRequest {
         description = "Names of the columns to plot as lines (can be multiple for multi-series)."
     )]
     pub y_columns: Vec<String>,
+
+    /// Column that splits the rows into one line each (optional)
+    #[schemars(
+        description = "Optional column whose values get one line each (at most 12): the unit column of panel data, such as firm or country."
+    )]
+    pub group_column: Option<String>,
+
+    /// Lower edge of a shaded band (optional)
+    #[schemars(
+        description = "Optional column with the lower edge of a shaded band (with upper_column), e.g. lower_95 of a saved forecast."
+    )]
+    pub lower_column: Option<String>,
+
+    /// Upper edge of a shaded band (optional)
+    #[schemars(
+        description = "Optional column with the upper edge of a shaded band (with lower_column), e.g. upper_95 of a saved forecast."
+    )]
+    pub upper_column: Option<String>,
 
     /// Chart title (optional)
     #[schemars(description = "Optional title for the chart.")]
@@ -83,8 +109,16 @@ pub struct BoxPlotRequest {
     pub dataset: String,
 
     /// Column names to include in box plot
-    #[schemars(description = "Names of numeric columns to create box plots for.")]
+    #[schemars(
+        description = "Names of numeric columns to create box plots for; exactly one with group_column."
+    )]
     pub columns: Vec<String>,
+
+    /// Column that splits the values into one box per group (optional)
+    #[schemars(
+        description = "Optional column whose values get one box each for the single column in columns (R's boxplot(y ~ group)), at most 30 groups, in R factor order: numbers numerically, text alphabetically."
+    )]
+    pub group_column: Option<String>,
 
     /// Chart title (optional)
     #[schemars(description = "Optional title for the chart.")]
@@ -173,7 +207,9 @@ pub struct LineInteractiveRequest {
     pub dataset: String,
 
     /// X-axis column name
-    #[schemars(description = "Name of the column for X-axis values (e.g., time index).")]
+    #[schemars(
+        description = "Name of the column for X-axis values: numeric, or dates (date columns or text such as 1949-01)."
+    )]
     pub x_column: String,
 
     /// Y-axis column name

@@ -1,6 +1,8 @@
 //! Heatmap visualization for correlation matrices and other 2D data.
 
 use super::charts::{encode_rgb_to_png_base64, rgb_buffer};
+use super::colors::{BRAND_BLUE, BRAND_ORANGE};
+use super::vector::{FigureBackend, SvgRecorder};
 use super::{DEFAULT_HEIGHT, DEFAULT_WIDTH, VisualizationError};
 use plotters::prelude::*;
 use plotters::style::text_anchor::{HPos, Pos, VPos};
@@ -9,6 +11,9 @@ use plotters::style::text_anchor::{HPos, Pos, VPos};
 pub struct HeatmapResult {
     /// Base64-encoded PNG image
     pub image_base64: String,
+    /// Vector version of the image (SVG); None when it would be larger than
+    /// [`MAX_SVG_BYTES`](super::MAX_SVG_BYTES)
+    pub svg: Option<String>,
     /// Number of rows
     pub n_rows: usize,
     /// Number of columns
@@ -199,9 +204,11 @@ pub fn correlation_heatmap(
 
     // Create image buffer
     let mut buffer = rgb_buffer(width, height)?;
+    let mut recorder = SvgRecorder::new(width, height);
 
     {
-        let root = BitMapBackend::with_buffer(&mut buffer, (width, height)).into_drawing_area();
+        let root =
+            FigureBackend::new(&mut buffer, &mut recorder, (width, height)).into_drawing_area();
         root.fill(&WHITE)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
@@ -244,7 +251,7 @@ pub fn correlation_heatmap(
 
                 // Draw value text if cells are large enough
                 if cell >= 35 {
-                    let text_color = if val.abs() > 0.5 { WHITE } else { BLACK };
+                    let text_color = text_on(color);
                     // A value that could not be computed (R's NA) shows as NA on its gray cell.
                     let val_text = if val.is_finite() {
                         format!("{:.2}", val)
@@ -347,6 +354,7 @@ pub fn correlation_heatmap(
 
     Ok(HeatmapResult {
         image_base64,
+        svg: recorder.finish(),
         n_rows,
         n_cols,
         row_labels: row_labels.to_vec(),
@@ -355,12 +363,8 @@ pub fn correlation_heatmap(
     })
 }
 
-/// Convert a value to a color using a diverging cyan-white-orange colormap.
-///
-/// Uses brand colors:
-/// - Negative values: Brand Cyan (#00B4D8)
-/// - Zero/neutral: White
-/// - Positive values: Brand Orange (#FF6B35)
+/// Convert a value to a color using a diverging blue-white-orange colormap: negative values
+/// towards `BRAND_BLUE`, zero white, positive values towards `BRAND_ORANGE`.
 fn value_to_color(val: f64, min: f64, max: f64) -> RGBColor {
     if !val.is_finite() {
         return RGBColor(128, 128, 128); // Gray for NaN
@@ -374,30 +378,29 @@ fn value_to_color(val: f64, min: f64, max: f64) -> RGBColor {
         (val - min) / range
     };
 
-    // Brand colors for endpoints
-    // Cyan: (0, 180, 216) - #00B4D8
-    // Orange: (255, 107, 53) - #FF6B35
-
-    // Diverging colormap: cyan (0) -> white (0.5) -> orange (1)
-    let (r, g, b) = if normalized <= 0.5 {
-        // Cyan to white
-        let t = normalized * 2.0;
-        (
-            (0.0 + t * 255.0) as u8,
-            (180.0 + t * (255.0 - 180.0)) as u8,
-            (216.0 + t * (255.0 - 216.0)) as u8,
-        )
+    let pole = if normalized <= 0.5 {
+        BRAND_BLUE
     } else {
-        // White to orange
-        let t = (normalized - 0.5) * 2.0;
-        (
-            255,
-            (255.0 - t * (255.0 - 107.0)) as u8,
-            (255.0 - t * (255.0 - 53.0)) as u8,
-        )
+        BRAND_ORANGE
     };
+    // From white at the midpoint to the pole at either end
+    let t = (normalized - 0.5).abs() * 2.0;
+    let mix = |c: u8| (255.0 - t * (255.0 - f64::from(c))).round() as u8;
+    RGBColor(mix(pole.0), mix(pole.1), mix(pole.2))
+}
 
-    RGBColor(r, g, b)
+/// Black or white, whichever has more contrast on `color` (WCAG relative luminance).
+fn text_on(color: RGBColor) -> RGBColor {
+    let linear = |c: u8| {
+        let c = f64::from(c) / 255.0;
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let luminance = 0.2126 * linear(color.0) + 0.7152 * linear(color.1) + 0.0722 * linear(color.2);
+    if luminance > 0.179 { BLACK } else { WHITE }
 }
 
 #[cfg(test)]

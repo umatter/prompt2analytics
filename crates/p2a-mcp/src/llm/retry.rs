@@ -149,7 +149,35 @@ pub(crate) async fn upstream_error(
         .take(ERROR_BODY_LOG_CHARS)
         .collect();
     tracing::debug!(provider, status, body = %preview, "LLM provider returned an error status");
+    if rejects_model(status, &body) {
+        return LlmError::ModelRejected { provider, status };
+    }
     LlmError::Upstream { provider, status }
+}
+
+/// Whether an error body of status 400, 404 or 422 says that the provider does not know the
+/// requested model: its text (lower-cased) mentions a model and one of the phrases the
+/// OpenAI, OpenRouter, Anthropic and Ollama APIs use for an unknown one. Only this yes or no
+/// leaves the body.
+fn rejects_model(status: u16, body: &[u8]) -> bool {
+    if !matches!(status, 400 | 404 | 422) {
+        return false;
+    }
+    let text = String::from_utf8_lossy(body).to_lowercase();
+    (text.contains("model")
+        && [
+            "not a valid model",
+            "invalid model",
+            "unknown model",
+            "model not found",
+            "model_not_found",
+            "does not exist",
+            "no endpoints found",
+            "not_found_error",
+        ]
+        .iter()
+        .any(|phrase| text.contains(phrase)))
+        || (status == 404 && text.contains("model") && text.contains("not found"))
 }
 
 /// Read a provider's JSON body, refusing it past `cap` bytes.
@@ -180,5 +208,41 @@ pub(crate) fn count_streamed(total: &mut usize, received: usize) -> Result<(), L
         Err(LlmError::ResponseTooLarge(MAX_UPSTREAM_BODY_BYTES))
     } else {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod model_rejection_tests {
+    use super::rejects_model;
+
+    /// The unknown-model bodies of OpenRouter, OpenAI, Anthropic and Ollama are recognised;
+    /// a context-length 400 and a model error under another status are not.
+    #[test]
+    fn unknown_model_bodies_are_recognised() {
+        for (status, body) in [
+            (
+                400,
+                r#"{"error":{"message":"anthropic/claude-nonexistent-9 is not a valid model ID","code":400}}"#,
+            ),
+            (
+                404,
+                r#"{"error":{"message":"The model `gpt-9` does not exist","code":"model_not_found"}}"#,
+            ),
+            (
+                404,
+                r#"{"type":"error","error":{"type":"not_found_error","message":"model: claude-x"}}"#,
+            ),
+            (
+                404,
+                r#"{"error":"model 'llama9' not found, try pulling it first"}"#,
+            ),
+        ] {
+            assert!(rejects_model(status, body.as_bytes()), "{body}");
+        }
+        let context =
+            r#"{"error":{"message":"This model's maximum context length is 8192 tokens"}}"#;
+        assert!(!rejects_model(400, context.as_bytes()));
+        let unknown = r#"{"error":{"message":"is not a valid model ID"}}"#;
+        assert!(!rejects_model(500, unknown.as_bytes()));
     }
 }

@@ -192,6 +192,10 @@ pub trait HttpClient {
     ) -> Result<HttpResponse, HttpError>;
 }
 
+/// Shown when a request gets no answer at all.
+pub const UNREACHABLE_TEXT: &str =
+    "The backend cannot be reached. Check that it is running, then try again.";
+
 // ============================================================================
 // Web implementation (WASM with fetch API)
 // ============================================================================
@@ -250,7 +254,10 @@ mod web {
                 web_sys::window().ok_or_else(|| HttpError("No window object".to_string()))?;
             let resp_value = JsFuture::from(window.fetch_with_request(&request))
                 .await
-                .map_err(|e| HttpError(format!("Fetch error: {e:?}")))?;
+                .map_err(|e| {
+                    tracing::warn!("fetch failed: {e:?}");
+                    HttpError(UNREACHABLE_TEXT.to_string())
+                })?;
 
             let response: Response = resp_value
                 .dyn_into()

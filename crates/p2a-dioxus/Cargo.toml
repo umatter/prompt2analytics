@@ -57,7 +57,7 @@ p2a-text.workspace = true
 # Dioxus framework - base features, platform selected via features
 # Note: "macro" enables rsx!, "html" enables HTML elements, "hooks/signals" for state
 # "document" enables Stylesheet and other document components
-dioxus = { version = "0.7.3", default-features = false, features = ["macro", "html", "hooks", "signals", "document", "asset"] }
+dioxus = { version = "0.7.3", default-features = false, features = ["macro", "html", "hooks", "signals", "document", "asset", "mounted"] }
 
 # HTTP client - always needed, but streaming only on native
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
@@ -84,6 +84,10 @@ tracing = "0.1"
 # Image encoding
 base64.workspace = true
 
+# PDF export of figures: glyph widths of the embedded font, stream compression
+ttf-parser = { version = "0.20", default-features = false }
+miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
+
 # ============================================================================
 # Web-only dependencies (optional)
 # ============================================================================
@@ -102,7 +106,9 @@ web-sys = { version = "0.3", optional = true, features = [
     "DomTokenList",
     "MediaQueryList",
     "MediaQueryListEvent",
+    "Event",
     "EventTarget",
+    "KeyboardEvent",
     "HtmlElement",
     "HtmlTextAreaElement",
     "HtmlInputElement",

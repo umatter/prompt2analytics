@@ -26,51 +26,29 @@ pub fn ShortcutsModal(props: ShortcutsModalProps) -> Element {
 
             // Backdrop
             div {
-                class: "absolute inset-0 bg-black/50 backdrop-blur-sm",
+                class: "k-backdrop",
                 onclick: move |_| props.on_close.call(()),
             }
 
             // Modal
             div {
-                class: "relative bg-white dark:bg-gray-900 rounded-2xl shadow-2xl w-full max-w-md max-h-[80vh] overflow-hidden border border-gray-200 dark:border-gray-800",
+                class: "k-modal max-w-md max-h-[80vh]",
 
                 // Header
-                div { class: "px-6 py-4 border-b border-gray-200 dark:border-gray-800 flex items-center justify-between",
-                    div { class: "flex items-center gap-2",
-                        // Keyboard icon
-                        svg {
-                            class: "w-5 h-5 text-teal-600 dark:text-teal-400",
-                            fill: "none",
-                            stroke: "currentColor",
-                            view_box: "0 0 24 24",
-                            path {
-                                stroke_linecap: "round",
-                                stroke_linejoin: "round",
-                                stroke_width: "2",
-                                d: "M12 6v6m0 0v6m0-6h6m-6 0H6"
-                            }
-                            rect {
-                                x: "2",
-                                y: "6",
-                                width: "20",
-                                height: "12",
-                                rx: "2",
-                                stroke_width: "2"
-                            }
-                        }
-                        h2 { class: "text-xl font-semibold text-gray-900 dark:text-white", "Keyboard Shortcuts" }
-                    }
+                div { class: "k-modal-head",
+                    h2 { class: "k-modal-title", "Keyboard shortcuts" }
                     button {
-                        class: "p-2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors",
+                        class: "k-icon-btn",
+                        title: "Close",
+                        aria_label: "Close",
                         onclick: move |_| props.on_close.call(()),
                         svg {
-                            class: "w-5 h-5",
+                            class: "w-4 h-4",
                             fill: "none",
                             stroke: "currentColor",
                             view_box: "0 0 24 24",
                             path {
-                                stroke_linecap: "round",
-                                stroke_linejoin: "round",
+                                stroke_linecap: "square",
                                 stroke_width: "2",
                                 d: "M6 18L18 6M6 6l12 12"
                             }
@@ -79,55 +57,41 @@ pub fn ShortcutsModal(props: ShortcutsModalProps) -> Element {
                 }
 
                 // Content
-                div { class: "px-6 py-4 overflow-y-auto",
+                div { class: "k-modal-body space-y-5",
                     // Global shortcuts
-                    div { class: "mb-6",
-                        h3 { class: "text-sm font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-3",
-                            "Global"
-                        }
-                        div { class: "space-y-2",
-                            ShortcutRow { keys: "Ctrl + /", description: "Show keyboard shortcuts" }
-                            ShortcutRow { keys: "?", description: "Show keyboard shortcuts (outside text fields)" }
-                            ShortcutRow { keys: "Ctrl + K", description: "Focus chat input" }
-                            ShortcutRow { keys: "Ctrl + N", description: "New conversation" }
-                            ShortcutRow { keys: "Escape", description: "Close dialog" }
-                        }
+                    div {
+                        h3 { class: "k-section-h", "Global" }
+                        ShortcutRow { keys: "Ctrl + /", description: "Show keyboard shortcuts" }
+                        ShortcutRow { keys: "?", description: "Show keyboard shortcuts (outside text fields)" }
+                        ShortcutRow { keys: "Ctrl + K", description: "Focus chat input" }
+                        ShortcutRow { keys: "Ctrl + N", description: "New conversation" }
+                        ShortcutRow { keys: "Escape", description: "Close dialog" }
                     }
 
                     // Chat input shortcuts
-                    div { class: "mb-6",
-                        h3 { class: "text-sm font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-3",
-                            "Chat Input"
-                        }
-                        div { class: "space-y-2",
-                            ShortcutRow { keys: "Enter", description: "Send message" }
-                            ShortcutRow { keys: "Shift + Enter", description: "New line" }
-                            ShortcutRow { keys: "\u{2191} / \u{2193}", description: "Navigate prompt history" }
-                            ShortcutRow { keys: "@", description: "Autocomplete datasets" }
-                            ShortcutRow { keys: "/", description: "Autocomplete tools" }
-                            ShortcutRow { keys: "Tab", description: "Accept autocomplete suggestion" }
-                        }
+                    div {
+                        h3 { class: "k-section-h", "Chat input" }
+                        ShortcutRow { keys: "Enter", description: "Send message" }
+                        ShortcutRow { keys: "Shift + Enter", description: "New line" }
+                        ShortcutRow { keys: "\u{2191} / \u{2193}", description: "Navigate prompt history" }
+                        ShortcutRow { keys: "@", description: "Autocomplete datasets" }
+                        ShortcutRow { keys: "/", description: "Autocomplete tools" }
+                        ShortcutRow { keys: "Tab", description: "Accept autocomplete suggestion" }
                     }
 
                     // Dataset sidebar shortcuts
                     div {
-                        h3 { class: "text-sm font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-3",
-                            "Datasets"
-                        }
-                        div { class: "space-y-2",
-                            ShortcutRow { keys: "Click", description: "View dataset details" }
-                        }
+                        h3 { class: "k-section-h", "Datasets" }
+                        ShortcutRow { keys: "Click", description: "View dataset details" }
                     }
                 }
 
                 // Footer
-                div { class: "px-6 py-3 border-t border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-800/50",
-                    p { class: "text-xs text-gray-500 dark:text-gray-400 text-center",
+                div { class: "px-5 py-2.5 k-rule-t",
+                    p { class: "k-mono k-muted text-[11px]",
                         "Press "
-                        kbd { class: "px-1.5 py-0.5 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded text-gray-600 dark:text-gray-300 font-mono text-xs",
-                            "Esc"
-                        }
-                        " to close this panel"
+                        kbd { class: "k-kbd", "Esc" }
+                        " to close"
                     }
                 }
             }
@@ -148,21 +112,15 @@ struct ShortcutRowProps {
 #[component]
 fn ShortcutRow(props: ShortcutRowProps) -> Element {
     rsx! {
-        div { class: "flex items-center justify-between py-1.5",
-            span { class: "text-sm text-gray-700 dark:text-gray-300",
-                "{props.description}"
-            }
-            div { class: "flex items-center gap-1",
+        div { class: "k-row",
+            span { "{props.description}" }
+            div { class: "flex items-center gap-1 flex-shrink-0",
                 // Split keys by " + " and render each as a kbd element
                 for (i, key) in props.keys.split(" + ").enumerate() {
                     if i > 0 {
-                        span { class: "text-gray-400 dark:text-gray-500 text-xs", "+" }
+                        span { class: "k-muted k-mono text-[11px]", "+" }
                     }
-                    kbd {
-                        key: "{key}",
-                        class: "px-2 py-1 bg-gray-100 dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded text-xs font-mono text-gray-700 dark:text-gray-300 min-w-[1.5rem] text-center",
-                        "{key}"
-                    }
+                    kbd { key: "{key}", class: "k-kbd", "{key}" }
                 }
             }
         }

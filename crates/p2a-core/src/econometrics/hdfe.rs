@@ -73,6 +73,13 @@ pub struct HdfeConfig {
     /// Whether to use Gearhart-Koshy acceleration for faster convergence.
     /// Default: true
     pub accelerate: bool,
+
+    /// Columns to cluster the standard errors by: none (the default; `cov_type`
+    /// applies), one or two (two-way). With clusters `cov_type` is ignored and the
+    /// covariance is fixest's `feols(vcov = ~c1 + c2)` with its default small-sample
+    /// correction; see [`run_hdfe`].
+    #[serde(default)]
+    pub cluster: Vec<String>,
 }
 
 impl Default for HdfeConfig {
@@ -81,6 +88,7 @@ impl Default for HdfeConfig {
             tolerance: 1e-8,
             max_iterations: 10000,
             accelerate: true,
+            cluster: Vec::new(),
         }
     }
 }
@@ -350,6 +358,22 @@ fn validate_config(config: &HdfeConfig) -> EconResult<()> {
     if config.max_iterations == 0 {
         return Err(EconError::InvalidSpecification {
             message: "max_iterations must be at least 1 (got 0)".to_string(),
+        });
+    }
+    if config.cluster.len() > 2 {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "at most two cluster columns are supported (got {})",
+                config.cluster.len()
+            ),
+        });
+    }
+    if config.cluster.len() == 2 && config.cluster[0] == config.cluster[1] {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "the two cluster columns are the same ('{}')",
+                config.cluster[0]
+            ),
         });
     }
     Ok(())
@@ -965,6 +989,17 @@ pub struct HdfeResult {
     /// Warnings: dropped regressors, non-convergence of the alternating projections
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+
+    /// The columns the standard errors are clustered by (empty: `cov_type` applies)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cluster_vars: Vec<String>,
+    /// The number of clusters of each column of `cluster_vars`
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub n_clusters: Vec<usize>,
+    /// Degrees of freedom of the t tests: `df_resid`, or the smallest number of
+    /// clusters minus 1 with clustered standard errors (fixest's `t.df = "min"`)
+    #[serde(default)]
+    pub df_t: usize,
 }
 
 impl ResultNotes for HdfeResult {
@@ -1006,7 +1041,22 @@ impl fmt::Display for HdfeResult {
             "F-statistic: {:.4} (p-value: {:.4})",
             self.f_stat, self.f_p_value
         )?;
-        writeln!(f, "Covariance Type: {:?}", self.cov_type)?;
+        if self.cluster_vars.is_empty() {
+            writeln!(f, "Covariance Type: {:?}", self.cov_type)?;
+        } else {
+            let parts: Vec<String> = self
+                .cluster_vars
+                .iter()
+                .zip(&self.n_clusters)
+                .map(|(c, g)| format!("{c} ({g} clusters)"))
+                .collect();
+            writeln!(
+                f,
+                "Covariance Type: clustered by {}; t on {} df",
+                parts.join(" and "),
+                self.df_t
+            )?;
+        }
         writeln!(f)?;
 
         writeln!(
@@ -1113,10 +1163,12 @@ pub fn run_hdfe(
 
     // y, X and every fixed-effect column on the rows complete in all of them
     // (fixest drops incomplete rows too)
+    let cluster_cols: Vec<&str> = config.cluster.iter().map(String::as_str).collect();
     let cols = ColumnRequest::new(dataset.df())
         .numeric(y_col)
         .numerics(x_cols)
         .factors(fe_cols)
+        .factors(&cluster_cols)
         .na(NaPolicy::Omit)
         .extract()?;
     let y = cols.numeric_array(y_col);
@@ -1218,31 +1270,52 @@ pub fn run_hdfe(
             h_fe.as_ref(),
         )
     };
-    let vcov = match cov_type {
-        CovarianceType::Standard => &xtx_inv * sigma2,
-        CovarianceType::HC0 => hc(0)?.0,
-        CovarianceType::HC1 => hc(1)?.0,
-        CovarianceType::HC2 | CovarianceType::HC3 => {
-            let (v, n_unit) = hc(if cov_type == CovarianceType::HC2 {
-                2
-            } else {
-                3
-            })?;
-            match n_unit {
-                0 => {}
-                1 => warnings.push(
-                    "1 observation has leverage 1 (it is fitted exactly, e.g. a singleton \
-                     fixed-effect level) and contributes nothing to the HC2/HC3 meat"
-                        .to_string(),
-                ),
-                m => warnings.push(format!(
-                    "{m} observations have leverage 1 (they are fitted exactly, e.g. singleton \
-                     fixed-effect levels) and contribute nothing to the HC2/HC3 meat"
-                )),
-            }
-            v
-        }
+    let clustered = if cluster_cols.is_empty() {
+        None
+    } else {
+        let clusters: Vec<&Factor> = cluster_cols.iter().map(|c| cols.factor(c)).collect();
+        let (v, n_clusters, warning) = clustered_vcov(
+            &x_demeaned.view(),
+            &residuals,
+            &xtx_inv,
+            &factors,
+            &clusters,
+            k,
+        )?;
+        warnings.extend(warning);
+        Some((v, n_clusters))
     };
+    let vcov = match (&clustered, cov_type) {
+        (Some((v, _)), _) => v.clone(),
+        (None, cov_type) => match cov_type {
+            CovarianceType::Standard => &xtx_inv * sigma2,
+            CovarianceType::HC0 => hc(0)?.0,
+            CovarianceType::HC1 => hc(1)?.0,
+            CovarianceType::HC2 | CovarianceType::HC3 => {
+                let (v, n_unit) = hc(if cov_type == CovarianceType::HC2 {
+                    2
+                } else {
+                    3
+                })?;
+                match n_unit {
+                    0 => {}
+                    1 => warnings.push(
+                        "1 observation has leverage 1 (it is fitted exactly, e.g. a singleton \
+                     fixed-effect level) and contributes nothing to the HC2/HC3 meat"
+                            .to_string(),
+                    ),
+                    m => warnings.push(format!(
+                        "{m} observations have leverage 1 (they are fitted exactly, e.g. singleton \
+                     fixed-effect levels) and contribute nothing to the HC2/HC3 meat"
+                    )),
+                }
+                v
+            }
+        },
+    };
+    let n_clusters: Vec<usize> = clustered.map(|(_, g)| g).unwrap_or_default();
+    // fixest's t.df = "min": t tests on the smallest number of clusters minus 1
+    let df_t = n_clusters.iter().min().map_or(df_resid, |g| g - 1);
 
     // Standard errors
     let se: Array1<f64> = vcov.diag().mapv(|v| v.max(0.0).sqrt());
@@ -1278,7 +1351,7 @@ pub fn run_hdfe(
         .collect();
     let p_values: Vec<f64> = t_stats
         .iter()
-        .map(|&t| t_test_p_value(t, df_resid as f64))
+        .map(|&t| t_test_p_value(t, df_t as f64))
         .collect();
     let significance: Vec<SignificanceLevel> = p_values
         .iter()
@@ -1320,7 +1393,102 @@ pub fn run_hdfe(
         missing: cols.missing().clone(),
         dropped: screen.dropped,
         warnings,
+        cluster_vars: config.cluster.clone(),
+        n_clusters,
+        df_t,
     })
+}
+
+/// The cluster-robust covariance of fixest's `feols(vcov = ~c1 [+ c2])` with its default
+/// `ssc()`: `(n - 1)/(n - K) * G/(G - 1) * B M B` with `B = (X'X)^-1` of the demeaned
+/// regressors, `M` the sum over clusters of the outer products of `X_g' e_g` (two-way:
+/// `M1 + M2 - M12`, the last over the intersections), `G` the smallest number of clusters
+/// (`G.df = "min"`) and `K` the `k` slopes plus, for the fixed effects not nested in a
+/// cluster column (`K.fixef = "nonnested"`), their levels less one each, plus 1. A two-way
+/// covariance that is not positive semi-definite has its negative eigenvalues set to 0, as
+/// fixest's `vcov_fix = TRUE`, with a warning. Returns the covariance, the number of
+/// clusters of each column and the warning.
+fn clustered_vcov(
+    x: &ndarray::ArrayView2<f64>,
+    resid: &Array1<f64>,
+    xtx_inv: &Array2<f64>,
+    factors: &[FactorInfo],
+    clusters: &[&Factor],
+    k: usize,
+) -> EconResult<(Array2<f64>, Vec<usize>, Option<String>)> {
+    let n = resid.len();
+    let n_clusters: Vec<usize> = clusters.iter().map(|c| c.n_levels()).collect();
+    let g_min = n_clusters.iter().copied().min().unwrap_or(0);
+    if g_min < 2 {
+        return Err(EconError::InsufficientData {
+            required: 2,
+            provided: g_min,
+            context: "clustered standard errors need at least 2 clusters".to_string(),
+        });
+    }
+    let codes: Vec<Vec<usize>> = clusters
+        .iter()
+        .map(|c| c.codes.iter().map(|&v| v as usize).collect())
+        .collect();
+    // Each row's score x_i e_i, summed within each cluster.
+    let meat = |ids: &[usize], n_groups: usize| -> EconResult<Array2<f64>> {
+        let mut sums = resource::try_zeros2(n_groups, k, "cluster score sums")?;
+        for (i, &g) in ids.iter().enumerate() {
+            let e = resid[i];
+            for j in 0..k {
+                sums[[g, j]] += x[[i, j]] * e;
+            }
+        }
+        Ok(sums.t().dot(&sums))
+    };
+    let mut m = meat(&codes[0], n_clusters[0])?;
+    if codes.len() == 2 {
+        m = m + meat(&codes[1], n_clusters[1])?;
+        let mut pairs: std::collections::HashMap<(usize, usize), usize> =
+            std::collections::HashMap::new();
+        let mut both: Vec<usize> = resource::try_with_capacity(n, "cluster intersections")?;
+        for (&a, &b) in codes[0].iter().zip(&codes[1]) {
+            let next = pairs.len();
+            both.push(*pairs.entry((a, b)).or_insert(next));
+        }
+        m = m - meat(&both, pairs.len())?;
+    }
+    // Fixed effects nested in a cluster column (each level within one cluster) are not
+    // counted in K.
+    let nested = |f: &FactorInfo| {
+        codes.iter().zip(&n_clusters).any(|(ids, _)| {
+            let mut owner = vec![usize::MAX; f.n_levels];
+            f.ids.iter().zip(ids).all(|(&level, &g)| {
+                let o = &mut owner[level];
+                if *o == usize::MAX {
+                    *o = g;
+                }
+                *o == g
+            })
+        })
+    };
+    let fe_k: usize = factors
+        .iter()
+        .filter(|f| !nested(f))
+        .map(|f| f.n_levels - 1)
+        .sum();
+    let big_k = k + fe_k + 1;
+    if big_k >= n {
+        return Err(EconError::InsufficientData {
+            required: big_k + 1,
+            provided: n,
+            context: "clustered standard errors (fixest's small-sample correction)".to_string(),
+        });
+    }
+    let g = g_min as f64;
+    let adj = (n as f64 - 1.0) / (n - big_k) as f64 * g / (g - 1.0);
+    let mut v = xtx_inv.dot(&m).dot(xtx_inv) * adj;
+    let warning = if codes.len() == 2 {
+        crate::regression::ols::twoway_psd_check(&mut v, true)?
+    } else {
+        None
+    };
+    Ok((v, n_clusters, warning))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1977,6 +2145,7 @@ mod tests {
             tolerance: 1e-12,
             max_iterations: 50000,
             accelerate: true,
+            ..HdfeConfig::default()
         };
 
         let result = run_hdfe(
@@ -2549,6 +2718,119 @@ mod tests {
             )
             .named("se_firm_only_iid", &r.variables, &r.std_errors, Tol::se(n))
             .finish();
+    }
+
+    /// Clustered standard errors as fixest's `feols(vcov = ~c)` with its default ssc():
+    /// one-way by firm (the firm effect nested, not counted in K) and by year, two-way by
+    /// firm and year (both nested), and a firm-only model clustered by year (not nested);
+    /// p-values on the smallest number of clusters minus 1.
+    #[test]
+    fn test_validate_hdfe_grunfeld_clustered() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("panel_hdfe_grunfeld");
+        let fit = |fe: &[&str], cluster: &[&str]| {
+            let config = HdfeConfig {
+                cluster: cluster.iter().map(|c| c.to_string()).collect(),
+                ..HdfeConfig::default()
+            };
+            run_hdfe(
+                &ds,
+                "inv",
+                &["value", "capital"],
+                fe,
+                Some(config),
+                CovarianceType::HC1,
+            )
+            .unwrap()
+        };
+        let mut check = Check::new(&case);
+        for (fe, cluster, se_key, p_key, g) in [
+            (
+                &["firm", "year"][..],
+                &["firm"][..],
+                "se_cluster_firm",
+                "p_cluster_firm",
+                vec![10],
+            ),
+            (
+                &["firm", "year"],
+                &["year"],
+                "se_cluster_year",
+                "p_cluster_year",
+                vec![20],
+            ),
+            (
+                &["firm", "year"],
+                &["firm", "year"],
+                "se_cluster_firm_year",
+                "p_cluster_firm_year",
+                vec![10, 20],
+            ),
+            (
+                &["firm"],
+                &["year"],
+                "se_firm_only_cluster_year",
+                "p_firm_only_cluster_year",
+                vec![20],
+            ),
+        ] {
+            let r = fit(fe, cluster);
+            let n = r.n_obs;
+            check
+                .named(se_key, &r.variables, &r.std_errors, Tol::se(n))
+                .named(p_key, &r.variables, &r.p_values, Tol::p_value(n));
+            assert_eq!(r.n_clusters, g);
+            assert_eq!(r.df_t, g.iter().min().unwrap() - 1);
+            assert!(
+                r.to_string().contains("Covariance Type: clustered by"),
+                "{r}"
+            );
+        }
+        check
+            .scalar(
+                "t_df_cluster_firm",
+                fit(&["firm", "year"], &["firm"]).df_t as f64,
+                Tol::exact(),
+            )
+            .scalar(
+                "t_df_cluster_year",
+                fit(&["firm", "year"], &["year"]).df_t as f64,
+                Tol::exact(),
+            )
+            .finish();
+    }
+
+    /// More than two cluster columns, or one twice, are refused; a single cluster is too
+    /// few.
+    #[test]
+    fn test_hdfe_cluster_options_are_checked() {
+        let ds = create_balanced_panel();
+        let run = |cluster: &[&str]| {
+            let config = HdfeConfig {
+                cluster: cluster.iter().map(|c| c.to_string()).collect(),
+                ..HdfeConfig::default()
+            };
+            run_hdfe(
+                &ds,
+                "y",
+                &["x"],
+                &["firm"],
+                Some(config),
+                CovarianceType::HC1,
+            )
+        };
+        assert!(matches!(
+            run(&["firm", "year", "firm"]),
+            Err(EconError::InvalidSpecification { .. })
+        ));
+        assert!(matches!(
+            run(&["year", "year"]),
+            Err(EconError::InvalidSpecification { .. })
+        ));
+        assert!(matches!(
+            run(&["nope"]),
+            Err(EconError::ColumnNotFound { .. })
+        ));
     }
 
     #[test]

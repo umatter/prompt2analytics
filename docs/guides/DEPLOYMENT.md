@@ -323,7 +323,9 @@ HTTP), and they never depend on the resource profile:
 
 ### Sessions and persistence
 
-- **TTL.** A session expires `P2A_SESSION_TTL` minutes (60) after its last use;
+- **TTL.** A session expires `P2A_SESSION_TTL` minutes after its last use (60;
+  30 days by default for a Local-mode server with a conversation store on disk,
+  `--db-path`, whose conversations would otherwise go with an hour's idle session);
   an expired session answers 410, and a cleanup task removes expired sessions
   every 10 minutes.
 - **One registry.** The in-memory session table is the only record of live
@@ -349,10 +351,14 @@ HTTP), and they never depend on the resource profile:
   (1,000) messages answers 422 `quota_exceeded`.
 - **History budget.** `session_db_bytes` (hosted 16 MiB, none when off) caps the
   bytes one session's conversations store: titles, message contents and
-  tool-call arguments, results and errors, and also its dataset metadata rows
+  tool-call arguments, results, errors and images (the base64 PNGs of chart
+  tools, kept so a reopened conversation shows its plots; a plot of about
+  800 x 600 takes some 170 KB) with their vector versions (SVG, typically 10 to 100
+  KB, kept after the images if there is room), and also its dataset metadata rows
   (the dataset listing; each row's texts and kept column names, plus 128 bytes).
   A client write past it answers 422 `quota_exceeded`; text the server produces
-  (assistant replies, tool results) is truncated to the room left; a dataset
+  (assistant replies, tool results) is truncated to the room left, and an
+  image that does not fit whole is not stored; a dataset
   whose metadata row would pass it is loaded but not listed; deleting a
   conversation frees its bytes. Under the budget a session also keeps at most
   1,000 dataset metadata rows. Every dataset a tool makes (generated data,
@@ -541,7 +547,7 @@ profile. For the timeout, watchdog, memory, data, allocation and eviction knobs
 | `--expose-enumeration` | `P2A_EXPOSE_ENUMERATION` | off | same | Local mode only; the env accepts `1`/`true`/`yes`/`on` |
 | `--enable-ws` | `P2A_ENABLE_WS` | off | same | OpenPublic only; the env accepts `1`/`true`/`yes`/`on` |
 | `--session-dirs` | `P2A_SESSION_DIRS` | `auto` | `auto` | `auto` = on only in OpenPublic; `on`, `off` |
-| `--session-ttl-minutes` | `P2A_SESSION_TTL` | 60 | 60 | minutes since last use |
+| `--session-ttl-minutes` | `P2A_SESSION_TTL` | 60; 43,200 (30 days) in Local mode with `--db-path` | 60 | minutes since last use; the 30 days keep a local store's conversations, as the desktop app does |
 | `--max-sessions` | `P2A_MAX_SESSIONS` | 100 | 100 | |
 | `--db-path` | `P2A_DB_PATH` | none (in-memory store) | same | feature `db`; must lie outside `P2A_DATA_ROOT` outside Local mode |
 | `--audit-log` | `P2A_AUDIT_LOG` | false | false | the env accepts `1`/`true`/`yes`/`on` |
@@ -642,7 +648,7 @@ Named budgets:
 | `response_bytes` | one tool's result (text, image and other content items), measured after the call ran | 16 MiB | none |
 | `session_disk_bytes` | bytes in one session's data directory | 64 MiB | none |
 | `spatial_links` | total links of a `spatial_neighbors` structure | 2,000,000 | none |
-| `arima_fit_work` | work of an ARIMA fit, observations × ((p + q + 3)² + d), checked before the fit starts; while set, a series holding a nonzero value below 1e-100 is refused as well | 7,500,000 | none |
+| `arima_fit_work` | work of an ARIMA fit, observations × ((p + q + 3)² + d), checked before the fit starts (a seasonal model counts the terms of its expanded polynomials, and a seasonal forecast also steps × states² / 100); while set, a series holding a nonzero value below 1e-100 is refused as well | 7,500,000 | none |
 | `scpi_work` | work of an `scpi` call, simulations × post-treatment periods × max(donors, 8)² (× 8 with the lasso constraint), checked before the simulations start | 512,000 | none |
 | `ctree_permutation_work` | work of an `ml_ctree` call with Monte Carlo p-values (`testtype` `montecarlo`), permutations × rows × (features + 20), checked before the fit starts | 2,000,000,000 | none |
 | `probit_impact_rows` | dataset rows of a `sar_probit_model` call with `compute_impacts` (on by default), checked before the sampler starts; `cubic_rows` bounds every call | 1,500 | none |

@@ -4159,3 +4159,151 @@ async fn deleting_one_message_removes_it_and_its_tool_calls() {
     off.delete_message(&m.id_string()).await.unwrap();
     assert!(off.get_messages(&c.id_string()).await.unwrap().is_empty());
 }
+
+/// Images without a vector version.
+fn plain(images: Vec<String>) -> Vec<(String, String)> {
+    images.into_iter().map(|i| (i, String::new())).collect()
+}
+
+/// The vector versions stay with their images, are counted, and give way to
+/// the images when the budget is short.
+#[tokio::test]
+async fn tool_call_svgs_follow_their_images() {
+    let db = limited_db(PersistenceLimits {
+        session_db_bytes: Some(1000),
+        message_bytes: Some(300),
+        ..Default::default()
+    })
+    .await;
+    let c = db.create_conversation("s1", "t").await.unwrap();
+    let m = db
+        .add_message(&c.id_string(), "assistant", "")
+        .await
+        .unwrap();
+    let call = ToolCall::new(
+        m.id_string(),
+        c.id_string(),
+        "viz_scatter".into(),
+        "a".repeat(10),
+    );
+    let id = db.create_tool_call(&call).await.unwrap().id_string();
+    let pair = |i: &str, n: usize, s: usize| (i.repeat(n), "s".repeat(s));
+
+    let stored = db
+        .set_tool_call_images(
+            &id,
+            vec![pair("i", 100, 50), pair("j", 400, 60), pair("k", 90, 301)],
+        )
+        .await
+        .unwrap();
+    assert_eq!(stored.images, Some(vec!["i".repeat(100), "k".repeat(90)]));
+    assert_eq!(stored.image_svgs, Some(vec!["s".repeat(50), String::new()]));
+    assert_eq!(counter_gap(&db, "s1").await, None);
+
+    // Room for the images but not for every vector version.
+    let stored = db
+        .set_tool_call_images(
+            &id,
+            vec![pair("i", 300, 200), pair("j", 300, 250), pair("k", 100, 10)],
+        )
+        .await
+        .unwrap();
+    assert_eq!(stored.images.map(|i| i.len()), Some(3));
+    assert_eq!(
+        stored.image_svgs,
+        Some(vec!["s".repeat(200), String::new(), "s".repeat(10)])
+    );
+    assert_eq!(counter_gap(&db, "s1").await, None);
+
+    let stored = db
+        .set_tool_call_images(&id, vec![pair("z", 10, 0)])
+        .await
+        .unwrap();
+    assert_eq!(stored.image_svgs, None);
+    assert_eq!(counter_gap(&db, "s1").await, None);
+
+    db.delete_conversation(&c.id_string()).await.unwrap();
+    assert_eq!(db.session_stored_bytes("s1").await.unwrap(), 0);
+}
+
+/// A tool call's images are stored whole and returned in order; an image
+/// longer than `message_bytes`, or than the room the session has left, is
+/// dropped rather than cut; replacing images counts only what they add; and
+/// the counter stays in step with what the store holds, through a delete.
+#[tokio::test]
+async fn tool_call_images_are_kept_whole_and_counted() {
+    let db = limited_db(PersistenceLimits {
+        session_db_bytes: Some(1000),
+        message_bytes: Some(300),
+        ..Default::default()
+    })
+    .await;
+    let c = db.create_conversation("s1", "t").await.unwrap();
+    let m = db
+        .add_message(&c.id_string(), "assistant", "")
+        .await
+        .unwrap();
+    let call = ToolCall::new(
+        m.id_string(),
+        c.id_string(),
+        "viz_scatter".into(),
+        "a".repeat(10),
+    );
+    let id = db.create_tool_call(&call).await.unwrap().id_string();
+    assert_eq!(db.get_tool_call(&id).await.unwrap().images, None);
+
+    let stored = db
+        .set_tool_call_images(
+            &id,
+            plain(vec!["i".repeat(200), "j".repeat(400), "k".repeat(300)]),
+        )
+        .await
+        .unwrap();
+    assert_eq!(stored.images, Some(vec!["i".repeat(200), "k".repeat(300)]));
+    assert_eq!(counter_gap(&db, "s1").await, None);
+    let listed = db
+        .get_tool_calls_for_conversation(&c.id_string())
+        .await
+        .unwrap();
+    assert_eq!(
+        listed[0].images,
+        Some(vec!["i".repeat(200), "k".repeat(300)])
+    );
+
+    db.set_tool_call_images(&id, plain(vec!["z".repeat(100)]))
+        .await
+        .unwrap();
+    assert_eq!(counter_gap(&db, "s1").await, None);
+
+    // Near the budget: what does not fit whole is dropped, what fits is kept.
+    let full = limited_db(PersistenceLimits {
+        session_db_bytes: Some(100),
+        ..Default::default()
+    })
+    .await;
+    let c = full.create_conversation("s1", "t").await.unwrap(); // 1
+    let m = full
+        .add_message(&c.id_string(), "assistant", "")
+        .await
+        .unwrap();
+    let call = ToolCall::new(
+        m.id_string(),
+        c.id_string(),
+        "viz_scatter".into(),
+        "a".repeat(9),
+    );
+    let id = full.create_tool_call(&call).await.unwrap().id_string(); // 10
+    let stored = full
+        .set_tool_call_images(
+            &id,
+            plain(vec!["x".repeat(50), "y".repeat(60), "w".repeat(30)]),
+        )
+        .await
+        .unwrap();
+    assert_eq!(stored.images, Some(vec!["x".repeat(50), "w".repeat(30)]));
+    assert_eq!(counter_gap(&full, "s1").await, None);
+
+    full.delete_conversation(&c.id_string()).await.unwrap();
+    assert_eq!(full.session_stored_bytes("s1").await.unwrap(), 0);
+    assert!(matches!(full.session_bytes_entry("s1"), None | Some(0)));
+}

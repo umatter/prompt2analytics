@@ -183,8 +183,16 @@ superseded by the `matchit_nearest` case.
 
 Missing values (null or NaN) in the treatment or covariates are refused, with "Column 'x' contains k
 missing value(s) (null or NaN). Drop or impute them first." (`EconError::NullValues`, naming the
-column and the count). A text column gives `NonNumericColumn`, infinite values `NonFiniteValues`, an
-absent column `ColumnNotFound`; a column that exists is never reported as not found. Int64 and
+column and the count). A text treatment gives `NonNumericColumn`, infinite values `NonFiniteValues`, an
+absent column `ColumnNotFound`; a column that exists is never reported as not found.
+
+A text (or categorical) covariate is a factor with R's level order, expanded as MatchIt's formula
+expands it: treatment contrasts (every level but the first) in the propensity glm, every level
+(`<column><level>`) in the balance tables, every level divided by sqrt(2) in the Mahalanobis and
+Euclidean distances (MatchIt's `get_covs_matrix_for_dist`; the pooled covariance is singular and its
+generalized inverse is used), and exact strata in CEM. More than `MAX_COVARIATE_LEVELS` = 1000 levels
+are refused. Not R-pinned: `test_text_covariate_matches_its_indicators` checks each method against
+the same run on indicator columns built by hand. Int64 and
 Boolean 0/1 treatments are read as numbers and give the same result as Float64. Results on complete
 data are unchanged.
 

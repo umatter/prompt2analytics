@@ -1,10 +1,13 @@
 //! Root application component
 
 use dioxus::prelude::*;
+use futures::StreamExt;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsCast;
 
-use crate::components::{ChatPanel, ConversationSidebar, DatasetSidebar, ShortcutsModal};
+use crate::components::{
+    ChatPanel, ConversationSidebar, DatasetSidebar, ShortcutsModal, StatusBar,
+};
 use crate::state::settings::Theme;
 use crate::state::{
     ChatState, ConversationState, EscapeStack, SessionState, Settings, start_new_conversation,
@@ -203,6 +206,61 @@ async fn focus_in_text_field_native() -> bool {
         .unwrap_or(true)
 }
 
+/// One item per Escape pressed with its target outside the element marked `data-p2a-root`
+/// (inside it the root's onkeydown handles the key). The web build listens with web_sys: the
+/// page's Content-Security-Policy forbids the string evaluation `document::eval` uses there.
+#[cfg(target_arch = "wasm32")]
+fn escape_outside_root() -> futures::channel::mpsc::UnboundedReceiver<()> {
+    let (tx, rx) = futures::channel::mpsc::unbounded();
+    let listener = wasm_bindgen::closure::Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(
+        move |e: web_sys::KeyboardEvent| {
+            if e.key() != "Escape" {
+                return;
+            }
+            let in_root = e
+                .target()
+                .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
+                .and_then(|el| el.closest("[data-p2a-root]").ok().flatten())
+                .is_some();
+            if !in_root {
+                let _ = tx.unbounded_send(());
+            }
+        },
+    );
+    if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
+        let _ = doc.add_event_listener_with_callback("keydown", listener.as_ref().unchecked_ref());
+    }
+    // Lives as long as the page, as the App does.
+    listener.forget();
+    rx
+}
+
+/// The desktop build: the webview reports each such Escape through `document::eval`.
+#[cfg(not(target_arch = "wasm32"))]
+fn escape_outside_root() -> futures::channel::mpsc::UnboundedReceiver<()> {
+    let (tx, rx) = futures::channel::mpsc::unbounded();
+    spawn(async move {
+        let mut outside = dioxus::document::eval(ESCAPE_OUTSIDE_ROOT_JS);
+        while outside.recv::<bool>().await.is_ok() {
+            if tx.unbounded_send(()).is_err() {
+                break;
+            }
+        }
+    });
+    rx
+}
+
+/// The desktop listener: sends `true` for each Escape outside the root; never finishes, so the
+/// channel stays open.
+#[cfg(not(target_arch = "wasm32"))]
+const ESCAPE_OUTSIDE_ROOT_JS: &str = r#"
+document.addEventListener('keydown', (e) => {
+    const inRoot = e.target instanceof Element && e.target.closest('[data-p2a-root]');
+    if (e.key === 'Escape' && !inRoot) { dioxus.send(true); }
+});
+await new Promise(() => {});
+"#;
+
 /// Register a dialog with Escape while `open`: Escape calls the `on_close`
 /// of the dialog opened last.
 pub fn use_escape_close(open: bool, on_close: Callback<()>) {
@@ -231,7 +289,9 @@ pub fn App() -> Element {
     let settings = use_signal(Settings::load);
 
     // UI state
-    let mut sidebar_visible = use_signal(|| true);
+    // On a narrow screen (a phone) both side panels start closed and open as overlays.
+    let mut sidebar_visible = use_signal(|| !narrow_viewport());
+    let mut datasets_open = use_signal(|| false);
     let mut shortcuts_open = use_signal(|| false);
 
     // Provide state to all child components via context
@@ -240,13 +300,16 @@ pub fn App() -> Element {
     use_context_provider(|| conversation_state);
     use_context_provider(|| settings);
     use_context_provider(|| sidebar_visible);
+    use_context_provider(|| crate::state::AddDataRequest(Signal::new(0)));
+    use_context_provider(|| crate::state::ConnectModelRequest(Signal::new(0)));
+    use_context_provider(crate::exhibit::ExhibitViewer::new);
     // The open dialogs, for Escape (use_escape_close)
     let escape_stack = use_context_provider(|| Signal::new(EscapeStack::<Callback<()>>::new()));
 
     // No session is created at mount: the first send, data load or new
-    // conversation creates it (state::ensure_session). The native app
-    // restores the session it used last, through the same gate.
-    #[cfg(any(feature = "desktop", feature = "mobile"))]
+    // conversation creates it (state::ensure_session). The app restores the
+    // session it used last, through the same gate: on desktop and mobile
+    // across restarts, on web across a reload of the tab.
     use_effect(move || {
         spawn(crate::state::restore_session(session_state));
     });
@@ -340,6 +403,20 @@ pub fn App() -> Element {
         }
     };
 
+    // Escape pressed while the focus is outside the app's root element (on the page body, after
+    // the button that had it is removed, as "Load dataset" is once the file loads) never reaches
+    // the root's onkeydown. A document listener reports it; the dialog opened last is closed from
+    // a task inside the Dioxus runtime.
+    use_future(move || async move {
+        let mut outside = escape_outside_root();
+        while outside.next().await.is_some() {
+            let top = escape_stack.read().top().copied();
+            if let Some(close) = top {
+                close.call(());
+            }
+        }
+    });
+
     // Handle shortcuts modal close
     let handle_close_shortcuts = move |_| {
         shortcuts_open.set(false);
@@ -347,58 +424,75 @@ pub fn App() -> Element {
 
     rsx! {
         // Include stylesheet - works for both web and desktop
+        Stylesheet { href: asset!("/assets/fonts.css") }
         Stylesheet { href: asset!("/assets/styles.css") }
 
         div {
-            class: "min-h-screen bg-gray-50 dark:bg-gray-900 flex",
+            class: "h-screen flex flex-col k-paper",
             tabindex: "0",
+            "data-p2a-root": "1",
             onkeydown: handle_global_keydown,
 
-            // Conversation sidebar (collapsible)
-            if is_sidebar_visible {
-                div {
-                    class: "w-72 flex-shrink-0",
-                    ConversationSidebar {}
-                }
-            } else {
-                // Show expand button when sidebar is hidden
-                div {
-                    class: "flex-shrink-0 bg-white dark:bg-gray-900 border-r border-gray-300 dark:border-gray-800",
-                    button {
-                        class: "m-2 p-2 text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 hover:bg-gray-200 dark:hover:bg-gray-700 rounded-lg transition-colors",
-                        onclick: move |_| sidebar_visible.set(true),
-                        title: "Show conversations",
-                        svg {
-                            class: "w-5 h-5",
-                            fill: "none",
-                            stroke: "currentColor",
-                            view_box: "0 0 24 24",
-                            path {
-                                stroke_linecap: "round",
-                                stroke_linejoin: "round",
-                                stroke_width: "2",
-                                d: "M13 5l7 7-7 7M5 5l7 7-7 7"
-                            }
+            div { class: "flex-1 min-h-0 flex",
+                // Conversation sidebar (collapsible)
+                if is_sidebar_visible {
+                    div { class: "k-side-conv w-[236px] flex-shrink-0 k-rule-r min-h-0",
+                        ConversationSidebar {}
+                    }
+                } else {
+                    // Show expand button when sidebar is hidden
+                    div { class: "flex-shrink-0 k-rule-r k-edge",
+                        button {
+                            class: "k-icon-btn m-2",
+                            onclick: move |_| sidebar_visible.set(true),
+                            title: "Show conversations",
+                            "aria-label": "Show conversations",
+                            span { class: "k-mono font-bold k-orange", "»" }
                         }
                     }
                 }
-            }
 
-            // Main chat area
-            div {
-                class: "flex-1 min-w-0 flex",
                 // Chat panel
-                div {
-                    class: "flex-1 min-w-0",
+                div { class: "flex-1 min-w-0 min-h-0",
                     ChatPanel {}
                 }
 
-                // Dataset sidebar (always visible for now)
+                // Dataset sidebar: always shown on a wide screen; an overlay opened from the
+                // edge button on a narrow one
+                if !*datasets_open.read() {
+                    div { class: "k-narrow-only flex-shrink-0 k-rule-l k-edge",
+                        button {
+                            class: "k-icon-btn m-2",
+                            onclick: move |_| datasets_open.set(true),
+                            title: "Show datasets",
+                            "aria-label": "Show datasets",
+                            span { class: "k-mono font-bold k-orange", "«" }
+                        }
+                    }
+                }
                 div {
-                    class: "w-72 flex-shrink-0",
-                    DatasetSidebar {}
+                    class: if *datasets_open.read() {
+                        "k-side-data open w-[312px] flex-shrink-0 k-rule-l min-h-0"
+                    } else {
+                        "k-side-data w-[312px] flex-shrink-0 k-rule-l min-h-0"
+                    },
+                    div { class: "k-narrow-only flex justify-end",
+                        button {
+                            class: "k-icon-btn m-1",
+                            onclick: move |_| datasets_open.set(false),
+                            title: "Hide datasets",
+                            "aria-label": "Hide datasets",
+                            span { class: "k-mono text-sm k-muted", "»" }
+                        }
+                    }
+                    div { class: "flex-1 min-h-0", DatasetSidebar {} }
                 }
             }
+
+            StatusBar {}
+
+            // Figures and tables of the transcript, enlarged
+            crate::components::ExhibitViewerModal {}
 
             // Shortcuts modal
             ShortcutsModal {
@@ -436,6 +530,59 @@ mod tests {
         );
         assert_eq!(global_shortcut(&ch("n"), false, false), None);
         assert_eq!(global_shortcut(&ch("/"), false, false), None);
+    }
+
+    /// `document::eval` runs a string through `new Function`, which the web page's
+    /// Content-Security-Policy refuses (no 'unsafe-eval'); the refusal panics the app. Every call
+    /// must therefore sit in desktop-only code: a `cfg(not(target_arch = "wasm32"))` within the
+    /// twelve lines above it.
+    #[test]
+    fn document_eval_is_desktop_only() {
+        fn visit(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    visit(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+        let mut files = Vec::new();
+        visit(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut files,
+        );
+        let mut bad = Vec::new();
+        for file in files {
+            let text = std::fs::read_to_string(&file).unwrap();
+            let lines: Vec<&str> = text.lines().collect();
+            for (i, line) in lines.iter().enumerate() {
+                let code = line.split("//").next().unwrap_or("");
+                if !code.contains(concat!("document::", "eval(")) {
+                    continue;
+                }
+                let gated = lines[i.saturating_sub(12)..i]
+                    .iter()
+                    .any(|l| l.contains("cfg(not(target_arch = \"wasm32\"))"));
+                if !gated {
+                    bad.push(format!("{}:{}", file.display(), i + 1));
+                }
+            }
+        }
+        assert!(
+            bad.is_empty(),
+            "document::eval reachable on the web: {bad:?}"
+        );
+    }
+
+    /// The desktop outside-root listener answers only Escape, only outside the root the App marks.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn escape_outside_root_listener() {
+        assert!(ESCAPE_OUTSIDE_ROOT_JS.contains("e.key === 'Escape'"));
+        assert!(ESCAPE_OUTSIDE_ROOT_JS.contains("closest('[data-p2a-root]')"));
+        assert!(ESCAPE_OUTSIDE_ROOT_JS.contains("dioxus.send(true)"));
     }
 
     #[test]
@@ -484,5 +631,25 @@ mod theme_tests {
         assert!(!css.contains("html.light"));
         assert!(!css.contains("@media (prefers-color-scheme"));
         assert!(!css.contains("ring-color"));
+    }
+}
+
+/// Below this viewport width (CSS px) the side panels are overlays (`input.css`).
+const NARROW_BELOW_PX: f64 = 900.0;
+
+/// Whether the window is narrower than [`NARROW_BELOW_PX`] at start (web; native windows are
+/// taken as wide).
+pub(crate) fn narrow_viewport() -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        web_sys::window()
+            .and_then(|w| w.inner_width().ok())
+            .and_then(|w| w.as_f64())
+            .is_some_and(|w| w < NARROW_BELOW_PX)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = NARROW_BELOW_PX;
+        false
     }
 }

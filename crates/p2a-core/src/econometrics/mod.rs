@@ -118,7 +118,9 @@ pub mod panel;
 pub mod panel_unit_root;
 pub mod rd;
 pub mod rd_bwselect;
+pub mod rddensity;
 pub mod rdmulti;
+pub mod rdplot;
 pub mod sbw;
 pub mod scpi;
 pub mod spatial;
@@ -298,6 +300,10 @@ pub use rd::{
     BandwidthMethod, FuzzyRdResult, KernelType, RdBandwidth, RdConfig, RdResult, VceType,
     rd_bandwidth, run_fuzzy_rd, run_rd,
 };
+pub use rddensity::{
+    DensityBwSelect, DensityKernel, DensityVce, RdDensityBandwidths, RdDensityConfig,
+    RdDensityResult, RdDensityWindow, rd_density, run_rd_density,
+};
 pub use rdmulti::{
     CutoffResult,
     HeterogeneityTest,
@@ -309,6 +315,7 @@ pub use rdmulti::{
     run_rd_multi,
     run_rd_multi_dataset,
 };
+pub use rdplot::{RdPlotBin, RdPlotBinSelect, RdPlotConfig, RdPlotResult, rd_plot, run_rd_plot};
 pub use scpi::{
     PredictionInterval,
     SCPIConfig,

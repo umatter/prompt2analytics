@@ -351,7 +351,7 @@ async fn a_stream_error_event_fails_the_call() {
             ProviderType::OpenAI,
             "/chat/completions",
             openai,
-            r#"StreamFailed { provider: "OpenAI", kind: "server_error" }"#,
+            r#"StreamFailed { provider: "The OpenAI-compatible provider", kind: "server_error" }"#,
         ),
         (
             ProviderType::Ollama,

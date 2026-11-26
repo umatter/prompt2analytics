@@ -66,6 +66,10 @@ pub enum LoadError {
     #[error("JSON error: {0}")]
     Json(String),
 
+    /// A CSV whose rows do not form a table, or whose text cannot be read.
+    #[error("CSV error: {0}")]
+    Csv(String),
+
     /// The file or a buffer would exceed the allocation ceiling, or the
     /// computation was cancelled.
     #[error("{0}")]
@@ -772,6 +776,336 @@ fn csv_options(na_strings: &[&str]) -> CsvReadOptions {
         .map_parse_options(|p| p.with_null_values(null_values.clone()))
 }
 
+/// How much of a CSV's start decides its separator, decimal mark and encoding.
+const CSV_SAMPLE_BYTES: usize = 64 * 1024;
+
+/// A CSV's separator and decimal mark.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CsvDialect {
+    separator: u8,
+    decimal_comma: bool,
+}
+
+impl CsvDialect {
+    const COMMA: Self = Self {
+        separator: b',',
+        decimal_comma: false,
+    };
+
+    /// The dialect of the CSV that starts with `sample`. Comma, unless the header holds no comma
+    /// and the header and the first data row hold the same number (at least one) of semicolons or
+    /// of tabs outside quotes. With such a separator the decimal mark is a comma when some sampled
+    /// field reads as a number with one (`1,5`) and none as a number with a point (`1.5`).
+    fn detect(sample: &[u8]) -> Self {
+        let sample = sample.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(sample);
+        let mut records = CsvRecords::new(sample);
+        let (Some(header), first) = (records.next(), records.next()) else {
+            return Self::COMMA;
+        };
+        if count_outside_quotes(header, b',') > 0 {
+            return Self::COMMA;
+        }
+        let separator = b";\t".iter().copied().find(|&s| {
+            let n = count_outside_quotes(header, s);
+            n > 0 && first.is_none_or(|row| count_outside_quotes(row, s) == n)
+        });
+        let Some(separator) = separator else {
+            return Self::COMMA;
+        };
+        let (mut comma, mut point) = (false, false);
+        for record in first.into_iter().chain(records) {
+            for field in record.split(|&b| b == separator) {
+                let field = field.trim_ascii();
+                let field = field.strip_prefix(b"\"").unwrap_or(field);
+                let field = field.strip_suffix(b"\"").unwrap_or(field);
+                comma |= is_decimal(field, b',');
+                point |= is_decimal(field, b'.');
+            }
+        }
+        Self {
+            separator,
+            decimal_comma: comma && !point,
+        }
+    }
+
+    fn apply(self, options: CsvReadOptions) -> CsvReadOptions {
+        if self == Self::COMMA {
+            return options;
+        }
+        options.map_parse_options(|p| {
+            p.with_separator(self.separator)
+                .with_decimal_comma(self.decimal_comma)
+        })
+    }
+
+    /// What was recognised, for the user; `None` for a plain comma-separated file.
+    fn note(self) -> Option<String> {
+        let name = match self.separator {
+            b';' => "semicolon",
+            b'\t' => "tab",
+            _ => return None,
+        };
+        let decimal = if self.decimal_comma {
+            " and the comma as decimal mark"
+        } else {
+            ""
+        };
+        Some(format!("read with the {name} as separator{decimal}"))
+    }
+}
+
+/// Whether `field` is digits, `mark`, digits (with an optional sign).
+fn is_decimal(field: &[u8], mark: u8) -> bool {
+    let field = match field.first() {
+        Some(b'-' | b'+') => &field[1..],
+        _ => field,
+    };
+    let Some(at) = field.iter().position(|&b| b == mark) else {
+        return false;
+    };
+    let digits = |s: &[u8]| !s.is_empty() && s.iter().all(u8::is_ascii_digit);
+    digits(&field[..at]) && digits(&field[at + 1..])
+}
+
+fn count_outside_quotes(record: &[u8], separator: u8) -> usize {
+    let mut quoted = false;
+    record
+        .iter()
+        .filter(|&&b| {
+            quoted ^= b == b'"';
+            !quoted && b == separator
+        })
+        .count()
+}
+
+/// The records of CSV text: lines, except that a line break inside quotes does not end one.
+/// Empty lines are skipped.
+struct CsvRecords<'a> {
+    rest: &'a [u8],
+}
+
+impl<'a> CsvRecords<'a> {
+    fn new(text: &'a [u8]) -> Self {
+        Self { rest: text }
+    }
+}
+
+impl<'a> Iterator for CsvRecords<'a> {
+    type Item = &'a [u8];
+
+    fn next(&mut self) -> Option<&'a [u8]> {
+        while !self.rest.is_empty() {
+            let mut quoted = false;
+            let end = self
+                .rest
+                .iter()
+                .position(|&b| {
+                    quoted ^= b == b'"';
+                    !quoted && b == b'\n'
+                })
+                .unwrap_or(self.rest.len());
+            let record = &self.rest[..end];
+            self.rest = self.rest.get(end + 1..).unwrap_or_default();
+            let record = record.strip_suffix(b"\r").unwrap_or(record);
+            if !record.is_empty() {
+                return Some(record);
+            }
+        }
+        None
+    }
+}
+
+/// The first bytes of the file at `path`, at most [`CSV_SAMPLE_BYTES`], ending with a whole line
+/// when the file is longer.
+fn csv_sample(path: &Path) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    let mut sample = Vec::new();
+    std::fs::File::open(path)?
+        .take(CSV_SAMPLE_BYTES as u64)
+        .read_to_end(&mut sample)?;
+    Ok(whole_lines(&sample).to_vec())
+}
+
+/// `sample` up to its last line break when it fills [`CSV_SAMPLE_BYTES`].
+fn whole_lines(sample: &[u8]) -> &[u8] {
+    if sample.len() < CSV_SAMPLE_BYTES {
+        return sample;
+    }
+    match sample.iter().rposition(|&b| b == b'\n') {
+        Some(end) => &sample[..=end],
+        None => sample,
+    }
+}
+
+/// The characters of the bytes 0x80..=0x9F in Windows-1252 (the undefined five keep their code);
+/// every other byte is its Latin-1 character.
+const WINDOWS_1252: [char; 32] = [
+    '\u{20AC}', '\u{81}', '\u{201A}', '\u{192}', '\u{201E}', '\u{2026}', '\u{2020}', '\u{2021}',
+    '\u{2C6}', '\u{2030}', '\u{160}', '\u{2039}', '\u{152}', '\u{8D}', '\u{17D}', '\u{8F}',
+    '\u{90}', '\u{2018}', '\u{2019}', '\u{201C}', '\u{201D}', '\u{2022}', '\u{2013}', '\u{2014}',
+    '\u{2DC}', '\u{2122}', '\u{161}', '\u{203A}', '\u{153}', '\u{9D}', '\u{17E}', '\u{178}',
+];
+
+/// `bytes` as text: UTF-16 with a byte-order mark, else UTF-8, else Windows-1252 (a superset of
+/// Latin-1), with the encoding's name when it is not UTF-8. Bytes with a NUL are not text in
+/// either single-byte encoding and are refused.
+fn decode_text(bytes: &[u8]) -> Result<(Cow<'_, str>, Option<&'static str>), LoadError> {
+    let little = bytes.starts_with(&[0xFF, 0xFE]);
+    if little || bytes.starts_with(&[0xFE, 0xFF]) {
+        let units = bytes[2..].as_chunks::<2>().0.iter().map(|&pair| {
+            if little {
+                u16::from_le_bytes(pair)
+            } else {
+                u16::from_be_bytes(pair)
+            }
+        });
+        crate::resource::check_alloc::<u8>(bytes.len().saturating_mul(2), "CSV text")
+            .map_err(resource_err)?;
+        let text: Result<String, _> = char::decode_utf16(units).collect();
+        return match text {
+            Ok(text) if bytes.len().is_multiple_of(2) => Ok((Cow::Owned(text), Some("UTF-16"))),
+            _ => Err(LoadError::Csv(
+                "the file starts as UTF-16 text but is not valid UTF-16".into(),
+            )),
+        };
+    }
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        return Ok((Cow::Borrowed(text), None));
+    }
+    if bytes.contains(&0) {
+        return Err(LoadError::Csv(
+            "the file is not text (it holds NUL bytes)".into(),
+        ));
+    }
+    crate::resource::check_alloc::<u8>(bytes.len().saturating_mul(3), "CSV text")
+        .map_err(resource_err)?;
+    let text = bytes
+        .iter()
+        .map(|&b| match b {
+            0x80..=0x9F => WINDOWS_1252[usize::from(b - 0x80)],
+            _ => char::from(b),
+        })
+        .collect();
+    Ok((Cow::Owned(text), Some("Windows-1252 (Latin-1)")))
+}
+
+/// Whether polars refused a value its type, inferred from the first rows, cannot hold.
+fn is_type_mismatch(e: &PolarsError) -> bool {
+    e.to_string().contains("could not parse")
+}
+
+/// Parse CSV `text`. A value the types inferred from the first 1000 rows cannot hold (a decimal
+/// far down a column of integers) makes a second pass that infers them from every row, as R's
+/// `read.csv` does.
+fn parse_csv_text(
+    text: &str,
+    options: CsvReadOptions,
+    dialect: CsvDialect,
+) -> Result<DataFrame, LoadError> {
+    let options = dialect.apply(options);
+    let read = |options: CsvReadOptions| {
+        options
+            .into_reader_with_file_handle(std::io::Cursor::new(text))
+            .finish()
+    };
+    let first = match read(options.clone()) {
+        Err(e) if is_type_mismatch(&e) => read(options.with_infer_schema_length(None)),
+        other => other,
+    };
+    first.map_err(|e| {
+        csv_error(
+            e,
+            || Some(Cow::Borrowed(text.as_bytes())),
+            dialect.separator,
+        )
+    })
+}
+
+/// Read the CSV file at `path` with `options`, as [`parse_csv_text`] reads text. A file that is
+/// not UTF-8 is decoded in memory first; a UTF-8 file is read by polars itself.
+fn read_csv_path(path: &Path, options: CsvReadOptions) -> Result<DataFrame, LoadError> {
+    let sample = csv_sample(path)?;
+    let cut_utf8 = |e: std::str::Utf8Error| e.error_len().is_some();
+    let encoded = sample.starts_with(&[0xFF, 0xFE])
+        || sample.starts_with(&[0xFE, 0xFF])
+        || std::str::from_utf8(&sample).is_err_and(cut_utf8);
+    if encoded {
+        return read_csv_decoded(path, options);
+    }
+    let dialect = CsvDialect::detect(&sample);
+    let plain = dialect.apply(options.clone());
+    let read = |options: CsvReadOptions| {
+        options
+            .try_into_reader_with_file_path(Some(path.to_path_buf()))?
+            .finish()
+    };
+    let first = match read(plain.clone()) {
+        Err(e) if is_type_mismatch(&e) => read(plain.with_infer_schema_length(None)),
+        other => other,
+    };
+    match first {
+        Ok(df) => Ok(df),
+        Err(e) if e.to_string().to_lowercase().contains("utf-8") => read_csv_decoded(path, options),
+        Err(e) => Err(csv_error(
+            e,
+            || read_whole(path).ok().map(Cow::Owned),
+            dialect.separator,
+        )),
+    }
+}
+
+fn read_whole(path: &Path) -> Result<Vec<u8>, LoadError> {
+    let len = usize::try_from(std::fs::metadata(path)?.len()).unwrap_or(usize::MAX);
+    crate::resource::check_alloc::<u8>(len, "CSV file").map_err(resource_err)?;
+    Ok(std::fs::read(path)?)
+}
+
+fn read_csv_decoded(path: &Path, options: CsvReadOptions) -> Result<DataFrame, LoadError> {
+    let bytes = read_whole(path)?;
+    let (text, encoding) = decode_text(&bytes)?;
+    if let Some(encoding) = encoding {
+        tracing::warn!("the CSV file is not UTF-8; read as {encoding}");
+    }
+    let dialect = CsvDialect::detect(whole_lines(
+        &text.as_bytes()[..text.len().min(CSV_SAMPLE_BYTES)],
+    ));
+    parse_csv_text(&text, options, dialect)
+}
+
+/// `e` in plain words where polars' message is advice about its own options. `bytes` gives the
+/// text, to find the row at fault; it is read only for a ragged row.
+fn csv_error<'a>(
+    e: PolarsError,
+    bytes: impl FnOnce() -> Option<Cow<'a, [u8]>>,
+    separator: u8,
+) -> LoadError {
+    let text = e.to_string();
+    if text.contains("truncate_ragged_lines") {
+        let at = bytes().and_then(|b| {
+            let mut records = CsvRecords::new(&b);
+            let columns = count_outside_quotes(records.next()?, separator) + 1;
+            records
+                .enumerate()
+                .map(|(i, r)| (i + 1, count_outside_quotes(r, separator) + 1))
+                .find(|&(_, fields)| fields > columns)
+                .map(|(row, fields)| {
+                    format!(
+                        "data row {row} has {fields} values but the header names {columns} columns"
+                    )
+                })
+        });
+        let at = at.unwrap_or_else(|| "a row has more values than the header names columns".into());
+        return LoadError::Csv(format!(
+            "{at}. Put quotes around values that contain the separator, or correct the header."
+        ));
+    }
+    if is_type_mismatch(&e) {
+        let first = text.lines().next().unwrap_or_default();
+        return LoadError::Csv(p2a_text::ellipsize(first, 200).into_owned());
+    }
+    LoadError::PolarsError(e)
+}
+
 impl DataLoader {
     /// Strings every CSV reader treats as missing unless the caller passes its own list
     /// (R `read.csv`'s default `"NA"` plus the empty field). Empty unquoted fields are
@@ -994,10 +1328,7 @@ impl DataLoader {
         path: impl AsRef<Path>,
         na_strings: &[&str],
     ) -> Result<DataFrame, LoadError> {
-        let df = csv_options(na_strings)
-            .try_into_reader_with_file_path(Some(path.as_ref().to_path_buf()))?
-            .finish()?;
-        Ok(df)
+        read_csv_path(path.as_ref(), csv_options(na_strings))
     }
 
     /// Load a Parquet file eagerly (entire file into memory).
@@ -1051,10 +1382,7 @@ impl DataLoader {
             options = options.with_n_rows(Some(limit));
         }
 
-        let df = options
-            .try_into_reader_with_file_path(Some(path.as_ref().to_path_buf()))?
-            .finish()?;
-        Ok(df)
+        read_csv_path(path.as_ref(), options)
     }
 
     /// Load a Parquet file with optional row limit.
@@ -1124,7 +1452,9 @@ impl DataLoader {
         // where a data row is known to exist, and that row is dropped.
         let before = skip_rows.saturating_sub(1);
         let lead = skip_rows - before;
-        let options = csv_options(Self::DEFAULT_NA_STRINGS)
+        let dialect = CsvDialect::detect(&csv_sample(path.as_ref())?);
+        let options = dialect
+            .apply(csv_options(Self::DEFAULT_NA_STRINGS))
             .with_skip_rows_after_header(before)
             .with_n_rows(Some(n_rows.saturating_add(lead)));
 
@@ -1135,13 +1465,12 @@ impl DataLoader {
             Ok(df) => Ok(df.slice(lead as i64, n_rows)),
             // An offset past the last data row: return the header with no rows, read without
             // skipping (a header-only file reads as an empty frame).
-            Err(PolarsError::NoData(_)) if skip_rows > 0 => {
-                Ok(csv_options(Self::DEFAULT_NA_STRINGS)
-                    .with_n_rows(Some(0))
-                    .try_into_reader_with_file_path(Some(path.as_ref().to_path_buf()))?
-                    .finish()?
-                    .slice(0, 0))
-            }
+            Err(PolarsError::NoData(_)) if skip_rows > 0 => Ok(dialect
+                .apply(csv_options(Self::DEFAULT_NA_STRINGS))
+                .with_n_rows(Some(0))
+                .try_into_reader_with_file_path(Some(path.as_ref().to_path_buf()))?
+                .finish()?
+                .slice(0, 0)),
             Err(e) => Err(e.into()),
         }
     }
@@ -1346,11 +1675,98 @@ impl DataLoader {
         data: &str,
         na_strings: &[&str],
     ) -> Result<DataFrame, LoadError> {
-        let cursor = std::io::Cursor::new(data);
-        let df = csv_options(na_strings)
-            .into_reader_with_file_handle(cursor)
-            .finish()?;
-        Ok(df)
+        let dialect = CsvDialect::detect(whole_lines(
+            &data.as_bytes()[..data.len().min(CSV_SAMPLE_BYTES)],
+        ));
+        parse_csv_text(data, csv_options(na_strings), dialect)
+    }
+
+    /// Load a CSV held in memory (an upload, say) with [`DataLoader::DEFAULT_NA_STRINGS`] as
+    /// missing values, and notes on the encoding and separator recognised, when they are not
+    /// UTF-8 and the comma.
+    pub fn load_csv_bytes(bytes: &[u8]) -> Result<(DataFrame, Vec<String>), LoadError> {
+        let (text, encoding) = decode_text(bytes)?;
+        let dialect = CsvDialect::detect(whole_lines(
+            &text.as_bytes()[..text.len().min(CSV_SAMPLE_BYTES)],
+        ));
+        let df = parse_csv_text(&text, csv_options(Self::DEFAULT_NA_STRINGS), dialect)?;
+        let mut notes = Vec::new();
+        notes.extend(encoding.map(|e| format!("decoded from {e}")));
+        notes.extend(dialect.note());
+        notes.extend(Self::missing_code_notes(&df));
+        Ok((df, notes))
+    }
+
+    /// Notes on text columns that would be numeric but for missing-value codes R does not
+    /// read as missing by default (`.`, `-`, `N/A`, `#N/A`, `n/a`, `NULL`, `null`, `?`): every
+    /// other value parses as a number. One note per column, naming the codes and how to convert
+    /// it (`munge_cast`, which turns them into missing values). At most the first 100,000
+    /// values of a column are looked at.
+    pub fn missing_code_notes(df: &DataFrame) -> Vec<String> {
+        const CODES: [&str; 8] = [".", "-", "N/A", "#N/A", "n/a", "NULL", "null", "?"];
+        const LOOK: usize = 100_000;
+        let mut notes = Vec::new();
+        for col in df.get_columns() {
+            let Ok(ca) = col.str() else { continue };
+            let mut found: Vec<&str> = Vec::new();
+            let mut numbers = 0usize;
+            let mut other = false;
+            for v in ca.into_iter().take(LOOK).flatten() {
+                let t = v.trim();
+                if let Some(code) = CODES.iter().find(|c| **c == t) {
+                    if !found.contains(code) {
+                        found.push(code);
+                    }
+                } else if t.parse::<f64>().is_ok() {
+                    numbers += 1;
+                } else {
+                    other = true;
+                    break;
+                }
+            }
+            if !other && numbers > 0 && !found.is_empty() {
+                let codes: Vec<String> = found.iter().map(|c| format!("'{c}'")).collect();
+                notes.push(format!(
+                    "column '{}' is text only because of the value(s) {}; if they mean missing, \
+                     convert it with munge_cast to float (they become missing values)",
+                    col.name(),
+                    codes.join(", ")
+                ));
+            }
+        }
+        notes
+    }
+
+    /// Load the first sheet of an Excel or OpenDocument workbook held in memory. A workbook is
+    /// compressed, and its cells can take far more memory than its bytes.
+    pub fn load_excel_bytes(bytes: &[u8]) -> Result<DataFrame, LoadError> {
+        #[cfg(feature = "file-formats")]
+        {
+            let mut workbook = calamine::open_workbook_auto_from_rs(std::io::Cursor::new(bytes))
+                .map_err(|e| LoadError::ExcelError(format!("Failed to open workbook: {e}")))?;
+            let Some(sheet) = workbook.sheet_names().first().cloned() else {
+                return Err(LoadError::ExcelError("Workbook has no sheets".to_string()));
+            };
+            let range = workbook.worksheet_range(&sheet).map_err(|e| {
+                LoadError::ExcelError(format!("Failed to read sheet '{sheet}': {e}"))
+            })?;
+            excel_range_to_dataframe(&range)
+        }
+        #[cfg(not(feature = "file-formats"))]
+        {
+            let _ = bytes;
+            Err(LoadError::ExcelNotSupported)
+        }
+    }
+
+    /// Load a Stata DTA file held in memory, as [`DataLoader::load_stata`] loads one from a path.
+    pub fn load_stata_bytes(bytes: &[u8]) -> Result<DataFrame, LoadError> {
+        Ok(super::stata::StataReader::new(std::io::Cursor::new(bytes))?.read_to_dataframe()?)
+    }
+
+    /// Load a SAS7BDAT file held in memory, as [`DataLoader::load_sas`] loads one from a path.
+    pub fn load_sas_bytes(bytes: &[u8]) -> Result<DataFrame, LoadError> {
+        Ok(super::sas::SasReader::new(std::io::Cursor::new(bytes))?.read_to_dataframe()?)
     }
 }
 
@@ -1518,6 +1934,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn missing_codes_that_make_a_column_text_are_noted() {
+        let bytes = b"a,b,c\n1,x,.\n2,y,3.5\nN/A,z,4\n";
+        let (df, notes) = DataLoader::load_csv_bytes(bytes).unwrap();
+        assert_eq!(df.height(), 3);
+        let joined = notes.join(" | ");
+        assert!(
+            joined.contains("column 'a'") && joined.contains("'N/A'"),
+            "{joined}"
+        );
+        assert!(
+            joined.contains("column 'c'") && joined.contains("'.'"),
+            "{joined}"
+        );
+        assert!(!joined.contains("column 'b'"), "{joined}");
+    }
+
+    #[test]
     fn test_load_csv_string() {
         let csv_data = "a,b,c\n1,2,3\n4,5,6";
         let df = DataLoader::from_csv_string(csv_data).unwrap();
@@ -1554,6 +1987,129 @@ mod tests {
         (0..col.len())
             .filter(|&i| col.get(i).unwrap().is_null())
             .collect()
+    }
+
+    #[test]
+    fn semicolon_and_tab_files_are_split_and_decimal_commas_read() {
+        let df = DataLoader::from_csv_string("name;x;n\nA;1,5;1\nB;-2,25;2\n").unwrap();
+        assert_eq!(df.shape(), (2, 3));
+        let x: Vec<_> = df.column("x").unwrap().f64().unwrap().iter().collect();
+        assert_eq!(x, [Some(1.5), Some(-2.25)]);
+        assert_eq!(df.column("n").unwrap().dtype(), &DataType::Int64);
+
+        // A point anywhere keeps the point; a comma is then text.
+        let df = DataLoader::from_csv_string("a;b\n1.5;2\n2.5;3\n").unwrap();
+        assert_eq!(df.column("a").unwrap().dtype(), &DataType::Float64);
+        let df = DataLoader::from_csv_string("a\tb\n1.5\tx, y\n").unwrap();
+        assert_eq!(df.shape(), (1, 2));
+
+        // Comma files, and one-column files, stay as they were.
+        for text in ["a,b;c\n1,2;3\n", "a;b\n1\n", "\"a;b\",c\n1,2\n"] {
+            let df = DataLoader::from_csv_string(text).unwrap();
+            assert_eq!(
+                df.width(),
+                text.lines().next().unwrap().matches(',').count() + 1,
+                "{text}"
+            );
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("eu.csv");
+        std::fs::write(&path, "x;y\n1,5;1\n2,5;2\n3,5;3\n").unwrap();
+        let from_file = DataLoader::load_csv(&path).unwrap();
+        assert_eq!(
+            from_file.column("x").unwrap().f64().unwrap().sum(),
+            Some(7.5)
+        );
+        let chunk = DataLoader::load_csv_chunk(&path, 1, 2).unwrap();
+        assert_eq!(chunk.column("x").unwrap().f64().unwrap().sum(), Some(6.0));
+        assert_eq!(DataLoader::load_csv_chunk(&path, 9, 2).unwrap().width(), 2);
+    }
+
+    #[test]
+    fn latin1_and_utf16_files_are_decoded() {
+        // "Zürich", "Bâle" and a Windows-1252 euro sign.
+        let latin1 = b"city;n\nZ\xFCrich;1\nB\xE2le;2\n\x80;3\n";
+        let cities = |df: &DataFrame| -> Vec<String> {
+            let c = df.column("city").unwrap();
+            c.str()
+                .unwrap()
+                .iter()
+                .flatten()
+                .map(str::to_string)
+                .collect()
+        };
+        let want = ["Z\u{FC}rich", "B\u{E2}le", "\u{20AC}"];
+        let (df, notes) = DataLoader::load_csv_bytes(latin1).unwrap();
+        assert_eq!(cities(&df), want);
+        assert_eq!(notes.len(), 2, "{notes:?}");
+
+        let mut utf16 = vec![0xFF, 0xFE];
+        for u in "city;n\nZ\u{FC}rich;1\nB\u{E2}le;2\n\u{20AC};3\n".encode_utf16() {
+            utf16.extend(u.to_le_bytes());
+        }
+        assert_eq!(cities(&DataLoader::load_csv_bytes(&utf16).unwrap().0), want);
+
+        let dir = tempfile::tempdir().unwrap();
+        for (name, bytes) in [("l.csv", &latin1[..]), ("u.csv", &utf16[..])] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, bytes).unwrap();
+            assert_eq!(
+                cities(&DataLoader::load_csv(&path).unwrap()),
+                want,
+                "{name}"
+            );
+        }
+        // The first accent is far behind the sample.
+        let mut late = b"city,n\n".to_vec();
+        for _ in 0..20_000 {
+            late.extend_from_slice(b"Bern,1\n");
+        }
+        late.extend_from_slice(b"Z\xFCrich,2\n");
+        let path = dir.path().join("late.csv");
+        std::fs::write(&path, &late).unwrap();
+        let df = DataLoader::load_csv(&path).unwrap();
+        assert_eq!(cities(&df).last().unwrap(), want[0]);
+
+        let (_, notes) = DataLoader::load_csv_bytes("a,b\n1,\u{FC}\n".as_bytes()).unwrap();
+        assert!(notes.is_empty(), "{notes:?}");
+        assert!(DataLoader::load_csv_bytes(b"a,b\n\xFF\x00,1\n").is_err());
+        let df = DataLoader::load_csv_bytes(b"\xEF\xBB\xBFa;b\n1;2\n")
+            .unwrap()
+            .0;
+        assert_eq!(df.get_column_names_str(), ["a", "b"]);
+    }
+
+    /// A decimal (or text) beyond the rows the types are inferred from widens the column.
+    #[test]
+    fn a_late_decimal_widens_an_integer_column() {
+        let mut text = String::from("id,v\n");
+        for i in 0..1500 {
+            text.push_str(&format!("{i},{i}\n"));
+        }
+        text.push_str("1500,0.5\n");
+        let df = DataLoader::from_csv_string(&text).unwrap();
+        assert_eq!(df.column("v").unwrap().dtype(), &DataType::Float64);
+        assert_eq!(df.column("v").unwrap().f64().unwrap().get(1500), Some(0.5));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("late.csv");
+        std::fs::write(&path, text.replace("1500,0.5", "1500,n/k")).unwrap();
+        let df = DataLoader::load_csv(&path).unwrap();
+        assert_eq!(df.column("v").unwrap().dtype(), &DataType::String);
+        assert_eq!(df.column("id").unwrap().dtype(), &DataType::Int64);
+    }
+
+    #[test]
+    fn a_row_with_too_many_values_is_named() {
+        let text = "a,b\n1,2\n3,4,5\n";
+        let want = "data row 2 has 3 values but the header names 2 columns";
+        let e = DataLoader::from_csv_string(text).unwrap_err().to_string();
+        assert!(e.contains(want) && !e.contains("truncate"), "{e}");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ragged.csv");
+        std::fs::write(&path, text).unwrap();
+        let e = DataLoader::load_csv(&path).unwrap_err().to_string();
+        assert!(e.contains(want), "{e}");
     }
 
     #[test]

@@ -467,16 +467,17 @@ mod tests {
         assert!(msg.len() < 120, "{} bytes", msg.len());
     }
 
+    /// The Harvey-Collier test drops the rows with a missing regressor (lm's na.omit) and
+    /// reports them in one short line, however many there are.
     #[test]
-    fn test_reg32_harvtest_null_error_is_bounded() {
+    fn test_reg32_harvtest_drops_and_reports_missing_rows() {
         let ds = crate::data::Dataset::new(half_null_frame());
-        let msg = crate::regression::harvey_collier_test(&ds, "y", &["x1"])
-            .unwrap_err()
-            .to_string();
+        let r = crate::regression::harvey_collier_test(&ds, "y", &["x1"]).unwrap();
+        assert_eq!((r.missing.n_used, r.missing.n_dropped), (50000, 50000));
+        let note = r.missing.note().unwrap();
         assert_eq!(
-            msg,
-            "Design matrix error: Column 'x1' contains 50000 missing value(s) \
-             (first at 0-based rows [0, 2, 4, 6, 8])"
+            note,
+            "50000 of 100000 rows dropped because of missing values (x1: 50000)"
         );
     }
 

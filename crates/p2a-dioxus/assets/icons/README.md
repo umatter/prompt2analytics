@@ -2,13 +2,20 @@
 
 This directory contains the app icons for prompt2analytics.
 
+The logo is drawn on a grid of square cells: p, 2 and a, with the 2 in orange
+(#F74C00). The icon is the 2 alone, black on an orange tile. Every SVG here is
+drawn from the cell paths in `src/components/logo.rs`; the PNG and ICO files are
+rendered from `favicon.svg` (`rsvg-convert -w N -h N favicon.svg`).
+
 ## Current Files
 
-- `icon.svg` - Source vector icon
-- `32x32.png` - Small icon
-- `128x128.png` - Medium icon
-- `256x256.png` - Large icon
-- `512x512.png` - Extra large icon (macOS, Linux)
+- `favicon.svg`, `icon.svg`, `p2a-icon.svg`, `p2a-icon-minimal.svg` - the orange tile
+- `p2a-wordmark.svg`, `p2a-wordmark-dark.svg` - the p2a wordmark for light and dark backgrounds
+- `p2a-icon-{16,32,64,128,256,512}.png`, `p2a-icon-minimal-{16,32}.png` - the tile as PNG
+- `32x32.png`, `128x128.png`, `256x256.png`, `512x512.png` - the tile at bundle sizes
+- `p2a-icon.ico` - Windows icon (16, 32, 64, 256)
+
+The README header lockup (mark plus "Prompt 2 Analytics" in Archivo, outlined) is in `docs/assets/`.
 
 ## Optional Files (for better platform support)
 

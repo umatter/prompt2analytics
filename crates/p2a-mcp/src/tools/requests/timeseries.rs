@@ -295,10 +295,36 @@ pub struct ArimaRequest {
     #[schemars(description = "Number of moving average (MA) terms.")]
     pub q: usize,
 
+    /// Seasonal AR order
+    #[serde(default)]
+    #[schemars(
+        description = "Seasonal AR order P of a seasonal ARIMA(p,d,q)(P,D,Q)[period]. Default 0."
+    )]
+    pub seasonal_p: Option<usize>,
+
+    /// Seasonal differencing order
+    #[serde(default)]
+    #[schemars(
+        description = "Seasonal differencing order D. Default 0. A common seasonal model is p=0, d=1, q=1 with seasonal_p=0, seasonal_d=1, seasonal_q=1."
+    )]
+    pub seasonal_d: Option<usize>,
+
+    /// Seasonal MA order
+    #[serde(default)]
+    #[schemars(description = "Seasonal MA order Q. Default 0.")]
+    pub seasonal_q: Option<usize>,
+
+    /// Seasonal period
+    #[serde(default)]
+    #[schemars(
+        description = "Observations per season (12 for monthly data, 4 for quarterly). Required with any seasonal order above 0."
+    )]
+    pub period: Option<usize>,
+
     /// Estimate the series mean
     #[serde(default)]
     #[schemars(
-        description = "Estimate the series mean (R's 'intercept'). Default: true when d = 0. Must be false or omitted when d > 0 (a mean has no effect after differencing)."
+        description = "Estimate the series mean (R's 'intercept'). Default: true when d = 0 (and seasonal_d = 0). Must be false or omitted otherwise (a mean has no effect after differencing)."
     )]
     pub include_mean: Option<bool>,
 
@@ -334,6 +360,32 @@ pub struct ArimaForecastRequest {
     #[schemars(description = "Number of moving average (MA) terms.")]
     pub q: usize,
 
+    /// Seasonal AR order
+    #[serde(default)]
+    #[schemars(
+        description = "Seasonal AR order P of a seasonal ARIMA(p,d,q)(P,D,Q)[period]. Default 0."
+    )]
+    pub seasonal_p: Option<usize>,
+
+    /// Seasonal differencing order
+    #[serde(default)]
+    #[schemars(
+        description = "Seasonal differencing order D. Default 0. A common seasonal model is p=0, d=1, q=1 with seasonal_p=0, seasonal_d=1, seasonal_q=1."
+    )]
+    pub seasonal_d: Option<usize>,
+
+    /// Seasonal MA order
+    #[serde(default)]
+    #[schemars(description = "Seasonal MA order Q. Default 0.")]
+    pub seasonal_q: Option<usize>,
+
+    /// Seasonal period
+    #[serde(default)]
+    #[schemars(
+        description = "Observations per season (12 for monthly data, 4 for quarterly). Required with any seasonal order above 0."
+    )]
+    pub period: Option<usize>,
+
     /// Forecast horizon
     #[schemars(description = "Number of periods to forecast ahead.")]
     pub horizon: usize,
@@ -341,7 +393,7 @@ pub struct ArimaForecastRequest {
     /// Estimate the series mean
     #[serde(default)]
     #[schemars(
-        description = "Estimate the series mean (R's 'intercept'). Default: true when d = 0. Must be false or omitted when d > 0 (a mean has no effect after differencing)."
+        description = "Estimate the series mean (R's 'intercept'). Default: true when d = 0 (and seasonal_d = 0). Must be false or omitted otherwise (a mean has no effect after differencing)."
     )]
     pub include_mean: Option<bool>,
 

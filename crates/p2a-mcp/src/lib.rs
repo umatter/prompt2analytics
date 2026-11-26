@@ -3,6 +3,10 @@
 //! This module exposes the MCP server functionality as a library,
 //! allowing it to be embedded in other applications (like p2a-dioxus desktop).
 
+/// Stack of each runtime thread. An unoptimised build's futures (the session database's most of all)
+/// need more than the 2 MiB default.
+pub const RUNTIME_STACK_BYTES: usize = 16 * 1024 * 1024;
+
 pub mod audit;
 pub mod config;
 #[cfg(feature = "db")]

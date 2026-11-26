@@ -602,6 +602,161 @@ pub fn match_it(
     )
 }
 
+/// Most levels a text covariate may have. Each level becomes an indicator column, so a
+/// column of identifiers would build an n x n matrix; a propensity model with that many
+/// indicators is not estimable anyway.
+pub const MAX_COVARIATE_LEVELS: usize = 1000;
+
+/// The covariate matrices of one matching call, as MatchIt builds them from its formula.
+///
+/// Numeric covariates enter every matrix unchanged. A text or categorical covariate is a
+/// factor with R's level order (`data::columns`) and enters as:
+/// - the propensity model: treatment contrasts, an indicator for every level but the first
+///   (`glm`'s `model.matrix`);
+/// - the balance tables: an indicator for every level, named `<column><level>`
+///   (`summary.matchit`);
+/// - the Mahalanobis and Euclidean distances: an indicator for every level divided by
+///   `sqrt(2)` (`get_covs_matrix_for_dist`); the pooled covariance is then singular and its
+///   generalized inverse is used, as MatchIt;
+/// - CEM: its level codes, matched exactly, one stratum per level.
+///
+/// Without text covariates all four are the numeric design and nothing is copied.
+struct CovariateDesigns {
+    /// The propensity-model design.
+    ps: Array2<f64>,
+    /// Balance-table row names, one per balance column.
+    names: Vec<String>,
+    expanded: Option<ExpandedDesigns>,
+}
+
+struct ExpandedDesigns {
+    balance: Array2<f64>,
+    distance: Array2<f64>,
+    cem: Array2<f64>,
+    exact: Vec<bool>,
+}
+
+impl CovariateDesigns {
+    fn build(df: &polars::prelude::DataFrame, cols: &[&str]) -> EconResult<Self> {
+        use crate::data::columns::{ColumnRequest, NaPolicy};
+        let is_factor = |c: &str| {
+            df.column(c).is_ok_and(|s| {
+                let dt = s.dtype();
+                dt.is_string() || dt.is_categorical() || dt.is_enum()
+            })
+        };
+        if !cols.iter().any(|c| is_factor(c)) {
+            let design = DesignMatrix::from_dataframe(df, cols, false)
+                .map_err(|e| econ_error_from_design(e, df))?;
+            return Ok(Self {
+                ps: design.data,
+                names: cols.iter().map(|s| s.to_string()).collect(),
+                expanded: None,
+            });
+        }
+        enum Col {
+            Numeric(Array1<f64>),
+            Factor(crate::data::columns::Factor),
+        }
+        let n = df.height();
+        let mut parsed = Vec::with_capacity(cols.len());
+        let (mut k_ps, mut k_full) = (0usize, 0usize);
+        for &c in cols {
+            if is_factor(c) {
+                let f = ColumnRequest::new(df)
+                    .factor(c)
+                    .na(NaPolicy::Fail)
+                    .extract()?
+                    .factor(c)
+                    .clone();
+                let levels = f.n_levels();
+                if levels > MAX_COVARIATE_LEVELS {
+                    return Err(EconError::InvalidSpecification {
+                        message: format!(
+                            "covariate '{c}' is text with {levels} distinct values; a text \
+                             covariate enters as one indicator per value, and at most \
+                             {MAX_COVARIATE_LEVELS} are allowed. Is it an identifier?"
+                        ),
+                    });
+                }
+                k_ps += levels.saturating_sub(1);
+                k_full += levels;
+                parsed.push(Col::Factor(f));
+            } else {
+                let v = DesignMatrix::extract_column(df, c)
+                    .map_err(|e| econ_error_from_design(e, df))?;
+                k_ps += 1;
+                k_full += 1;
+                parsed.push(Col::Numeric(v));
+            }
+        }
+        let alloc = crate::resource::try_zeros2;
+        let mut ps = alloc(n, k_ps, "propensity-model design")?;
+        let mut balance = alloc(n, k_full, "balance-table covariates")?;
+        let mut distance = alloc(n, k_full, "distance covariates")?;
+        let mut cem = alloc(n, cols.len(), "CEM covariates")?;
+        let mut names = Vec::with_capacity(k_full);
+        let mut exact = Vec::with_capacity(cols.len());
+        let (mut jp, mut jf) = (0, 0);
+        for (j, (col, &name)) in parsed.iter().zip(cols).enumerate() {
+            match col {
+                Col::Numeric(v) => {
+                    ps.column_mut(jp).assign(v);
+                    balance.column_mut(jf).assign(v);
+                    distance.column_mut(jf).assign(v);
+                    cem.column_mut(j).assign(v);
+                    names.push(name.to_string());
+                    exact.push(false);
+                    jp += 1;
+                    jf += 1;
+                }
+                Col::Factor(f) => {
+                    for (i, &code) in f.codes.iter().enumerate() {
+                        let code = code as usize;
+                        balance[[i, jf + code]] = 1.0;
+                        distance[[i, jf + code]] = std::f64::consts::FRAC_1_SQRT_2;
+                        if code > 0 {
+                            ps[[i, jp + code - 1]] = 1.0;
+                        }
+                        cem[[i, j]] = code as f64;
+                    }
+                    names.extend(f.levels.iter().map(|l| format!("{name}{l}")));
+                    exact.push(true);
+                    jp += f.n_levels().saturating_sub(1);
+                    jf += f.n_levels();
+                }
+            }
+        }
+        Ok(Self {
+            ps,
+            names,
+            expanded: Some(ExpandedDesigns {
+                balance,
+                distance,
+                cem,
+                exact,
+            }),
+        })
+    }
+
+    fn balance(&self) -> &Array2<f64> {
+        self.expanded.as_ref().map_or(&self.ps, |e| &e.balance)
+    }
+
+    fn distance(&self) -> &Array2<f64> {
+        self.expanded.as_ref().map_or(&self.ps, |e| &e.distance)
+    }
+
+    /// The CEM matrix (one column per covariate) and which columns are matched exactly
+    /// (empty: none).
+    fn cem(&self) -> (&Array2<f64>, &[bool]) {
+        match &self.expanded {
+            Some(e) => (&e.cem, &e.exact),
+            None => (&self.ps, &[]),
+        }
+    }
+}
+
 /// What one matching method hands back to [`match_it_with`].
 struct MethodOutput {
     /// MatchIt's weights per row, already normalised (`.make_sum_to_n`) by the method.
@@ -663,10 +818,8 @@ pub fn match_it_with(
 
     validate_match_counts(&method, n, n_treated, n_control, covariate_cols.len())?;
 
-    let design = DesignMatrix::from_dataframe(dataset.df(), covariate_cols, false)
-        .map_err(|e| econ_error_from_design(e, dataset.df()))?;
-    let x = design.data;
-    let covariate_names: Vec<String> = covariate_cols.iter().map(|s| s.to_string()).collect();
+    let designs = CovariateDesigns::build(dataset.df(), covariate_cols)?;
+    let x = &designs.ps;
 
     let ps_link = match distance_method {
         DistanceMethod::Logit => Some(GlmLink::Logit),
@@ -681,11 +834,16 @@ pub fn match_it_with(
         covariate_cols,
     )?;
 
-    let balance_before = balance_table(&x, &covariate_names, &is_treated, &vec![1.0; n]);
+    let balance_before = balance_table(
+        designs.balance(),
+        &designs.names,
+        &is_treated,
+        &vec![1.0; n],
+    );
 
     let uses_ps = ps_link.is_some() && !matches!(method, MatchMethod::CoarsenedExact { .. });
     let ps_model = match ps_link {
-        Some(link) if uses_ps => Some(estimate_propensity(&x, &treatment, link)?),
+        Some(link) if uses_ps => Some(estimate_propensity(x, &treatment, link)?),
         _ => None,
     };
     let scores: Option<Vec<f64>> = ps_model.as_ref().map(|m| m.scores.to_vec());
@@ -696,7 +854,7 @@ pub fn match_it_with(
             caliper,
             replace,
         } => nearest_neighbour(
-            &x,
+            designs.distance(),
             &is_treated,
             scores.as_deref(),
             distance_method,
@@ -706,13 +864,14 @@ pub fn match_it_with(
             options,
         )?,
         MatchMethod::CoarsenedExact { cutpoints, n_bins } => {
-            cem_method(&x, &is_treated, cutpoints.as_deref(), *n_bins)?
+            let (cem_x, exact) = designs.cem();
+            cem_method(cem_x, exact, &is_treated, cutpoints.as_deref(), *n_bins)?
         }
         MatchMethod::Full {
             min_ratio,
             max_ratio,
         } => full_method(
-            &x,
+            designs.distance(),
             &is_treated,
             scores.as_deref(),
             distance_method,
@@ -755,7 +914,7 @@ pub fn match_it_with(
         m.weight = weights[m.treated_idx];
     }
 
-    let balance_after = balance_table(&x, &covariate_names, &is_treated, &weights);
+    let balance_after = balance_table(designs.balance(), &designs.names, &is_treated, &weights);
     let wt: Vec<f64> = (0..n)
         .filter(|&i| is_treated[i])
         .map(|i| weights[i])
@@ -1688,6 +1847,7 @@ fn sets_from_subclasses(n: usize, sc: &Option<Vec<SubclassInfo>>) -> Vec<Option<
 /// numbered by first appearance among those holding both groups.
 fn cem_method(
     x: &Array2<f64>,
+    exact: &[bool],
     is_treated: &[bool],
     cutpoints: Option<&[Vec<f64>]>,
     n_bins: Option<usize>,
@@ -1696,7 +1856,13 @@ fn cem_method(
     let breaks: Vec<Vec<f64>> = (0..k)
         .map(|j| {
             let col = x.column(j).to_vec();
-            cem_breaks(&col, cutpoints.map(|c| c[j].as_slice()), n_bins)
+            if exact.get(j).copied().unwrap_or(false) {
+                // a factor's level codes: one stratum per level, as MatchIt's cem
+                let top = col.iter().copied().fold(0.0, f64::max) as usize;
+                padded_breaks((0..top).map(|c| c as f64 + 0.5).collect())
+            } else {
+                cem_breaks(&col, cutpoints.map(|c| c[j].as_slice()), n_bins)
+            }
         })
         .collect();
     let mut ids: HashMap<Vec<usize>, usize> = HashMap::new();
@@ -3393,6 +3559,157 @@ mod tests {
         }
         .unwrap();
         Dataset::new(df)
+    }
+
+    /// `create_test_dataset` plus a text covariate `grp` (levels "a" < "b" < "c" in R's
+    /// order, row order "c", "a", "b", ...) and its indicators `ga`, `gb`, `gc`, also
+    /// divided by sqrt(2) (`ha`, `hb`, `hc`).
+    fn dataset_with_text_covariate() -> Dataset {
+        let base = create_test_dataset();
+        let n = base.df().height();
+        let labels: Vec<&str> = (0..n)
+            .map(|i| ["c", "a", "b"][(i * 7 + i / 4) % 3])
+            .collect();
+        let ind = |l: &str, v: f64| -> Vec<f64> {
+            labels
+                .iter()
+                .map(|&x| if x == l { v } else { 0.0 })
+                .collect()
+        };
+        let r = std::f64::consts::FRAC_1_SQRT_2;
+        let mut df = base.df().clone();
+        df.with_column(Series::new("grp".into(), labels.clone()))
+            .unwrap();
+        for (name, level, v) in [
+            ("ga", "a", 1.0),
+            ("gb", "b", 1.0),
+            ("gc", "c", 1.0),
+            ("ha", "a", r),
+            ("hb", "b", r),
+            ("hc", "c", r),
+        ] {
+            df.with_column(Series::new(name.into(), ind(level, v)))
+                .unwrap();
+        }
+        Dataset::new(df)
+    }
+
+    /// A text covariate is expanded as MatchIt's formula does: treatment contrasts in the
+    /// propensity glm, every level in the balance tables, every level / sqrt(2) in the
+    /// distances, exact strata in CEM. Each run equals the run on the indicators built by
+    /// hand.
+    #[test]
+    fn test_text_covariate_matches_its_indicators() {
+        let ds = dataset_with_text_covariate();
+        let text = ["x1", "grp"];
+        let run = |covs: &[&str], method: MatchMethod, d: Option<DistanceMethod>| {
+            match_it(&ds, "treatment", covs, method, d).unwrap()
+        };
+        let close = |a: &[f64], b: &[f64]| {
+            assert_eq!(a.len(), b.len());
+            for (x, y) in a.iter().zip(b) {
+                // NaN: summary.matchit's NA (no variance ratio for a binary row)
+                let same = (x.is_nan() && y.is_nan()) || (x - y).abs() <= 1e-10 * (1.0 + y.abs());
+                assert!(same, "{x} vs {y}");
+            }
+        };
+
+        // propensity score: x1 + indicators of "b" and "c"
+        let t = run(&text, MatchMethod::default(), None);
+        let h = run(&["x1", "gb", "gc"], MatchMethod::default(), None);
+        close(
+            t.propensity_scores.as_ref().unwrap(),
+            h.propensity_scores.as_ref().unwrap(),
+        );
+        assert_eq!(t.weights, h.weights);
+        let names: Vec<&str> = t
+            .balance_before
+            .covariates
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(names, ["x1", "grpa", "grpb", "grpc"]);
+        // the balance tables carry every level
+        let x = DesignMatrix::from_dataframe(ds.df(), &["x1", "ga", "gb", "gc"], false)
+            .unwrap()
+            .data;
+        let tr = mask_of(&ds, "treatment");
+        let names4: Vec<String> = names.iter().map(|s| s.to_string()).collect();
+        for (table, w) in [
+            (&t.balance_before, vec![1.0; tr.len()]),
+            (&t.balance_after, t.weights.clone()),
+        ] {
+            let want = balance_table(&x, &names4, &tr, &w);
+            for (got, want) in balance_rows(table).iter().zip(balance_rows(&want).iter()) {
+                close(got, want);
+            }
+        }
+
+        // Mahalanobis on every level / sqrt(2) (singular covariance: generalized inverse)
+        let t = run(&text, nn(1, None, false), Some(DistanceMethod::Mahalanobis));
+        let h = run(
+            &["x1", "ha", "hb", "hc"],
+            nn(1, None, false),
+            Some(DistanceMethod::Mahalanobis),
+        );
+        assert_eq!(pairs_vec(&t), pairs_vec(&h));
+        // Euclidean on every level / sqrt(2)
+        let t = run(&text, nn(1, None, false), Some(DistanceMethod::Euclidean));
+        let h = run(
+            &["x1", "ha", "hb", "hc"],
+            nn(1, None, false),
+            Some(DistanceMethod::Euclidean),
+        );
+        assert_eq!(pairs_vec(&t), pairs_vec(&h));
+
+        // CEM: one stratum per level, exactly
+        let cem = || MatchMethod::CoarsenedExact {
+            cutpoints: None,
+            n_bins: None,
+        };
+        let t = run(&text, cem(), None);
+        let h = run(&["x1", "ga", "gb", "gc"], cem(), None);
+        assert_eq!(t.subclass, h.subclass);
+        let grp = ds.df().column("grp").unwrap().str().unwrap().clone();
+        let mut level_of = HashMap::new();
+        for (i, s) in t.subclass.iter().enumerate() {
+            if let Some(s) = s {
+                let l = grp.get(i).unwrap();
+                assert_eq!(
+                    *level_of.entry(*s).or_insert(l),
+                    l,
+                    "stratum {s} mixes levels"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_text_covariate_with_too_many_levels_is_refused() {
+        let n = MAX_COVARIATE_LEVELS + 2;
+        let df = df! {
+            "treat" => (0..n).map(|i| (i % 2) as f64).collect::<Vec<_>>(),
+            "id" => (0..n).map(|i| format!("u{i}")).collect::<Vec<_>>(),
+        }
+        .unwrap();
+        let err = match_it(
+            &Dataset::new(df),
+            "treat",
+            &["id"],
+            MatchMethod::default(),
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("'id'") && err.contains("identifier"), "{err}");
+    }
+
+    fn mask_of(ds: &Dataset, col: &str) -> Vec<bool> {
+        DesignMatrix::extract_column(ds.df(), col)
+            .unwrap()
+            .iter()
+            .map(|&v| v == 1.0)
+            .collect()
     }
 
     #[test]

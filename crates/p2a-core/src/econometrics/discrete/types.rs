@@ -128,11 +128,19 @@ impl fmt::Display for DiscreteResult {
 
         // Marginal effects
         writeln!(f)?;
-        writeln!(f, "Marginal Effects at the Mean:")?;
+        // At the regressors' means (MEM), which is not the average marginal effect (AME);
+        // the intercept has none (margins reports none).
+        writeln!(
+            f,
+            "Marginal Effects at the Mean (MEM, not the average marginal effect):"
+        )?;
         writeln!(f, "{:-<45}", "")?;
         writeln!(f, "{:<20} {:>12}", "Variable", "dy/dx")?;
         writeln!(f, "{:-<45}", "")?;
         for i in 0..self.variables.len() {
+            if self.variables[i] == "(Intercept)" {
+                continue;
+            }
             writeln!(
                 f,
                 "{:<20} {:>12.6}",
