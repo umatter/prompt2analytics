@@ -916,7 +916,9 @@ pub struct MatchItRequest {
     pub treatment: String,
 
     /// Covariate columns for matching
-    #[schemars(description = "Names of covariate columns to use for matching.")]
+    #[schemars(
+        description = "Names of covariate columns to use for matching. Text columns are factors, as in MatchIt: one indicator per level (the first level is the reference in the propensity model), matched exactly by CEM; at most 1000 levels."
+    )]
     pub covariates: Vec<String>,
 
     /// Matching method: 'nearest' (default), 'cem', 'full', or 'subclass'
