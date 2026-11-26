@@ -228,9 +228,9 @@ pub struct OlsResult {
     // ═══════════════════════════════════════════════════════════════════════
     /// Any warnings generated during estimation
     pub warnings: Vec<String>,
-    /// Rows dropped because an identifier (a cluster id) was missing. Empty for
-    /// `run_ols` and `run_ols_raw`, which refuse missing values; absent from JSON when
-    /// nothing was dropped.
+    /// Rows dropped because of a missing value (response, regressor, weight or cluster id;
+    /// `run_ols_complete_cases`, `run_ols_clustered`). Empty for `run_ols` and `run_ols_raw`,
+    /// which refuse missing values; absent from JSON when nothing was dropped.
     #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
     pub missing: MissingSummary,
     /// Names of the aliased (linearly dependent) design columns, in column order; their
@@ -1860,8 +1860,9 @@ impl std::fmt::Display for OlsClusteredResult {
 /// model is re-estimated on the remaining rows, as `fixest::feols(cluster = )` does
 /// (`sandwich::vcovCL` refuses missing clusters). The drop is reported in
 /// `OlsResult::missing` and as the first warning; when no row has an id the error is
-/// `InsufficientData` naming the id column(s). A missing value of `y_col` or of an
-/// `x_cols` column in a kept row is an error, as in [`run_ols`].
+/// `InsufficientData` naming the id column(s). A row with a missing value of `y_col` or of
+/// an `x_cols` column is dropped too, as `lm`'s `na.omit` drops it, and counted in the same
+/// report.
 ///
 /// # Arguments
 /// * `dataset` - The dataset containing the data
@@ -1924,14 +1925,18 @@ impl OlsClusteredResult {
         intercept: bool,
         opts: ClusteredOptions,
     ) -> EconResult<OlsClusteredResult> {
-        // Cluster ids, with the rows whose id is missing left out.
-        let mut request = ColumnRequest::new(dataset.df()).factor(cluster1);
+        // The rows complete in y, x and the cluster ids (lm's na.omit, and fixest's drop
+        // of a missing id).
+        let mut request = ColumnRequest::new(dataset.df())
+            .numeric(y_col)
+            .numerics(x_cols)
+            .factor(cluster1);
         let context = match cluster2 {
             Some(c2) => {
                 request = request.factor(c2);
-                format!("clustered OLS (rows with ids in '{cluster1}' and '{c2}')")
+                format!("clustered OLS (complete rows with ids in '{cluster1}' and '{c2}')")
             }
-            None => format!("clustered OLS (rows with an id in '{cluster1}')"),
+            None => format!("clustered OLS (complete rows with an id in '{cluster1}')"),
         };
         let ids = request.na(NaPolicy::Omit).min_rows(1, &context).extract()?;
 
@@ -2212,6 +2217,84 @@ fn estimation_sample<'a>(
     Ok(Cow::Owned(Dataset::new(sample)))
 }
 
+/// The rows of `dataset` complete in `y_col` and `x_cols`, as R's `lm` with its default
+/// `na.action = na.omit`: a row with a missing (null or NaN) value in any of them is left
+/// out, and the summary says how many rows were dropped and in which columns. ±Inf and
+/// text columns are refused as in [`run_ols`]. Without a missing value the dataset itself
+/// is returned (borrowed). The estimators and tests R computes from an `lm` fit
+/// (`sandwich`'s covariances, `lmtest`'s tests) start here; [`run_ols`] itself refuses
+/// missing values.
+pub(crate) fn complete_sample<'a>(
+    dataset: &'a Dataset,
+    y_col: &str,
+    x_cols: &[&str],
+    context: &str,
+) -> EconResult<(Cow<'a, Dataset>, MissingSummary)> {
+    // Fast path: no null and no NaN in any of the columns (the common case) leaves the
+    // dataset as it is, and run_ols then sees exactly what it saw before (±Inf and text
+    // columns are refused there). Checking costs a scan of the float columns only.
+    let df = dataset.df();
+    let complete_already = std::iter::once(y_col)
+        .chain(x_cols.iter().copied())
+        .all(|name| df.column(name).is_ok_and(column_has_no_missing));
+    if complete_already {
+        return Ok((Cow::Borrowed(dataset), MissingSummary::none(df.height())));
+    }
+    let complete = ColumnRequest::new(dataset.df())
+        .numeric(y_col)
+        .numerics(x_cols)
+        .na(NaPolicy::Omit)
+        .min_rows(1, context)
+        .extract()?;
+    let mut names: Vec<&str> = Vec::with_capacity(x_cols.len() + 1);
+    names.push(y_col);
+    names.extend_from_slice(x_cols);
+    let sample = estimation_sample(dataset, &names, &complete)?;
+    Ok((sample, complete.missing().clone()))
+}
+
+/// Whether a column has no null and, if it is a float column, no NaN.
+fn column_has_no_missing(c: &Column) -> bool {
+    if c.null_count() > 0 {
+        return false;
+    }
+    match c.dtype() {
+        // na-ok: null_count is 0, so the values buffers hold every cell
+        DataType::Float64 => c.f64().is_ok_and(|ca| {
+            ca.downcast_iter()
+                .all(|arr| !arr.values().iter().any(|v| v.is_nan()))
+        }),
+        DataType::Float32 => c.f32().is_ok_and(|ca| {
+            ca.downcast_iter()
+                .all(|arr| !arr.values().iter().any(|v| v.is_nan()))
+        }),
+        _ => true,
+    }
+}
+
+/// The `Missing values: <note>` line of a result fitted on [`complete_sample`] (nothing when
+/// no row was dropped). `ordered` marks a statistic that uses the row order (lags, recursive
+/// residuals, kernel weights): its series is joined across the dropped rows, as R's
+/// `na.omit` joins it, and the line says so.
+pub(crate) fn write_missing_line(
+    f: &mut std::fmt::Formatter<'_>,
+    missing: &MissingSummary,
+    ordered: bool,
+) -> std::fmt::Result {
+    if let Some(note) = missing.note() {
+        if ordered {
+            writeln!(
+                f,
+                "Missing values: {note}; the other rows are used in their order, joined \
+                 across the dropped ones (as R's na.omit)"
+            )?;
+        } else {
+            writeln!(f, "Missing values: {note}")?;
+        }
+    }
+    Ok(())
+}
+
 /// Row indices of each level of `f` (indices into the rows `f` was extracted from).
 fn cluster_groups(f: &Factor) -> EconResult<Vec<Vec<usize>>> {
     let mut groups: Vec<Vec<usize>> =
@@ -2357,6 +2440,10 @@ pub struct HacResult {
     /// for Truncated, up to n for Quadratic Spectral.
     #[serde(default)]
     pub n_lag_weights: usize,
+    /// Rows dropped because of a missing value in the response or a regressor (as `lm`'s
+    /// `na.omit`); absent from JSON when none was.
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
 }
 
 impl std::fmt::Display for HacResult {
@@ -2376,6 +2463,7 @@ impl std::fmt::Display for HacResult {
                 name, self.coefficients[i], self.std_errors[i]
             )?;
         }
+        write_missing_line(f, &self.missing, true)?;
         write_warnings(f, &self.warnings)
     }
 }
@@ -2816,6 +2904,7 @@ pub fn vcov_hac(
         df_resid: ols_result.df_resid,
         warnings,
         n_lag_weights,
+        missing: MissingSummary::default(),
     })
 }
 
@@ -3152,7 +3241,9 @@ pub fn run_vcov_hac(
 
 impl HacResult {
     /// OLS with HAC (Newey-West family) standard errors, as [`run_vcov_hac`], with or without an
-    /// intercept (`intercept = false`: `NeweyWest(lm(y ~ 0 + x), ..)`). [`run_vcov_hac`] is
+    /// intercept (`intercept = false`: `NeweyWest(lm(y ~ 0 + x), ..)`). Rows with a missing
+    /// response or regressor are left out, as `lm`'s `na.omit`, and reported in `missing`;
+    /// the kernel weights then run over the other rows in their order. [`run_vcov_hac`] is
     /// `fit(.., true)`.
     pub fn fit(
         dataset: &Dataset,
@@ -3163,6 +3254,10 @@ impl HacResult {
         prewhiten: bool,
         intercept: bool,
     ) -> EconResult<HacResult> {
+        // The rows complete in y and x (lm's na.omit)
+        let (sample, missing) = complete_sample(dataset, y_col, x_cols, "HAC regression")?;
+        let dataset = sample.as_ref();
+
         // First run OLS
         let ols_result = run_ols(dataset, y_col, x_cols, intercept, CovarianceType::Standard)?;
 
@@ -3173,7 +3268,9 @@ impl HacResult {
         // Parse kernel (unknown names are an error)
         let kernel_type = crate::options::parse_or(kernel, HacKernel::Bartlett)?;
 
-        vcov_hac(&ols_result, &x, bandwidth, kernel_type, prewhiten)
+        let mut result = vcov_hac(&ols_result, &x, bandwidth, kernel_type, prewhiten)?;
+        result.missing = missing;
+        Ok(result)
     }
 }
 
@@ -3307,6 +3404,10 @@ pub struct BootstrapResult {
     /// because the resampled design lost rank. Absent from JSON when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    /// Rows dropped because of a missing value in the response or a regressor (as `lm`'s
+    /// `na.omit`); absent from JSON when none was.
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
 }
 
 impl std::fmt::Display for BootstrapResult {
@@ -3325,6 +3426,7 @@ impl std::fmt::Display for BootstrapResult {
                 name, self.coefficients[i], self.std_errors[i]
             )?;
         }
+        write_missing_line(f, &self.missing, false)?;
         f.write_str(&notes_text(self))
     }
 }
@@ -3568,6 +3670,7 @@ pub fn vcov_bootstrap(
         boot_samples: Some(boot_samples),
         convergence_rate: successful_reps as f64 / replications as f64,
         warnings,
+        missing: MissingSummary::default(),
     })
 }
 
@@ -3603,11 +3706,15 @@ pub fn run_vcov_bootstrap(
     bootstrap_type: Option<&str>,
     seed: Option<u64>,
 ) -> EconResult<BootstrapResult> {
+    // The rows complete in y and x (lm's na.omit)
+    let (sample, missing) = complete_sample(dataset, y_col, x_cols, "bootstrap covariance")?;
+    let dataset = sample.as_ref();
+
     // First run OLS
     let ols_result = run_ols(dataset, y_col, x_cols, true, CovarianceType::Standard)?;
 
-    // X and y as run_ols reads them (integer and boolean columns are numbers; run_ols
-    // has already refused missing values)
+    // X and y as run_ols reads them (integer and boolean columns are numbers; the sample
+    // has no missing value)
     let df = dataset.df();
     let dm = DesignMatrix::from_dataframe(df, x_cols, true)
         .map_err(|e| econ_error_from_design(e, df))?;
@@ -3617,7 +3724,9 @@ pub fn run_vcov_bootstrap(
     // Parse bootstrap type (unknown names are an error)
     let boot_type = crate::options::parse_or(bootstrap_type, BootstrapType::Pairs)?;
 
-    vcov_bootstrap(&ols_result, &x, &y, n_boot, boot_type, seed)
+    let mut result = vcov_bootstrap(&ols_result, &x, &y, n_boot, boot_type, seed)?;
+    result.missing = missing;
+    Ok(result)
 }
 
 // ============================================================================
@@ -3656,7 +3765,8 @@ pub struct DriscollKraayResult {
     /// Warnings about the estimate
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
-    /// Rows dropped because their time id was missing ([`run_vcov_driscoll_kraay`]);
+    /// Rows dropped because their time id, response or a regressor was missing
+    /// ([`run_vcov_driscoll_kraay`]);
     /// absent from JSON when nothing was dropped.
     #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
     pub missing: MissingSummary,
@@ -3946,8 +4056,9 @@ pub fn vcov_driscoll_kraay(
 /// * `x_cols` - Names of independent variable columns
 /// * `time_col` - Name of the time period identifier column: whole numbers (integers or
 ///   integral floats) or dates. A fractional or text id is an `InvalidSpecification`; a row
-///   whose id is missing is dropped, the model is re-estimated on the other rows, and the
-///   drop is reported in `DriscollKraayResult::missing` and as the first warning (no row
+///   whose id is missing is dropped (as a row with a missing response or regressor is, as
+///   `lm`'s `na.omit`), the model is re-estimated on the other rows, and the drop is
+///   reported in `DriscollKraayResult::missing` and as the first warning (no row
 ///   with an id is `InsufficientData` naming the column).
 /// * `bandwidth` - Optional lag count L (None: floor(T^(1/4))). Must be smaller than the number
 ///   of time periods T; one above T/4 adds a warning (see [`vcov_driscoll_kraay`]).
@@ -3976,13 +4087,15 @@ pub fn run_vcov_driscoll_kraay(
     kernel: Option<&str>,
 ) -> EconResult<DriscollKraayResult> {
     // Time ids: whole numbers (integers or integral floats) or dates. A fractional or
-    // text id is an error; a row whose id is missing is dropped.
+    // text id is an error; a row whose id, response or regressor is missing is dropped.
     let ids = ColumnRequest::new(dataset.df())
+        .numeric(y_col)
+        .numerics(x_cols)
         .time_index(time_col)
         .na(NaPolicy::Omit)
         .min_rows(
             1,
-            &format!("Driscoll-Kraay (rows with a time id in '{time_col}')"),
+            &format!("Driscoll-Kraay (complete rows with a time id in '{time_col}')"),
         )
         .extract()?;
     let mut names: Vec<&str> = Vec::with_capacity(x_cols.len() + 2);
@@ -6416,6 +6529,128 @@ mod tests {
             .finish();
     }
 
+    /// The covariances and tests R computes from an `lm` fit drop the rows with a missing
+    /// response or regressor, as `lm`'s `na.omit` (5 of 200 rows here; the clustered fit
+    /// also drops the row with no firm label), and match R on the rest.
+    #[test]
+    fn test_validate_reg_lm_tests_na() {
+        use crate::regression::{
+            BgTestType, ResetType, bg_test, harvey_collier_test, reset_test, run_diagnostics,
+            wald_test,
+        };
+        let (case, ds) = crate::test_support::load_case("reg_lm_tests_na");
+        let x = ["value", "capital"];
+        let n = 195;
+        let hac = run_vcov_hac(&ds, "inv", &x, Some(3), None, false).unwrap();
+        let cl = run_ols_clustered(&ds, "inv", &x, "firm_label", None).unwrap();
+        let dk = run_vcov_driscoll_kraay(&ds, "inv", &x, "year", Some(2), None).unwrap();
+        let bg = bg_test(&ds, "inv", &x, 2, BgTestType::Chisq, 0.0).unwrap();
+        let rs = reset_test(&ds, "inv", &x, &[2, 3], ResetType::Fitted).unwrap();
+        let hc = harvey_collier_test(&ds, "inv", &x).unwrap();
+        let w = wald_test(&ds, "inv", &x, &["value"], true).unwrap();
+        let dg = run_diagnostics(&ds, "inv", &x).unwrap();
+        for m in [
+            &hac.missing,
+            &dk.missing,
+            &bg.missing,
+            &rs.missing,
+            &hc.missing,
+            &w.missing,
+        ] {
+            assert_eq!((m.n_total, m.n_used, m.n_dropped), (200, n, 5));
+            assert_eq!(
+                m.note().unwrap(),
+                "5 of 200 rows dropped because of missing values (inv: 3, value: 2)"
+            );
+        }
+        assert_eq!(dg.missing, hac.missing);
+        assert_eq!(
+            (cl.ols.missing.n_used, cl.ols.missing.n_dropped),
+            (194, 6),
+            "{:?}",
+            cl.ols.missing
+        );
+        assert_eq!(
+            (hac.n_obs, bg.n_obs, rs.n_obs, w.n_obs, dg.n_obs),
+            (n, n, n, n, n)
+        );
+        let cl_names: Vec<String> = cl.ols.coefficients.iter().map(|c| c.name.clone()).collect();
+        let cl_se: Vec<f64> = cl.ols.coefficients.iter().map(|c| c.std_error).collect();
+        Check::new(&case)
+            .named("coef", &hac.names, &hac.coefficients, Tol::coef(n))
+            .scalar("n_used", hac.n_obs as f64, Tol::exact())
+            .scalar("n_dropped", hac.missing.n_dropped as f64, Tol::exact())
+            .named("se_nw_lag3", &hac.names, &hac.std_errors, Tol::se(n))
+            .named("se_cluster_hc1", &cl_names, &cl_se, Tol::se(194))
+            .scalar("n_used_cluster", cl.ols.n_obs as f64, Tol::exact())
+            .named("se_dk_lag2", &dk.names, &dk.std_errors, Tol::se(n))
+            .scalar("bg_stat", bg.statistic, Tol::stat(n))
+            .scalar("bg_p", bg.p_value, Tol::p_value(n))
+            .scalar("reset_stat", rs.statistic, Tol::stat(n))
+            .scalar("reset_p", rs.p_value, Tol::p_value(n))
+            // harvtest reports |t|; p2a's statistic keeps the sign of the mean (a known
+            // difference, validation/diagnostics/harvtest.md)
+            .scalar("harv_stat", hc.statistic.abs(), Tol::stat(n))
+            .scalar("harv_p", hc.p_value, Tol::p_value(n))
+            .scalar("wald_f", w.statistic, Tol::stat(n))
+            .scalar("wald_p", w.p_value, Tol::p_value(n))
+            .scalar(
+                "bp_stat",
+                dg.breusch_pagan.as_ref().unwrap().statistic,
+                Tol::stat(n),
+            )
+            .scalar(
+                "dw_stat",
+                dg.durbin_watson.as_ref().unwrap().statistic,
+                Tol::stat(n),
+            )
+            .finish();
+    }
+
+    /// The bootstrap covariance fits on the complete rows too (its draws are not R's, so
+    /// only the sample and the point estimates are compared), and every result above says
+    /// in its text which rows were dropped; the order-dependent ones say the series is
+    /// joined across them. Without a missing value nothing is reported.
+    #[test]
+    fn lm_based_results_report_the_dropped_rows() {
+        use crate::regression::{BgTestType, bg_test, harvey_collier_test};
+        let (_, ds) = crate::test_support::load_case("reg_lm_tests_na");
+        let x = ["value", "capital"];
+        let boot = run_vcov_bootstrap(&ds, "inv", &x, Some(50), None, Some(1)).unwrap();
+        let ols =
+            run_ols_complete_cases(&ds, "inv", &x, None, true, CovarianceType::Standard).unwrap();
+        assert_eq!(boot.n_obs, 195);
+        assert_eq!(boot.missing, ols.missing);
+        for (b, c) in boot.coefficients.iter().zip(&ols.coefficients) {
+            assert!(
+                (b - c.estimate).abs() <= 1e-10 * c.estimate.abs(),
+                "{b} vs {c:?}"
+            );
+        }
+        let line =
+            "Missing values: 5 of 200 rows dropped because of missing values (inv: 3, value: 2)";
+        let joined = format!("{line}; the other rows are used in their order");
+        let boot_text = boot.to_string();
+        assert!(
+            boot_text.contains(line) && !boot_text.contains(&joined),
+            "{boot_text}"
+        );
+        let hac = run_vcov_hac(&ds, "inv", &x, Some(3), None, false).unwrap();
+        let bg = bg_test(&ds, "inv", &x, 2, BgTestType::Chisq, 0.0).unwrap();
+        let hc = harvey_collier_test(&ds, "inv", &x).unwrap();
+        for text in [hac.to_string(), bg.to_string(), hc.to_string()] {
+            assert!(text.contains(&joined), "{text}");
+        }
+        let json = serde_json::to_value(&hac).unwrap();
+        assert_eq!(json["missing"]["n_dropped"], 5);
+
+        // a dataset with no missing value: nothing reported, nothing in the JSON
+        let (_, full) = crate::test_support::load_case("reg_cluster_na");
+        let hac = run_vcov_hac(&full, "inv", &x, Some(3), None, false).unwrap();
+        assert!(hac.missing.is_empty() && !hac.to_string().contains("Missing values"));
+        assert!(serde_json::to_value(&hac).unwrap().get("missing").is_none());
+    }
+
     /// REG-21: rows with a missing cluster id are dropped and the model is re-estimated
     /// on the rest, one- and two-way; the CR1 SEs then equal lm + vcovCL(type = "HC1")
     /// on those rows (and fixest's one-way SEs).
@@ -6510,11 +6745,11 @@ mod tests {
         let none = with_all_null(&ds, "no_id", DataType::String);
         assert_eq!(
             insufficient_context(run_ols_clustered(&none, "inv", &x, "no_id", None)),
-            "clustered OLS (rows with an id in 'no_id'): 0 of 200 rows have no missing value"
+            "clustered OLS (complete rows with an id in 'no_id'): 0 of 200 rows have no missing value"
         );
         assert_eq!(
             insufficient_context(run_ols_clustered(&none, "inv", &x, "firm", Some("no_id"))),
-            "clustered OLS (rows with ids in 'firm' and 'no_id'): \
+            "clustered OLS (complete rows with ids in 'firm' and 'no_id'): \
              0 of 200 rows have no missing value"
         );
     }
@@ -6599,7 +6834,7 @@ mod tests {
             insufficient_context(run_vcov_driscoll_kraay(
                 &none, "inv", &x, "no_t", None, None
             )),
-            "Driscoll-Kraay (rows with a time id in 'no_t'): 0 of 200 rows have no missing value"
+            "Driscoll-Kraay (complete rows with a time id in 'no_t'): 0 of 200 rows have no missing value"
         );
     }
 

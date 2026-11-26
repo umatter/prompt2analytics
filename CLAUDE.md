@@ -537,7 +537,9 @@ let missing = cols.missing().clone();           // what was dropped
   - **Omit:** one-sample tests (`t.test`); two-sample columns, each column separately (`t.test(x, y)`);
     paired tests and `cor.test`, jointly (`complete.cases`); correlation matrices, pairwise
     (`cor(use = "pairwise.complete.obs")`); response ~ group (`aov`, `kruskal.test`);
-    contingency tables (`table`); survival (`survfit`, `coxph`); discrete choice on rows (`glm`, `polr`,
+    contingency tables (`table`); survival (`survfit`, `coxph`); OLS and what R computes from its `lm`
+    fit (`sandwich` covariances: HAC, clustered, Driscoll-Kraay, bootstrap; `lmtest` tests), jointly over the
+    response and regressors (the order-dependent ones say the series is joined across the dropped rows); discrete choice on rows (`glm`, `polr`,
     `nnet::multinom`); panel, IV, DiD and RD, jointly over every model column (`plm`, `fixest`,
     `rdrobust`); difference GMM (`pgmm`; rows with a missing id or time too); panel unit-root tests (rows
     dropped, gaps joined with a warning, as `plm::purtest`); the weighted mean (complete value-weight

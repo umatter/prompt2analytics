@@ -980,6 +980,9 @@ fn execute_diagnostics(
                         });
                         let mut json = json;
                         add_notes(&mut json, None, &diag.warnings);
+                        if let Some(m) = missing_json(&diag.missing) {
+                            json["missing"] = m;
+                        }
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
@@ -1025,6 +1028,7 @@ fn execute_diagnostics(
                         if let Some(cond) = diag.condition_number {
                             println!("\nCondition Number: {:.4}", cond);
                         }
+                        print_missing_note(&diag.missing, format);
                         print_notes(None, &diag.warnings, format);
                     }
                 },
@@ -1835,9 +1839,15 @@ fn execute_hac(
                 intercept,
             ) {
                 Ok(hac_result) => {
-                    // Also run OLS for R-squared
-                    let ols_result =
-                        run_ols(ds, dep_var, &x_cols, intercept, CovarianceType::Standard);
+                    // Also run OLS for R-squared, on the same complete rows
+                    let ols_result = run_ols_complete_cases(
+                        ds,
+                        dep_var,
+                        &x_cols,
+                        None,
+                        intercept,
+                        CovarianceType::Standard,
+                    );
                     let (r_squared, n_obs_display) = match &ols_result {
                         Ok(ols) => (ols.r_squared, ols.n_obs),
                         Err(_) => (f64::NAN, hac_result.n_obs),
@@ -1875,6 +1885,9 @@ fn execute_hac(
                                 "r_squared": r_squared,
                             });
                             add_result_notes(&mut json, &hac_result);
+                            if let Some(m) = missing_json(&hac_result.missing) {
+                                json["missing"] = m;
+                            }
                             println!("{}", serde_json::to_string_pretty(&json)?);
                         }
                         _ => {
@@ -1909,6 +1922,7 @@ fn execute_hac(
                             let uncentered = if intercept { "" } else { " (uncentered)" };
                             println!("R-squared{uncentered}: {:.4}", r_squared);
                             println!("Observations: {}", n_obs_display);
+                            print_missing_note(&hac_result.missing, format);
                             crate::output::print_warnings(&hac_result.warnings);
                         }
                     }

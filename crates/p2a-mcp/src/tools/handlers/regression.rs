@@ -550,7 +550,7 @@ impl AnalyticsServer {
 
     /// Run regression diagnostics.
     #[tool(
-        description = "Run comprehensive regression diagnostics. Tests include: Jarque-Bera (normality), Breusch-Pagan (heteroskedasticity), Durbin-Watson (autocorrelation), VIF (multicollinearity), and condition number."
+        description = "Run comprehensive regression diagnostics. Tests include: Jarque-Bera (normality), Breusch-Pagan (heteroskedasticity), Durbin-Watson (autocorrelation), VIF (multicollinearity), and condition number. Rows with a missing response or regressor are dropped, as R's lm (na.omit); the output reports how many."
     )]
     pub async fn regression_diagnostics(
         &self,
@@ -579,7 +579,7 @@ impl AnalyticsServer {
 
     /// Run Breusch-Godfrey test for serial correlation.
     #[tool(
-        description = "Breusch-Godfrey test for higher-order serial correlation in regression residuals. More general than Durbin-Watson as it: (1) tests for AR(p) or MA(p) correlation, (2) allows lagged dependent variables as regressors, (3) is valid regardless of regressor properties. Returns LM statistic and p-value. test_type 'chisq' (LM, default) or 'f', as lmtest::bgtest(type =); df from the rank of the augmented design (lmtest counts columns; they differ only when a term aliases)."
+        description = "Breusch-Godfrey test for higher-order serial correlation in regression residuals. More general than Durbin-Watson as it: (1) tests for AR(p) or MA(p) correlation, (2) allows lagged dependent variables as regressors, (3) is valid regardless of regressor properties. Returns LM statistic and p-value. test_type 'chisq' (LM, default) or 'f', as lmtest::bgtest(type =); df from the rank of the augmented design (lmtest counts columns; they differ only when a term aliases). Rows with a missing response or regressor are dropped, as R's lm (na.omit); the output reports how many."
     )]
     pub async fn regression_bgtest(
         &self,
@@ -616,7 +616,7 @@ impl AnalyticsServer {
 
     /// Run Ramsey's RESET test for functional form.
     #[tool(
-        description = "Ramsey's RESET test for functional form misspecification. Tests whether nonlinear terms (powers of fitted values) should be added to the model. Significant result suggests the linear model is misspecified and nonlinear terms may be needed. reset_type 'fitted' (default), 'regressor' or 'princomp' (powers of the first principal component of the regressors), as lmtest::resettest(type =); df from the rank of the augmented design (lmtest counts columns; they differ only when a term aliases)."
+        description = "Ramsey's RESET test for functional form misspecification. Tests whether nonlinear terms (powers of fitted values) should be added to the model. Significant result suggests the linear model is misspecified and nonlinear terms may be needed. reset_type 'fitted' (default), 'regressor' or 'princomp' (powers of the first principal component of the regressors), as lmtest::resettest(type =); df from the rank of the augmented design (lmtest counts columns; they differ only when a term aliases). Rows with a missing response or regressor are dropped, as R's lm (na.omit); the output reports how many."
     )]
     pub async fn regression_resettest(
         &self,
@@ -652,7 +652,7 @@ impl AnalyticsServer {
 
     /// Wald test for comparing nested linear models.
     #[tool(
-        description = "Wald test (F-test) for comparing nested linear models. Tests whether variables excluded from the restricted model are jointly significant. Common uses: testing joint significance of multiple coefficients, testing nested model hypotheses, comparing model specifications."
+        description = "Wald test (F-test) for comparing nested linear models. Tests whether variables excluded from the restricted model are jointly significant. Common uses: testing joint significance of multiple coefficients, testing nested model hypotheses, comparing model specifications. Rows with a missing response or regressor are dropped, as R's lm (na.omit); the output reports how many."
     )]
     pub async fn regression_waldtest(
         &self,
@@ -691,7 +691,7 @@ impl AnalyticsServer {
 
     /// Harvey-Collier test for linearity using recursive residuals.
     #[tool(
-        description = "Harvey-Collier test for detecting departure from linearity. Uses recursive residuals to test whether the mean of one-step-ahead forecast errors differs from zero. A significant result suggests convex or concave functional misspecification - the linear model may need polynomial terms. Equivalent to R's lmtest::harvtest()."
+        description = "Harvey-Collier test for detecting departure from linearity. Uses recursive residuals to test whether the mean of one-step-ahead forecast errors differs from zero. A significant result suggests convex or concave functional misspecification - the linear model may need polynomial terms. Equivalent to R's lmtest::harvtest(). Rows with a missing response or regressor are dropped, as R's lm (na.omit); the output reports how many."
     )]
     pub async fn regression_harvtest(
         &self,
@@ -720,7 +720,7 @@ impl AnalyticsServer {
 
     /// HAC (Newey-West) standard errors for time series regression.
     #[tool(
-        description = "Compute HAC (Heteroskedasticity and Autocorrelation Consistent) standard errors using the Newey-West estimator. Essential for time series regression where errors may be both heteroskedastic and autocorrelated. Supports multiple kernel functions and automatic bandwidth selection. kernel 'bartlett' (default), 'parzen', 'qs' (Quadratic Spectral), 'truncated' or 'tukey-hanning' (sandwich's spellings are accepted)."
+        description = "Compute HAC (Heteroskedasticity and Autocorrelation Consistent) standard errors using the Newey-West estimator. Essential for time series regression where errors may be both heteroskedastic and autocorrelated. Supports multiple kernel functions and automatic bandwidth selection. kernel 'bartlett' (default), 'parzen', 'qs' (Quadratic Spectral), 'truncated' or 'tukey-hanning' (sandwich's spellings are accepted). Rows with a missing response or regressor are dropped, as R's lm (na.omit); the output reports how many."
     )]
     pub async fn regression_hac(
         &self,
@@ -757,7 +757,7 @@ impl AnalyticsServer {
 
     /// Bootstrap covariance estimation (vcovBS).
     #[tool(
-        description = "Compute bootstrap covariance matrix and standard errors for OLS regression. Supports pairs bootstrap (most robust, resamples observations), residual bootstrap (assumes homoskedasticity), and wild bootstrap (robust to heteroskedasticity). Useful when asymptotic standard errors may be unreliable. As sandwich::vcovBS with type 'pairs' (default), 'residual', 'wild' (Rademacher), 'mammen' or 'webb'. Seeded: seed, else the session seed (set_seed), else 42."
+        description = "Compute bootstrap covariance matrix and standard errors for OLS regression. Supports pairs bootstrap (most robust, resamples observations), residual bootstrap (assumes homoskedasticity), and wild bootstrap (robust to heteroskedasticity). Useful when asymptotic standard errors may be unreliable. As sandwich::vcovBS with type 'pairs' (default), 'residual', 'wild' (Rademacher), 'mammen' or 'webb'. Seeded: seed, else the session seed (set_seed), else 42. Rows with a missing response or regressor are dropped, as R's lm (na.omit); the output reports how many."
     )]
     pub async fn regression_bootstrap_cov(
         &self,
@@ -798,7 +798,7 @@ impl AnalyticsServer {
 
     /// Driscoll-Kraay panel-robust standard errors.
     #[tool(
-        description = "Compute Driscoll-Kraay (1998) panel-robust standard errors. Robust to arbitrary cross-sectional correlation (spatial dependence) and serial correlation in panel data. Aggregates score vectors by time period and applies Newey-West HAC correction. Best for panels with large T (many time periods). Returns coefficient estimates with panel-robust SEs, t-stats, and p-values. time_col must hold whole numbers or dates; rows with a missing time id are dropped and the model is re-estimated (reported in the output). kernel 'bartlett' (default), 'parzen', 'qs' (Quadratic Spectral), 'truncated' or 'tukey-hanning' (sandwich's spellings are accepted)."
+        description = "Compute Driscoll-Kraay (1998) panel-robust standard errors. Robust to arbitrary cross-sectional correlation (spatial dependence) and serial correlation in panel data. Aggregates score vectors by time period and applies Newey-West HAC correction. Best for panels with large T (many time periods). Returns coefficient estimates with panel-robust SEs, t-stats, and p-values. time_col must hold whole numbers or dates; rows with a missing time id are dropped and the model is re-estimated (reported in the output). kernel 'bartlett' (default), 'parzen', 'qs' (Quadratic Spectral), 'truncated' or 'tukey-hanning' (sandwich's spellings are accepted). Rows with a missing response or regressor are dropped, as R's lm (na.omit); the output reports how many."
     )]
     pub async fn regression_driscoll_kraay(
         &self,
@@ -904,7 +904,7 @@ impl AnalyticsServer {
 
     /// Run OLS with clustered standard errors.
     #[tool(
-        description = "Run OLS regression with clustered standard errors. Supports one-way (firm, state) or two-way (firm + time) clustering. Essential for panel data with correlated errors. Rows with a missing cluster id are dropped and the model is re-estimated on the remaining rows (as fixest); the output reports how many."
+        description = "Run OLS regression with clustered standard errors. Supports one-way (firm, state) or two-way (firm + time) clustering. Essential for panel data with correlated errors. Rows with a missing cluster id, response or regressor are dropped and the model is re-estimated on the remaining rows (as fixest, and lm's na.omit); the output reports how many."
     )]
     pub async fn regression_clustered(
         &self,
@@ -2353,6 +2353,56 @@ mod tests {
         Check::new(&case)
             .named("coef_twoway", &names, &coef, Tol::printed(4))
             .named("se_cluster_twoway_hc1", &names, &se, Tol::printed(4))
+            .finish();
+    }
+
+    /// A missing response or regressor no longer stops the tools built on an lm fit: HAC and
+    /// the Breusch-Godfrey test run on the complete rows, match R there, and say which rows
+    /// were dropped.
+    #[test]
+    fn test_validate_mcp_regression_lm_tests_na() {
+        let case = Case::load("reg_lm_tests_na");
+        let (rt, server) = cases_server(&["reg_lm_tests_na"]);
+        let note = "Missing values: 5 of 200 rows dropped because of missing values \
+                    (inv: 3, value: 2); the other rows are used in their order";
+        let req: HacRequest = serde_json::from_value(json!({"dataset": "grunfeld_lm_na",
+            "y": "inv", "x": ["value", "capital"], "bandwidth": 3}))
+        .unwrap();
+        let r = rt.block_on(server.regression_hac(Parameters(req))).unwrap();
+        let t = text(&r);
+        assert_ne!(r.is_error, Some(true), "{t}");
+        assert!(t.contains(note), "{t}");
+        let (mut names, mut coef, mut se) = (Vec::new(), Vec::new(), Vec::new());
+        for l in t.lines().skip_while(|l| !l.starts_with("---")).skip(1) {
+            let tok: Vec<&str> = l.split_whitespace().collect();
+            if tok.len() != 3 {
+                break;
+            }
+            names.push(tok[0].to_string());
+            coef.push(tok[1].parse::<f64>().unwrap());
+            se.push(tok[2].parse::<f64>().unwrap());
+        }
+        Check::new(&case)
+            .named("coef", &names, &coef, Tol::printed(6))
+            .named("se_nw_lag3", &names, &se, Tol::printed(6))
+            .finish();
+        let req: BgTestRequest = serde_json::from_value(json!({"dataset": "grunfeld_lm_na",
+            "y": "inv", "x": ["value", "capital"], "order": 2}))
+        .unwrap();
+        let r = rt
+            .block_on(server.regression_bgtest(Parameters(req)))
+            .unwrap();
+        let t = text(&r);
+        assert_ne!(r.is_error, Some(true), "{t}");
+        assert!(t.contains(note), "{t}");
+        let stat: f64 = t
+            .lines()
+            .find_map(|l| l.strip_prefix("LM Statistic: "))
+            .unwrap()
+            .parse()
+            .unwrap();
+        Check::new(&case)
+            .scalar("bg_stat", stat, Tol::printed(4))
             .finish();
     }
 

@@ -87,9 +87,10 @@ clusters, so the reference is `lm` + `vcovCL(type = "HC1")` on the rows that hav
 The drop is reported in `OlsResult::missing` (JSON key `missing`, present only when rows
 were dropped) and as the first warning, `3 of 200 rows dropped because of missing values
 (firm_label: 3)`; `p2a reg clustered` prints it in its `Warnings:` block and adds the
-`missing` object to `-F json`. A missing y or regressor in a kept row is still an error
-(`NullValues`), as in `run_ols`. Without a missing id the code path and the output are
-those of the section above.
+`missing` object to `-F json`. A row with a missing y or regressor is dropped as well, as
+`lm`'s `na.omit` drops it, and counted in the same report (see "Missing response or regressor
+values" below); `run_ols` itself still refuses missing values. Without a missing value the
+code path and the output are those of the section above.
 
 R code: case `reg_cluster_na` of `validation/r/cases/regression_na.R`
 ([source](../r/cases/regression_na.R)), on
@@ -143,6 +144,65 @@ pin the estimation sample on `validation/datasets/generated/grunfeld_cluster_na.
 - `test_mcp_regression_driscoll_kraay_missing_time`
   (`crates/p2a-mcp/src/tools/handlers/regression.rs`): the dropped rows and the refused
   fractional ids through MCP `regression_driscoll_kraay`.
+
+
+### Missing response or regressor values
+
+The covariances and tests R computes from an `lm` fit (`run_ols_clustered`, `run_vcov_hac`,
+`run_vcov_bootstrap`, `run_vcov_driscoll_kraay`, `run_diagnostics`, `bg_test`, `reset_test`,
+`wald_test`, `harvey_collier_test`) fit on the rows complete in the response and the
+regressors, as `lm` with its default `na.action = na.omit`, and report the drop in `missing`
+and in their text (`Missing values: 5 of 200 rows dropped because of missing values (inv: 3,
+value: 2)`). Before, they refused a missing value with `NullValues` while `regression_ols`
+dropped the row, so asking for other standard errors on the same data failed. The Wald
+test fits both models on the rows complete in the unrestricted model's columns
+(`lmtest::waldtest` refuses fits on different rows). The statistics that use the row order
+(HAC kernel weights, the Breusch-Godfrey lags, Harvey-Collier's recursive residuals,
+Durbin-Watson) run over the remaining rows in their order, joined across the dropped ones as
+`na.omit` joins them, and their text says so. `run_ols`, the core routine, still refuses
+missing values.
+
+On data with no missing value the dataset is passed on unchanged after a null count and a NaN
+scan of the float columns. Timing (release build, `run_vcov_hac` with two regressors, the
+cheapest of these entry points; gazelle, 2026-11-26): the check costs 0.3 / 1.8 / 19 µs at
+n = 100 / 1,000 / 10,000 against 20 / 137 / 1,483 µs for the whole fit, 1.01x. Building the
+complete-row sample unconditionally had cost 1.33-1.39x.
+
+R code: case `reg_lm_tests_na` of `validation/r/cases/regression_na.R`
+([source](../r/cases/regression_na.R)), on
+`validation/datasets/generated/grunfeld_lm_na.csv`: Grunfeld with `inv` missing in rows 7, 58
+and 133, `value` in rows 21 and 150 and `firm_label` in row 90 (1-based); 195 rows used (194
+in the clustered fit, which also drops the row with no label). R 4.3.3, sandwich 3.1.3,
+lmtest 0.9.40.
+
+| Quantity | (Intercept) | value | capital |
+|---|---|---|---|
+| coefficients | -43.59062062667414 | 0.11572750426139546 | 0.23651404574334878 |
+| SE `NeweyWest(lag = 3, prewhite = FALSE)` | 14.269390558386828 | 0.011343944445322586 | 0.06122666527756681 |
+| SE CR1 by `firm_label` (194 rows) | 19.91456547959869 | 0.016886866727761834 | 0.08308997580774863 |
+| SE `vcovPL(cluster = ~firm, order.by = ~year, lag = 2, adjust = FALSE)` | 11.994661293687697 | 0.01225246431615253 | 0.04918157134519427 |
+
+| Test | Statistic | p-value |
+|---|---|---|
+| `bgtest(order = 2)` | 135.27693692252876 | 4.216832815257396e-30 |
+| `resettest(power = 2:3, type = "fitted")` | 17.750307810493123 | 8.561651874002046e-08 |
+| `harvtest` (\|t\|) | 1.4601807218070797 | 0.14588330404853414 |
+| `waldtest` (drop `capital`), F | 83.97247139528046 | 7.707538134593926e-17 |
+| `bptest` | 52.77722293472305 | |
+| Durbin-Watson | 0.3420469179293619 | |
+
+Tests (registry entry `lm_based_covariances_tests_missing` in
+`validation/methods/regression_na.json`):
+
+| Test | Path | Pins |
+|---|---|---|
+| `test_validate_reg_lm_tests_na` | `p2a-core` `regression/ols.rs` | every quantity above, rows used and dropped, the drop report |
+| `lm_based_results_report_the_dropped_rows` | `p2a-core` `regression/ols.rs` | the bootstrap's sample and point estimates (its draws are not R's), the `Missing values` lines, the JSON key, nothing reported without a missing value |
+| `test_validate_mcp_regression_lm_tests_na` | MCP `regression_hac`, `regression_bgtest` | the printed coefficients, SEs and LM statistic, the note |
+| `test_validate_cli_reg_hac_diagnostics_na` | `p2a reg hac`, `p2a reg diagnostics` | coefficients, SEs, Durbin-Watson and Breusch-Pagan in `-F json`, the note in text and JSON |
+
+Tolerances (`validation/README.md`, n = 194-195): coefficients 1e-8, SEs, statistics and
+p-values 1e-6 relative; counts exact; MCP text at its printed decimals.
 
 ## Known Differences
 
