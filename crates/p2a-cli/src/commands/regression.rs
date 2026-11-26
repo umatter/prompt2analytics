@@ -4,6 +4,7 @@ use clap::{Subcommand, ValueEnum};
 use p2a_core::regression::CovarianceType;
 use p2a_core::regression::gls::{GlsCorrelation, GlsMethod, GlsOptions, run_gls_with};
 use p2a_core::regression::quantreg::{QuantRegMethod, QuantRegSe};
+use p2a_core::regression::run_ols_complete_cases;
 use p2a_core::regression::smooth_spline::{SmoothSplineConfig, SplineCriterion, smooth_spline};
 use p2a_core::regression::step::StepDirection;
 use p2a_core::regression::{OlsClusteredResult, QuantRegConfig, quantreg};
@@ -757,7 +758,8 @@ fn execute_ols(
             // Show progress spinner for regression
             let progress = Progress::spinner("Running OLS regression...", quiet);
 
-            match run_ols(ds, dep_var, &x_cols, intercept, cov_type) {
+            // rows missing in the response or a regressor are dropped, as lm's na.omit
+            match run_ols_complete_cases(ds, dep_var, &x_cols, None, intercept, cov_type) {
                 Ok(result) => {
                     progress.finish_and_clear();
                     log::info!(
@@ -772,6 +774,10 @@ fn execute_ols(
                     // an aliased column prints the core's NaN, never a made-up 0.
                     let se_type = se_label(result.cov_type);
                     let r2 = R2Labels::new(intercept);
+                    let mut extra_json = serde_json::Map::new();
+                    if let Some(m) = missing_json(&result.missing) {
+                        extra_json.insert("missing".to_string(), m);
+                    }
                     let report = RegressionReport {
                         method: "OLS Regression",
                         coefficients: result.coefficients.iter().map(CoefRow::from).collect(),
@@ -784,10 +790,11 @@ fn execute_ols(
                         se_type: &se_type,
                         se_type_json: result.cov_type.short_label(),
                         r_squared_type: r2.json_type,
-                        extra_json: serde_json::Map::new(),
+                        extra_json,
                         warnings: &result.warnings,
                     };
                     println!("{}", format_regression_report(&report, format));
+                    print_missing_note(&result.missing, format);
                 }
                 Err(e) => {
                     progress.finish_and_clear();

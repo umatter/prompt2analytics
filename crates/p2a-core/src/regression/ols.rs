@@ -861,6 +861,40 @@ pub fn run_ols(
     )
 }
 
+/// OLS, or WLS with `weights_col`, on the rows complete in the response, the regressors
+/// and the weights, as R's `lm` with its default `na.action = na.omit`: a row with a
+/// missing (null or NaN) value in any of those columns is left out, and `missing` says how
+/// many rows were dropped and in which columns. ±Inf is still refused, and text columns
+/// are not numeric, as in [`run_ols`]. Without a missing value this is [`run_ols`] (or
+/// [`run_wls`]) on the dataset itself.
+pub fn run_ols_complete_cases(
+    dataset: &Dataset,
+    y_col: &str,
+    x_cols: &[&str],
+    weights_col: Option<&str>,
+    intercept: bool,
+    cov_type: CovarianceType,
+) -> EconResult<OlsResult> {
+    let mut request = ColumnRequest::new(dataset.df())
+        .numeric(y_col)
+        .numerics(x_cols);
+    if let Some(w) = weights_col {
+        request = request.numeric(w);
+    }
+    let complete = request.na(NaPolicy::Omit).min_rows(1, "OLS").extract()?;
+    let mut names: Vec<&str> = Vec::with_capacity(x_cols.len() + 2);
+    names.push(y_col);
+    names.extend_from_slice(x_cols);
+    names.extend(weights_col);
+    let sample = estimation_sample(dataset, &names, &complete)?;
+    let mut result = match weights_col {
+        None => run_ols(&sample, y_col, x_cols, intercept, cov_type)?,
+        Some(w) => run_wls(&sample, y_col, x_cols, w, intercept, cov_type)?,
+    };
+    result.missing = complete.missing().clone();
+    Ok(result)
+}
+
 /// Weighted least squares on a dataset, as R's `lm(y ~ x, weights = w)` (with `summary`,
 /// `logLik` and `sandwich::vcovHC` for the robust covariances).
 ///
@@ -4950,6 +4984,56 @@ mod tests {
                     .scalar("wald_f_hc1", w.statistic, Tol::stat(r.n_obs))
                     .scalar("wald_f_hc1_p", w.p_value, Tol::p_value(r.n_obs));
                 assert_eq!((w.df1, w.df2), (3, 245));
+            }
+        }
+        check.finish();
+    }
+
+    /// Missing cells in y, a regressor and the weights drop their rows jointly, as lm's
+    /// na.omit: the fits match R on the complete rows, and `missing` names the columns.
+    #[test]
+    fn test_validate_ols_na() {
+        let (case, ds) = crate::test_support::load_case("ols_na");
+        let mut check = Check::new(&case);
+        for (cov, tag) in [
+            (CovarianceType::Standard, "classical"),
+            (CovarianceType::HC0, "hc0"),
+            (CovarianceType::HC1, "hc1"),
+            (CovarianceType::HC2, "hc2"),
+            (CovarianceType::HC3, "hc3"),
+        ] {
+            let r = run_ols_complete_cases(&ds, "y", &["x1", "x2"], None, true, cov).unwrap();
+            pin_inference(&mut check, &r, tag);
+            pin_trait(&mut check, &r, tag);
+            if cov == CovarianceType::Standard {
+                pin_fit(&mut check, &r);
+                assert_eq!((r.missing.n_total, r.missing.n_used), (120, 112));
+                assert_eq!(
+                    r.missing.note().unwrap(),
+                    "8 of 120 rows dropped because of missing values (y: 5, x1: 4)"
+                );
+            }
+        }
+        check.finish();
+    }
+
+    #[test]
+    fn test_validate_ols_na_wls() {
+        let (case, ds) = crate::test_support::load_case("ols_na_wls");
+        let mut check = Check::new(&case);
+        for (cov, tag) in [
+            (CovarianceType::Standard, "classical"),
+            (CovarianceType::HC0, "hc0"),
+            (CovarianceType::HC1, "hc1"),
+            (CovarianceType::HC2, "hc2"),
+            (CovarianceType::HC3, "hc3"),
+        ] {
+            let r = run_ols_complete_cases(&ds, "y", &["x1", "x2"], Some("w"), true, cov).unwrap();
+            pin_inference(&mut check, &r, tag);
+            pin_trait(&mut check, &r, tag);
+            if cov == CovarianceType::Standard {
+                pin_fit(&mut check, &r);
+                assert_eq!((r.missing.n_total, r.missing.n_used), (120, 110));
             }
         }
         check.finish();

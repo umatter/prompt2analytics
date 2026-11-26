@@ -101,6 +101,28 @@ R² 0.9954790045772955, adj. R² 0.992465007628826, sigma 0.3048540735619657, F
 330.2853392345862 on (6, 9) with p 4.984030528724918e-10, logLik 0.9066496552335839, AIC
 14.186700689532833, BIC 20.36741046745108.
 
+### `ols_na` and `ols_na_wls`: missing values
+
+`run_ols_complete_cases`, which the `regression_ols` tool and `p2a reg ols` call, fits on
+the rows complete in the response, the regressors and (for WLS) the weights, as `lm` with its
+default `na.action = na.omit`, and reports the dropped rows (`MissingSummary`). The data
+(`validation/datasets/generated/ols_na.csv`, 120 rows) have 5 missing responses, 4 missing
+`x1` (one row shared with y) and 3 missing weights: OLS uses 112 rows, WLS 110. `run_ols`
+itself still refuses a missing value, as before; the estimators that call it on a sample they
+built are unchanged.
+
+| `ols_na` | coef | SE (classical) |
+|---|---|---|
+| (Intercept) | 0.9621180727299594 | 0.2343971675472302 |
+| x1 | 0.553475086092205 | 0.1109866177843862 |
+| x2 | 0.16391699020213735 | 0.0203450330950971 |
+
+Every quantity of `.ols_values` (HC0-HC3 included) is pinned for both cases by
+`test_validate_ols_na` and `test_validate_ols_na_wls`, and coefficients and HC1 SEs through
+the tool by `p2a-mcp::tools::handlers::regression::tests::test_validate_mcp_regression_ols_na`
+and through `p2a reg ols` (text note and JSON `missing`) by
+`p2a-cli::tier2::wp15_regression::test_validate_cli_reg_ols_na`.
+
 ## Tests
 
 All in `crates/p2a-core/src/regression/ols.rs` (registry entry `ols` in

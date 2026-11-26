@@ -55,6 +55,37 @@ fn json_and_text(s: &TempSession, args: &[&str]) -> (String, Value) {
     (text, value)
 }
 
+/// `reg ols` drops the rows missing in the response or a regressor, as lm's na.omit:
+/// the text ends with the drop, `-F json` carries it as a `missing` object.
+#[test]
+fn test_validate_cli_reg_ols_na() {
+    let case = Case::load("ols_na");
+    let s = temp_session();
+    let name = s.load(&case);
+    let args = [
+        "reg", "ols", &name, "-y", "y", "-x", "x1", "x2", "--robust", "hc1",
+    ];
+    let text = s.ok(&args);
+    assert!(
+        text.trim_end()
+            .ends_with("Note: 8 of 120 rows dropped because of missing values (y: 5, x1: 4)"),
+        "{text}"
+    );
+    let j = s.json(&args);
+    let rows = j["coefficients"].as_array().unwrap();
+    let names: Vec<&str> = rows.iter().map(|r| r["name"].as_str().unwrap()).collect();
+    let pick = |key: &str| -> Vec<f64> { rows.iter().map(|r| r[key].as_f64().unwrap()).collect() };
+    Check::new(&case)
+        .named("coef", &names, &pick("coefficient"), Tol::coef(112))
+        .named("se_hc1", &names, &pick("std_error"), Tol::se(112))
+        .scalar("n_obs", j["n_observations"].as_f64().unwrap(), Tol::exact())
+        .finish();
+    assert_eq!(
+        j["missing"],
+        json!({"n_total": 120, "n_used": 112, "n_dropped": 8, "by_column": {"y": 5, "x1": 4}})
+    );
+}
+
 /// REG-21: rows with a missing cluster id are dropped and the model re-estimated;
 /// the text shows the drop as a warning, `-F json` as a `missing` object.
 #[test]

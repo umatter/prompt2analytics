@@ -155,6 +155,7 @@ pub use ols::{
     OlsCoefficient,
     OlsResult,
     run_ols,
+    run_ols_complete_cases,
     run_ols_clustered,
     run_ols_raw,
     run_vcov_bootstrap,

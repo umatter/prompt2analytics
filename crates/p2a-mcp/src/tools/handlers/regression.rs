@@ -29,7 +29,8 @@ use crate::tools::common::{
     MCP_DEFAULT_SEED, append_unshown_notes, json_compact, json_text, parse_choice,
 };
 use crate::tools::common::{
-    NaPolicy, missing_json, notes_json, numeric_column, numeric_columns, parse_option,
+    NaPolicy, append_missing_note, missing_json, notes_json, numeric_column, numeric_columns,
+    parse_option,
 };
 use crate::tools::requests::regression::{
     BgTestRequest, BootstrapCovRequest, CvGlmnetRequest, DiagnosticsRequest, DriscollKraayRequest,
@@ -44,9 +45,9 @@ use p2a_core::polars::prelude::{DataFrame, NamedFrom, Series};
 use p2a_core::regression::{
     BgTestType, CovarianceType, GlmnetConfig, GlmnetFamily, OlsResult, ResetType,
     SmoothSplineConfig, bg_test, harvey_collier_test, reset_test, run_cv_glmnet, run_diagnostics,
-    run_glmnet, run_lasso, run_line, run_loess, run_ols, run_ols_clustered, run_ridge, run_step,
-    run_vcov_bootstrap, run_vcov_driscoll_kraay, run_vcov_hac, run_wls, smooth_spline,
-    smooth_spline_predict, supsmu, wald_test,
+    run_glmnet, run_lasso, run_line, run_loess, run_ols, run_ols_clustered, run_ols_complete_cases,
+    run_ridge, run_step, run_vcov_bootstrap, run_vcov_driscoll_kraay, run_vcov_hac, run_wls,
+    smooth_spline, smooth_spline_predict, supsmu, wald_test,
 };
 
 use p2a_core::EconError;
@@ -363,10 +364,15 @@ fn run_ols_request(
     (intercept, cov_type): (bool, CovarianceType),
 ) -> Result<OlsResult, String> {
     let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
-    match request.weights.as_deref() {
-        None => run_ols(dataset, &request.y, &x_refs, intercept, cov_type),
-        Some(w) => run_wls(dataset, &request.y, &x_refs, w, intercept, cov_type),
-    }
+    // rows missing in y, a regressor or the weights are dropped jointly, as lm's na.omit
+    run_ols_complete_cases(
+        dataset,
+        &request.y,
+        &x_refs,
+        request.weights.as_deref(),
+        intercept,
+        cov_type,
+    )
     .map_err(|e| format!("Regression failed: {e}"))
 }
 
@@ -498,7 +504,7 @@ pub(crate) fn save_table(
 impl AnalyticsServer {
     /// Run OLS regression.
     #[tool(
-        description = "Run Ordinary Least Squares (OLS) regression. Returns coefficients, standard errors, t-values, p-values, R-squared, and F-statistic. Standard errors default to HC1 (heteroskedasticity-robust); set cov_type = 'standard' for classical, or 'hc0', 'hc2', 'hc3'. Set intercept = false to omit the intercept. Set weights to a column for weighted least squares (lm(weights = w)), e.g. the 'weights' column of a matched sample. The coefficients are also saved as a dataset named in the reply's first line, which viz_coefficient plots directly. For comparing group means with a single categorical predictor, consider anova_one_way instead."
+        description = "Run Ordinary Least Squares (OLS) regression. Returns coefficients, standard errors, t-values, p-values, R-squared, and F-statistic. Standard errors default to HC1 (heteroskedasticity-robust); set cov_type = 'standard' for classical, or 'hc0', 'hc2', 'hc3'. Set intercept = false to omit the intercept. Set weights to a column for weighted least squares (lm(weights = w)), e.g. the 'weights' column of a matched sample. Rows with a missing value in y, a regressor or the weights are dropped, as lm does, and the reply says how many. The coefficients are also saved as a dataset named in the reply's first line, which viz_coefficient plots directly. For comparing group means with a single categorical predictor, consider anova_one_way instead."
     )]
     pub async fn regression_ols(
         &self,
@@ -526,6 +532,7 @@ impl AnalyticsServer {
                         .replace("\nAdj. R-squared: ", "\nAdj. R-squared (uncentered): ");
                 }
                 append_unshown_notes(&mut text, &result);
+                append_missing_note(&mut text, &result.missing);
                 let saved = {
                     let mut datasets = self.datasets.write().await;
                     save_coefficient_table(
@@ -2124,6 +2131,32 @@ mod tests {
             .finish();
         let r = call(&rt, &server, json!({"weights": "nope"}));
         assert_eq!(r.is_error, Some(true));
+    }
+
+    /// Missing cells drop their rows, as lm's na.omit, and the reply ends with the drop.
+    #[test]
+    fn test_validate_mcp_regression_ols_na() {
+        let (case, rt, server) = case_server("ols_na");
+        let r = call(&rt, &server, json!({"y": "y", "x": ["x1", "x2"]}));
+        assert_ne!(r.is_error, Some(true), "{}", text(&r));
+        let t = text(&r);
+        assert!(
+            t.trim_end().ends_with(
+                "Missing values: 8 of 120 rows dropped because of missing values (y: 5, x1: 4)"
+            ),
+            "{t}"
+        );
+        assert!(
+            t.starts_with("Coefficients saved as dataset 'grunfeld_ols_y'"),
+            "{t}"
+        );
+        let (names, values): (Vec<String>, Vec<Vec<f64>>) = rows(&t).into_iter().unzip();
+        let coef: Vec<f64> = values.iter().map(|v| v[0]).collect();
+        let se: Vec<f64> = values.iter().map(|v| v[1]).collect();
+        Check::new(&case)
+            .named("coef", &names, &coef, Tol::printed(4))
+            .named("se_hc1", &names, &se, Tol::printed(4))
+            .finish();
     }
 
     /// No R case for the no-intercept model: this checks the option plumbing.
