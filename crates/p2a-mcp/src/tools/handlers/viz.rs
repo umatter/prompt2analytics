@@ -890,7 +890,7 @@ impl AnalyticsServer {
                             .outliers
                             .iter()
                             .take(BOXPLOT_OUTLIERS_LISTED)
-                            .map(|v| format!("{v:.4}"))
+                            .map(|&v| format_significant(v))
                             .collect::<Vec<_>>()
                             .join(", ");
                         match stat.outliers.len().saturating_sub(BOXPLOT_OUTLIERS_LISTED) {
@@ -898,10 +898,19 @@ impl AnalyticsServer {
                             more => format!("{shown}, and {more} more"),
                         }
                     };
+                    // 7 significant digits, as R prints them: at 4 decimals a value such as
+                    // 1.404994 printed as 1.4050, which a reader then rounded again to 1.41.
+                    let f = format_significant;
                     description.push_str(&format!(
-                        "\n{} (n = {}):\n  Lower whisker: {:.4}, Q1 (lower hinge): {:.4}, Median: {:.4}, \
-                         Q3 (upper hinge): {:.4}, Upper whisker: {:.4}\n  Outliers: {outliers}",
-                        stat.label, stat.n, stat.min, stat.q1, stat.median, stat.q3, stat.max
+                        "\n{} (n = {}):\n  Lower whisker: {}, Q1 (lower hinge): {}, Median: {}, \
+                         Q3 (upper hinge): {}, Upper whisker: {}\n  Outliers: {outliers}",
+                        stat.label,
+                        stat.n,
+                        f(stat.min),
+                        f(stat.q1),
+                        f(stat.median),
+                        f(stat.q3),
+                        f(stat.max)
                     ));
                 }
                 if unlabelled > 0 {
@@ -1833,7 +1842,7 @@ mod tests {
             })),
         ));
         assert!(t.contains("x (n = 5):") && t.contains("w (n = 6):"), "{t}");
-        assert!(t.contains("Outliers: inf"), "{t}");
+        assert!(t.contains("Outliers: Inf"), "{t}");
         assert!(t.contains("z (n = 0): no values"), "{t}");
         assert!(
             t.contains("Missing values: 1 of 6 rows dropped because of missing values (x: 1)")

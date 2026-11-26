@@ -809,8 +809,8 @@ async fn test_mcp_boxplot_reports_whiskers_and_n() {
         "{t}"
     );
     for line in [
-        "a (n = 8):\n  Lower whisker: 1.0000, Q1 (lower hinge): 9.5000, Median: 15.0000, Q3 (upper hinge): 17.0000, Upper whisker: 18.0000\n  Outliers: none",
-        "b (n = 7):\n  Lower whisker: 1.0000, Q1 (lower hinge): 3.2500, Median: 4.0000, Q3 (upper hinge): 8.1250, Upper whisker: 9.7500\n  Outliers: 30.0000",
+        "a (n = 8):\n  Lower whisker: 1, Q1 (lower hinge): 9.5, Median: 15, Q3 (upper hinge): 17, Upper whisker: 18\n  Outliers: none",
+        "b (n = 7):\n  Lower whisker: 1, Q1 (lower hinge): 3.25, Median: 4, Q3 (upper hinge): 8.125, Upper whisker: 9.75\n  Outliers: 30",
         "z (n = 0): no values",
         "Missing values: 1 of 8 rows dropped because of missing values (b: 1)",
         "Missing values: 8 of 8 rows dropped because of missing values (z: 8)",

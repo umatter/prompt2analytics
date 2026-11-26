@@ -78,7 +78,9 @@ async fn test_validate_mcp_boxplot_groups() {
             number_after(&t, "Q3 (upper hinge): "),
             number_after(&t, "Upper whisker: "),
         ];
-        check.vector(&format!("{g}_stats"), &stats, Tol::printed(4));
+        // printed with 7 significant digits (format_significant)
+        let seven = Tol::new(5e-7, 1e-12);
+        check.vector(&format!("{g}_stats"), &stats, seven);
         let outliers = t
             .lines()
             .find_map(|l| l.trim().strip_prefix("Outliers: "))
@@ -90,7 +92,7 @@ async fn test_validate_mcp_boxplot_groups() {
         };
         check.scalar(&format!("{g}_n_out"), out.len() as f64, Tol::exact());
         if !out.is_empty() {
-            check.vector(&format!("{g}_out"), &out, Tol::printed(4));
+            check.vector(&format!("{g}_out"), &out, seven);
         }
     }
     check.finish();

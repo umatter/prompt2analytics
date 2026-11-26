@@ -975,7 +975,10 @@ fn llm_error_code(e: &LlmError) -> &'static str {
 }
 
 /// The prompt of a title request: the user's message (at most 2,000 bytes)
-/// and the assistant's reply (at most 500), cut on char boundaries.
+/// and the assistant's reply (at most 500), cut on char boundaries. The title
+/// names what the user asked for, not how the first reply went: it is made
+/// once, after the first turn, and a title such as "Analysis blocked: missing
+/// dataset" stayed after the analysis had run.
 fn title_prompt(user: &str, assistant: Option<&str>) -> String {
     let context = match assistant {
         Some(a) => format!(
@@ -986,7 +989,9 @@ fn title_prompt(user: &str, assistant: Option<&str>) -> String {
         None => format!("User: {}", truncate_str(user, 2_000)),
     };
     format!(
-        "Generate a very short title (3-6 words, no quotes) for this conversation:\n\n{context}\n\nTitle:"
+        "Generate a very short title (3-6 words, no quotes) for this conversation. Name the \
+         analysis or question the user asked about, not the outcome of the reply (no \
+         \"failed\", \"blocked\", \"missing\" or \"error\"):\n\n{context}\n\nTitle:"
     )
 }
 
@@ -3204,6 +3209,8 @@ mod chat_tests {
         let p = title_prompt(&format!("b{}", "ü".repeat(3000)), Some(&resp));
         assert!(p.contains("Assistant: a") && p.len() < 4_000, "{}", p.len());
         assert!(title_prompt("hi", None).contains("User: hi"));
+        // the title names the request, not the first reply's outcome
+        assert!(title_prompt("hi", None).contains("not the outcome of the reply"));
     }
 
     #[test]
