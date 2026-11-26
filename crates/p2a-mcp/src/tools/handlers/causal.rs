@@ -1147,7 +1147,7 @@ impl AnalyticsServer {
 
     /// Run propensity score matching (MatchIt) for causal inference.
     #[tool(
-        description = "Match treated and control units as R's MatchIt::matchit: 'nearest' (default; PS by logit or probit glm, or Mahalanobis/Euclidean distance; m.order, ratio, caliper, replacement), optimal 'full' matching (optmatch::fullmatch; refused above 1e7 treated-control pairs, optmatch's default maximum problem size), 'cem' (Sturges bins; one-sided strata are left unmatched with a warning) or 'subclass'. Text covariates are expanded into level indicators as MatchIt does. Returns the summary.matchit balance tables before and after matching (standardized mean differences, variance ratios, eCDF mean and max), sample sizes and effective sample sizes, and registers the matched sample (MatchIt::match.data: distance, weights, subclass) under output_name for weighted outcome analyses. Options the chosen method does not use are ignored with a warning, as MatchIt. For direct effect estimation by reweighting, use treatment_ipw."
+        description = "Match treated and control units as R's MatchIt::matchit: 'nearest' (default; PS by logit or probit glm, or Mahalanobis/Euclidean distance; m.order, ratio, caliper, replacement), optimal 'full' matching (optmatch::fullmatch; refused above 1e7 treated-control pairs, optmatch's default maximum problem size), 'cem' (Sturges bins; one-sided strata are left unmatched with a warning) or 'subclass'. Text covariates are expanded into level indicators as MatchIt does. Returns the summary.matchit balance tables before and after matching (standardized mean differences, variance ratios, eCDF mean and max), sample sizes and effective sample sizes, and registers the matched sample (MatchIt::match.data: distance, weights, subclass) under output_name for weighted outcome analyses: estimate the effect with regression_ols on it with weights = 'weights', as MatchIt recommends. Options the chosen method does not use are ignored with a warning, as MatchIt. For direct effect estimation by reweighting, use treatment_ipw."
     )]
     pub async fn propensity_matching(
         &self,
@@ -1280,6 +1280,11 @@ impl AnalyticsServer {
         if replaced {
             output.push_str(&format!(" (replacing the existing dataset '{name}')"));
         }
+        output.push_str(&format!(
+            "\nTo estimate the effect, regress the outcome on the treatment in '{name}' with \
+             regression_ols and weights = 'weights' (unweighted estimates are wrong whenever \
+             the matching weights differ)."
+        ));
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 

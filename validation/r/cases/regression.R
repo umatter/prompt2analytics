@@ -50,6 +50,31 @@ case("ols_mtcars", "regression", "OLS with HC0-HC3 SEs, mtcars mpg ~ wt + hp + d
        call = "lm(mpg ~ wt + hp + disp, data = mtcars)", packages = c("sandwich"))
 })
 
+case("wls_sim", "regression", "Weighted least squares with HC0-HC3 SEs: lm(weights = w), weights with zeros as matching gives", function(ctx) {
+  set.seed(20261126)
+  n <- 300
+  x1 <- rnorm(n); x2 <- runif(n, 0, 10); d <- rbinom(n, 1, 0.4)
+  y <- 2 + 1.5 * x1 - 0.3 * x2 + 0.8 * d + rnorm(n, sd = 1 + 0.5 * abs(x1))
+  w <- sample(c(0, 0.25, 1, 1, 1, 2.5, 4), n, replace = TRUE)
+  dd <- ctx$gen_dataset("wls_sim", data.frame(id = seq_len(n), y = y, x1 = x1, x2 = x2, d = d, w = w))
+  m0 <- lm(y ~ x1 + x2 + d, data = dd, weights = w)
+  # With a weight of 0, sandwich mixes all n rows with nobs (the rows with w > 0): HC0/HC1
+  # scale by the wrong n, and HC2/HC3 recycle the n residuals against the hat values. The
+  # reference is therefore the fit on the positive-weight rows, which equals lm's own fit
+  # with zero weights in every lm quantity (checked here).
+  m <- lm(y ~ x1 + x2 + d, data = dd[dd$w > 0, ], weights = w)
+  stopifnot(all.equal(coef(m0), coef(m), tolerance = 1e-12),
+            all.equal(as.numeric(logLik(m0)), as.numeric(logLik(m)), tolerance = 1e-12),
+            all.equal(summary(m0)$r.squared, summary(m)$r.squared, tolerance = 1e-12),
+            nobs(m0) == nobs(m), m0$df.residual == m$df.residual)
+  v <- .ols_values(m)
+  wt <- lmtest::waldtest(m, vcov = vcovHC(m, type = "HC1"), test = "F")
+  v$wald_f_hc1 <- wt$F[2]; v$wald_f_hc1_p <- wt[["Pr(>F)"]][2]
+  v$resid_positive <- unname(residuals(m))
+  list(values = v, reference = "stats::lm(weights = ); sandwich::vcovHC; lmtest::waldtest",
+       call = "lm(y ~ x1 + x2 + d, data = wls_sim, weights = w)", packages = c("sandwich", "lmtest"))
+})
+
 case("ols_diagnostics_grunfeld", "regression", "Regression diagnostics printed by `p2a reg diagnostics`, Grunfeld pooled", function(ctx) {
   g <- ctx$dataset("datasets/grunfeld.csv")
   m <- lm(inv ~ value + capital, data = g)

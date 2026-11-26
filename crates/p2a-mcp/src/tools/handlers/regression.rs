@@ -45,7 +45,7 @@ use p2a_core::regression::{
     BgTestType, CovarianceType, GlmnetConfig, GlmnetFamily, OlsResult, ResetType,
     SmoothSplineConfig, bg_test, harvey_collier_test, reset_test, run_cv_glmnet, run_diagnostics,
     run_glmnet, run_lasso, run_line, run_loess, run_ols, run_ols_clustered, run_ridge, run_step,
-    run_vcov_bootstrap, run_vcov_driscoll_kraay, run_vcov_hac, smooth_spline,
+    run_vcov_bootstrap, run_vcov_driscoll_kraay, run_vcov_hac, run_wls, smooth_spline,
     smooth_spline_predict, supsmu, wald_test,
 };
 
@@ -363,8 +363,11 @@ fn run_ols_request(
     (intercept, cov_type): (bool, CovarianceType),
 ) -> Result<OlsResult, String> {
     let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
-    run_ols(dataset, &request.y, &x_refs, intercept, cov_type)
-        .map_err(|e| format!("Regression failed: {e}"))
+    match request.weights.as_deref() {
+        None => run_ols(dataset, &request.y, &x_refs, intercept, cov_type),
+        Some(w) => run_wls(dataset, &request.y, &x_refs, w, intercept, cov_type),
+    }
+    .map_err(|e| format!("Regression failed: {e}"))
 }
 
 /// The columns of a saved coefficient table, in order; `viz_coefficient(model = ...)`
@@ -495,7 +498,7 @@ pub(crate) fn save_table(
 impl AnalyticsServer {
     /// Run OLS regression.
     #[tool(
-        description = "Run Ordinary Least Squares (OLS) regression. Returns coefficients, standard errors, t-values, p-values, R-squared, and F-statistic. Standard errors default to HC1 (heteroskedasticity-robust); set cov_type = 'standard' for classical, or 'hc0', 'hc2', 'hc3'. Set intercept = false to omit the intercept. The coefficients are also saved as a dataset named in the reply's first line, which viz_coefficient plots directly. For comparing group means with a single categorical predictor, consider anova_one_way instead."
+        description = "Run Ordinary Least Squares (OLS) regression. Returns coefficients, standard errors, t-values, p-values, R-squared, and F-statistic. Standard errors default to HC1 (heteroskedasticity-robust); set cov_type = 'standard' for classical, or 'hc0', 'hc2', 'hc3'. Set intercept = false to omit the intercept. Set weights to a column for weighted least squares (lm(weights = w)), e.g. the 'weights' column of a matched sample. The coefficients are also saved as a dataset named in the reply's first line, which viz_coefficient plots directly. For comparing group means with a single categorical predictor, consider anova_one_way instead."
     )]
     pub async fn regression_ols(
         &self,
@@ -2088,6 +2091,39 @@ mod tests {
         let t = text(&r);
         assert!(t.contains(&format!("'{}'", "x".repeat(64))), "{t}");
         assert!(!t.contains(&"x".repeat(65)), "{t}");
+    }
+
+    /// `regression_ols` with `weights` is weighted least squares (case `wls_sim`,
+    /// `lm(y ~ x1 + x2 + d, weights = w)`): the printed coefficients and HC1 SEs, the
+    /// weighted title and the note on the rows with weight 0.
+    #[test]
+    fn test_validate_mcp_regression_ols_weights() {
+        let (case, rt, server) = case_server("wls_sim");
+        let r = call(
+            &rt,
+            &server,
+            json!({"y": "y", "x": ["x1", "x2", "d"], "weights": "w"}),
+        );
+        assert_ne!(r.is_error, Some(true));
+        let t = text(&r);
+        assert!(
+            t.starts_with("Weighted Least Squares Results")
+                || t.contains("\nWeighted Least Squares Results"),
+            "{t}"
+        );
+        assert!(
+            t.contains("Weights: w") && t.contains("51 row(s) with weight 0"),
+            "{t}"
+        );
+        let (names, values): (Vec<String>, Vec<Vec<f64>>) = rows(&t).into_iter().unzip();
+        let coef: Vec<f64> = values.iter().map(|v| v[0]).collect();
+        let se: Vec<f64> = values.iter().map(|v| v[1]).collect();
+        Check::new(&case)
+            .named("coef", &names, &coef, Tol::printed(4))
+            .named("se_hc1", &names, &se, Tol::printed(4))
+            .finish();
+        let r = call(&rt, &server, json!({"weights": "nope"}));
+        assert_eq!(r.is_error, Some(true));
     }
 
     /// No R case for the no-intercept model: this checks the option plumbing.

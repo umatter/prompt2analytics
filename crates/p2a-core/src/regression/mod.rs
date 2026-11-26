@@ -160,6 +160,7 @@ pub use ols::{
     run_vcov_bootstrap,
     run_vcov_driscoll_kraay,
     run_vcov_hac,
+    run_wls,
     vcov_bootstrap,
     vcov_driscoll_kraay,
     vcov_hac,

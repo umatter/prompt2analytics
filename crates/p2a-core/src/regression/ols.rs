@@ -245,6 +245,10 @@ pub struct OlsResult {
     /// [`f_statistic`](Self::f_statistic) stays the classical `summary.lm` F.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wald_f: Option<WaldF>,
+    /// The weights column of a weighted fit ([`run_wls`]); `None` for OLS. Absent from JSON
+    /// for OLS.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weights: Option<String>,
 
     // ═══════════════════════════════════════════════════════════════════════
     // Internal caches (not serialized)
@@ -368,6 +372,28 @@ fn intercept_column(x: ndarray::ArrayView2<'_, f64>, intercept: bool) -> Option<
     })
 }
 
+/// [`intercept_column`] of a design whose rows were multiplied by `sqrt_weights`: the column
+/// that is constant once the weights are divided out.
+fn weighted_intercept_column(
+    x: ndarray::ArrayView2<'_, f64>,
+    sqrt_weights: &Array1<f64>,
+    intercept: bool,
+) -> Option<usize> {
+    if !intercept || x.nrows() == 0 {
+        return None;
+    }
+    x.columns().into_iter().position(|col| {
+        let v0 = col[0] / sqrt_weights[0];
+        if !v0.is_finite() || v0 == 0.0 {
+            return false;
+        }
+        let tol = 1e-10 * v0.abs().max(1.0);
+        col.iter()
+            .zip(sqrt_weights)
+            .all(|(&v, &s)| (v / s - v0).abs() <= tol)
+    })
+}
+
 impl LinearEstimator for OlsResult {
     fn coefficients(&self) -> &Array1<f64> {
         &self.beta
@@ -391,6 +417,12 @@ impl LinearEstimator for OlsResult {
 
     fn degrees_of_freedom(&self) -> usize {
         self.df_resid
+    }
+
+    /// The fit's sigma: `sqrt(sum(w e^2) / df)` for a weighted fit, whose stored residuals
+    /// are on the original scale (the trait's default would leave the weights out).
+    fn residual_std_error(&self) -> f64 {
+        self.residual_std_error
     }
 
     fn n_obs(&self) -> usize {
@@ -425,9 +457,19 @@ impl LinearEstimator for OlsResult {
 
 impl std::fmt::Display for OlsResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "OLS Regression Results")?;
-        writeln!(f, "======================")?;
-        writeln!(f, "Dependent Variable: {}", self.dependent_var)?;
+        match &self.weights {
+            None => {
+                writeln!(f, "OLS Regression Results")?;
+                writeln!(f, "======================")?;
+                writeln!(f, "Dependent Variable: {}", self.dependent_var)?;
+            }
+            Some(w) => {
+                writeln!(f, "Weighted Least Squares Results")?;
+                writeln!(f, "==============================")?;
+                writeln!(f, "Dependent Variable: {}", self.dependent_var)?;
+                writeln!(f, "Weights: {w}")?;
+            }
+        }
         writeln!(f, "Observations: {}", self.n_obs)?;
         writeln!(f, "R-squared: {:.4}", self.r_squared)?;
         writeln!(f, "Adj. R-squared: {:.4}", self.adj_r_squared)?;
@@ -649,6 +691,63 @@ fn fit_summary(
     }
 }
 
+/// [`fit_summary`] of a weighted fit, as `summary.lm` with weights: `y` and `residuals` are
+/// the transformed `sqrt(w) * y` and `sqrt(w) * e`. The explained sum of squares is
+/// `sum(w (f - m)^2)` about the weighted mean `m = sum(w f) / sum(w)` of the fitted values
+/// `f` with an intercept, `sum(w f^2)` without; the total is explained plus residual.
+fn weighted_fit_summary(
+    y: &Array1<f64>,
+    residuals: &Array1<f64>,
+    sqrt_weights: &Array1<f64>,
+    k: usize,
+    df_resid: usize,
+    intercept: bool,
+) -> FitSummary {
+    let n = y.len();
+    let ssr: f64 = residuals.iter().map(|e| e * e).sum();
+    // fitted values on the original scale and the weights
+    let fw: Vec<(f64, f64)> = (0..n)
+        .map(|i| {
+            let s = sqrt_weights[i];
+            ((y[i] - residuals[i]) / s, s * s)
+        })
+        .collect();
+    let (mss, df_int) = if intercept {
+        let sum_w: f64 = fw.iter().map(|(_, w)| w).sum();
+        let m = fw.iter().map(|(f, w)| w * f).sum::<f64>() / sum_w;
+        (fw.iter().map(|(f, w)| w * (f - m).powi(2)).sum::<f64>(), 1)
+    } else {
+        (fw.iter().map(|(f, w)| w * f * f).sum::<f64>(), 0)
+    };
+    let sst = mss + ssr;
+    let df_model = k.saturating_sub(df_int);
+    let sigma_squared = ssr / df_resid as f64;
+    let r_squared = if sst > 0.0 { mss / sst } else { 0.0 };
+    let adj_r_squared = if sst > 0.0 && df_resid > 0 {
+        1.0 - (1.0 - r_squared) * ((n - df_int) as f64) / (df_resid as f64)
+    } else {
+        0.0
+    };
+    let f_statistic = if df_model > 0 && ssr > 0.0 {
+        (mss / df_model as f64) / sigma_squared
+    } else {
+        0.0
+    };
+    let f_p_value = if df_model > 0 && df_resid > 0 {
+        f_test_p_value(f_statistic, df_model as f64, df_resid as f64)
+    } else {
+        f64::NAN
+    };
+    FitSummary {
+        sst,
+        r_squared,
+        adj_r_squared,
+        df_model,
+        f_statistic,
+        f_p_value,
+    }
+}
+
 /// Run OLS regression on pre-extracted ndarray data.
 ///
 /// This is the core computation function that operates directly on arrays,
@@ -704,6 +803,7 @@ pub fn run_ols_raw(
         has_intercept,
         cov_type,
         true,
+        None,
     )
 }
 
@@ -757,7 +857,82 @@ pub fn run_ols(
         intercept,
         cov_type,
         false,
+        None,
     )
+}
+
+/// Weighted least squares on a dataset, as R's `lm(y ~ x, weights = w)` (with `summary`,
+/// `logLik` and `sandwich::vcovHC` for the robust covariances).
+///
+/// The weights must be finite and non-negative, with at least one positive; a missing
+/// weight is refused like any missing value. Rows with weight 0 are left out of the fit,
+/// as `lm` leaves them out of the residual degrees of freedom and `nobs`. The fit is OLS
+/// on `sqrt(w) * y` and `sqrt(w) * X`; R², F and the log-likelihood are the weighted ones
+/// of `summary.lm` and `logLik.lm`, and the residuals are `y - X b`. Weights that are
+/// matching weights (`propensity_matching`'s `weights` column) give MatchIt's recommended
+/// outcome model on the matched sample.
+pub fn run_wls(
+    dataset: &Dataset,
+    y_col: &str,
+    x_cols: &[&str],
+    weights_col: &str,
+    intercept: bool,
+    cov_type: CovarianceType,
+) -> EconResult<OlsResult> {
+    let df = dataset.df();
+    let design = DesignMatrix::from_dataframe(df, x_cols, intercept)
+        .map_err(|e| econ_error_from_design(e, df))?;
+    let y = DesignMatrix::extract_column(df, y_col).map_err(|e| econ_error_from_design(e, df))?;
+    let w =
+        DesignMatrix::extract_column(df, weights_col).map_err(|e| econ_error_from_design(e, df))?;
+    if let Some((i, v)) = w
+        .iter()
+        .enumerate()
+        .find(|(_, v)| !(v.is_finite() && **v >= 0.0))
+    {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "weights column '{weights_col}' must be finite and non-negative (row {} is {v})",
+                i + 1
+            ),
+        });
+    }
+    let keep: Vec<usize> = (0..w.len()).filter(|&i| w[i] > 0.0).collect();
+    if keep.is_empty() {
+        return Err(EconError::InvalidSpecification {
+            message: format!("weights column '{weights_col}' has no positive weight"),
+        });
+    }
+    let k = design.data.ncols();
+    let mut xs = crate::resource::try_zeros2(keep.len(), k, "weighted design")?;
+    let mut ys = crate::resource::try_zeros1(keep.len(), "weighted response")?;
+    let mut sw = crate::resource::try_zeros1(keep.len(), "square-root weights")?;
+    for (r, &i) in keep.iter().enumerate() {
+        let s = w[i].sqrt();
+        sw[r] = s;
+        ys[r] = s * y[i];
+        for j in 0..k {
+            xs[[r, j]] = s * design.data[[i, j]];
+        }
+    }
+    let mut result = fit_ols(
+        xs.view(),
+        &ys,
+        &design.column_names,
+        y_col,
+        intercept,
+        cov_type,
+        false,
+        Some(&sw),
+    )?;
+    result.weights = Some(weights_col.to_string());
+    let dropped = w.len() - keep.len();
+    if dropped > 0 {
+        result.warnings.push(format!(
+            "{dropped} row(s) with weight 0 were left out of the fit (as lm)"
+        ));
+    }
+    Ok(result)
 }
 
 /// Which solve an OLS fit took (decision D1, variant B).
@@ -1183,6 +1358,7 @@ fn fit_ols(
     intercept: bool,
     cov_type: CovarianceType,
     check_finite: bool,
+    sqrt_weights: Option<&Array1<f64>>,
 ) -> EconResult<OlsResult> {
     let (n, k) = x.dim();
     // lm.fit refuses NA/NaN/Inf. With `check_finite` (a raw matrix) X'X, which the
@@ -1273,9 +1449,19 @@ fn fit_ols(
         df_model,
         f_statistic,
         f_p_value,
-    } = fit_summary(y, ssr, rank, df_resid, sigma_squared, intercept);
+    } = match sqrt_weights {
+        None => fit_summary(y, ssr, rank, df_resid, sigma_squared, intercept),
+        Some(sw) => weighted_fit_summary(y, &residuals, sw, rank, df_resid, intercept),
+    };
 
-    let (log_likelihood, aic, bic) = gaussian_fit_criteria(ssr, n, rank);
+    let (mut log_likelihood, mut aic, mut bic) = gaussian_fit_criteria(ssr, n, rank);
+    if let Some(sw) = sqrt_weights {
+        // logLik.lm: + sum(log(w)) / 2
+        let half_log_w: f64 = sw.iter().map(|s| s.ln()).sum();
+        log_likelihood += half_log_w;
+        aic -= 2.0 * half_log_w;
+        bic -= 2.0 * half_log_w;
+    }
 
     // Covariance on the identified columns; aliased rows and columns are NaN.
     let vcov = if aliased.is_empty() {
@@ -1302,7 +1488,10 @@ fn fit_ols(
             match robust_wald_f(
                 &beta,
                 &vcov,
-                intercept_column(x, intercept),
+                match sqrt_weights {
+                    None => intercept_column(x, intercept),
+                    Some(sw) => weighted_intercept_column(x, sw, intercept),
+                },
                 df_resid,
                 label,
             )? {
@@ -1368,9 +1557,14 @@ fn fit_ols(
         missing: MissingSummary::none(n),
         aliased,
         wald_f,
+        weights: None,
         beta,
         se,
-        resid: residuals,
+        resid: match sqrt_weights {
+            // lm's residuals: y - X b on the original scale
+            Some(sw) => &residuals / sw,
+            None => residuals,
+        },
         vcov,
         xtx_inv,
         ssr,
@@ -4720,6 +4914,98 @@ mod tests {
         pin_fit(&mut check, &r);
         pin_trait(&mut check, &r, "classical");
         check.finish();
+    }
+
+    /// Weighted least squares (case `wls_sim`): `lm(y ~ x1 + x2 + d, weights = w)` with 51
+    /// zero weights among 300 rows, classical and HC0-HC3 SEs, the weighted R², F,
+    /// log-likelihood, AIC and BIC, the HC1 Wald F (`lmtest::waldtest`) and the residuals
+    /// `y - X b` of the rows with positive weight.
+    #[test]
+    fn test_validate_wls_sim() {
+        let (case, ds) = crate::test_support::load_case("wls_sim");
+        let fit = |cov| run_wls(&ds, "y", &["x1", "x2", "d"], "w", true, cov).unwrap();
+        let mut check = Check::new(&case);
+        for (cov, tag) in [
+            (CovarianceType::Standard, "classical"),
+            (CovarianceType::HC0, "hc0"),
+            (CovarianceType::HC1, "hc1"),
+            (CovarianceType::HC2, "hc2"),
+            (CovarianceType::HC3, "hc3"),
+        ] {
+            let r = fit(cov);
+            pin_inference(&mut check, &r, tag);
+            pin_trait(&mut check, &r, tag);
+            if cov == CovarianceType::Standard {
+                pin_fit(&mut check, &r);
+                let n = r.n_obs;
+                check.vector(
+                    "resid_positive",
+                    &LinearEstimator::residuals(&r).to_vec(),
+                    Tol::stat(n),
+                );
+            }
+            if cov == CovarianceType::HC1 {
+                let w = r.wald_f.as_ref().expect("HC1 Wald F");
+                check
+                    .scalar("wald_f_hc1", w.statistic, Tol::stat(r.n_obs))
+                    .scalar("wald_f_hc1_p", w.p_value, Tol::p_value(r.n_obs));
+                assert_eq!((w.df1, w.df2), (3, 245));
+            }
+        }
+        check.finish();
+    }
+
+    /// Weights are checked: negative, non-finite or all-zero weights are refused, and a
+    /// weight of 1 everywhere is OLS.
+    #[test]
+    fn test_wls_checks_weights_and_unit_weights_are_ols() {
+        let n = 40;
+        let x1: Vec<f64> = (0..n).map(|i| (i as f64 * 0.37).sin() * 2.0).collect();
+        let x2: Vec<f64> = (0..n).map(|i| (i % 7) as f64).collect();
+        let d: Vec<f64> = (0..n).map(|i| ((i * 5) % 3 == 0) as u8 as f64).collect();
+        let y: Vec<f64> = (0..n)
+            .map(|i| 1.0 + 0.8 * x1[i] - 0.2 * x2[i] + d[i] + ((i * 13) % 11) as f64 * 0.1)
+            .collect();
+        let ds = Dataset::new(
+            df! { "y" => y, "x1" => x1, "x2" => x2, "d" => d, "w" => vec![1.0; n] }.unwrap(),
+        );
+        let with_w = |w: Vec<f64>| {
+            let mut df = ds.df().clone();
+            df.with_column(polars::prelude::Series::new("w".into(), w))
+                .unwrap();
+            Dataset::new(df)
+        };
+        let run = |d: &Dataset| run_wls(d, "y", &["x1", "x2", "d"], "w", true, CovarianceType::HC1);
+        let mut neg = vec![1.0; n];
+        neg[4] = -0.5;
+        let err = run(&with_w(neg)).unwrap_err().to_string();
+        assert!(
+            err.contains("row 5") && err.contains("non-negative"),
+            "{err}"
+        );
+        let err = run(&with_w(vec![0.0; n])).unwrap_err().to_string();
+        assert!(err.contains("no positive weight"), "{err}");
+        let unit = run(&with_w(vec![1.0; n])).unwrap();
+        let ols = run_ols(&ds, "y", &["x1", "x2", "d"], true, CovarianceType::HC1).unwrap();
+        for (a, b) in unit.coefficients.iter().zip(&ols.coefficients) {
+            assert!((a.estimate - b.estimate).abs() <= 1e-12 * (1.0 + b.estimate.abs()));
+            assert!((a.std_error - b.std_error).abs() <= 1e-12 * b.std_error);
+        }
+        for (a, b) in [
+            (unit.r_squared, ols.r_squared),
+            (unit.f_statistic, ols.f_statistic),
+            (unit.log_likelihood, ols.log_likelihood),
+            (
+                unit.wald_f.as_ref().unwrap().statistic,
+                ols.wald_f.as_ref().unwrap().statistic,
+            ),
+        ] {
+            assert!((a - b).abs() <= 1e-10 * (1.0 + b.abs()), "{a} vs {b}");
+        }
+        assert!(
+            unit.to_string()
+                .starts_with("Weighted Least Squares Results")
+        );
     }
 
     /// OLS on the ill-conditioned Longley (1967) data (case `ols_longley`), classical SEs.

@@ -50,6 +50,13 @@ pub struct OlsRequest {
     #[serde(default)]
     #[schemars(description = "Include an intercept term (default true).")]
     pub intercept: Option<bool>,
+
+    /// Weights column for weighted least squares
+    #[serde(default)]
+    #[schemars(
+        description = "Optional column of non-negative weights: weighted least squares, as R's lm(weights = w). Use the 'weights' column of a matched sample (propensity_matching) to estimate the treatment effect after CEM, full, subclass, ratio > 1 or with-replacement matching. Rows with weight 0 are left out."
+    )]
+    pub weights: Option<String>,
 }
 
 /// Request for regression diagnostics.

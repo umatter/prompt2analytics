@@ -352,6 +352,7 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | OLS | [ols.md](regression/ols.md) | R-pinned |
 | Stepwise selection (AIC, BIC) | [ols.md](regression/ols.md) | R-pinned |
 | Robust SEs (HC0-HC3) | [ols_robust_se.md](regression/ols_robust_se.md) | R-pinned |
+| Weighted least squares | [wls.md](regression/wls.md) | R-pinned |
 | Clustered SEs | [ols_clustered.md](regression/ols_clustered.md) | R-pinned |
 | Regression through the origin: uncentered R², adjusted R² with n, F on k df (OLS, raw design, GLS, clustered, HAC) | [no_intercept.md](regression/no_intercept.md) | R-pinned |
 | HAC, Driscoll-Kraay, quantile regression, AR(1) GLS, RESET, Wald (legacy DGPs) | [regression_legacy_cases.md](regression/regression_legacy_cases.md) | R-pinned |
