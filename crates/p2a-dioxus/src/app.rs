@@ -549,7 +549,10 @@ mod tests {
             }
         }
         let mut files = Vec::new();
-        visit(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut files);
+        visit(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut files,
+        );
         let mut bad = Vec::new();
         for file in files {
             let text = std::fs::read_to_string(&file).unwrap();
@@ -567,7 +570,10 @@ mod tests {
                 }
             }
         }
-        assert!(bad.is_empty(), "document::eval reachable on the web: {bad:?}");
+        assert!(
+            bad.is_empty(),
+            "document::eval reachable on the web: {bad:?}"
+        );
     }
 
     /// The desktop outside-root listener answers only Escape, only outside the root the App marks.
