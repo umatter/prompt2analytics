@@ -7,7 +7,7 @@ use dioxus::prelude::*;
 use crate::api::ApiClient;
 use crate::state::{KeySource, Provider, SessionState, Settings};
 
-/// What the backend reported at startup.
+/// What the backend reported at the last health check.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Backend {
     Checking,
@@ -30,6 +30,26 @@ fn model_label(settings: &Settings) -> String {
     }
 }
 
+/// Wait `secs` seconds between two health checks.
+async fn pause(secs: u32) {
+    #[cfg(target_arch = "wasm32")]
+    gloo_timers::future::TimeoutFuture::new(secs * 1_000).await;
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        any(feature = "desktop", feature = "mobile")
+    ))]
+    tokio::time::sleep(std::time::Duration::from_secs(secs.into())).await;
+    // A host build of the web feature (its tests) has no timer: it waits forever.
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        not(any(feature = "desktop", feature = "mobile"))
+    ))]
+    {
+        let _ = secs;
+        std::future::pending::<()>().await;
+    }
+}
+
 /// "1 dataset", "3 datasets".
 fn count_label(n: usize, one: &str, many: &str) -> String {
     if n == 1 {
@@ -42,21 +62,35 @@ fn count_label(n: usize, one: &str, many: &str) -> String {
 /// The status bar.
 #[component]
 pub fn StatusBar() -> Element {
-    let session = use_context::<Signal<SessionState>>();
+    let mut session = use_context::<Signal<SessionState>>();
     let settings = use_context::<Signal<Settings>>();
     let mut backend = use_signal(|| Backend::Checking);
 
     use_future(move || async move {
-        let client = ApiClient::new();
-        match client.health().await {
-            Ok(h) => {
-                let tools = client.list_tools().await.ok().map(|t| t.len());
-                backend.set(Backend::Online {
-                    version: h.version,
-                    tools,
-                });
+        loop {
+            let client = ApiClient::new();
+            let was = backend.peek().clone();
+            match client.health().await {
+                Ok(h) => {
+                    let same =
+                        matches!(&was, Backend::Online { version, .. } if *version == h.version);
+                    if !same {
+                        let tools = client.list_tools().await.ok().map(|t| t.len());
+                        backend.set(Backend::Online {
+                            version: h.version,
+                            tools,
+                        });
+                    }
+                    // Back after an outage: what the server still holds may differ.
+                    if was == Backend::Offline {
+                        session.write().trigger_datasets_refresh();
+                    }
+                }
+                Err(_) if was != Backend::Offline => backend.set(Backend::Offline),
+                Err(_) => {}
             }
-            Err(_) => backend.set(Backend::Offline),
+            let offline = *backend.peek() == Backend::Offline;
+            pause(if offline { 5 } else { 30 }).await;
         }
     });
 

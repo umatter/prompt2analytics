@@ -54,7 +54,7 @@ pub struct UploadDatasetRequest {
 
     /// Original filename (used to determine format and default name)
     #[schemars(
-        description = "Original filename including extension (e.g., 'data.csv'); the extension sets the format: CSV (.csv), Parquet (.parquet, .pq), JSON Lines (.jsonl, .ndjson) or a JSON record array (.json)."
+        description = "Original filename including extension (e.g., 'data.csv'); the extension sets the format: CSV (.csv), Parquet (.parquet, .pq), JSON Lines (.jsonl, .ndjson), a JSON record array (.json), Stata (.dta), SAS (.sas7bdat) or Excel (.xlsx, .xls, .xlsb, .ods)."
     )]
     pub filename: String,
 

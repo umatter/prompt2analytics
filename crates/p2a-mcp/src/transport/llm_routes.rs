@@ -573,8 +573,9 @@ async fn reply_placeholder(db: &crate::db::DbConnection, conversation_id: &str) 
     }
 }
 
-/// A conversation's stored messages as LLM history: user and assistant texts, and each assistant
-/// message's successful tool calls followed by their results (each cut to 2,000 bytes). System
+/// A conversation's stored messages as LLM history: user texts and, for each assistant message, its
+/// finished tool calls, their results or errors (each cut to 2,000 bytes), then its text, the order
+/// in which they came about. System
 /// messages and empty assistant messages (unfilled placeholders) are skipped.
 #[cfg(feature = "db")]
 async fn stored_history(db: &crate::db::DbConnection, conversation_id: &str) -> Vec<Message> {
@@ -602,7 +603,13 @@ async fn stored_history(db: &crate::db::DbConnection, conversation_id: &str) -> 
                         if let Ok(tool_calls) = &tool_calls_for_msg {
                             let completed_calls: Vec<_> = tool_calls
                                 .iter()
-                                .filter(|tc| tc.status == crate::db::ToolCallStatus::Success)
+                                .filter(|tc| {
+                                    matches!(
+                                        tc.status,
+                                        crate::db::ToolCallStatus::Success
+                                            | crate::db::ToolCallStatus::Error
+                                    )
+                                })
                                 .collect();
 
                             if !completed_calls.is_empty() {
@@ -617,9 +624,9 @@ async fn stored_history(db: &crate::db::DbConnection, conversation_id: &str) -> 
                                     })
                                     .collect();
 
-                                // Assistant message with tool calls
+                                // The calls, then their results; the answer comes after both
                                 history.push(Message::assistant_with_tools(
-                                    db_msg.content.clone(),
+                                    String::new(),
                                     llm_tool_calls,
                                 ));
 
@@ -627,24 +634,28 @@ async fn stored_history(db: &crate::db::DbConnection, conversation_id: &str) -> 
                                 let tool_results: Vec<crate::llm::ToolResult> = completed_calls
                                     .iter()
                                     .map(|tc| {
-                                        let result_content = tc.result.as_deref().unwrap_or("");
+                                        let is_error =
+                                            tc.status == crate::db::ToolCallStatus::Error;
+                                        let result_content = if is_error {
+                                            tc.error.as_deref().unwrap_or("the call failed")
+                                        } else {
+                                            tc.result.as_deref().unwrap_or("")
+                                        };
                                         // Truncate long results
                                         let truncated = truncate_tool_result(result_content, 2_000);
                                         crate::llm::ToolResult {
                                             tool_call_id: tc.id_string(),
                                             content: truncated,
-                                            is_error: false,
+                                            is_error,
                                         }
                                     })
                                     .collect();
 
                                 history.push(Message::tool_result(tool_results));
-                            } else if !db_msg.content.is_empty() {
-                                // No tool calls, just content
-                                history.push(Message::assistant(db_msg.content.clone()));
                             }
-                        } else if !db_msg.content.is_empty() {
-                            history.push(Message::assistant(db_msg.content.clone()));
+                            history.extend(answer_for_model(&db_msg.content));
+                        } else {
+                            history.extend(answer_for_model(&db_msg.content));
                         }
                     }
                     crate::db::MessageRole::System => {
@@ -697,7 +708,8 @@ impl Drop for UnfinishedReply {
             return;
         };
         let (db, message_id) = (self.db.clone(), std::mem::take(&mut self.message_id));
-        runtime.spawn(async move { stop_unfinished_chat(&db, &message_id).await });
+        // The non-streamed reply has no text before it ends.
+        runtime.spawn(async move { stop_unfinished_chat(&db, &message_id, "").await });
     }
 }
 
@@ -1501,7 +1513,13 @@ pub struct ImageData {
 pub struct ChatEvents {
     tx: tokio::sync::mpsc::Sender<ProgressEvent>,
     pending: Arc<std::sync::Mutex<String>>,
+    /// Every text delta of the answer, when a stopped answer is to be kept.
+    streamed: Option<StreamedText>,
 }
+
+/// The text an answer has streamed so far, shared with the task that stores it when the client
+/// disconnects.
+type StreamedText = Arc<std::sync::Mutex<String>>;
 
 impl ChatEvents {
     /// Events sent on `tx`, with nothing held yet.
@@ -1509,12 +1527,25 @@ impl ChatEvents {
         Self {
             tx,
             pending: Arc::default(),
+            streamed: None,
         }
+    }
+
+    /// As `self`, also collecting the answer's text in `streamed`.
+    fn collecting(mut self, streamed: StreamedText) -> Self {
+        self.streamed = Some(streamed);
+        self
     }
 
     /// A text delta, from the synchronous stream callback: sent at once with any held text, or
     /// held when the channel is full.
     pub(crate) fn text(&self, delta: &str) {
+        if let Some(streamed) = &self.streamed {
+            streamed
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push_str(delta);
+        }
         let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
         pending.push_str(delta);
         let text = std::mem::take(&mut *pending);
@@ -1850,13 +1881,22 @@ pub async fn llm_chat_stream(
     tokio::spawn(async move {
         let _slot = slot;
         let _hold = hold;
-        let chat = run_chat_stream(state, request, settings, tx.clone(), placeholder.clone());
+        let streamed = StreamedText::default();
+        let chat = run_chat_stream(
+            state,
+            request,
+            settings,
+            tx.clone(),
+            placeholder.clone(),
+            streamed.clone(),
+        );
         run_chat_task(
             &tx,
             chat,
             #[cfg(feature = "db")]
             db,
             &placeholder,
+            &streamed,
         )
         .await;
     });
@@ -1898,7 +1938,7 @@ pub async fn llm_chat_stream(
 /// first come, first served, and the tool calls are read after it. So a
 /// call the dropped chat completed or failed keeps its result, one it left
 /// pending or running is failed here, and content it wrote is replaced by
-/// the stopped text. The one exception: when the update's lookup of the
+/// the text it had streamed and the stopped mark. The one exception: when the update's lookup of the
 /// message, made before it waits for the turn, fails, the tool calls are
 /// read without waiting. A message that is gone took its tool calls with
 /// it, so a later write finds no row; after a store error, the order is not
@@ -1910,6 +1950,7 @@ async fn run_chat_task<F: std::future::Future<Output = ()>>(
     chat: F,
     #[cfg(feature = "db")] db: Option<Arc<crate::db::DbConnection>>,
     placeholder: &OnceLock<String>,
+    streamed: &StreamedText,
 ) {
     if run_until_client_gone(tx, chat).await.is_some() {
         return;
@@ -1917,25 +1958,64 @@ async fn run_chat_task<F: std::future::Future<Output = ()>>(
     tracing::info!("The chat stream's client disconnected; the chat was stopped");
     #[cfg(feature = "db")]
     if let (Some(db), Some(msg_id)) = (&db, placeholder.get()) {
-        stop_unfinished_chat(db, msg_id).await;
+        let partial = streamed.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        stop_unfinished_chat(db, msg_id, &partial).await;
     }
     #[cfg(not(feature = "db"))]
-    let _ = placeholder;
+    let _ = (placeholder, streamed);
 }
 
 /// Error text of a tool call the client's disconnect stopped.
 #[cfg(feature = "db")]
 const STOPPED_TOOL_CALL: &str = "stopped: the client disconnected";
 
-/// Mark assistant message `msg_id` stopped and fail its tool calls that are
+/// The last line of a stored answer the client's disconnect stopped.
+#[cfg(feature = "db")]
+const STOPPED_MARK: &str = "[Stopped: the client disconnected]";
+
+/// What the model is told after the text of an answer that was stopped.
+#[cfg(feature = "db")]
+const STOPPED_NOTE: &str =
+    "[This answer was stopped before it was finished. Do not continue it unless the user asks.]";
+
+/// A stored answer's text as the model is sent it: none when empty, and a stopped answer's text
+/// marked as stopped, so the model neither takes it for a finished one nor answers its prompt
+/// again.
+#[cfg(feature = "db")]
+fn answer_for_model(content: &str) -> Option<Message> {
+    let text = match content.strip_suffix(STOPPED_MARK) {
+        Some(partial) if partial.trim_end().is_empty() => STOPPED_NOTE.to_string(),
+        Some(partial) => format!("{}\n\n{STOPPED_NOTE}", partial.trim_end()),
+        None if content.is_empty() => return None,
+        None => content.to_string(),
+    };
+    Some(Message::assistant(text))
+}
+
+/// The stored content of a stopped answer: the text it had streamed, then the mark.
+#[cfg(feature = "db")]
+fn stopped_content(partial: &str) -> String {
+    let partial = partial.trim_end();
+    if partial.is_empty() {
+        STOPPED_MARK.to_string()
+    } else {
+        format!("{partial}\n\n{STOPPED_MARK}")
+    }
+}
+
+/// Store assistant message `msg_id` as stopped, with the text it had streamed (without it when
+/// the store refuses the text, over a budget, say), and fail its tool calls that are
 /// still pending or running (see [`run_chat_task`]). Failures are logged.
 #[cfg(feature = "db")]
-async fn stop_unfinished_chat(db: &crate::db::DbConnection, msg_id: &str) {
+async fn stop_unfinished_chat(db: &crate::db::DbConnection, msg_id: &str, partial: &str) {
     use crate::db::ToolCallStatus;
-    if let Err(e) = db
-        .update_message_content(msg_id, "[Stopped: the client disconnected]")
-        .await
-    {
+    let mut stored = db
+        .update_message_content(msg_id, &stopped_content(partial))
+        .await;
+    if stored.is_err() && !partial.is_empty() {
+        stored = db.update_message_content(msg_id, STOPPED_MARK).await;
+    }
+    if let Err(e) = stored {
         tracing::warn!("Failed to mark the stopped message: {}", e);
     }
     let calls = match db.get_tool_calls_for_message(msg_id).await {
@@ -1970,6 +2050,7 @@ async fn run_chat_stream(
     settings: LlmSettings,
     tx: tokio::sync::mpsc::Sender<ProgressEvent>,
     placeholder: Arc<OnceLock<String>>,
+    streamed: StreamedText,
 ) {
     use crate::llm::StreamChunk;
 
@@ -2065,7 +2146,7 @@ async fn run_chat_stream(
     // messages are, below)
     // Only the db build reconfigures the executor below.
     let chat = ChatSession::new(state.session_manager.clone(), session.clone());
-    let events = ChatEvents::new(tx.clone());
+    let events = ChatEvents::new(tx.clone()).collecting(streamed);
     #[cfg_attr(not(feature = "db"), allow(unused_mut))]
     let mut tool_executor = StreamingToolExecutor::new(
         state.governor.clone(),
@@ -2258,6 +2339,66 @@ mod tests {
     use crate::config::SessionConfig;
     use crate::exec::ExecConfig;
     use crate::session::SessionManager;
+
+    /// The stored history sends each answer after its calls and their results (failed ones as
+    /// errors), and marks a stopped answer's text as stopped.
+    #[cfg(feature = "db")]
+    #[tokio::test]
+    async fn stored_history_puts_the_answer_after_its_tool_results() {
+        use crate::db::{DbConnection, ToolCall};
+        use crate::llm::MessageRole;
+        let db = DbConnection::connect_memory().await.unwrap();
+        let conv = db.create_conversation("s", "t").await.unwrap().id_string();
+        db.add_message(&conv, "user", "describe it").await.unwrap();
+        let answer = db
+            .add_message(&conv, "assistant", "Mean price is 3.")
+            .await
+            .unwrap()
+            .id_string();
+        for (tool, failed) in [("describe_dataset", false), ("head_dataset", true)] {
+            let call = ToolCall::new(answer.clone(), conv.clone(), tool.into(), "{}".into());
+            let id = db.create_tool_call(&call).await.unwrap().id_string();
+            if failed {
+                db.fail_tool_call(&id, "no such dataset", 1).await.unwrap();
+            } else {
+                db.complete_tool_call(&id, "price: mean 3", 1)
+                    .await
+                    .unwrap();
+            }
+        }
+        db.add_message(&conv, "user", "more").await.unwrap();
+        db.add_message(&conv, "assistant", &stopped_content("Half an ans"))
+            .await
+            .unwrap();
+        let history = stored_history(&db, &conv).await;
+        let stop_note = format!("Half an ans\n\n{STOPPED_NOTE}");
+        let shape: Vec<(MessageRole, &str, usize)> = history
+            .iter()
+            .map(|m| {
+                let calls = m.tool_calls.as_ref().map_or(0, Vec::len)
+                    + m.tool_results.as_ref().map_or(0, Vec::len);
+                (m.role.clone(), m.content.as_str(), calls)
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                (MessageRole::User, "describe it", 0),
+                (MessageRole::Assistant, "", 2),
+                (MessageRole::Tool, "", 2),
+                (MessageRole::Assistant, "Mean price is 3.", 0),
+                (MessageRole::User, "more", 0),
+                (MessageRole::Assistant, &stop_note, 0),
+            ]
+        );
+        let results = history[2].tool_results.as_deref().unwrap();
+        let errors: Vec<(bool, &str)> = results
+            .iter()
+            .map(|r| (r.is_error, r.content.as_str()))
+            .collect();
+        assert!(errors.contains(&(true, "no such dataset")), "{errors:?}");
+        assert_eq!(stopped_content(""), STOPPED_MARK);
+    }
 
     /// A governor that refuses every call on memory admission (RSS > 1 byte),
     /// and a chat on one live session.
@@ -2466,7 +2607,9 @@ mod disconnect_tests {
                     .execute("list_datasets", serde_json::json!({}))
                     .await;
             };
-            run_chat_task(&tx, chat, Some(task_db), &task_placeholder).await;
+            let streamed = StreamedText::default();
+            streamed.lock().unwrap().push_str("The first part.\n");
+            run_chat_task(&tx, chat, Some(task_db), &task_placeholder, &streamed).await;
         });
 
         // The Running row is written inside the chat future, between
@@ -2514,7 +2657,7 @@ mod disconnect_tests {
         );
         assert_eq!(
             db.get_message(&msg).await.unwrap().content,
-            "[Stopped: the client disconnected]"
+            "The first part.\n\n[Stopped: the client disconnected]"
         );
 
         release.store(true, Ordering::SeqCst);

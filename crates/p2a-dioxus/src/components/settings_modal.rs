@@ -453,7 +453,17 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
             match result {
                 Ok(res) => {
                     if res.success {
-                        load_status.set(Some(format!("Loaded: {}", dataset_name_to_use)));
+                        // How the file was read, when the server says (encoding, separator).
+                        let note = res.content.iter().find_map(|item| match item {
+                            crate::api::types::ContentItem::Text { text } => text
+                                .split_once("\n\nNote: ")
+                                .map(|(_, note)| note.trim().to_string()),
+                            _ => None,
+                        });
+                        load_status.set(Some(match note {
+                            Some(note) => format!("Loaded: {dataset_name_to_use} ({note})"),
+                            None => format!("Loaded: {dataset_name_to_use}"),
+                        }));
                         load_error.set(None);
                         file_path.set(String::new());
                         dataset_name.set(String::new());
@@ -511,6 +521,8 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
     let ollama = ollama_copy(HOSTED_BACKEND);
     let requires_api_key = current_provider.requires_api_key();
     let current_tab = active_tab.read().clone();
+    // A chosen file or a typed path that has not been loaded yet.
+    let load_pending = selected_file_name.read().is_some() || !file_path.read().trim().is_empty();
     // The environment notice applies only while the field still shows the
     // environment key; once the user edits it, the typed key will be saved.
     let key_source = {
@@ -788,7 +800,7 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
                             // Info box
                             div { class: "k-notice",
                                 p {
-                                    "Load datasets from your local filesystem. Supported formats: CSV, Parquet, Excel, Stata (.dta), SAS (.sas7bdat)"
+                                    "Load datasets from your local filesystem. Supported formats: CSV, Parquet, JSON, Stata (.dta), SAS (.sas7bdat) and, with your own server, Excel."
                                 }
                             }
 
@@ -803,7 +815,7 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
                                         class: "hidden",
                                         r#type: "file",
                                         id: "file-upload-input",
-                                        accept: ".csv,.parquet,.xlsx,.xls,.xlsb,.ods,.dta,.sas7bdat",
+                                        accept: ".csv,.parquet,.pq,.json,.jsonl,.ndjson,.xlsx,.xls,.xlsb,.ods,.dta,.sas7bdat",
                                         onchange: handle_file_select
                                     }
                                     // Browse button
@@ -909,27 +921,13 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
                                     oninput: move |evt| dataset_name.set(evt.value().clone())
                                 }
                             }
+                        }
+                    }
+                }
 
-                            // Load button
-                            button {
-                                class: "k-btn-pri w-full justify-center",
-                                onclick: handle_load_dataset,
-                                svg {
-                                    class: "w-5 h-5",
-                                    fill: "none",
-                                    stroke: "currentColor",
-                                    view_box: "0 0 24 24",
-                                    path {
-                                        stroke_linecap: "round",
-                                        stroke_linejoin: "round",
-                                        stroke_width: "2",
-                                        d: "M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"
-                                    }
-                                }
-                                "Load dataset"
-                            }
-
-                            // Status/Error
+                // The load's outcome, always in view above the footer
+                if current_tab != "llm" {
+                    div { class: "mx-5 mt-3 space-y-2",
                             if let Some(ref status) = *load_status.read() {
                                 div { class: "k-notice ink",
                                     p { class: "flex items-center gap-2",
@@ -970,7 +968,6 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
                                     }
                                 }
                             }
-                        }
                     }
                 }
 
@@ -992,6 +989,12 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
                             class: "k-btn-pri",
                             onclick: handle_save,
                             "Save settings"
+                        }
+                    } else if load_pending {
+                        button {
+                            class: "k-btn-pri",
+                            onclick: handle_load_dataset,
+                            "Load dataset"
                         }
                     } else {
                         button {

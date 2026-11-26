@@ -61,7 +61,10 @@ fn start_embedded_backend() -> Result<p2a_mcp::EmbeddedServer, String> {
     use p2a_mcp::EmbeddedServerConfig;
 
     // Create a tokio runtime for the embedded server
-    let rt = tokio::runtime::Runtime::new()
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .thread_stack_size(p2a_mcp::RUNTIME_STACK_BYTES)
+        .enable_all()
+        .build()
         .map_err(|e| format!("cannot create the async runtime: {e}"))?;
 
     // Determine the database path (use user data directory)

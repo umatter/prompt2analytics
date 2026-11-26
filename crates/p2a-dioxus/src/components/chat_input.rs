@@ -56,7 +56,8 @@ pub fn ChatInput(on_send: EventHandler<String>) -> Element {
         if let Some(sid) = session_id {
             spawn(async move {
                 match api().list_session_datasets(&sid).await {
-                    Ok(datasets) => {
+                    Ok(mut datasets) => {
+                        datasets.retain(|d| d.in_memory);
                         tracing::info!(
                             "[ChatInput] Loaded {} datasets for autocomplete: {:?}",
                             datasets.len(),
@@ -400,6 +401,7 @@ mod accept_tests {
                 column_names: vec!["price".into(), "sqft".into()],
                 loaded_at: String::new(),
                 file_size_bytes: None,
+                in_memory: true,
             },
             DatasetMeta {
                 id: "ds-2".into(),
@@ -412,6 +414,7 @@ mod accept_tests {
                 column_names: vec!["unit price".into()],
                 loaded_at: String::new(),
                 file_size_bytes: None,
+                in_memory: true,
             },
         ]
     }

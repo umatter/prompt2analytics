@@ -270,6 +270,9 @@ pub struct DatasetMetaResponse {
     /// The `value_labels` a Stata file was loaded with, when it was.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value_labels: Option<String>,
+    /// Whether the session holds the dataset's data now. After a server restart the row is
+    /// listed but its data is gone until it is reloaded or added again.
+    pub in_memory: bool,
 }
 
 impl From<DatasetMeta> for DatasetMetaResponse {
@@ -287,6 +290,7 @@ impl From<DatasetMeta> for DatasetMetaResponse {
             file_size_bytes: meta.file_size_bytes,
             na_strings: meta.na_strings,
             value_labels: meta.value_labels,
+            in_memory: false,
         }
     }
 }
@@ -835,9 +839,10 @@ async fn list_session_datasets(
         return mismatch;
     }
     let pm = &state.session_manager;
-    if let Err(e) = pm.get_session(&session_id).await {
-        return error_response(e);
-    }
+    let session = match pm.get_session(&session_id).await {
+        Ok(session) => session,
+        Err(e) => return error_response(e),
+    };
     match pm.get_datasets_for_session(&session_id).await {
         Ok(datasets) => {
             tracing::debug!(
@@ -845,7 +850,18 @@ async fn list_session_datasets(
                 num_datasets = datasets.len(),
                 "[LIST_DATASETS] Retrieved datasets from database"
             );
-            let response: Vec<DatasetMetaResponse> = datasets.into_iter().map(Into::into).collect();
+            let held = session.datasets.read().await;
+            let response: Vec<DatasetMetaResponse> = datasets
+                .into_iter()
+                .map(|meta| {
+                    let in_memory = held.contains_key(&meta.name);
+                    DatasetMetaResponse {
+                        in_memory,
+                        ..meta.into()
+                    }
+                })
+                .collect();
+            drop(held);
             ok(StatusCode::OK, response)
         }
         Err(e) => error_response(e),

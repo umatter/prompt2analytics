@@ -37,6 +37,7 @@ pub fn DatasetSidebar() -> Element {
                         // the status bar counts them after a reload too.
                         let known: Vec<DatasetInfo> = ds
                             .iter()
+                            .filter(|d| d.in_memory)
                             .map(|d| DatasetInfo {
                                 name: d.name.clone(),
                                 rows: usize::try_from(d.row_count).unwrap_or(0),
@@ -71,10 +72,8 @@ pub fn DatasetSidebar() -> Element {
                     Ok(result) => {
                         reload_result.set(Some(result.clone()));
 
-                        // Refresh dataset list
-                        if let Ok(ds) = client.list_session_datasets(&sid).await {
-                            datasets.set(ds);
-                        }
+                        // Refresh the dataset list, here and in the status bar
+                        session_state.write().trigger_datasets_refresh();
                     }
                     Err(e) => {
                         error.set(Some(e));
@@ -165,7 +164,7 @@ pub fn DatasetSidebar() -> Element {
                         }
                         if !res.skipped.is_empty() {
                             div { class: "k-muted",
-                                "Skipped: {res.skipped.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join(\", \")}"
+                                {skipped_text(&res.skipped)}
                             }
                         }
                     }
@@ -183,7 +182,7 @@ pub fn DatasetSidebar() -> Element {
                         div { class: "k-mono text-[11.5px] k-ink border border-dashed border-[var(--k-rule)] px-4 py-[22px] mb-2.5",
                             "no data yet"
                         }
-                        p { "Add a CSV, Parquet, Stata or SAS file, or load an example from the welcome screen. Data stays in this session." }
+                        p { "Add a CSV, Excel, Parquet, Stata or SAS file, or load an example from the welcome screen. Data stays in this session." }
                         button {
                             class: "k-btn-pri mt-3",
                             onclick: move |_| {
@@ -195,6 +194,11 @@ pub fn DatasetSidebar() -> Element {
                     }
                 } else {
                     // Dataset list
+                    if datasets_list.iter().any(|d| !d.in_memory) {
+                        div { class: "m-[18px] mb-0 pl-3 py-1 border-l-4 border-[var(--k-orange)] text-[13px]", role: "status",
+                            "The server restarted, and the data marked below is no longer loaded. Reload it with the button above, or add the file again."
+                        }
+                    }
                     div {
                         for dataset in datasets_list.iter() {
                             DatasetCard {
@@ -220,6 +224,15 @@ pub fn DatasetSidebar() -> Element {
             }
         }
     }
+}
+
+/// "Skipped: name (reason), ...".
+fn skipped_text(skipped: &[crate::api::ReloadSkip]) -> String {
+    let items: Vec<String> = skipped
+        .iter()
+        .map(|s| format!("{} ({})", s.name, s.reason))
+        .collect();
+    format!("Skipped: {}", items.join(", "))
 }
 
 /// Props for DatasetCard
@@ -254,6 +267,9 @@ fn DatasetCard(props: DatasetCardProps) -> Element {
                     span { class: "k-orange text-xs", "aria-hidden": "true", "●" }
                     span { class: "k-mono text-[13px] font-bold truncate",
                         "{dataset.name}"
+                    }
+                    if !dataset.in_memory {
+                        span { class: "k-mono text-[11px] k-muted flex-shrink-0", "not loaded" }
                     }
                 }
                 // Expand icon

@@ -5,6 +5,13 @@ use chrono::{DateTime, Utc};
 use std::sync::atomic::{AtomicU64, Ordering};
 use uuid::Uuid;
 
+/// The last line the server stores for an answer stopped by the client's disconnect.
+const STOPPED_MARK: &str = "[Stopped: the client disconnected]";
+
+/// What the model is told after the text of an answer that was stopped.
+const STOPPED_NOTE: &str =
+    "[This answer was stopped before it was finished. Do not continue it unless the user asks.]";
+
 /// The source of `ChatMessage::tool_rev`: one counter for the process, so
 /// no two states of any messages share a revision, not even those of a
 /// message rebuilt with the same id.
@@ -108,15 +115,19 @@ impl ChatMessage {
             .map(|dt| dt.with_timezone(&Utc))
             .unwrap_or_else(|_| Utc::now());
 
+        // A stopped answer is stored with this last line; it is shown as interrupted.
+        let stopped = (msg.role == "assistant")
+            .then(|| msg.content.strip_suffix(STOPPED_MARK))
+            .flatten();
         Self {
             id: msg.id.clone(),
             role: msg.role.clone(),
-            content: msg.content.clone(),
+            content: stopped.map_or_else(|| msg.content.clone(), |t| t.trim_end().to_string()),
             tool_calls: Vec::new(), // Tool calls will be loaded separately
             images: Vec::new(),
             svgs: Vec::new(),
             is_streaming: false,
-            interrupted: false,
+            interrupted: stopped.is_some(),
             tool_rev: next_rev(),
             timestamp,
         }
@@ -835,11 +846,8 @@ impl ChatState {
                     // An interrupted answer's partial text is not sent; its tools ran.
                     history.push(Message {
                         role: "assistant".to_string(),
-                        content: if msg.interrupted {
-                            String::new()
-                        } else {
-                            msg.content.clone()
-                        },
+                        // The answer's text follows the results it was written from.
+                        content: String::new(),
                         tool_calls: Some(tool_calls),
                         tool_results: None,
                     });
@@ -874,11 +882,22 @@ impl ChatState {
                         tool_calls: None,
                         tool_results: Some(tool_results),
                     });
-                } else if !msg.content.is_empty() && !msg.interrupted {
-                    // Assistant message without tool calls - just include content
+                }
+                // A stopped answer goes back marked, so the model neither takes it for a
+                // finished one nor answers its prompt again.
+                let content = if msg.interrupted {
+                    if msg.content.is_empty() {
+                        STOPPED_NOTE.to_string()
+                    } else {
+                        format!("{}\n\n{STOPPED_NOTE}", msg.content.trim_end())
+                    }
+                } else {
+                    msg.content.clone()
+                };
+                if !content.is_empty() {
                     history.push(Message {
                         role: "assistant".to_string(),
-                        content: msg.content.clone(),
+                        content,
                         tool_calls: None,
                         tool_results: None,
                     });
@@ -1058,6 +1077,7 @@ mod tests {
 
         let history = chat.build_history();
         let roles: Vec<&str> = history.iter().map(|m| m.role.as_str()).collect();
+        // The reply has no text, so nothing follows the results.
         assert_eq!(roles, ["user", "assistant", "tool"]);
         let ids: Vec<&str> = history[1]
             .tool_calls
@@ -1422,7 +1442,7 @@ mod tests {
     }
 
     /// The tools of an interrupted answer ran on the server: their calls go
-    /// back to the model, its partial text does not.
+    /// back to the model, then its partial text, marked as stopped.
     #[test]
     fn build_history_keeps_the_tools_of_an_interrupted_answer() {
         let mut chat = ChatState::new();
@@ -1438,7 +1458,8 @@ mod tests {
             pairs(&[
                 ("user", "load and describe"),
                 ("assistant", ""),
-                ("tool", "")
+                ("tool", ""),
+                ("assistant", &format!("The data has\n\n{STOPPED_NOTE}")),
             ])
         );
         assert_eq!(
@@ -1452,7 +1473,13 @@ mod tests {
         chat.finish_stream(false);
         chat.stop_processing();
         let history = send(&mut chat, "describe sales");
-        assert_eq!(turns(&history), pairs(&[("user", "load and describe")]));
+        assert_eq!(
+            turns(&history),
+            pairs(&[
+                ("user", "load and describe"),
+                ("assistant", &format!("The data has\n\n{STOPPED_NOTE}")),
+            ])
+        );
     }
 
     fn input<'a>(current: Option<&'a str>, synced: Option<&'a str>) -> SyncInput<'a> {
@@ -1605,7 +1632,10 @@ mod tests {
         chat.clear_active_tool(Some(format!("a{}", "é".repeat(1500))), Some("success"));
         finish(&mut chat, reply("Here are the labels."));
         let history = chat.build_history();
-        assert_eq!(history.len(), 3, "{history:?}");
+        assert_eq!(history.len(), 4, "{history:?}");
+        // The calls, their results, then the answer written from them.
+        assert_eq!(history[1].content, "");
+        assert_eq!(history[3].content, "Here are the labels.");
         let content = &history[2].tool_results.as_deref().unwrap_or_default()[0].content;
         assert!(
             content.starts_with(&format!("a{}...\n[Result truncated", "é".repeat(999))),

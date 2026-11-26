@@ -138,7 +138,7 @@ pub fn Welcome(props: WelcomeProps) -> Element {
                 p { class: "mt-3 text-sm k-orange-text", role: "alert", "{msg}" }
             }
             p { class: "mt-3 text-[12.5px] k-muted",
-                "The examples are small public datasets bundled with p2a. Or add your own: CSV, Parquet, Stata or SAS."
+                "The examples are small public datasets bundled with p2a. Or add your own: CSV, Excel, Parquet, Stata or SAS."
             }
         }
     }

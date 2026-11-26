@@ -426,9 +426,10 @@ pub mod web {
         futures::pin_mut!(stopped);
         let waiting = select(stopped, idle_timer());
         let resp_value = match select(fetch, waiting).await {
-            Either::Left((resp, _)) => {
-                resp.map_err(|e| StreamError::failed(format!("Fetch error: {e:?}")))?
-            }
+            Either::Left((resp, _)) => resp.map_err(|e| {
+                tracing::warn!("fetch failed: {e:?}");
+                StreamError::failed(crate::platform::http::UNREACHABLE_TEXT)
+            })?,
             Either::Right((Either::Left(_), _)) => {
                 controller.abort();
                 return Err(StreamError::stopped());

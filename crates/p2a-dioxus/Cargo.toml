@@ -57,7 +57,7 @@ p2a-text.workspace = true
 # Dioxus framework - base features, platform selected via features
 # Note: "macro" enables rsx!, "html" enables HTML elements, "hooks/signals" for state
 # "document" enables Stylesheet and other document components
-dioxus = { version = "0.7.3", default-features = false, features = ["macro", "html", "hooks", "signals", "document", "asset"] }
+dioxus = { version = "0.7.3", default-features = false, features = ["macro", "html", "hooks", "signals", "document", "asset", "mounted"] }
 
 # HTTP client - always needed, but streaming only on native
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
