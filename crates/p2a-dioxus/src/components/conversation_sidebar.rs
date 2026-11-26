@@ -381,9 +381,7 @@ pub fn ConversationSidebar() -> Element {
                             onmounted: move |e: Event<MountedData>| async move {
                                 let _ = e.set_focus(true).await;
                             },
-                            onfocus: move |_| {
-                                let _ = document::eval("document.activeElement?.select?.()");
-                            },
+                            onfocus: move |_| select_focused_text(),
                             oninput: move |e| edit_title.set(e.value().clone()),
                             onkeydown: move |e| {
                                 if e.key() == Key::Enter {
@@ -396,6 +394,8 @@ pub fn ConversationSidebar() -> Element {
                         }
                         button {
                             class: "p-1 text-teal-600 hover:text-teal-700 dark:text-teal-400",
+                            "aria-label": "Save the title",
+                            title: "Save the title",
                             onclick: move |e| {
                                 e.stop_propagation();
                                 handle_save_rename(())
@@ -415,6 +415,8 @@ pub fn ConversationSidebar() -> Element {
                         }
                         button {
                             class: "p-1 text-gray-500 hover:text-gray-700 dark:text-gray-400",
+                            "aria-label": "Keep the old title",
+                            title: "Keep the old title",
                             onclick: move |e| {
                                 e.stop_propagation();
                                 handle_cancel_rename(())
@@ -683,4 +685,25 @@ mod tests {
         assert!(show_archived_toggle(1));
         assert!(!show_archived_toggle(0));
     }
+}
+
+/// Select the text of the focused input. The web build calls the DOM directly: the page's
+/// Content-Security-Policy forbids the string evaluation `document::eval` uses there, and the
+/// refused call panicked the app when a conversation was renamed.
+#[cfg(target_arch = "wasm32")]
+fn select_focused_text() {
+    use wasm_bindgen::JsCast;
+    if let Some(input) = web_sys::window()
+        .and_then(|w| w.document())
+        .and_then(|d| d.active_element())
+        .and_then(|el| el.dyn_into::<web_sys::HtmlInputElement>().ok())
+    {
+        input.select();
+    }
+}
+
+/// Select the text of the focused input (desktop: a script in the webview).
+#[cfg(not(target_arch = "wasm32"))]
+fn select_focused_text() {
+    let _ = document::eval("document.activeElement?.select?.()");
 }

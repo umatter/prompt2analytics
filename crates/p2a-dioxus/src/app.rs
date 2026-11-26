@@ -1,6 +1,7 @@
 //! Root application component
 
 use dioxus::prelude::*;
+use futures::StreamExt;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsCast;
 
@@ -205,6 +206,61 @@ async fn focus_in_text_field_native() -> bool {
         .unwrap_or(true)
 }
 
+/// One item per Escape pressed with its target outside the element marked `data-p2a-root`
+/// (inside it the root's onkeydown handles the key). The web build listens with web_sys: the
+/// page's Content-Security-Policy forbids the string evaluation `document::eval` uses there.
+#[cfg(target_arch = "wasm32")]
+fn escape_outside_root() -> futures::channel::mpsc::UnboundedReceiver<()> {
+    let (tx, rx) = futures::channel::mpsc::unbounded();
+    let listener = wasm_bindgen::closure::Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(
+        move |e: web_sys::KeyboardEvent| {
+            if e.key() != "Escape" {
+                return;
+            }
+            let in_root = e
+                .target()
+                .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
+                .and_then(|el| el.closest("[data-p2a-root]").ok().flatten())
+                .is_some();
+            if !in_root {
+                let _ = tx.unbounded_send(());
+            }
+        },
+    );
+    if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
+        let _ = doc.add_event_listener_with_callback("keydown", listener.as_ref().unchecked_ref());
+    }
+    // Lives as long as the page, as the App does.
+    listener.forget();
+    rx
+}
+
+/// The desktop build: the webview reports each such Escape through `document::eval`.
+#[cfg(not(target_arch = "wasm32"))]
+fn escape_outside_root() -> futures::channel::mpsc::UnboundedReceiver<()> {
+    let (tx, rx) = futures::channel::mpsc::unbounded();
+    spawn(async move {
+        let mut outside = dioxus::document::eval(ESCAPE_OUTSIDE_ROOT_JS);
+        while outside.recv::<bool>().await.is_ok() {
+            if tx.unbounded_send(()).is_err() {
+                break;
+            }
+        }
+    });
+    rx
+}
+
+/// The desktop listener: sends `true` for each Escape outside the root; never finishes, so the
+/// channel stays open.
+#[cfg(not(target_arch = "wasm32"))]
+const ESCAPE_OUTSIDE_ROOT_JS: &str = r#"
+document.addEventListener('keydown', (e) => {
+    const inRoot = e.target instanceof Element && e.target.closest('[data-p2a-root]');
+    if (e.key === 'Escape' && !inRoot) { dioxus.send(true); }
+});
+await new Promise(() => {});
+"#;
+
 /// Register a dialog with Escape while `open`: Escape calls the `on_close`
 /// of the dialog opened last.
 pub fn use_escape_close(open: bool, on_close: Callback<()>) {
@@ -347,6 +403,20 @@ pub fn App() -> Element {
         }
     };
 
+    // Escape pressed while the focus is outside the app's root element (on the page body, after
+    // the button that had it is removed, as "Load dataset" is once the file loads) never reaches
+    // the root's onkeydown. A document listener reports it; the dialog opened last is closed from
+    // a task inside the Dioxus runtime.
+    use_future(move || async move {
+        let mut outside = escape_outside_root();
+        while outside.next().await.is_some() {
+            let top = escape_stack.read().top().copied();
+            if let Some(close) = top {
+                close.call(());
+            }
+        }
+    });
+
     // Handle shortcuts modal close
     let handle_close_shortcuts = move |_| {
         shortcuts_open.set(false);
@@ -360,6 +430,7 @@ pub fn App() -> Element {
         div {
             class: "h-screen flex flex-col k-paper",
             tabindex: "0",
+            "data-p2a-root": "1",
             onkeydown: handle_global_keydown,
 
             div { class: "flex-1 min-h-0 flex",
@@ -459,6 +530,53 @@ mod tests {
         );
         assert_eq!(global_shortcut(&ch("n"), false, false), None);
         assert_eq!(global_shortcut(&ch("/"), false, false), None);
+    }
+
+    /// `document::eval` runs a string through `new Function`, which the web page's
+    /// Content-Security-Policy refuses (no 'unsafe-eval'); the refusal panics the app. Every call
+    /// must therefore sit in desktop-only code: a `cfg(not(target_arch = "wasm32"))` within the
+    /// twelve lines above it.
+    #[test]
+    fn document_eval_is_desktop_only() {
+        fn visit(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    visit(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+        let mut files = Vec::new();
+        visit(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut files);
+        let mut bad = Vec::new();
+        for file in files {
+            let text = std::fs::read_to_string(&file).unwrap();
+            let lines: Vec<&str> = text.lines().collect();
+            for (i, line) in lines.iter().enumerate() {
+                let code = line.split("//").next().unwrap_or("");
+                if !code.contains(concat!("document::", "eval(")) {
+                    continue;
+                }
+                let gated = lines[i.saturating_sub(12)..i]
+                    .iter()
+                    .any(|l| l.contains("cfg(not(target_arch = \"wasm32\"))"));
+                if !gated {
+                    bad.push(format!("{}:{}", file.display(), i + 1));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "document::eval reachable on the web: {bad:?}");
+    }
+
+    /// The desktop outside-root listener answers only Escape, only outside the root the App marks.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn escape_outside_root_listener() {
+        assert!(ESCAPE_OUTSIDE_ROOT_JS.contains("e.key === 'Escape'"));
+        assert!(ESCAPE_OUTSIDE_ROOT_JS.contains("closest('[data-p2a-root]')"));
+        assert!(ESCAPE_OUTSIDE_ROOT_JS.contains("dioxus.send(true)"));
     }
 
     #[test]
