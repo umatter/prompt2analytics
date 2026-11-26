@@ -343,8 +343,8 @@ Remember: your value is in orchestrating these tools, not in doing mental math. 
 /// The last section of every system prompt, after the dataset block. The tool loop also puts a
 /// note with each round's results (`tool_loop::language_note`): tool results reach the model as a
 /// user turn, and this rule alone did not stop a German reply to an English question after one.
-const LANGUAGE_RULE: &str = "\n## LANGUAGE\n\nReply in the language of the user's latest \
-     question, even when earlier messages are in another language.\n";
+const LANGUAGE_RULE: &str = "\n## LANGUAGE\n\nReply in English, unless the user asks for \
+     another language or writes the question in it.\n";
 
 /// Returns the system prompt for the data analytics assistant.
 pub fn get_system_prompt() -> String {
@@ -426,7 +426,7 @@ mod tests {
             with_data.ends_with(LANGUAGE_RULE),
             "the rule comes after the dataset block"
         );
-        assert!(LANGUAGE_RULE.contains("Reply in the language of the user's latest question"));
+        assert!(LANGUAGE_RULE.contains("Reply in English, unless the user asks for"));
         assert!(prompt.contains("Run the method and the variable roles the user asked for."));
         assert!(prompt.contains(
             "Never swap the outcome and the regressors or substitute another analysis without \

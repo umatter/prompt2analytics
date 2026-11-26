@@ -180,10 +180,139 @@ fn language_note(messages: &[Message]) -> Option<String> {
     if text.is_empty() {
         return None;
     }
-    Some(format!(
-        "Tool results for the question {}. Reply in the language of that question.",
-        json_str(&p2a_text::ellipsize(text, NOTE_QUESTION_CHARS))
-    ))
+    let quoted = json_str(&p2a_text::ellipsize(text, NOTE_QUESTION_CHARS));
+    // English unless the question is plainly in another language. A model asked for "the
+    // language of the question" guesses it from names and content words: gpt-4o answered the
+    // English "In lalonde, estimate the effect of treat on re78 ..." and "summarize the dataset"
+    // in Spanish.
+    Some(if is_plainly_other_language(text) {
+        format!(
+            "Tool results for the question {quoted}. That question is not in English: reply in \
+             its language."
+        )
+    } else {
+        format!(
+            "Tool results for the question {quoted}. Reply in English unless the user asked for \
+             another language."
+        )
+    })
+}
+
+/// English function words that are not also common words of German, Dutch or French ("in",
+/// "an", "is" and "on" are); one of them keeps a question English.
+const ENGLISH_MARKERS: &[&str] = &[
+    "the", "of", "with", "and", "what", "how", "does", "which", "between", "this", "that",
+    "please", "can", "you", "my", "did", "were", "there", "than", "whether", "using", "from", "by",
+    "should", "would", "could", "has", "have", "its", "into", "show", "each", "for", "are", "to",
+    "it",
+];
+
+/// Common words of the other languages the app is used in (German, Spanish, French, Italian,
+/// Portuguese, Dutch) that are not English words.
+const OTHER_MARKERS: &[&str] = &[
+    // German
+    "der",
+    "das",
+    "und",
+    "ist",
+    "nicht",
+    "wie",
+    "viele",
+    "mit",
+    "von",
+    "ein",
+    "eine",
+    "den",
+    "dem",
+    "des",
+    "bitte",
+    "zeige",
+    "berechne",
+    "zeilen",
+    "spalten",
+    "werte",
+    "fehlende",
+    "mittelwert",
+    "auf",
+    "aus",
+    "bei",
+    "nach",
+    "welche",
+    "gibt",
+    "es",
+    "mir",
+    // Spanish, Portuguese
+    "el",
+    "los",
+    "las",
+    "del",
+    "por",
+    "con",
+    "una",
+    "que",
+    "sobre",
+    "para",
+    "filas",
+    "columnas",
+    "calcula",
+    "muestra",
+    "cual",
+    "como",
+    "os",
+    "uma",
+    "com",
+    "da",
+    "do",
+    // French, Italian
+    "le",
+    "les",
+    "est",
+    "une",
+    "sur",
+    "dans",
+    "avec",
+    "quel",
+    "quelle",
+    "pour",
+    "lignes",
+    "colonnes",
+    "moyenne",
+    "calcule",
+    "montre",
+    "il",
+    "gli",
+    "della",
+    "che",
+    "sono",
+    // Dutch
+    "het",
+    "een",
+    "van",
+    "wat",
+    "hoe",
+    "niet",
+    "zijn",
+];
+
+/// Whether a question is plainly not English: no English function word, and at least two
+/// common words of another language, or one with a letter outside ASCII (ä, é, ñ). Names of
+/// datasets and columns carry neither, so a question made of them stays English.
+fn is_plainly_other_language(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    let words: Vec<&str> = lower
+        .split(|c: char| !c.is_alphabetic())
+        .filter(|w| !w.is_empty())
+        .collect();
+    if words.iter().any(|w| ENGLISH_MARKERS.contains(w)) {
+        return false;
+    }
+    let other: std::collections::HashSet<&str> = words
+        .iter()
+        .copied()
+        .filter(|w| OTHER_MARKERS.contains(w))
+        .collect();
+    let accented = words.iter().any(|w| w.chars().any(|c| !c.is_ascii()));
+    other.len() >= 2 || (other.len() == 1 && accented)
 }
 
 /// Puts the note on the newest tool-results message and takes it off older ones, so the model
@@ -446,7 +575,8 @@ mod tests {
         let (m, _) = run(&p, &tools, &config(25, true)).await;
         assert_eq!(m.content, "done");
         let seen = p.seen.lock().unwrap();
-        let note = "Tool results for the question \"go\". Reply in the language of that question.";
+        let note = "Tool results for the question \"go\". Reply in English unless the user asked \
+                    for another language.";
         assert_eq!(seen[1].last().unwrap().role, MessageRole::Tool);
         assert_eq!(seen[1].last().unwrap().content, note);
         let tool_notes: Vec<&str> = seen[2]
@@ -464,14 +594,52 @@ mod tests {
     fn the_language_note_is_bounded_and_quoted() {
         let long = format!("{}\"\n{}", "é".repeat(150), "x".repeat(150));
         let note = language_note(&[Message::user(long)]).unwrap();
-        assert!(
-            note.ends_with("...\". Reply in the language of that question."),
-            "{note}"
-        );
+        assert!(note.contains("...\". "), "{note}");
         assert!(!note.contains('\n'));
         assert!(note.chars().count() < 300, "{}", note.chars().count());
         assert_eq!(language_note(&[Message::assistant("hi")]), None);
         assert_eq!(language_note(&[Message::user("  ")]), None);
+    }
+
+    /// English is the default: plain English questions, short ones and questions made of names
+    /// keep it; only a question plainly in another language gets the note to answer in it.
+    #[test]
+    fn the_note_keeps_english_unless_the_question_is_plainly_another_language() {
+        let english = [
+            "In lalonde, estimate the effect of treat on re78 with propensity score matching on \
+             age, educ, race, married, nodegree, re74 and re75.",
+            "summarize the dataset",
+            "Fit a logit of d on x and z.",
+            "Add grp to that model and compare the two models by AIC.",
+            "go",
+            "lalonde re78 treat",
+            "plot Größe against Alter",
+            "describe grunfeld",
+        ];
+        for q in english {
+            assert!(!is_plainly_other_language(q), "{q}");
+            let note = language_note(&[Message::user(q)]).unwrap();
+            assert!(
+                note.contains("Reply in English unless the user asked"),
+                "{q}: {note}"
+            );
+        }
+        let other = [
+            "Wie viele Zeilen hat der Datensatz?",
+            "Anzahl Zeilen und fehlende Werte",
+            "Estima el efecto de treat sobre re78 con emparejamiento por puntaje de propensión.",
+            "Quel est l'effet de treat sur re78 dans lalonde ?",
+            "Wat is het effect van treat op re78?",
+            "Zeige mir die Größe",
+        ];
+        for q in other {
+            assert!(is_plainly_other_language(q), "{q}");
+            let note = language_note(&[Message::user(q)]).unwrap();
+            assert!(
+                note.contains("not in English: reply in its language"),
+                "{q}: {note}"
+            );
+        }
     }
 
     #[tokio::test]
