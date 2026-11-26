@@ -174,13 +174,20 @@ impl AnthropicProvider {
                 MessageRole::Tool => {
                     // Tool results go in a user message with tool_result content blocks
                     if let Some(ref tool_results) = msg.tool_results {
-                        let content_blocks: Vec<AnthropicContentBlock> = tool_results
+                        let mut content_blocks: Vec<AnthropicContentBlock> = tool_results
                             .iter()
                             .filter(|tr| !sent.contains(tr.tool_call_id.as_str()))
                             .map(tool_result_block)
                             .collect();
 
                         if !content_blocks.is_empty() {
+                            // The tool loop's note about the results (after them, as the API
+                            // requires).
+                            if !msg.content.is_empty() {
+                                content_blocks.push(AnthropicContentBlock::Text {
+                                    text: msg.content.clone(),
+                                });
+                            }
                             result.push(AnthropicMessage {
                                 role: "user".to_string(),
                                 content: AnthropicContent::Blocks(content_blocks),
@@ -712,6 +719,41 @@ mod tests {
                 {"role": "user", "content": [
                     {"type": "tool_result", "tool_use_id": "call_r1_1", "content": "No datasets"}]},
                 {"role": "user", "content": "next"}
+            ])
+        );
+    }
+
+    /// The tool loop's note on a tool-results message is sent after the results it is about.
+    #[test]
+    fn the_tool_loop_note_follows_the_results() {
+        fn loop_shaped() -> Vec<Message> {
+            let call = ToolCall {
+                id: "c1".into(),
+                name: "list_datasets".into(),
+                arguments: serde_json::json!({}),
+            };
+            let mut results = Message::tool_result(vec![ToolResult {
+                tool_call_id: "c1".into(),
+                content: "No datasets".into(),
+                is_error: false,
+            }]);
+            results.content = "note".into();
+            vec![
+                Message::user("list"),
+                Message::assistant_with_tools(String::new(), vec![call]),
+                results,
+            ]
+        }
+        let p = AnthropicProvider::new(ProviderConfig::default());
+        assert_eq!(
+            serde_json::to_value(p.to_anthropic_messages(&loop_shaped()).1).unwrap(),
+            serde_json::json!([
+                {"role": "user", "content": "list"},
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "c1", "name": "list_datasets", "input": {}}]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "c1", "content": "No datasets"},
+                    {"type": "text", "text": "note"}]}
             ])
         );
     }

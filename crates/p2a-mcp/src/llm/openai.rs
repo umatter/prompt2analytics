@@ -193,6 +193,15 @@ impl OpenAIProvider {
                                 tool_call_id: Some(tr.tool_call_id.clone()),
                             });
                         }
+                        // The tool loop's note about the results, after them.
+                        if !msg.content.is_empty() {
+                            result.push(OpenAIMessage {
+                                role: "user".to_string(),
+                                content: Some(msg.content.clone()),
+                                tool_calls: None,
+                                tool_call_id: None,
+                            });
+                        }
                     }
                 }
             }
@@ -787,6 +796,41 @@ mod tests {
                                  "function": {"name": "list_datasets", "arguments": "{}"}}]},
                 {"role": "tool", "content": "No datasets", "tool_call_id": "call_r1_1"},
                 {"role": "user", "content": "next"}
+            ])
+        );
+    }
+
+    /// The tool loop's note on a tool-results message is sent after the results it is about.
+    #[test]
+    fn the_tool_loop_note_follows_the_results() {
+        fn loop_shaped() -> Vec<Message> {
+            let call = ToolCall {
+                id: "c1".into(),
+                name: "list_datasets".into(),
+                arguments: serde_json::json!({}),
+            };
+            let mut results = Message::tool_result(vec![ToolResult {
+                tool_call_id: "c1".into(),
+                content: "No datasets".into(),
+                is_error: false,
+            }]);
+            results.content = "note".into();
+            vec![
+                Message::user("list"),
+                Message::assistant_with_tools(String::new(), vec![call]),
+                results,
+            ]
+        }
+        let p = OpenAIProvider::new(ProviderConfig::default());
+        assert_eq!(
+            serde_json::to_value(p.to_openai_messages(&loop_shaped())).unwrap(),
+            serde_json::json!([
+                {"role": "user", "content": "list"},
+                {"role": "assistant",
+                 "tool_calls": [{"id": "c1", "type": "function",
+                                 "function": {"name": "list_datasets", "arguments": "{}"}}]},
+                {"role": "tool", "content": "No datasets", "tool_call_id": "c1"},
+                {"role": "user", "content": "note"}
             ])
         );
     }

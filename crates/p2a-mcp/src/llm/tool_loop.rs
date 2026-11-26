@@ -11,7 +11,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 
 use async_trait::async_trait;
 
-use super::context::{push_tool_results_for_model, truncate_str};
+use super::context::{json_str, push_tool_results_for_model, truncate_str};
 use super::provider::effective_max_tool_iterations;
 use super::{
     LlmError, Message, MessageRole, ProviderConfig, StreamChunk, ToolCall, ToolDefinition,
@@ -164,6 +164,44 @@ impl LoopGuard {
     }
 }
 
+/// Longest part of the question the language note quotes, in characters.
+const NOTE_QUESTION_CHARS: usize = 200;
+
+/// The note that goes with each round's tool results: the question the results answer, quoted,
+/// and that the reply is in its language. Tool results reach Anthropic models as a user turn, so
+/// after a tool call the latest "user" text had no language and an English question after German
+/// turns was answered in German; a rule in the system prompt alone did not change that.
+fn language_note(messages: &[Message]) -> Option<String> {
+    let question = messages
+        .iter()
+        .rev()
+        .find(|m| m.role == MessageRole::User && m.tool_results.is_none())?;
+    let text = question.content.trim();
+    if text.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "Tool results for the question {}. Reply in the language of that question.",
+        json_str(&p2a_text::ellipsize(text, NOTE_QUESTION_CHARS))
+    ))
+}
+
+/// Puts the note on the newest tool-results message and takes it off older ones, so the model
+/// reads it once, next to the results it is about to interpret.
+fn attach_note(conversation: &mut [Message], note: Option<&str>) {
+    let Some(note) = note else { return };
+    let newest = conversation.len().saturating_sub(1);
+    for (i, m) in conversation.iter_mut().enumerate() {
+        if m.role == MessageRole::Tool {
+            m.content = if i == newest {
+                note.to_string()
+            } else {
+                String::new()
+            };
+        }
+    }
+}
+
 /// Run the tool loop: call the model; while it asks for tools, run them (in order, announcing each
 /// on the stream just before it runs; at most [`MAX_CALLS_PER_ROUND`] per round) and call it again
 /// with the results, until it answers without a tool call, `interpret` is false (the first round's
@@ -178,6 +216,7 @@ pub async fn run_tool_loop(
     stream: Option<&StreamSink>,
 ) -> Result<Message, LlmError> {
     let mut conversation = messages.to_vec();
+    let note = language_note(messages);
     let mut guard = LoopGuard::default();
     let mut last_text = String::new();
     let mut issued = 0usize;
@@ -257,6 +296,7 @@ pub async fn run_tool_loop(
             results.push(result);
         }
         push_tool_results_for_model(&mut conversation, &results, config.loop_tool_bytes);
+        attach_note(&mut conversation, note.as_deref());
         if !config.interpret {
             tracing::info!(
                 "interpret=false: returning the tool results without another model call"
@@ -391,6 +431,47 @@ mod tests {
         .unwrap();
         let labels = chunks.lock().unwrap().clone();
         (m, labels)
+    }
+
+    /// Each round's results carry the note quoting the question; an older round's note is
+    /// taken off, and the user's own messages are left as they were.
+    #[tokio::test]
+    async fn the_newest_tool_results_carry_the_language_note() {
+        let p = Scripted::new(vec![
+            turn("", &[("a", json!({}))]),
+            turn("", &[("b", json!({}))]),
+            turn("done", &[]),
+        ]);
+        let tools = Tools::default();
+        let (m, _) = run(&p, &tools, &config(25, true)).await;
+        assert_eq!(m.content, "done");
+        let seen = p.seen.lock().unwrap();
+        let note = "Tool results for the question \"go\". Reply in the language of that question.";
+        assert_eq!(seen[1].last().unwrap().role, MessageRole::Tool);
+        assert_eq!(seen[1].last().unwrap().content, note);
+        let tool_notes: Vec<&str> = seen[2]
+            .iter()
+            .filter(|m| m.role == MessageRole::Tool)
+            .map(|m| m.content.as_str())
+            .collect();
+        assert_eq!(tool_notes, ["", note]);
+        assert_eq!(seen[2][0].content, "go");
+    }
+
+    /// The note quotes at most 200 characters of the question, JSON-quoted, and is left out
+    /// without a question.
+    #[test]
+    fn the_language_note_is_bounded_and_quoted() {
+        let long = format!("{}\"\n{}", "é".repeat(150), "x".repeat(150));
+        let note = language_note(&[Message::user(long)]).unwrap();
+        assert!(
+            note.ends_with("...\". Reply in the language of that question."),
+            "{note}"
+        );
+        assert!(!note.contains('\n'));
+        assert!(note.chars().count() < 300, "{}", note.chars().count());
+        assert_eq!(language_note(&[Message::assistant("hi")]), None);
+        assert_eq!(language_note(&[Message::user("  ")]), None);
     }
 
     #[tokio::test]

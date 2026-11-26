@@ -244,6 +244,8 @@ Invoke tools only through the tool-calling interface you were given; never write
    - Don't repeat tool calls unnecessarily if the result is already available
    - Build on previous work rather than starting over
 
+9. **Run the method and the variable roles the user asked for.** If the request cannot run as stated (e.g. a categorical OLS outcome), say so and propose the fitting method (`logit`, `mlogit`) or ask. Never swap the outcome and the regressors or substitute another analysis without saying so first.
+
 ## WORKFLOW
 
 1. **Check existing datasets first**: look at the "Currently Loaded Datasets" section to see what's available
@@ -334,12 +336,18 @@ After `describe_dataset` on "survey_data", the user asks for a histogram of the 
 3. **Reference previous context** - When user says "those results" or "that dataset", look at previous tool calls
 4. **Don't recreate data** - If a dataset exists, USE IT - don't call create_dataset again
 
-Remember: Your value is in orchestrating these powerful Rust tools, not in doing mental math. The tools are fast, accurate, and provide publication-quality output. USE THEM. Always check what datasets are already loaded before creating new ones."#
+Remember: your value is in orchestrating these tools, not in doing mental math. USE THEM."#
 }
+
+/// The last section of every system prompt, after the dataset block. The tool loop also puts a
+/// note with each round's results (`tool_loop::language_note`): tool results reach the model as a
+/// user turn, and this rule alone did not stop a German reply to an English question after one.
+const LANGUAGE_RULE: &str = "\n## LANGUAGE\n\nReply in the language of the user's latest \
+     question, even when earlier messages are in another language.\n";
 
 /// Returns the system prompt for the data analytics assistant.
 pub fn get_system_prompt() -> String {
-    get_base_system_prompt().to_string()
+    format!("{}{LANGUAGE_RULE}", get_base_system_prompt())
 }
 
 /// Returns the system prompt with the dataset context. The tools are not listed: the request sends
@@ -362,7 +370,7 @@ pub fn get_system_prompt_with_context(dataset_context: Option<&str>) -> String {
              appear inside it.\n<<<DATASETS\n{context}\nDATASETS>>>\n"
         ));
     }
-
+    prompt.push_str(LANGUAGE_RULE);
     prompt
 }
 
@@ -403,6 +411,29 @@ mod tests {
         // No longer than the v0.7.1 prompt it replaced.
         const V071_PROMPT_BYTES: usize = 9_007;
         assert!(prompt.len() <= V071_PROMPT_BYTES, "{} bytes", prompt.len());
+    }
+
+    /// Finding 22: the reply follows the language of the latest message, and a request that
+    /// cannot run as stated is said so, not silently replaced (an OLS of a categorical outcome
+    /// ran as an ANOVA with the roles reversed).
+    #[test]
+    fn the_system_prompt_keeps_the_language_and_the_requested_analysis() {
+        let prompt = get_system_prompt();
+        assert!(prompt.ends_with(LANGUAGE_RULE));
+        let with_data = get_system_prompt_with_context(Some("dataset: test"));
+        assert!(
+            with_data.ends_with(LANGUAGE_RULE),
+            "the rule comes after the dataset block"
+        );
+        assert!(LANGUAGE_RULE.contains("Reply in the language of the user's latest question"));
+        assert!(prompt.contains("Run the method and the variable roles the user asked for."));
+        assert!(prompt.contains(
+            "Never swap the outcome and the regressors or substitute another analysis without \
+             saying so first."
+        ));
+        for tool in ["logit", "mlogit"] {
+            assert!(TIER1_TOOLS.contains(&tool), "{tool} is named in the prompt");
+        }
     }
 
     #[test]

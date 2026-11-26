@@ -75,7 +75,7 @@ pub fn truncate_str(s: &str, max_bytes: usize) -> &str {
 /// them, U+2028 and U+2029) is escaped here as `\uXXXX`. All of them are in
 /// the Basic Multilingual Plane, so one escape each suffices, and serde's
 /// own escapes are ASCII, so the rewrite cannot split one of them.
-fn json_str(s: &str) -> String {
+pub(crate) fn json_str(s: &str) -> String {
     use std::fmt::Write as _;
 
     let quoted = serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string());
