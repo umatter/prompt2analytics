@@ -115,7 +115,7 @@ looks like a validation failure but is not one.
   gsynth, tmle, gmm, bacondecomp, did, DRDID, CBPS, etwfe, marginaleffects, mclust, mixtools,
   flexmix, apcluster, e1071, changepoint, spatialreg, spdep, sphet, splm, haven, pdp,
   randomForest, purrr, gbm, dplyr, tidyr, mboost, xgboost, cobalt, CVXR, ECOSolveR, Qtools, alpaca,
-  Rtsne, aricode, arules, clusterCrit, fpc, libcoin, partykit, pvclust,
+  Rtsne, aricode, arules, clusterCrit, fpc, libcoin, partykit, pvclust, rddensity,
   and scpi 3.0.1 (scpi 4.x needs R >= 4.4; on R 4.3 install 3.0.1 from the CRAN archive). Some case
   files also record the base packages base, stats and datasets and the recommended packages boot
   and Matrix, which ship with R.
@@ -133,7 +133,8 @@ looks like a validation failure but is not one.
                      "spdep", "sphet", "splm", "haven", "pdp", "randomForest", "purrr",
                      "gbm", "dplyr", "tidyr", "mboost", "xgboost", "cobalt", "CVXR",
                      "ECOSolveR", "Qtools", "alpaca", "Rtsne", "aricode", "arules",
-                     "clusterCrit", "fpc", "libcoin", "partykit", "pvclust"))
+                     "clusterCrit", "fpc", "libcoin", "partykit", "pvclust",
+                     "rddensity"))
   # R 4.3: scpi 3.0.1 from the CRAN archive (R >= 4.4: install.packages("scpi"))
   install.packages("https://cran.r-project.org/src/contrib/Archive/scpi/scpi_3.0.1.tar.gz",
                    repos = NULL, type = "source")
@@ -388,10 +389,10 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Goodman-Bacon decomposition (bacondecomp) | [bacon.md](econometrics/bacon.md) | R-pinned, known deviations (CAUS-53) |
 | Staggered DiD (Callaway-Sant'Anna) | [staggered_did.md](econometrics/staggered_did.md) | R-pinned, known deviations (CAUS-84) |
 | Extended TWFE (etwfe::etwfe + emfx) | [etwfe.md](econometrics/etwfe.md) | R-pinned, known deviations (CAUS-14) |
-| Regression Discontinuity (Sharp) | [rd.md](econometrics/rd.md) | R-pinned, known deviations (CAUS-28) |
-| Regression Discontinuity (Fuzzy) | [rd.md](econometrics/rd.md) | R-pinned, known deviations (CAUS-28) |
-| RD plot (rdrobust::rdplot) | [rd.md](econometrics/rd.md) | R-pinned, known deviations (APP-12) |
-| RD density manipulation test (rddensity) | [rd.md](econometrics/rd.md) | R-pinned |
+| Regression Discontinuity (Sharp) | [rd.md](econometrics/rd.md) | R-pinned, known deviations (APP-12, CAUS-28) |
+| Regression Discontinuity (Fuzzy) | [rd.md](econometrics/rd.md) | R-pinned, known deviations (APP-12, CAUS-28) |
+| RD plot (rdrobust::rdplot) | [rd.md](econometrics/rd.md) | R-pinned, known deviations (APP-12, CAUS-28) |
+| RD density manipulation test (rddensity) | [rd.md](econometrics/rd.md) | R-pinned, known deviations (APP-12, CAUS-28) |
 | IPW Treatment Effects | [treatment_ipw.md](econometrics/treatment_ipw.md) | R-pinned |
 | Doubly Robust (AIPW) | [treatment_aipw.md](econometrics/treatment_aipw.md) | R-pinned |
 | TMLE | [tmle.md](econometrics/tmle.md) | R-pinned |

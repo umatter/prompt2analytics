@@ -9,6 +9,7 @@ This directory contains validation documentation for regression methods.
 | OLS | [ols.md](ols.md) | `run_ols()`, `run_ols_raw()` | R `lm()` |
 | Robust SEs | [ols_robust_se.md](ols_robust_se.md) | `run_ols()` with HC0-HC3 | R `sandwich::vcovHC()` |
 | Clustered SEs | [ols_clustered.md](ols_clustered.md) | `run_ols_clustered()` | R `sandwich::vcovCL()` |
+| Weighted least squares | [wls.md](wls.md) | `run_wls()`, `run_ols_complete_cases()` | R `lm(weights = )`, `sandwich::vcovHC()` |
 | Bootstrap covariance | [vcovBS.md](vcovBS.md) | `vcov_bootstrap()` | R `sandwich::vcovBS()` (not pinned: R's RNG) |
 | Regression through the origin | [no_intercept.md](no_intercept.md) | `run_ols_raw()`, `run_ols()` | R `lm(y ~ 0 + x)`, `summary.lm()` |
 | HAC, Driscoll-Kraay, quantile regression, GLS, RESET, Wald (legacy DGPs) | [regression_legacy_cases.md](regression_legacy_cases.md) | `vcov_hac()`, `vcov_driscoll_kraay()`, `run_quantreg()`, `run_gls()` | R `sandwich`, `quantreg`, `nlme`, `lmtest` |
