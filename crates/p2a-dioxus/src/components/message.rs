@@ -107,15 +107,8 @@ pub fn Message(props: MessageProps) -> Element {
                         }
                     }
 
-                    // Message content
-                    {render_content(message, viewer)}
-
-                    // An answer that ended before it was finished
-                    if message.interrupted {
-                        p { class: "k-note", "Answer interrupted" }
-                    }
-
-                    // Plots, each under a rule with its caption and actions;
+                    // Plots, made by the calls above and placed before the answer that
+                    // refers to them; each under a rule with its caption and actions;
                     // a click opens the viewer
                     for (idx , image) in message.images.iter().enumerate() {
                         crate::components::FigureExhibit {
@@ -125,6 +118,15 @@ pub fn Message(props: MessageProps) -> Element {
                             label: format!("Figure {}", idx + 1),
                         }
                     }
+
+                    // Message content
+                    {render_content(message, viewer)}
+
+                    // An answer that ended before it was finished
+                    if message.interrupted {
+                        p { class: "k-note", "Answer interrupted" }
+                    }
+
                 }
             }
         }

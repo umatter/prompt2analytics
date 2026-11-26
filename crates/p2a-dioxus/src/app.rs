@@ -233,7 +233,9 @@ pub fn App() -> Element {
     let settings = use_signal(Settings::load);
 
     // UI state
-    let mut sidebar_visible = use_signal(|| true);
+    // On a narrow screen (a phone) both side panels start closed and open as overlays.
+    let mut sidebar_visible = use_signal(|| !narrow_viewport());
+    let mut datasets_open = use_signal(|| false);
     let mut shortcuts_open = use_signal(|| false);
 
     // Provide state to all child components via context
@@ -363,12 +365,12 @@ pub fn App() -> Element {
             div { class: "flex-1 min-h-0 flex",
                 // Conversation sidebar (collapsible)
                 if is_sidebar_visible {
-                    div { class: "w-[236px] flex-shrink-0 k-rule-r min-h-0",
+                    div { class: "k-side-conv w-[236px] flex-shrink-0 k-rule-r min-h-0",
                         ConversationSidebar {}
                     }
                 } else {
                     // Show expand button when sidebar is hidden
-                    div { class: "flex-shrink-0 k-rule-r",
+                    div { class: "flex-shrink-0 k-rule-r k-edge",
                         button {
                             class: "k-icon-btn m-2",
                             onclick: move |_| sidebar_visible.set(true),
@@ -384,9 +386,35 @@ pub fn App() -> Element {
                     ChatPanel {}
                 }
 
-                // Dataset sidebar
-                div { class: "w-[312px] flex-shrink-0 k-rule-l min-h-0",
-                    DatasetSidebar {}
+                // Dataset sidebar: always shown on a wide screen; an overlay opened from the
+                // edge button on a narrow one
+                if !*datasets_open.read() {
+                    div { class: "k-narrow-only flex-shrink-0 k-rule-l k-edge",
+                        button {
+                            class: "k-icon-btn m-2",
+                            onclick: move |_| datasets_open.set(true),
+                            title: "Show datasets",
+                            "aria-label": "Show datasets",
+                            span { class: "k-mono font-bold k-orange", "«" }
+                        }
+                    }
+                }
+                div {
+                    class: if *datasets_open.read() {
+                        "k-side-data open w-[312px] flex-shrink-0 k-rule-l min-h-0"
+                    } else {
+                        "k-side-data w-[312px] flex-shrink-0 k-rule-l min-h-0"
+                    },
+                    div { class: "k-narrow-only flex justify-end",
+                        button {
+                            class: "k-icon-btn m-1",
+                            onclick: move |_| datasets_open.set(false),
+                            title: "Hide datasets",
+                            "aria-label": "Hide datasets",
+                            span { class: "k-mono text-sm k-muted", "»" }
+                        }
+                    }
+                    div { class: "flex-1 min-h-0", DatasetSidebar {} }
                 }
             }
 
@@ -479,5 +507,25 @@ mod theme_tests {
         assert!(!css.contains("html.light"));
         assert!(!css.contains("@media (prefers-color-scheme"));
         assert!(!css.contains("ring-color"));
+    }
+}
+
+/// Below this viewport width (CSS px) the side panels are overlays (`input.css`).
+const NARROW_BELOW_PX: f64 = 900.0;
+
+/// Whether the window is narrower than [`NARROW_BELOW_PX`] at start (web; native windows are
+/// taken as wide).
+pub(crate) fn narrow_viewport() -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        web_sys::window()
+            .and_then(|w| w.inner_width().ok())
+            .and_then(|w| w.as_f64())
+            .is_some_and(|w| w < NARROW_BELOW_PX)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = NARROW_BELOW_PX;
+        false
     }
 }

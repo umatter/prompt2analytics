@@ -211,11 +211,12 @@ pub fn histogram(
 
         let y_range = 0u32..(max_count + max_count / 10 + 1);
 
+        let caption = fitted_caption(title, config.width, config.title_font_size);
         let mut chart = ChartBuilder::on(&root)
-            .caption(title, ("sans-serif", config.title_font_size))
+            .caption(&caption.0, ("sans-serif", caption.1))
             .margin(15)
             .x_label_area_size(50)
-            .y_label_area_size(60)
+            .y_label_area_size(y_label_area(&y_range, 60, config.tick_font_size))
             .build_cartesian_2d(x_range, y_range)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
@@ -355,11 +356,12 @@ pub fn scatter_plot(
         let x_label = config.x_label.as_deref().unwrap_or("X");
         let y_label = config.y_label.as_deref().unwrap_or("Y");
 
+        let caption = fitted_caption(title, config.width, config.title_font_size);
         let mut chart = ChartBuilder::on(&root)
-            .caption(title, ("sans-serif", config.title_font_size))
+            .caption(&caption.0, ("sans-serif", caption.1))
             .margin(10)
             .x_label_area_size(40)
-            .y_label_area_size(50)
+            .y_label_area_size(y_label_area(&y_range, 50, config.tick_font_size))
             .build_cartesian_2d(XAxis::new(x_range, config.x_dates), y_range)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
@@ -514,11 +516,12 @@ pub fn box_plot(
 
         let labels: Vec<String> = statistics.iter().map(|s| s.label.clone()).collect();
 
+        let caption = fitted_caption(title, config.width, config.title_font_size);
         let mut chart = ChartBuilder::on(&root)
-            .caption(title, ("sans-serif", config.title_font_size))
+            .caption(&caption.0, ("sans-serif", caption.1))
             .margin(10)
             .x_label_area_size(40)
-            .y_label_area_size(50)
+            .y_label_area_size(y_label_area(&y_range, 50, config.tick_font_size))
             .build_cartesian_2d(x_range, y_range)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
@@ -767,11 +770,12 @@ pub fn line_chart_with_band(
         let x_label = config.x_label.as_deref().unwrap_or("X");
         let y_label = config.y_label.as_deref().unwrap_or("Y");
 
+        let caption = fitted_caption(title, config.width, config.title_font_size);
         let mut chart = ChartBuilder::on(&root)
-            .caption(title, ("sans-serif", config.title_font_size))
+            .caption(&caption.0, ("sans-serif", caption.1))
             .margin(10)
             .x_label_area_size(40)
-            .y_label_area_size(50)
+            .y_label_area_size(y_label_area(&y_range, 50, config.tick_font_size))
             .build_cartesian_2d(XAxis::new(x_range, config.x_dates), y_range)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
@@ -976,11 +980,12 @@ pub fn event_study_plot(
             .unwrap_or("Time Relative to Treatment");
         let y_label = config.y_label.as_deref().unwrap_or("Treatment Effect");
 
+        let caption = fitted_caption(title, config.width, config.title_font_size);
         let mut chart = ChartBuilder::on(&root)
-            .caption(title, ("sans-serif", config.title_font_size))
+            .caption(&caption.0, ("sans-serif", caption.1))
             .margin(10)
             .x_label_area_size(40)
-            .y_label_area_size(60)
+            .y_label_area_size(y_label_area(&y_range, 60, config.tick_font_size))
             .build_cartesian_2d(x_range, y_range)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
@@ -1172,8 +1177,9 @@ pub fn coefficient_plot(
 
         if horizontal {
             // Horizontal layout: coefficients on Y-axis, values on X-axis
+            let caption = fitted_caption(title, config.width, config.title_font_size);
             let mut chart = ChartBuilder::on(&root)
-                .caption(title, ("sans-serif", config.title_font_size))
+                .caption(&caption.0, ("sans-serif", caption.1))
                 .margin(10)
                 .x_label_area_size(40)
                 .y_label_area_size(120) // More space for variable names
@@ -1234,11 +1240,12 @@ pub fn coefficient_plot(
             }
         } else {
             // Vertical layout: coefficients on X-axis, values on Y-axis
+            let caption = fitted_caption(title, config.width, config.title_font_size);
             let mut chart = ChartBuilder::on(&root)
-                .caption(title, ("sans-serif", config.title_font_size))
+                .caption(&caption.0, ("sans-serif", caption.1))
                 .margin(10)
                 .x_label_area_size(60)
-                .y_label_area_size(60)
+                .y_label_area_size(y_label_area(&value_range, 60, config.tick_font_size))
                 .build_cartesian_2d(coef_range, value_range)
                 .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
@@ -1469,11 +1476,12 @@ pub fn irf_plot(
         let x_label = config.x_label.as_deref().unwrap_or("Horizon");
         let y_label = config.y_label.as_deref().unwrap_or("Response");
 
+        let caption = fitted_caption(title, config.width, config.title_font_size);
         let mut chart = ChartBuilder::on(&root)
-            .caption(title, ("sans-serif", config.title_font_size))
+            .caption(&caption.0, ("sans-serif", caption.1))
             .margin(10)
             .x_label_area_size(40)
-            .y_label_area_size(60)
+            .y_label_area_size(y_label_area(&y_range, 60, config.tick_font_size))
             .build_cartesian_2d(x_range, y_range)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
@@ -1926,7 +1934,7 @@ fn generate_residuals_vs_fitted(
             .caption("Residuals vs Fitted", ("sans-serif", 24))
             .margin(10)
             .x_label_area_size(40)
-            .y_label_area_size(50)
+            .y_label_area_size(y_label_area(&y_range, 50, config.tick_font_size))
             .build_cartesian_2d(x_range, y_range)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
@@ -2028,7 +2036,7 @@ fn generate_qq_plot(
             .caption("Normal Q-Q", ("sans-serif", 24))
             .margin(10)
             .x_label_area_size(40)
-            .y_label_area_size(50)
+            .y_label_area_size(y_label_area(&y_range, 50, config.tick_font_size))
             .build_cartesian_2d(x_range, y_range)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
@@ -2109,7 +2117,7 @@ fn generate_scale_location(
             .caption("Scale-Location", ("sans-serif", 24))
             .margin(10)
             .x_label_area_size(40)
-            .y_label_area_size(50)
+            .y_label_area_size(y_label_area(&y_range, 50, config.tick_font_size))
             .build_cartesian_2d(x_range, y_range)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
@@ -2192,7 +2200,7 @@ fn generate_residuals_vs_leverage(
             .caption("Residuals vs Leverage", ("sans-serif", 24))
             .margin(10)
             .x_label_area_size(40)
-            .y_label_area_size(50)
+            .y_label_area_size(y_label_area(&y_range, 50, config.tick_font_size))
             .build_cartesian_2d(x_range, y_range)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
@@ -2783,9 +2791,78 @@ fn compute_leaf_order(
     order
 }
 
+/// The title and its font size for a chart `width` pixels wide: the configured size when the
+/// title fits (about 0.45 em per character), else a size down to 60% of it, and below that
+/// the title cut with an ellipsis.
+fn fitted_caption(title: &str, width: u32, font: u32) -> (String, u32) {
+    let avail = f64::from(width.saturating_sub(24).max(80));
+    let chars = title.chars().count().max(1) as f64;
+    let fits = |size: f64| chars * 0.45 * size <= avail;
+    let font_f = f64::from(font);
+    if fits(font_f) {
+        return (title.to_string(), font);
+    }
+    let size = (avail / (chars * 0.45)).floor().max((font_f * 0.6).ceil());
+    if fits(size) {
+        return (title.to_string(), size as u32);
+    }
+    let keep = (avail / (0.45 * size)).floor().max(4.0) as usize;
+    (p2a_text::ellipsize(title, keep).into_owned(), size as u32)
+}
+
+/// The width of the y label area: room for the widest tick label of `range` at `tick_font`
+/// (about 0.6 em per character, digits of the larger bound plus a sign and two decimals) and
+/// for the axis title beside it, and at least `base`.
+fn y_label_area<T: Copy + Into<f64>>(range: &std::ops::Range<T>, base: u32, tick_font: u32) -> u32 {
+    let (lo, hi): (f64, f64) = (range.start.into(), range.end.into());
+    let big = lo.abs().max(hi.abs());
+    let chars = if !big.is_finite() || big >= 1e7 || (big > 0.0 && big < 1e-3) {
+        8.0 // scientific notation, e.g. "1.25e7"
+    } else {
+        let digits = if big >= 1.0 {
+            big.log10().floor() + 1.0
+        } else {
+            1.0
+        };
+        digits + 3.0 + f64::from(u8::from(lo < 0.0))
+    };
+    let need = chars * 0.6 * f64::from(tick_font) + f64::from(tick_font) * 1.6 + 12.0;
+    base.max(need.ceil() as u32)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn long_titles_shrink_then_are_cut() {
+        // 32 px is ChartConfig's default title size
+        assert_eq!(
+            fitted_caption("Histogram", 800, 32),
+            ("Histogram".to_string(), 32)
+        );
+        let long = "Distribution of earnings in 1978 by treatment status, group and survey wave";
+        let (t, size) = fitted_caption(long, 800, 32);
+        assert_eq!(t, long);
+        assert!((20..32).contains(&size), "{size}");
+        let (t, size) = fitted_caption(&long.repeat(3), 800, 32);
+        assert_eq!(size, 20);
+        assert!(
+            t.ends_with("...") && t.chars().count() < long.len() * 3,
+            "{t}"
+        );
+    }
+
+    #[test]
+    fn y_label_area_widens_for_wide_tick_labels() {
+        // "0.25" at a 16 px font plus the axis title: wider than the old fixed 60 px
+        let narrow = y_label_area(&(0.0..1.0), 60, 16);
+        assert!((60..90).contains(&narrow), "{narrow}");
+        assert_eq!(y_label_area(&(0.0..1.0), 120, 16), 120);
+        let wide = y_label_area(&(-25000.0..250000.0), 60, 16);
+        assert!(wide > 100, "{wide}");
+        assert!(y_label_area(&(0u32..50), 50, 16) >= 50);
+    }
 
     #[test]
     fn category_label_names_only_category_positions() {

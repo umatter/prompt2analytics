@@ -85,6 +85,10 @@ pub fn DatasetSidebar() -> Element {
     };
 
     let datasets_list = datasets.read();
+    let n_results = datasets_list
+        .iter()
+        .filter(|d| is_coefficient_table(d))
+        .count();
     let loading = *is_loading.read();
     let reloading = *is_reloading.read();
     let err = error.read().clone();
@@ -200,12 +204,30 @@ pub fn DatasetSidebar() -> Element {
                         }
                     }
                     div {
-                        for dataset in datasets_list.iter() {
+                        for dataset in datasets_list.iter().filter(|d| !is_coefficient_table(d)) {
                             DatasetCard {
                                 key: "{dataset.id}",
                                 dataset: dataset.clone(),
                                 on_inspect: move |ds: DatasetMeta| {
                                     selected_dataset.set(Some(ds));
+                                }
+                            }
+                        }
+                    }
+                    // Coefficient tables the regressions save for viz_coefficient, folded
+                    // away below the data
+                    if n_results > 0 {
+                        details { class: "mx-[18px] mt-2 text-[13px]",
+                            summary { class: "cursor-pointer k-muted py-1",
+                                "Model results ({n_results})"
+                            }
+                            for dataset in datasets_list.iter().filter(|d| is_coefficient_table(d)) {
+                                DatasetCard {
+                                    key: "{dataset.id}",
+                                    dataset: dataset.clone(),
+                                    on_inspect: move |ds: DatasetMeta| {
+                                        selected_dataset.set(Some(ds));
+                                    }
                                 }
                             }
                         }
@@ -224,6 +246,28 @@ pub fn DatasetSidebar() -> Element {
             }
         }
     }
+}
+
+/// The columns of the coefficient table a regression tool saves (the server's
+/// `COEFFICIENT_TABLE_COLUMNS`).
+const COEFFICIENT_TABLE_COLUMNS: [&str; 7] = [
+    "term",
+    "estimate",
+    "std_error",
+    "t_value",
+    "p_value",
+    "ci_lower",
+    "ci_upper",
+];
+
+/// Whether `d` is a coefficient table a regression saved: a dataset made in the session
+/// with exactly those columns.
+fn is_coefficient_table(d: &DatasetMeta) -> bool {
+    d.source_path.is_none()
+        && d.column_names
+            .iter()
+            .map(String::as_str)
+            .eq(COEFFICIENT_TABLE_COLUMNS)
 }
 
 /// "Skipped: name (reason), ...".
@@ -386,5 +430,45 @@ fn DatasetCard(props: DatasetCardProps) -> Element {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn meta(source_path: Option<&str>, columns: &[&str]) -> DatasetMeta {
+        DatasetMeta {
+            id: "dataset_meta:x".into(),
+            session_id: "s".into(),
+            name: "d_ols_y".into(),
+            source_path: source_path.map(Into::into),
+            source_type: "derived".into(),
+            row_count: 2,
+            column_count: columns.len() as i32,
+            column_names: columns.iter().map(|c| c.to_string()).collect(),
+            loaded_at: "2026-11-26T00:00:00Z".into(),
+            file_size_bytes: None,
+            in_memory: true,
+            column_types: Vec::new(),
+        }
+    }
+
+    /// Only a session-made dataset with exactly the coefficient columns is folded away.
+    #[test]
+    fn coefficient_tables_are_recognised_by_their_columns() {
+        assert!(is_coefficient_table(&meta(
+            None,
+            &COEFFICIENT_TABLE_COLUMNS
+        )));
+        assert!(!is_coefficient_table(&meta(
+            Some("coef.csv"),
+            &COEFFICIENT_TABLE_COLUMNS
+        )));
+        assert!(!is_coefficient_table(&meta(
+            None,
+            &COEFFICIENT_TABLE_COLUMNS[..6]
+        )));
+        assert!(!is_coefficient_table(&meta(None, &["term", "estimate"])));
     }
 }

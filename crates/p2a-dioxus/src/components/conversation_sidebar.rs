@@ -145,6 +145,11 @@ pub fn ConversationSidebar() -> Element {
         if !may_switch(chat_state, conversation_state) {
             return;
         }
+        // a phone's overlay closes on the choice, uncovering the chat
+        if crate::app::narrow_viewport() {
+            let mut visible = sidebar_visible;
+            visible.set(false);
+        }
         let mut conv = conversation_state;
         spawn(async move {
             conv.write().set_current_conversation(Some(id.clone()));
