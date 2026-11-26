@@ -270,7 +270,9 @@ pub fn generate_filename(title: Option<&str>, format: ExportFormat) -> String {
         .map(sanitize_filename)
         .unwrap_or_else(|| "conversation".to_string());
 
-    let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+    // Local time, as the figure and table downloads name theirs (`exhibit_filename`), so the
+    // files of one session sort together; the export's own "Created" line stays in UTC.
+    let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
 
     format!("{}_{}.{}", base, timestamp, format.extension())
 }

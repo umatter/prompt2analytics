@@ -41,6 +41,12 @@ fn show_archived_toggle(count: usize) -> bool {
 }
 
 /// Conversation sidebar component
+/// Whether a key pressed on a row's action button stops there: Enter and Space press the
+/// button and must not also open the row; Escape and the rest reach the app's handler.
+fn stops_at_row_actions(key: &Key) -> bool {
+    *key == Key::Enter || *key == Key::Character(" ".into())
+}
+
 #[component]
 pub fn ConversationSidebar() -> Element {
     let session_state = use_context::<Signal<SessionState>>();
@@ -455,8 +461,13 @@ pub fn ConversationSidebar() -> Element {
                         // Action buttons (shown on hover)
                         // shown on hover, and while the row or a button has the keyboard focus
                         div { class: "k-row-actions flex items-center gap-0.5 transition-opacity",
-                            // a key on a button acts on the button, not on the row
-                            onkeydown: |e: Event<KeyboardData>| e.stop_propagation(),
+                            // Enter or Space on a button acts on the button, not on the row; other
+                            // keys (Escape for an open dialog) go on to the app's handler
+                            onkeydown: |e: Event<KeyboardData>| {
+                                if stops_at_row_actions(&e.key()) {
+                                    e.stop_propagation();
+                                }
+                            },
                             // Rename button
                             button {
                                 class: "action-btn-rename p-1.5 rounded transition-all cursor-pointer hover:bg-teal-50 dark:hover:bg-teal-900/30",
@@ -548,6 +559,15 @@ pub fn ConversationSidebar() -> Element {
 
     // Track if we need to show delete dialog (read outside of sidebar div)
     let show_delete_dialog = delete_confirm_id.read().is_some();
+    // The title of the conversation the dialog would delete, so the dialog names it
+    let delete_title = delete_confirm_id.read().as_ref().and_then(|id| {
+        conversation_state
+            .read()
+            .conversations
+            .iter()
+            .find(|c| &c.id == id)
+            .map(|c| c.title.clone())
+    });
 
     rsx! {
         // Use fragment to render sidebar and dialog as siblings
@@ -630,6 +650,10 @@ pub fn ConversationSidebar() -> Element {
                 onclick: move |_| handle_cancel_delete(()),
                 div {
                     class: "k-paper border-2 border-[var(--k-rule)] p-6 m-4 w-[90vw] max-w-md",
+                    role: "alertdialog",
+                    "aria-modal": "true",
+                    "aria-labelledby": "delete-dialog-title",
+                    "aria-describedby": "delete-dialog-text",
                     onclick: |e| e.stop_propagation(),
                     // Warning icon and title
                     div { class: "flex items-center gap-3 mb-4",
@@ -647,13 +671,17 @@ pub fn ConversationSidebar() -> Element {
                                 }
                             }
                         }
-                        h3 { class: "text-[22px] font-extrabold k-cond",
+                        h3 { id: "delete-dialog-title", class: "text-[22px] font-extrabold k-cond",
                             "Delete this conversation?"
                         }
                     }
                     // Message
-                    p { class: "text-sm mb-6",
-                        "This will permanently delete the conversation and all its messages. This action cannot be undone."
+                    p { id: "delete-dialog-text", class: "text-sm mb-6",
+                        if let Some(title) = delete_title {
+                            "This will permanently delete “{title}” and all its messages. This action cannot be undone."
+                        } else {
+                            "This will permanently delete the conversation and all its messages. This action cannot be undone."
+                        }
                     }
                     // Buttons - use grid to ensure both are always visible
                     div { class: "grid grid-cols-2 gap-3 mt-2",
@@ -676,6 +704,16 @@ pub fn ConversationSidebar() -> Element {
 
 #[cfg(test)]
 mod tests {
+    use dioxus::prelude::Key;
+
+    /// Escape on a focused Delete button reaches the app's handler and closes the dialog.
+    #[test]
+    fn escape_passes_the_row_action_buttons() {
+        assert!(!stops_at_row_actions(&Key::Escape));
+        assert!(stops_at_row_actions(&Key::Enter));
+        assert!(stops_at_row_actions(&Key::Character(" ".into())));
+    }
+
     use super::*;
 
     #[test]
