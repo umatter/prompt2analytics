@@ -183,6 +183,7 @@ pub static PARAM_RULES: &[ParamRule] = {
         p("*", "predictors", UniqueList(ListLength)),
         p("*", "y_columns", UniqueList(ListLength)),
         p("*", "fe", UniqueList(ListLength)),
+        p("panel_hdfe", "cluster", UniqueList(ListLength)),
         p("*", "controls", UniqueList(ListLength)),
         p("*", "instruments", UniqueList(ListLength)),
         p("*", "x_exog", UniqueList(ListLength)),

@@ -4,7 +4,7 @@
   "area": "econometrics/hdfe",
   "method": "Two-way fixed effects (firm + year), Grunfeld",
   "reference": "fixest::feols(inv ~ value + capital | firm + year); plm::plm(effect = 'twoways') for the adjusted within R-squared",
-  "call": "feols(inv ~ value + capital | firm + year, grunfeld, vcov = 'iid' / 'hetero' / ~firm)",
+  "call": "feols(inv ~ value + capital | firm + year, grunfeld, vcov = 'iid' / 'hetero' / ~firm / ~year / ~firm + year)",
   "dataset": "validation/datasets/grunfeld.csv",
   "datasets": ["validation/datasets/grunfeld.csv"],
   "r_version": "R version 4.3.3 (2024-02-29)",
@@ -54,6 +54,36 @@
     "se_firm_only_iid": {
       "names": ["value", "capital"],
       "values": [0.011856694214043839, 0.017354502775552564]
+    },
+    "p_cluster_firm": {
+      "names": ["value", "capital"],
+      "values": [1.7726713730996007e-06, 3.7702779481795014e-05]
+    },
+    "se_cluster_year": {
+      "names": ["value", "capital"],
+      "values": [0.019163829907530683, 0.052539020361993025]
+    },
+    "p_cluster_year": {
+      "names": ["value", "capital"],
+      "values": [6.6424637831290234e-06, 1.6705934184737925e-06]
+    },
+    "se_cluster_firm_year": {
+      "names": ["value", "capital"],
+      "values": [0.011265788856861815, 0.045191282889572304]
+    },
+    "p_cluster_firm_year": {
+      "names": ["value", "capital"],
+      "values": [2.4797168826475726e-06, 2.3982595382004168e-05]
+    },
+    "t_df_cluster_firm": 9,
+    "t_df_cluster_year": 19,
+    "se_firm_only_cluster_year": {
+      "names": ["value", "capital"],
+      "values": [0.017327915180428779, 0.032278880830817702]
+    },
+    "p_firm_only_cluster_year": {
+      "names": ["value", "capital"],
+      "values": [4.2579497673101531e-06, 1.0019304721896106e-08]
     }
   }
 }

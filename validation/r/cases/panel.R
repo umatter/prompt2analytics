@@ -148,7 +148,15 @@ case("panel_hdfe_grunfeld", "econometrics/hdfe", "Two-way fixed effects (firm + 
     adj_r2_within_fixest = unname(r2(h, "war2")), r2_full = unname(r2(h, "r2")),
     within_f = unname(wf$stat), within_f_df1 = unname(wf$df1), within_f_df2 = unname(wf$df2), within_f_p = unname(wf$p),
     df_resid = unname(degrees_freedom(h, "resid")), n_obs = nobs(h),
-    coef_firm_only = named(coef(h1)), se_firm_only_iid = named(se(h1))
+    coef_firm_only = named(coef(h1)), se_firm_only_iid = named(se(h1)),
+    p_cluster_firm = named(pvalue(summary(h, vcov = ~firm))),
+    se_cluster_year = named(se(summary(h, vcov = ~year))), p_cluster_year = named(pvalue(summary(h, vcov = ~year))),
+    se_cluster_firm_year = named(se(summary(h, vcov = ~firm + year))),
+    p_cluster_firm_year = named(pvalue(summary(h, vcov = ~firm + year))),
+    t_df_cluster_firm = unname(degrees_freedom(h, "t", vcov = ~firm)),
+    t_df_cluster_year = unname(degrees_freedom(h, "t", vcov = ~year)),
+    se_firm_only_cluster_year = named(se(summary(h1, vcov = ~year))),
+    p_firm_only_cluster_year = named(pvalue(summary(h1, vcov = ~year)))
   ), reference = "fixest::feols(inv ~ value + capital | firm + year); plm::plm(effect = 'twoways') for the adjusted within R-squared",
-  call = "feols(inv ~ value + capital | firm + year, grunfeld, vcov = 'iid' / 'hetero' / ~firm)", packages = c("fixest", "plm"))
+  call = "feols(inv ~ value + capital | firm + year, grunfeld, vcov = 'iid' / 'hetero' / ~firm / ~year / ~firm + year)", packages = c("fixest", "plm"))
 })

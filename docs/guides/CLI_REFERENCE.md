@@ -1470,6 +1470,7 @@ p2a panel hdfe [OPTIONS] --dep-var <DEP_VAR> <DATASET>
 | `-y, --dep-var <DEP_VAR>` | Dependent variable column |
 | `-x, --indep-vars <INDEP_VARS>...` | Independent variable columns |
 | `--fe <FE>...` | Fixed effect columns |
+| `--cluster <CLUSTER>...` | Cluster the standard errors by one or two columns (fixest's default small-sample correction; p-values on the smallest number of clusters minus 1 df); without it the standard errors are HC1 |
 
 #### `p2a panel feglm`
 

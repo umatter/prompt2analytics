@@ -2108,7 +2108,7 @@ pub struct ClusteredOptions {
 /// reported. With `fix` the covariance is rebuilt as `Q max(Λ, 0) Q'` whenever an eigenvalue
 /// is negative, rounding-level ones included. Without `fix` a reported covariance is
 /// indefinite: the caller withholds the Wald F, which the warning says.
-fn twoway_psd_check(vcov: &mut Array2<f64>, fix: bool) -> EconResult<Option<String>> {
+pub(crate) fn twoway_psd_check(vcov: &mut Array2<f64>, fix: bool) -> EconResult<Option<String>> {
     let sym = (&*vcov + &vcov.t()) * 0.5;
     // A Cholesky factorisation with positive pivots shows the covariance is positive
     // definite, so without `fix` the eigenvalues are not needed (they are with `fix`, which

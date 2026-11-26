@@ -7,8 +7,17 @@ alternating projections (MAP) and runs OLS on the demeaned data, without dummy v
 
 - Core: `p2a_core::run_hdfe(dataset, y, x, fe_cols, config, se_type)`; MCP tool:
   `panel_hdfe`.
-- `se_type` (`CovarianceType`): `Standard` (iid) or HC0-HC3; HC1 uses `n / df_resid`. There
-  is no cluster option.
+- `se_type` (`CovarianceType`): `Standard` (iid) or HC0-HC3; HC1 uses `n / df_resid`.
+- `config.cluster`: one or two columns to cluster by (MCP `cluster`, CLI `--cluster`), which
+  replaces `se_type`. The covariance is fixest's `feols(vcov = ~c1 + c2)` with its default
+  `ssc()`: `(n - 1)/(n - K) * G/(G - 1) * B M B`, `M` the sum over clusters of the outer
+  products of the cluster score sums (two-way `M1 + M2 - M12`), `G` the smallest number of
+  clusters (`G.df = "min"`), and `K` the slopes plus the levels less one of each fixed
+  effect not nested in a cluster column, plus 1 (`K.fixef = "nonnested"`; 22 for firm +
+  year effects clustered by firm). t tests use `G - 1` degrees of freedom (`t.df = "min"`).
+  A two-way covariance that is not positive semi-definite has its negative eigenvalues set
+  to 0 with a warning (fixest's `vcov_fix = TRUE`). Rows with a missing cluster id are
+  dropped.
 - `config` (`HdfeConfig`): tolerance (relative, default 1e-8), iteration limit (default
   10000) and acceleration of the MAP; invalid controls and non-finite data are refused.
 - Degrees of freedom: `df_resid = n - K - (sum of levels - redundant levels)`.
@@ -27,6 +36,8 @@ r2(h, "wr2"); fitstat(h, "wf")
 summary(plm(inv ~ value + capital, data = pdata.frame(g, index = c("firm", "year")),
             model = "within", effect = "twoways"))$r.squared["adjrsq"]
 feols(inv ~ value + capital | firm, g, vcov = "iid")   # firm effects only
+summary(h, vcov = ~firm); summary(h, vcov = ~year); summary(h, vcov = ~firm + year)
+summary(feols(inv ~ value + capital | firm, g), vcov = ~year)
 ```
 
 ## Pinned values (R, 12 significant digits; the case file holds 17)
@@ -38,7 +49,14 @@ feols(inv ~ value + capital | firm, g, vcov = "iid")   # firm effects only
 | SE hetero (HC1) | 0.0191799205213 | 0.0544026642585 |
 | t (HC1) | 6.13745270486 | 6.57902104523 |
 | p (HC1) | 5.78157933598e-09 | 5.69168652956e-10 |
-| SE clustered by firm (not pinned) | 0.0108244294769 | 0.0478483965926 |
+| SE clustered by firm | 0.0108244294769 | 0.0478483965926 |
+| p clustered by firm (t on 9 df) | 1.7726713731e-06 | 3.77027794818e-05 |
+| SE clustered by year | 0.0191638299075 | 0.052539020362 |
+| p clustered by year (t on 19 df) | 6.64246378313e-06 | 1.67059341847e-06 |
+| SE clustered by firm and year | 0.0112657888569 | 0.0451912828896 |
+| p clustered by firm and year (t on 9 df) | 2.47971688265e-06 | 2.3982595382e-05 |
+| SE firm only, clustered by year | 0.0173279151804 | 0.0322788808308 |
+| p firm only, clustered by year | 4.25794976731e-06 | 1.00193047219e-08 |
 | coefficient (firm only) | 0.110123804121 | 0.3100653413 |
 | SE iid (firm only) | 0.011856694214 | 0.0173545027756 |
 
@@ -66,6 +84,12 @@ feols(inv ~ value + capital | firm, g, vcov = "iid")   # firm effects only
     against fixest's `hetero`.
   - `econometrics::hdfe::tests::test_validate_hdfe_grunfeld_firm_only`: firm effects only,
     coefficients and iid SEs (the one-way within estimator).
+  - `econometrics::hdfe::tests::test_validate_hdfe_grunfeld_clustered`: clustered SEs and
+    p-values, one-way by firm and by year, two-way by firm and year, and the firm-only model
+    by year (no effect nested), with the cluster counts and the t degrees of freedom.
+  - Through the tool and the CLI: `p2a-mcp::tier2::wp08_iv_panel::test_validate_mcp_panel_hdfe_clustered`
+    (one- and two-way, printed SEs and p-values) and
+    `p2a-cli::tier3::wp60_models::test_validate_cli_panel_hdfe_cluster` (by firm, JSON).
 - R-pinned HC0-HC3 (registered as method `hdfe_hc_leverage` in
   `validation/methods/econ_panel_t4.json`, case `hdfe_hc_leverage`):
   `econometrics::hdfe::tests::test_validate_hdfe_hc_leverage_grunfeld` (firm and firm + year),
@@ -420,7 +444,6 @@ The four hardware threads are two physical cores, so the parallel demeaning gain
 
 - The adjusted within R-squared follows plm (0.6704668484), not fixest's `war2`
   (0.7168333220), which uses a different degrees-of-freedom convention.
-- No cluster option, so fixest's firm-clustered SEs are not compared.
 - HC2 and HC3 need at most two fixed effects, the smaller with at most 1,000 levels.
 
 ## How to run

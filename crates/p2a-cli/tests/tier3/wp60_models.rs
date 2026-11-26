@@ -904,6 +904,47 @@ fn test_validate_cli_panel_absorbed_regressors() {
     assert!(v["iterations"].as_u64().unwrap() >= 1);
 }
 
+/// `panel hdfe --cluster` gives fixest's cluster-robust SEs and p-values on G - 1 df.
+#[test]
+fn test_validate_cli_panel_hdfe_cluster() {
+    let case = Case::load("panel_hdfe_grunfeld");
+    let s = temp_session();
+    let name = s.load(&case);
+    let args = [
+        "panel",
+        "hdfe",
+        &name,
+        "-y",
+        "inv",
+        "-x",
+        "value",
+        "capital",
+        "--fe",
+        "firm",
+        "year",
+        "--cluster",
+        "firm",
+    ];
+    let v = s.json(&args);
+    let t = json_table(&v, "t_value");
+    let p: Vec<f64> = v["coefficients"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["p_value"].as_f64().unwrap())
+        .collect();
+    Check::new(&case)
+        .named("se_cluster_firm", &t.names, &t.se, Tol::se(200))
+        .named("p_cluster_firm", &t.names, &p, Tol::p_value(200))
+        .finish();
+    assert_eq!(v["se_type"], "cluster:firm");
+    let text = s.ok(&args);
+    assert!(
+        text.contains("clustered by firm (G = 10); t on 9 df"),
+        "{text}"
+    );
+}
+
 // =================================================================================================
 // Regression
 // =================================================================================================

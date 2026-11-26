@@ -510,7 +510,7 @@ impl AnalyticsServer {
 
     /// Run High-Dimensional Fixed Effects regression with multiple absorbed FE.
     #[tool(
-        description = "Run High-Dimensional Fixed Effects (HDFE) regression with multiple absorbed fixed effects (e.g., firm + year + industry). Uses the Method of Alternating Projections (MAP) for efficient estimation. Equivalent to R's lfe::felm() or Stata's reghdfe. tolerance is relative: ||delta|| / ||x|| (fixest); se_type 'hc1' (default), 'standard', 'hc0', 'hc2' or 'hc3'."
+        description = "Run High-Dimensional Fixed Effects (HDFE) regression with multiple absorbed fixed effects (e.g., firm + year + industry). Uses the Method of Alternating Projections (MAP) for efficient estimation. Equivalent to R's lfe::felm() or Stata's reghdfe. tolerance is relative: ||delta|| / ||x|| (fixest); se_type 'hc1' (default), 'standard', 'hc0', 'hc2' or 'hc3'; cluster = ['firm'] (or two columns) for cluster-robust SEs as fixest."
     )]
     pub async fn panel_hdfe(
         &self,
@@ -528,6 +528,7 @@ impl AnalyticsServer {
         config.tolerance = request.tolerance.unwrap_or(1e-8);
         config.max_iterations = request.max_iterations.unwrap_or(10000);
         config.accelerate = true;
+        config.cluster = request.cluster.clone().unwrap_or_default();
 
         let cov_type =
             match parse_option::<CovarianceType>(request.se_type.as_deref(), CovarianceType::HC1) {
