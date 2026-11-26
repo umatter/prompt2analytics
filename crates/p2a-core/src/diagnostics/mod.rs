@@ -10,7 +10,8 @@
 //!   overidentification tests (Sargan/Hansen J)
 //! - **Difference-in-Differences**: Parallel pre-trends tests
 //! - **Matching/IPW**: Positivity violations, extreme weights, covariate balance
-//! - **Regression Discontinuity**: McCrary manipulation test, bandwidth sensitivity
+//! - **Regression Discontinuity**: effective sample size, bandwidth sensitivity, a pointer to the
+//!   density manipulation test (`econometrics::rddensity`)
 //!
 //! # Example
 //!

@@ -1,6 +1,6 @@
 # MCP Tool Usage Examples
 
-Chat-shorthand examples for many of the server's 270 tools
+Chat-shorthand examples for many of the server's 272 tools
 ([docs/mcp/tools-reference.md](../mcp/tools-reference.md) lists all of them, with descriptions generated from the
 tool router). A line `/tool key:value ...` is what you type in the web app's chat box: typing `/` autocompletes a
 tool name, and the message, with the tool and its arguments, goes to the model, which calls the tool. Lists are
@@ -828,6 +828,40 @@ Bandwidth selection for Regression Discontinuity.
 - Optimal bandwidth(s)
 - Number of observations within bandwidth
 
+### rd_plot
+RD plot as `rdrobust::rdplot`: binned means of the outcome on each side of the cutoff and a global polynomial fitted on each side.
+
+```
+/rd_plot dataset:mydata outcome:test_score running_var:age cutoff:65
+/rd_plot dataset:mydata outcome:outcome running_var:score cutoff:0 p:2 nbins:20,20
+```
+
+**Parameters:**
+- `cutoff` (optional): Cutoff, strictly inside the range of the running variable (default: 0)
+- `p` (optional): Order of the global polynomial on each side (default: 4, at most 8)
+- `nbins` (optional): Evenly spaced bins, one value for both sides or two (left, right); by default the number mimics the variance of the outcome (`binselect = "esmv"`, or `"esmvpr"` with many repeated values)
+
+**Output includes:** the chart, the bins per side, the polynomial coefficients and the bins (midpoint, mean, n). The gap between the curves is descriptive; estimate the effect with `rd_estimate`.
+
+### rd_density
+Manipulation test of the running variable's density at the cutoff, as `rddensity::rddensity` (Cattaneo, Jansson & Ma 2020).
+
+```
+/rd_density dataset:mydata running_var:score cutoff:0
+/rd_density dataset:mydata running_var:score cutoff:0 kernel:uniform bwselect:each
+/rd_density dataset:mydata running_var:score cutoff:0 h:0.3,0.4 vce:plugin
+```
+
+**Parameters:**
+- `p` (optional): Order of the density fit for the bandwidths, 1 to 7 (default: 2; the test uses p + 1)
+- `kernel` (optional): `triangular` (default), `epanechnikov` or `uniform`
+- `vce` (optional): `jackknife` (default) or `plugin`
+- `bwselect` (optional): `comb` (default), `each`, `diff` or `sum`
+- `h` (optional): Bandwidth by hand, one value or two (left, right)
+- `mass_points` (optional): Treat repeated values as mass points (default: true)
+
+**Output includes:** the densities left and right of the cutoff with standard errors, their difference, T and its p-value, the bandwidths and observations used, and binomial tests in ten windows around the cutoff.
+
 ### rd_fuzzy
 Fuzzy Regression Discontinuity (LATE estimation via Wald estimator).
 
@@ -1532,7 +1566,10 @@ Scatter plot with correlation coefficient.
 
 ```
 /viz_scatter dataset:housing x_column:sqft y_column:price
+/viz_scatter dataset:lalonde x_column:age y_column:re78 group_column:treat
 ```
+
+`group_column` gives each group its own colour and marker shape (at most 12 groups).
 
 ### viz_line
 Time series or multi-series line chart.
@@ -1550,7 +1587,10 @@ Box plots for comparing distributions.
 
 ```
 /viz_boxplot dataset:survey columns:income,spending,savings
+/viz_boxplot dataset:lalonde columns:re78 group_column:treat
 ```
+
+With `group_column`, one column is split into one box per group, as R's `boxplot(y ~ group)` (at most 30 groups).
 
 ### viz_heatmap
 Correlation heatmap.

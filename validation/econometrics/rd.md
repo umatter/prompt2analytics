@@ -414,6 +414,53 @@ ten names), and the `scaleregul` request fields and flags arrive with WP55/WP61.
 `rd_multi` and CLI `fuzzy-rd` select with `mserd`, and every selection uses `scaleregul = 1`
 outside the library.
 
+## RD plot (`rd_plot`)
+
+`p2a_core::econometrics::rdplot` draws the RD plot of `rdrobust::rdplot` 4.0.0 with its
+defaults: means of the outcome in evenly spaced bins on each side of the cutoff, and a global
+polynomial of order `p` (4) fitted on each side over the whole range with a uniform kernel.
+The number of bins mimics the variance of the outcome (`binselect = "esmv"`):
+`J = ceiling(var(y) / V * n / log(n)^2)` with the spacings estimator `V`; when at least 20 % of
+a side's observations repeat (`masspoints = "adjust"`) `V` comes from global quartic fits of
+`y` and `y^2` (`"esmvpr"`). `nbins` sets the bins by hand. Observations at the cutoff are on
+the right; empty bins are left out.
+
+R-pinned (registry `rd_plot`, case `rdplot_sim` on `rd_sim.csv`): J, N, the coefficients, the
+bins (midpoints, breaks, means of x and y, counts) and the curve, for the defaults, the mass
+points of `xm`, `nbins = c(10, 12)`, `p = 2` and a cutoff of 0.2. Tests:
+`test_validate_rdplot_sim` (every quantity) and `test_validate_mcp_rd_plot_sim` (the tool's
+text, image and `nbins`).
+
+Deviation (APP-12): R's `seq()` can stop one rounding step short of `max(x)`, so rdplot puts
+`max(x)` into an extra bin with no break and no midpoint, which it does not draw. p2a closes
+the last bin at `max(x)`. The case records rdplot's raw bin count and the bins with each such
+bin merged into the one before it; the tests compare against the merged bins.
+
+Not supported: `covs`, `weights`, `h`, `kernel`, `support`, `scale`, `ci`, `shade` and the
+quantile-spaced selectors.
+
+## Density manipulation test (`rd_density`)
+
+`p2a_core::econometrics::rddensity` is the test of `rddensity::rddensity` 3.0 (Cattaneo,
+Jansson & Ma 2020): the densities just left and right of the cutoff are the slopes of local
+polynomial fits of the empirical CDF on each side (`fitselect = "unrestricted"`), and T is
+their difference over its standard error. Defaults as rddensity: `p = 2` for the bandwidths
+and `q = 3` for the test, triangular kernel, jackknife variance, bandwidths from
+`rdbwdensity` with `bwselect = "comb"`, regularised to at least 20 + p + 1 observations and
+distinct values per side, ties treated as mass points, and binomial tests in ten windows
+around the cutoff. The kernel moment integrals are evaluated exactly (rddensity integrates
+numerically).
+
+R-pinned (registry `rd_density`, case `rddensity_sim`, 1,500 draws with a sorted copy `s` and a
+0.01 grid `xm`): the bandwidths and rdbwdensity's four, N and effective N, the densities, SEs,
+T, p and the binomial windows, counts and p-values, for the defaults, mass points, sorting,
+the uniform and Epanechnikov kernels, the plug-in variance, `bwselect` each, diff and sum,
+`p = 1`, `h = c(0.3, 0.4)` and a cutoff of 0.2. Tests: `test_validate_rddensity_sim` and
+`test_validate_mcp_rd_density_sim`.
+
+Not supported: the restricted model, `all = TRUE` and the binomial-window options.
+`rd_estimate`'s identification notes point to this test (`MANIPULATION_TEST_SEPARATE`).
+
 ## Limits
 
 - No covariates, clusters, weights or derivatives (`deriv`), in the estimator or the selector.

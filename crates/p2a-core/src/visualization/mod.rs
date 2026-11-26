@@ -26,9 +26,10 @@ mod vector;
 
 pub use charts::{
     Band, BoxPlotResult, ChartConfig, CoefficientPlotResult, DendrogramResult, EventStudyResult,
-    HistogramResult, IrfPlotResult, LineChartResult, ResidualDiagnosticsResult, ScatterResult,
-    box_plot, coefficient_plot, dendrogram, event_study_plot, histogram, irf_plot, line_chart,
-    line_chart_with_band, residual_diagnostics, scatter_plot,
+    HistogramResult, IrfPlotResult, LineChartResult, MAX_SCATTER_GROUPS, RdPlotChart,
+    ResidualDiagnosticsResult, ScatterResult, box_plot, coefficient_plot, dendrogram,
+    event_study_plot, histogram, irf_plot, line_chart, line_chart_with_band, rd_plot_chart,
+    residual_diagnostics, scatter_plot, scatter_plot_grouped,
 };
 pub use colors::{
     BRAND_BLUE, BRAND_MAGENTA, BRAND_OCHRE, BRAND_ORANGE, BRAND_PURPLE, BRAND_SLATE, BRAND_TEAL,

@@ -89,6 +89,65 @@
         }
       ],
       "supersedes_legacy": []
+    },
+    {
+      "id": "rd_plot",
+      "name": "RD plot: variance-mimicking evenly spaced bins (esmv, esmvpr under mass points) or bins by hand, binned means and the global polynomial on each side",
+      "category": "econometrics",
+      "reference": "rdrobust::rdplot(y, x, c, p, nbins) 4.0.0 (binselect = 'esmv', masspoints = 'adjust', kernel = 'uni')",
+      "doc": "validation/econometrics/rd.md",
+      "cases": [
+        "rdplot_sim"
+      ],
+      "tests": [
+        "p2a-core::econometrics::rdplot::tests::test_validate_rdplot_sim",
+        "p2a-mcp::tools::handlers::causal::tests::test_validate_mcp_rd_plot_sim"
+      ],
+      "quantities": [
+        "bins per side J",
+        "N left and right",
+        "polynomial coefficients left and right",
+        "bin midpoints, lower and upper breaks",
+        "bin means of x and y",
+        "bin counts",
+        "polynomial curve at six points",
+        "defaults, mass points, nbins, p = 2, cutoff 0.2"
+      ],
+      "tolerance": "validation/README.md, n = 1000: coefficients and means 1e-8 relative, counts and J exact",
+      "deviations": [
+        {
+          "finding": "APP-12",
+          "quantity": "the last bin of a side",
+          "note": "R's seq() can stop one rounding step short of max(x), so rdplot puts max(x) into an extra bin with no break and no midpoint (4 of the 5 settings of rdplot_sim); p2a closes the last bin at max(x), and the case compares the bins with each such bin merged into the one before it"
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "rd_density",
+      "name": "RD manipulation test: local polynomial density estimates left and right of the cutoff (unrestricted), jackknife or plug-in variance, rdbwdensity bandwidths, binomial windows",
+      "category": "econometrics",
+      "reference": "rddensity::rddensity(X, c, p, kernel, vce, bwselect, h) and rddensity::rdbwdensity 3.0",
+      "doc": "validation/econometrics/rd.md",
+      "cases": [
+        "rddensity_sim"
+      ],
+      "tests": [
+        "p2a-core::econometrics::rddensity::tests::test_validate_rddensity_sim",
+        "p2a-mcp::tools::handlers::causal::tests::test_validate_mcp_rd_density_sim"
+      ],
+      "quantities": [
+        "bandwidths used and rdbwdensity's four bandwidths",
+        "N and effective N left and right",
+        "densities left, right and their difference",
+        "standard errors (jackknife, plug-in)",
+        "T and p",
+        "binomial windows, counts and p-values",
+        "defaults, mass points, sorting, three kernels, four bwselect, p = 1, h given, cutoff 0.2"
+      ],
+      "tolerance": "validation/README.md, n = 1500: coefficients and bandwidths 1e-10, SE and statistics 1e-8 relative, p-values 1e-8 relative + 1e-12 absolute, counts exact; observed agreement <= 1e-11",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

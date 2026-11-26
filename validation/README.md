@@ -390,6 +390,8 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Extended TWFE (etwfe::etwfe + emfx) | [etwfe.md](econometrics/etwfe.md) | R-pinned, known deviations (CAUS-14) |
 | Regression Discontinuity (Sharp) | [rd.md](econometrics/rd.md) | R-pinned, known deviations (CAUS-28) |
 | Regression Discontinuity (Fuzzy) | [rd.md](econometrics/rd.md) | R-pinned, known deviations (CAUS-28) |
+| RD plot (rdrobust::rdplot) | [rd.md](econometrics/rd.md) | R-pinned, known deviations (APP-12) |
+| RD density manipulation test (rddensity) | [rd.md](econometrics/rd.md) | R-pinned |
 | IPW Treatment Effects | [treatment_ipw.md](econometrics/treatment_ipw.md) | R-pinned |
 | Doubly Robust (AIPW) | [treatment_aipw.md](econometrics/treatment_aipw.md) | R-pinned |
 | TMLE | [tmle.md](econometrics/tmle.md) | R-pinned |

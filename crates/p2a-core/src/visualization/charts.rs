@@ -306,21 +306,52 @@ pub fn scatter_plot(
             y.len()
         )));
     }
+    scatter_plot_grouped(&[(String::new(), x.to_vec(), y.to_vec())], config)
+}
 
-    if x.is_empty() {
+/// At most this many groups in one scatter plot: each has its own colour and marker
+/// shape (six colours times four shapes repeat only after twelve).
+pub const MAX_SCATTER_GROUPS: usize = 12;
+
+/// A scatter plot of several groups of points, `(label, x, y)` each, with a legend when
+/// there is more than one. Group `i` has colour `i mod 6` of the palette and marker shape
+/// `i mod 4` (circle, triangle, square, cross), so groups differ in shape as well as
+/// colour up to [`MAX_SCATTER_GROUPS`]. Pairs with a non-finite value are left out; the
+/// correlation is over every plotted point.
+pub fn scatter_plot_grouped(
+    groups: &[(String, Vec<f64>, Vec<f64>)],
+    config: ChartConfig,
+) -> Result<ScatterResult, VisualizationError> {
+    if groups.len() > MAX_SCATTER_GROUPS {
+        return Err(VisualizationError::InvalidData(format!(
+            "{} groups are too many to tell apart (at most {MAX_SCATTER_GROUPS})",
+            groups.len()
+        )));
+    }
+    let mut sets: Vec<(&str, Vec<(f64, f64)>)> = Vec::with_capacity(groups.len());
+    for (label, x, y) in groups {
+        if x.len() != y.len() {
+            return Err(VisualizationError::InvalidData(format!(
+                "X and Y must have same length: {} vs {}",
+                x.len(),
+                y.len()
+            )));
+        }
+        let points = x
+            .iter()
+            .zip(y)
+            .filter(|(xi, yi)| xi.is_finite() && yi.is_finite())
+            .map(|(xi, yi)| (*xi, *yi))
+            .collect();
+        sets.push((label.as_str(), points));
+    }
+
+    if groups.iter().all(|(_, x, _)| x.is_empty()) {
         return Err(VisualizationError::InvalidData(
             "Empty data arrays".to_string(),
         ));
     }
-
-    // Filter out pairs with NaN
-    let points: Vec<(f64, f64)> = x
-        .iter()
-        .zip(y.iter())
-        .filter(|(xi, yi)| xi.is_finite() && yi.is_finite())
-        .map(|(xi, yi)| (*xi, *yi))
-        .collect();
-
+    let points: Vec<(f64, f64)> = sets.iter().flat_map(|(_, p)| p.iter().copied()).collect();
     if points.is_empty() {
         return Err(VisualizationError::InvalidData(
             "No finite value pairs".to_string(),
@@ -345,6 +376,7 @@ pub fn scatter_plot(
     // Create image buffer
     let mut buffer = rgb_buffer(config.width, config.height)?;
     let mut recorder = SvgRecorder::new(config.width, config.height);
+    let several = sets.len() > 1;
 
     {
         let root = FigureBackend::new(&mut buffer, &mut recorder, (config.width, config.height))
@@ -374,14 +406,75 @@ pub fn scatter_plot(
             .draw()
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
-        // Draw points
-        chart
-            .draw_series(
-                points.iter().map(|(xi, yi)| {
-                    Circle::new((*xi, *yi), 4, DEFAULT_SERIES_COLOR.mix(0.7).filled())
-                }),
-            )
-            .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+        let plot_err =
+            |e: DrawingAreaErrorKind<_>| VisualizationError::PlottingError(e.to_string());
+        for (idx, (label, pts)) in sets.iter().enumerate() {
+            let color = if several {
+                CHART_PALETTE[idx % CHART_PALETTE.len()]
+            } else {
+                DEFAULT_SERIES_COLOR
+            };
+            let style = color.mix(0.7).filled();
+            let stroke = color.stroke_width(2);
+            let label = label.to_string();
+            match idx % 4 {
+                0 => {
+                    let drawn = chart
+                        .draw_series(pts.iter().map(|p| Circle::new(*p, 4, style)))
+                        .map_err(plot_err)?;
+                    if several {
+                        drawn
+                            .label(label)
+                            .legend(move |(x, y)| Circle::new((x + 10, y), 4, style));
+                    }
+                }
+                1 => {
+                    chart
+                        .draw_series(pts.iter().map(|p| TriangleMarker::new(*p, 5, style)))
+                        .map_err(plot_err)?
+                        .label(label)
+                        .legend(move |(x, y)| TriangleMarker::new((x + 10, y), 5, style));
+                }
+                2 => {
+                    chart
+                        .draw_series(pts.iter().map(|p| {
+                            EmptyElement::at(*p) + Rectangle::new([(-4, -4), (4, 4)], style)
+                        }))
+                        .map_err(plot_err)?
+                        .label(label)
+                        .legend(move |(x, y)| {
+                            Rectangle::new([(x + 6, y - 4), (x + 14, y + 4)], style)
+                        });
+                }
+                _ => {
+                    chart
+                        .draw_series(pts.iter().map(|p| Cross::new(*p, 4, stroke)))
+                        .map_err(plot_err)?
+                        .label(label)
+                        .legend(move |(x, y)| Cross::new((x + 10, y), 4, stroke));
+                }
+            }
+        }
+
+        if several {
+            let series: Vec<(String, Vec<f64>, Vec<f64>)> = sets
+                .iter()
+                .map(|(l, p)| {
+                    (
+                        l.to_string(),
+                        p.iter().map(|q| q.0).collect(),
+                        p.iter().map(|q| q.1).collect(),
+                    )
+                })
+                .collect();
+            chart
+                .configure_series_labels()
+                .position(emptiest_corner(&series, (x_min, x_max), (y_min, y_max)))
+                .background_style(WHITE.mix(0.8))
+                .border_style(BLACK)
+                .draw()
+                .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+        }
 
         root.present()
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
@@ -396,6 +489,95 @@ pub fn scatter_plot(
         n_points: points.len(),
         correlation,
     })
+}
+
+/// Result of an RD plot chart.
+pub struct RdPlotChart {
+    /// Base64-encoded PNG image
+    pub image_base64: String,
+    /// Vector version of the image (SVG); None when it would be larger than
+    /// [`MAX_SVG_BYTES`](super::MAX_SVG_BYTES)
+    pub svg: Option<String>,
+}
+
+/// The chart of an RD plot (as `rdrobust::rdplot` draws it): binned means as dots at their
+/// bins' midpoints, the fitted polynomial of each side as a line, and a vertical line at the
+/// cutoff. `bins` are `(midpoint, mean)` pairs; non-finite pairs are left out.
+pub fn rd_plot_chart(
+    bins: &[(f64, f64)],
+    curve_left: &[(f64, f64)],
+    curve_right: &[(f64, f64)],
+    cutoff: f64,
+    config: ChartConfig,
+) -> Result<RdPlotChart, VisualizationError> {
+    let finite = |p: &&(f64, f64)| p.0.is_finite() && p.1.is_finite();
+    let dots: Vec<(f64, f64)> = bins.iter().filter(finite).copied().collect();
+    let left: Vec<(f64, f64)> = curve_left.iter().filter(finite).copied().collect();
+    let right: Vec<(f64, f64)> = curve_right.iter().filter(finite).copied().collect();
+    let all = || dots.iter().chain(&left).chain(&right);
+    if dots.is_empty() {
+        return Err(VisualizationError::InvalidData(
+            "No finite binned means".to_string(),
+        ));
+    }
+    let x_min = all().map(|p| p.0).fold(cutoff, f64::min);
+    let x_max = all().map(|p| p.0).fold(cutoff, f64::max);
+    let y_min = all().map(|p| p.1).fold(f64::INFINITY, f64::min);
+    let y_max = all().map(|p| p.1).fold(f64::NEG_INFINITY, f64::max);
+    let x_pad = (x_max - x_min).max(0.1) * 0.03;
+    let y_pad = (y_max - y_min).max(0.1) * 0.05;
+    let x_range = checked_axis_range(x_min - x_pad, x_max + x_pad, "x")?;
+    let y_range = checked_axis_range(y_min - y_pad, y_max + y_pad, "y")?;
+
+    let mut buffer = rgb_buffer(config.width, config.height)?;
+    let mut recorder = SvgRecorder::new(config.width, config.height);
+    {
+        let root = FigureBackend::new(&mut buffer, &mut recorder, (config.width, config.height))
+            .into_drawing_area();
+        root.fill(&WHITE)
+            .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+        let title = config.title.as_deref().unwrap_or("RD Plot");
+        let caption = fitted_caption(title, config.width, config.title_font_size);
+        let mut chart = ChartBuilder::on(&root)
+            .caption(&caption.0, ("sans-serif", caption.1))
+            .margin(10)
+            .x_label_area_size(40)
+            .y_label_area_size(y_label_area(&y_range, 50, config.tick_font_size))
+            .build_cartesian_2d(x_range, y_range.clone())
+            .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+        chart
+            .configure_mesh()
+            .x_desc(config.x_label.as_deref().unwrap_or("X"))
+            .y_desc(config.y_label.as_deref().unwrap_or("Y"))
+            .label_style(("sans-serif", config.tick_font_size))
+            .axis_desc_style(("sans-serif", config.label_font_size))
+            .draw()
+            .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+        let plot_err =
+            |e: DrawingAreaErrorKind<_>| VisualizationError::PlottingError(e.to_string());
+        chart
+            .draw_series(std::iter::once(PathElement::new(
+                vec![(cutoff, y_range.start), (cutoff, y_range.end)],
+                BLACK.stroke_width(1),
+            )))
+            .map_err(plot_err)?;
+        for curve in [left, right] {
+            chart
+                .draw_series(LineSeries::new(curve, TREND_LINE_COLOR.stroke_width(2)))
+                .map_err(plot_err)?;
+        }
+        chart
+            .draw_series(
+                dots.iter()
+                    .map(|p| Circle::new(*p, 4, DEFAULT_SERIES_COLOR.mix(0.85).filled())),
+            )
+            .map_err(plot_err)?;
+        root.present()
+            .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+    }
+    let image_base64 = encode_rgb_to_png_base64(&buffer, config.width, config.height)?;
+    let svg = recorder.finish();
+    Ok(RdPlotChart { image_base64, svg })
 }
 
 /// Result of box plot generation.
@@ -515,12 +697,14 @@ pub fn box_plot(
         let y_label = config.y_label.as_deref().unwrap_or("Value");
 
         let labels: Vec<String> = statistics.iter().map(|s| s.label.clone()).collect();
+        // An x title (the group column of a grouped box plot) needs room under the labels.
+        let x_label = config.x_label.as_deref().unwrap_or("");
 
         let caption = fitted_caption(title, config.width, config.title_font_size);
         let mut chart = ChartBuilder::on(&root)
             .caption(&caption.0, ("sans-serif", caption.1))
             .margin(10)
-            .x_label_area_size(40)
+            .x_label_area_size(if x_label.is_empty() { 40 } else { 55 })
             .y_label_area_size(y_label_area(&y_range, 50, config.tick_font_size))
             .build_cartesian_2d(x_range, y_range)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
@@ -528,6 +712,7 @@ pub fn box_plot(
         chart
             .configure_mesh()
             .y_desc(y_label)
+            .x_desc(x_label)
             .x_labels(labels.len())
             .x_label_formatter(&|x| category_label(&labels, *x))
             .draw()
@@ -2833,6 +3018,39 @@ fn y_label_area<T: Copy + Into<f64>>(range: &std::ops::Range<T>, base: u32, tick
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An RD plot chart draws; without binned means it is refused.
+    #[test]
+    fn rd_plot_chart_draws_and_needs_bins() {
+        let curve: Vec<(f64, f64)> = (0..50).map(|i| (-1.0 + f64::from(i) / 49.0, 0.1)).collect();
+        let right: Vec<(f64, f64)> = curve.iter().map(|(x, y)| (-x, y + 0.5)).collect();
+        let bins = [(-0.5, 0.2), (0.5, 0.7)];
+        assert!(rd_plot_chart(&bins, &curve, &right, 0.0, ChartConfig::default()).is_ok());
+        assert!(rd_plot_chart(&[], &curve, &right, 0.0, ChartConfig::default()).is_err());
+    }
+
+    /// Groups are drawn with a legend, counted together, and refused past twelve.
+    #[test]
+    fn grouped_scatter_counts_all_groups_and_caps_them() {
+        let group = |label: &str, shift: f64| {
+            let x: Vec<f64> = (0..20).map(f64::from).collect();
+            let y = x
+                .iter()
+                .map(|v| v * 0.5 + shift + (v * 1.7).sin())
+                .collect();
+            (label.to_string(), x, y)
+        };
+        let groups: Vec<_> = (0..5)
+            .map(|i| group(&format!("g{i}"), f64::from(i)))
+            .collect();
+        let result = scatter_plot_grouped(&groups, ChartConfig::default()).unwrap();
+        assert_eq!(result.n_points, 100);
+        assert!(result.svg.as_deref().is_some_and(|s| s.contains("g4")));
+        let one = scatter_plot(&groups[0].1, &groups[0].2, ChartConfig::default()).unwrap();
+        assert_eq!(one.n_points, 20);
+        let many: Vec<_> = (0..13).map(|i| group(&format!("g{i}"), 0.0)).collect();
+        assert!(scatter_plot_grouped(&many, ChartConfig::default()).is_err());
+    }
 
     #[test]
     fn long_titles_shrink_then_are_cut() {

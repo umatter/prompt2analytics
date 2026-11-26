@@ -1159,6 +1159,8 @@ impl AnalyticsServer {
         dispatch!("gsynth" => GsynthRequest => gsynth);
         dispatch!("scpi" => ScpiRequest => scpi);
         dispatch!("rd_estimate" => RdEstimateRequest => rd_estimate);
+        dispatch!("rd_density" => RdDensityRequest => rd_density);
+        dispatch!("rd_plot" => RdPlotRequest => rd_plot);
         dispatch!("rd_bw" => RdBandwidthRequest => rd_bw);
         dispatch!("rd_fuzzy" => FuzzyRdRequest => rd_fuzzy);
         dispatch!("rd_multi" => RdMultiRequest => rd_multi);

@@ -45,6 +45,8 @@ pub const TIER1_TOOLS: &[&str] = &[
     "etwfe",
     "bacon_decomp",
     "rd_estimate",
+    "rd_plot",
+    "rd_density",
     "rd_bw",
     "rd_fuzzy",
     "synthetic_control",

@@ -177,7 +177,8 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/shapiro_cases.csv` | 5000 × 18 (id and 17 sample columns n3_124 ... n5000_rnorm, each padded with NA to 5000 rows; n3_124, n3_123, n25_int read as Int64) | `stat_shapiro_wilk` | `r/cases/stats_onesample.R` | seed 42; `qnorm(ppoints(100))` for `n100_qnorm` |
 | `generated/two_sample_na.csv` | 22 × 8 (id, x, y, xi, yi, g, mi, mj; xi, yi, mi, mj Int64 with NA, g text with one NA) | `stat_two_sample_na`; read by `cli_stat_descriptive_na` | `r/cases/stats_onesample.R`; read by `r/cases/cli_stats.R` | fixed x, y; seed 3 (xi, yi), seed 17 (mi, mj) |
 | `generated/pairwise_mahalanobis_na.csv` | 30 × 5 (id, y, g, a, b; y Int64 with NA in rows 4 and 18, a NA in row 7) | `stat_pairwise_mahalanobis_na` | `r/cases/stats_onesample.R` | seed 9 |
-| `generated/rd_sim.csv` | 1000 × 6 (x, y, d, yf, xm, ym) | `rd_sharp_fixed_bw`, `rd_mass_points_nn`, `rd_fuzzy_fixed_bw` | `r/cases/causal_rd.R` | seed 42, cutoff 0, fuzzy take-up 0.2/0.8, x on a 0.01 grid in xm |
+| `generated/rd_sim.csv` | 1000 × 6 (x, y, d, yf, xm, ym) | `rd_sharp_fixed_bw`, `rd_mass_points_nn`, `rd_fuzzy_fixed_bw`, `rdplot_sim` | `r/cases/causal_rd.R` | seed 42, cutoff 0, fuzzy take-up 0.2/0.8, x on a 0.01 grid in xm |
+| `generated/rddensity_sim.csv` | 1500 × 4 (id, x, s, xm) | `rddensity_sim` | `r/cases/causal_rddensity.R` | seed 7, x ~ N(0, 0.5), s moves 30% of the units in (-0.15, 0) above the cutoff, x on a 0.01 grid in xm |
 | `generated/iv_weak_controls.csv` | 500 × 5 (y, x, w, z1, z2) | `iv_weak_controls` | `r/cases/econ_iv.R` | seed 20261021 |
 | `generated/iv_two_endog.csv` | 400 × 8 (y, x1, x2, w1, w2, z1, z2, z3) | `iv_two_endog` | `r/cases/econ_iv.R` | seed 77 |
 | `generated/iv_no_controls.csv` | 300 × 4 (y, x, z1, z2) | `iv_no_controls` | `r/cases/econ_iv.R` | seed 5 |

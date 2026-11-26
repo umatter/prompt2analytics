@@ -11,7 +11,7 @@
 
 A comprehensive analytics toolkit exposing econometrics, machine learning, and visualization capabilities through multiple interfaces:
 - **CLI (`p2a`)**: Direct command-line execution for scripted workflows
-- **MCP Server**: Model Context Protocol integration for AI assistants (270 tools)
+- **MCP Server**: Model Context Protocol integration for AI assistants (272 tools)
 - **Dioxus App**: Cross-platform frontend (web, desktop) with LLM-powered natural language analysis
 
 **🌐 Live demo (bring your own key):** [p2a.qamelab.org](https://p2a.qamelab.org) — the hosted web app. You supply your own LLM API key in the browser; it is never stored server-side. This is a small **demo deployment**: it runs on a modest single instance (limited performance) and accepts uploaded files of up to about 1.5 MB (larger ones are refused with HTTP 413), so expect slower responses and use small datasets. Each tool call stops after 60 seconds, each session holds up to about 200 MB of data and runs one request at a time, and other large or costly requests are refused with a message that names the limit and what to make smaller. For full performance and large data, run the desktop app or self-host the backend container `ghcr.io/umatter/prompt2analytics/backend` (see [docs/guides/DEPLOYMENT.md](docs/guides/DEPLOYMENT.md)).
@@ -422,7 +422,7 @@ p2a script run analysis.sh
 
 ### MCP Server
 
-The MCP server exposes 270 analytics tools via the Model Context Protocol. Configure it in your MCP client (e.g., Claude Desktop):
+The MCP server exposes 272 analytics tools via the Model Context Protocol. Configure it in your MCP client (e.g., Claude Desktop):
 
 ```json
 {
@@ -496,7 +496,7 @@ prompt2analytics/
 │   │   ├── linalg/        # Matrix operations (via faer)
 │   │   └── traits/        # LinearEstimator trait
 │   ├── p2a-cli/           # CLI binary (`p2a`)
-│   ├── p2a-mcp/           # MCP server (270 tools)
+│   ├── p2a-mcp/           # MCP server (272 tools)
 │   │   └── db/            # SurrealDB persistence layer
 │   └── p2a-dioxus/        # Cross-platform Dioxus app
 │       ├── api/           # HTTP client and SSE streaming
@@ -516,7 +516,7 @@ prompt2analytics/
 ## MCP Tools
 
 <!-- BEGIN GENERATED: MCP tool table (cargo run -p p2a-mcp --example generate_tool_docs; do not edit by hand) -->
-The server registers 270 tools in a default build (263 without the `database` feature, which CI's feature set leaves out). [docs/mcp/tools-reference.md](docs/mcp/tools-reference.md) describes each one and names its R equivalent.
+The server registers 272 tools in a default build (265 without the `database` feature, which CI's feature set leaves out). [docs/mcp/tools-reference.md](docs/mcp/tools-reference.md) describes each one and names its R equivalent.
 
 | Category | Tools | Names |
 |---|---|---|
@@ -529,7 +529,7 @@ The server registers 270 tools in a default build (263 without the `database` fe
 | Panel | 9 | `hausman_test`, `panel_fixed_effects`, `panel_gls`, `panel_gmm`, `panel_hdfe`, `panel_pmg`, `panel_pvcm`, `panel_random_effects`, `panel_unit_root` |
 | IV | 6 | `bp_bounds`, `gmm_iv`, `iv_2sls`, `iv_first_stage`, `iv_mte`, `iv_sargan_test` |
 | DiD | 7 | `bacon_decomp`, `diff_in_diff`, `etwfe`, `gsynth`, `scpi`, `staggered_did`, `synthetic_control` |
-| RD | 4 | `rd_bw`, `rd_estimate`, `rd_fuzzy`, `rd_multi` |
+| RD | 6 | `rd_bw`, `rd_density`, `rd_estimate`, `rd_fuzzy`, `rd_multi`, `rd_plot` |
 | Matching | 1 | `propensity_matching` |
 | Treatment | 14 | `collaborative_tmle`, `gformula`, `heterogeneity_test`, `ltmle`, `regression_standardization`, `treatment_cbps`, `treatment_double_ml`, `treatment_doubly_robust`, `treatment_entropy_balance`, `treatment_ipw`, `treatment_sbw`, `treatment_tmle`, `treatment_twang`, `treatment_weightit` |
 | Mediation | 2 | `mediation_analysis`, `natural_effects_mediation` |
@@ -541,7 +541,7 @@ The server registers 270 tools in a default build (263 without the `database` fe
 | Visualization | 13 | `viz_boxplot`, `viz_coefficient`, `viz_dendrogram`, `viz_event_study`, `viz_heatmap`, `viz_histogram`, `viz_histogram_interactive`, `viz_irf`, `viz_line`, `viz_line_interactive`, `viz_residual_diagnostics`, `viz_scatter`, `viz_scatter_interactive` |
 | Database | 7 | `db_duckdb_query`, `db_duckdb_schema`, `db_duckdb_tables`, `db_query_file`, `db_sqlite_query`, `db_sqlite_schema`, `db_sqlite_tables` |
 | Utility | 10 | `export_session`, `generate_random_data`, `generate_report`, `get_seed`, `import_session`, `list_tool_categories`, `search_tools`, `server_stats`, `set_seed`, `tool_info` |
-| **Total** | **270** | |
+| **Total** | **272** | |
 <!-- END GENERATED: MCP tool table -->
 
 [docs/mcp/tools-reference.md](docs/mcp/tools-reference.md) describes every tool, and

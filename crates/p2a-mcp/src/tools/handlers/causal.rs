@@ -25,6 +25,9 @@ const MAX_TIME_POINTS: usize = 1_000;
 /// gsynth replicates when the bootstrap is on and `bootstrap_reps` is unset: gsynth's `nboots`.
 const GSYNTH_DEFAULT_BOOTSTRAP: usize = 200;
 
+/// Bins listed in rd_plot's reply; the rest are counted.
+const RD_PLOT_BINS_LISTED: usize = 80;
+
 use crate::server::AnalyticsServer;
 use crate::tools::common::{option_message, parse_choice};
 use crate::tools::requests::causal::{
@@ -32,18 +35,24 @@ use crate::tools::requests::causal::{
     DoublyRobustRequest, EValueRequest, EntropyBalanceRequest, EtwfeRequest, FirstStageRequest,
     FuzzyRdRequest, GFormulaRequest, GeneralGmmIvRequest, GsynthRequest, IV2SLSRequest,
     IVMTERequest, IpwRequest, LtmleRequest, MarginalEffectsRequest, MatchItRequest,
-    MediationRequest, NaturalEffectsRequest, RdBandwidthRequest, RdEstimateRequest, RdMultiRequest,
-    SBWRequest, SarganTestRequest, ScpiRequest, SensemakrRequest, StaggeredDiDRequest,
-    StdRegRequest, SyntheticControlRequest, TmleRequest, TwangRequest, WeightItRequest,
+    MediationRequest, NaturalEffectsRequest, RdBandwidthRequest, RdDensityRequest,
+    RdEstimateRequest, RdMultiRequest, RdPlotRequest, SBWRequest, SarganTestRequest, ScpiRequest,
+    SensemakrRequest, StaggeredDiDRequest, StdRegRequest, SyntheticControlRequest, TmleRequest,
+    TwangRequest, WeightItRequest,
 };
 
-use crate::tools::common::parse_option;
+use crate::tools::common::{chart_content, parse_option};
 use p2a_core::econometrics::rd::rd_bandwidth_with;
+use p2a_core::econometrics::rddensity::{
+    DensityBwSelect, DensityKernel, DensityVce, RdDensityConfig, run_rd_density,
+};
+use p2a_core::econometrics::rdplot::{RdPlotConfig, run_rd_plot};
 use p2a_core::econometrics::staggered_did::BasePeriodType;
 use p2a_core::linalg::design::DesignMatrix;
 use p2a_core::options::Choices;
 use p2a_core::regression::HacKernel;
 use p2a_core::regression::ModelType as MarginalModel;
+use p2a_core::visualization::{ChartConfig, rd_plot_chart};
 use p2a_core::{
     AttEstimationMethod, BPBoundsConfig, BandwidthMethod, CTmleConfig, CTmleQModel, CbpsConfig,
     CbpsMethod, ComparisonGroup, ControlGroup as EtwfeControlGroup, DRMethod, DistanceMethod,
@@ -2230,6 +2239,131 @@ impl AnalyticsServer {
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
+    /// RD density (manipulation) test.
+    #[tool(
+        description = "Manipulation test for a regression discontinuity design, as R's rddensity::rddensity (Cattaneo, Jansson & Ma 2020): estimates the density of the running variable just left and right of the cutoff by local polynomial fits of its empirical CDF and tests whether they differ (T and two-sided p-value; jackknife variance, triangular kernel, bandwidths selected as rdbwdensity with bwselect = 'comb' by default; repeated values treated as mass points). Also reports binomial tests of the counts in ten windows around the cutoff. A small p-value means units may sort around the cutoff, which threatens the RD design. Rows with a missing running variable are dropped and counted."
+    )]
+    pub async fn rd_density(
+        &self,
+        Parameters(request): Parameters<RdDensityRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let kernel = tool_try!(parse_option(
+            request.kernel.as_deref(),
+            DensityKernel::Triangular
+        ));
+        let vce = tool_try!(parse_option(request.vce.as_deref(), DensityVce::Jackknife));
+        let bwselect = tool_try!(parse_option(
+            request.bwselect.as_deref(),
+            DensityBwSelect::Comb
+        ));
+        let h = match request.h.as_deref() {
+            None => None,
+            Some([h]) => Some((*h, *h)),
+            Some([l, r]) => Some((*l, *r)),
+            Some(other) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "h takes one value (both sides) or two (left, right), not {}",
+                    other.len()
+                ))]));
+            }
+        };
+        let dataset = self.datasets.read().await.get(&request.dataset).cloned();
+        let Some(dataset) = dataset else {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "Dataset '{}' not found",
+                request.dataset
+            ))]));
+        };
+        let mut config = RdDensityConfig::default();
+        config.cutoff = request.cutoff.unwrap_or(0.0);
+        config.p = request.p.unwrap_or(2);
+        config.kernel = kernel;
+        config.vce = vce;
+        config.bwselect = bwselect;
+        config.h = h;
+        config.mass_points = request.mass_points.unwrap_or(true);
+        match run_rd_density(&dataset, &request.running_var, config) {
+            Ok(r) => Ok(CallToolResult::success(vec![Content::text(r.to_string())])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "RD density test failed: {e}"
+            ))])),
+        }
+    }
+
+    /// RD plot: binned means and a global polynomial on each side of the cutoff.
+    #[tool(
+        description = "RD plot as R's rdrobust::rdplot: means of the outcome in evenly spaced bins of the running variable on each side of the cutoff (the number of bins mimics the variance of the outcome, binselect = 'esmv', or 'esmvpr' when many values of the running variable repeat; nbins sets them by hand) and a global polynomial of order p (default 4) fitted on each side. Use it to show the discontinuity before estimating it with rd_estimate; the gap between the curves is descriptive, not an estimate. Rows with a missing value are dropped and counted. Returns a PNG image, the bins and the polynomial coefficients."
+    )]
+    pub async fn rd_plot(
+        &self,
+        Parameters(request): Parameters<RdPlotRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let nbins = match request.nbins.as_deref() {
+            None => None,
+            Some([n]) => Some((*n, *n)),
+            Some([l, r]) => Some((*l, *r)),
+            Some(other) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "nbins takes one value (both sides) or two (left, right), not {}",
+                    other.len()
+                ))]));
+            }
+        };
+        let dataset = self.datasets.read().await.get(&request.dataset).cloned();
+        let Some(dataset) = dataset else {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "Dataset '{}' not found",
+                request.dataset
+            ))]));
+        };
+        let mut config = RdPlotConfig::default();
+        config.cutoff = request.cutoff.unwrap_or(0.0);
+        config.p = request.p.unwrap_or(4);
+        config.nbins = nbins;
+        let result = match run_rd_plot(&dataset, &request.outcome, &request.running_var, config) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "RD plot failed: {e}"
+                ))]));
+            }
+        };
+        let mut chart_config = ChartConfig::default();
+        chart_config.title = request.title;
+        chart_config.x_label = Some(request.running_var.clone());
+        chart_config.y_label = Some(request.outcome.clone());
+        let points: Vec<(f64, f64)> = result.bins.iter().map(|b| (b.mid, b.mean_y)).collect();
+        let chart = match rd_plot_chart(
+            &points,
+            &result.curve_left,
+            &result.curve_right,
+            result.cutoff,
+            chart_config,
+        ) {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "RD plot failed: {e}"
+                ))]));
+            }
+        };
+        let mut text = result.to_string();
+        text.push_str("\nBins (midpoint: mean of the outcome, n):\n");
+        for b in result.bins.iter().take(RD_PLOT_BINS_LISTED) {
+            text.push_str(&format!("  {:.4}: {:.4} ({})\n", b.mid, b.mean_y, b.n));
+        }
+        if result.bins.len() > RD_PLOT_BINS_LISTED {
+            text.push_str(&format!(
+                "  and {} more\n",
+                result.bins.len() - RD_PLOT_BINS_LISTED
+            ));
+        }
+        Ok(CallToolResult::success(vec![
+            Content::text(text),
+            chart_content(chart.image_base64, chart.svg),
+        ]))
+    }
+
     /// Compute RD bandwidth only.
     #[tool(
         description = "Select RD bandwidths h and b as rdrobust::rdbwselect (the ten bwselect methods, kernel, p, scaleregul) without estimating; returns h and b left and right, the observations inside h, the pilot bandwidth and mass-point information."
@@ -3167,6 +3301,101 @@ mod tests {
             out.contains(&format!("[{:>8.4}, {:>8.4}]", ci[0], ci[1])),
             "{out}"
         );
+    }
+
+    /// rd_plot through MCP: the bins per side, the coefficients and the first bins as
+    /// rdrobust::rdplot reports them, a PNG, and nbins and its length check.
+    #[test]
+    fn test_validate_mcp_rd_plot_sim() {
+        let (case, rt, server) = case_server("rdplot_sim");
+        let call = |args: serde_json::Value| {
+            let req: RdPlotRequest = serde_json::from_value(args).unwrap();
+            rt.block_on(server.rd_plot(Parameters(req))).unwrap()
+        };
+        let r = call(json!({"dataset": "rd", "outcome": "y", "running_var": "x"}));
+        let out = text(&r);
+        assert_ne!(r.is_error, Some(true), "{out}");
+        let j = case.vector("default_j");
+        assert!(
+            out.contains(&format!(
+                "Bins: {} left, {} right; mimicking variance",
+                j[0], j[1]
+            )),
+            "{out}"
+        );
+        let coef = case.vector("default_coef_left");
+        assert!(out.contains(&format!("{:.6}", coef[0])), "{out}");
+        let (mid, mean, n) = (
+            case.vector("default_bin_mid"),
+            case.vector("default_bin_mean_y"),
+            case.vector("default_bin_n"),
+        );
+        assert!(
+            out.contains(&format!("  {:.4}: {:.4} ({})\n", mid[0], mean[0], n[0])),
+            "{out}"
+        );
+        assert!(
+            r.content
+                .iter()
+                .any(|c| matches!(c.raw, rmcp::model::RawContent::Image(_))),
+            "no image"
+        );
+
+        let r =
+            call(json!({"dataset": "rd", "outcome": "y", "running_var": "x", "nbins": [10, 12]}));
+        assert!(text(&r).contains("Bins: 10 left, 12 right; evenly spaced, set by hand"));
+        let r =
+            call(json!({"dataset": "rd", "outcome": "y", "running_var": "x", "nbins": [1, 2, 3]}));
+        assert_eq!(r.is_error, Some(true));
+        assert!(
+            text(&r).contains("one value (both sides) or two"),
+            "{}",
+            text(&r)
+        );
+    }
+
+    /// rd_density through MCP: bandwidths, densities, T and p as rddensity reports them,
+    /// options parsed, and the h length checked.
+    #[test]
+    fn test_validate_mcp_rd_density_sim() {
+        let (case, rt, server) = case_server("rddensity_sim");
+        let call = |args: serde_json::Value| {
+            let req: RdDensityRequest = serde_json::from_value(args).unwrap();
+            rt.block_on(server.rd_density(Parameters(req))).unwrap()
+        };
+        for (prefix, extra) in [
+            ("default", json!({})),
+            ("sorted", json!({"running_var": "s"})),
+            ("uniform", json!({"kernel": "Uniform"})),
+            ("plugin", json!({"vce": "plugin"})),
+            ("h", json!({"h": [0.3, 0.4]})),
+        ] {
+            let r = call(merged(json!({"dataset": "rd", "running_var": "x"}), extra));
+            let out = text(&r);
+            assert_ne!(r.is_error, Some(true), "{out}");
+            let h = case.vector(&format!("{prefix}_h"));
+            let hat = case.vector(&format!("{prefix}_hat"));
+            let (t, p) = (
+                case.scalar(&format!("{prefix}_t")),
+                case.scalar(&format!("{prefix}_p")),
+            );
+            for want in [
+                format!("Bandwidth: {:.4} left, {:.4} right", h[0], h[1]),
+                format!("Difference (right - left):   {:.6}", hat[2]),
+                format!("T = {t:.4}, p = {p:.4}"),
+            ] {
+                assert!(out.contains(&want), "{prefix}: {want}\n{out}");
+            }
+        }
+        let r = call(json!({"dataset": "rd", "running_var": "x", "kernel": "gaussian"}));
+        assert_eq!(r.is_error, Some(true));
+        assert!(
+            text(&r).contains("expected one of: triangular"),
+            "{}",
+            text(&r)
+        );
+        let r = call(json!({"dataset": "rd", "running_var": "x", "h": [0.1, 0.2, 0.3]}));
+        assert_eq!(r.is_error, Some(true));
     }
 
     #[test]

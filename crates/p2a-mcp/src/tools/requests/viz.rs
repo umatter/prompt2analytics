@@ -46,6 +46,12 @@ pub struct ScatterPlotRequest {
     #[schemars(description = "Name of the column for Y-axis values.")]
     pub y_column: String,
 
+    /// Column whose values colour the points (optional)
+    #[schemars(
+        description = "Optional column whose values get their own colour and marker shape (at most 12), such as a treatment indicator or a region."
+    )]
+    pub group_column: Option<String>,
+
     /// Chart title (optional)
     #[schemars(description = "Optional title for the chart.")]
     pub title: Option<String>,
@@ -103,8 +109,16 @@ pub struct BoxPlotRequest {
     pub dataset: String,
 
     /// Column names to include in box plot
-    #[schemars(description = "Names of numeric columns to create box plots for.")]
+    #[schemars(
+        description = "Names of numeric columns to create box plots for; exactly one with group_column."
+    )]
     pub columns: Vec<String>,
+
+    /// Column that splits the values into one box per group (optional)
+    #[schemars(
+        description = "Optional column whose values get one box each for the single column in columns (R's boxplot(y ~ group)), at most 30 groups, in R factor order: numbers numerically, text alphabetically."
+    )]
+    pub group_column: Option<String>,
 
     /// Chart title (optional)
     #[schemars(description = "Optional title for the chart.")]

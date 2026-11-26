@@ -127,11 +127,11 @@ opt-level = 1
 
 ## Project Overview
 
-prompt2analytics is a Rust workspace (edition 2024, requires Rust 1.95+) exposing its econometrics, statistics, ML and visualization methods as 270 MCP tools (263 without the `database` feature) and through the `p2a` CLI, in these crates:
+prompt2analytics is a Rust workspace (edition 2024, requires Rust 1.95+) exposing its econometrics, statistics, ML and visualization methods as 272 MCP tools (265 without the `database` feature) and through the `p2a` CLI, in these crates:
 
 - **p2a-core**: Core analytics library (all algorithms)
 - **p2a-cli**: Command-line interface (`p2a` binary) with session recording, script export, and JSON output
-- **p2a-mcp**: MCP server exposing 270 tools with LLM integration, plus an HTTP API documented in `API_ENDPOINTS.md`
+- **p2a-mcp**: MCP server exposing 272 tools with LLM integration, plus an HTTP API documented in `API_ENDPOINTS.md`
 - **p2a-chat**: Lightweight terminal REPL that speaks to a running `p2a-mcp` HTTP server (no direct p2a-core dependency). Reach for it when you want to exercise the MCP tool-call path end-to-end from a shell without the Dioxus UI.
 - **p2a-dioxus**: Cross-platform GUI (web via WASM, desktop via native)
 - **p2a-validation**: test-only crate (`publish = false`) that loads the R reference cases in `validation/expected/*.json` and compares values (`Case`, `Check`, `Tol`); a dev-dependency of p2a-core, p2a-cli and p2a-mcp; its tests also hold the source guards `na_guard` and `numeric_guard`.
@@ -336,6 +336,8 @@ crates/p2a-core/src/
 │   ├── rd.rs              # Sharp/Fuzzy RD with CCT robust inference
 │   ├── rdmulti.rs         # Multi-cutoff RD
 │   ├── rd_bwselect.rs     # rdrobust::rdbwselect bandwidths, all ten selectors
+│   ├── rdplot.rs          # rdrobust::rdplot: esmv/esmvpr bins, binned means, global polynomial
+│   ├── rddensity.rs       # rddensity manipulation test (CJM 2020), rdbwdensity bandwidths, binomial windows
 │   ├── synth.rs           # Synthetic control (classic + gsynth)
 │   ├── scpi.rs            # Synthetic control with prediction intervals
 │   ├── treatment.rs       # IPW, doubly robust estimation
@@ -653,7 +655,7 @@ with a `Default` never breaks other crates.
 
 ### Module Organization
 
-The MCP server exposes 270 tools organized into modular handler files. For the HTTP API surface (sessions, datasets, tools, LLM chat, SSE streaming, conversation persistence), see `API_ENDPOINTS.md` at the repo root — that is the authoritative reference.
+The MCP server exposes 272 tools organized into modular handler files. For the HTTP API surface (sessions, datasets, tools, LLM chat, SSE streaming, conversation persistence), see `API_ENDPOINTS.md` at the repo root — that is the authoritative reference.
 
 ```
 crates/p2a-mcp/src/
@@ -1032,7 +1034,7 @@ Changing any of these silently changes or breaks a paper exhibit; check the pape
 | This repo | Paper consumer | What breaks |
 |---|---|---|
 | `bench_utils.rs` JSON schema and method names emitted by `comprehensive_benchmarks`, `unified_benchmarks`, `benchmark_n10000` | `performance/results/rust_*.json` → `merge_results.R` (name normalization across R/Rust) | Renaming a benchmark or a JSON field drops the method from the speed/memory comparison |
-| MCP **tool names** (270 handlers) | `paper/code/e2e_eval/test_cases.json` expects exact names for the 96 single-turn prompts (`regression_ols`, `panel_fixed_effects`, `rd_estimate`, `ts_arima_fit`, ...); `rescore.py` scores them with an alias table | Renaming a tool turns every single-turn prompt targeting it into a scored miss. Multi-turn (MT1–MT8) scoring only checks that *some* tool was called, so names there are documentation |
+| MCP **tool names** (272 handlers) | `paper/code/e2e_eval/test_cases.json` expects exact names for the 96 single-turn prompts (`regression_ols`, `panel_fixed_effects`, `rd_estimate`, `ts_arima_fit`, ...); `rescore.py` scores them with an alias table | Renaming a tool turns every single-turn prompt targeting it into a scored miss. Multi-turn (MT1–MT8) scoring only checks that *some* tool was called, so names there are documentation |
 | HTTP API contract in `API_ENDPOINTS.md` (`/api/sessions`, `/api/tools/load_dataset`, `/api/llm/chat/stream`, `/health`) | `run_evaluation.py` (backend URL from `P2A_BASE_URL`, default `localhost:8081`, the Dioxus dev-proxy port used for the paper runs) | Endpoint or SSE event changes break the eval harness |
 | `p2a` **text output format** for `data describe`, `data head`, `reg ols` (text and `-F json`), `panel fe`, `panel re`, `panel hausman`, `panel hdfe`, diagnostics | No paper exhibit includes `p2a` text output any more: the CLI captures moved to the paper repo's untracked `paper/archive/` (paper commit `0b849be`) and no section includes them. The golden copies (`crates/p2a-cli/tests/golden/cli_*.txt`) still pin the output | An output change fails the exhibit tests (`p2a-cli::exhibits::test_validate_cli_*`); update the goldens with `P2A_UPDATE_GOLDEN=1` only after their R checks pass |
 | `validation/datasets/` (Grunfeld etc.) | `paper/code/rust_validation/scripts/run_validation.sh` (copies `grunfeld.csv` and `longley.csv`), `paper/code/validate_examples.sh`, several R benchmark DGPs | Moving a dataset breaks `make rust-validation` |
@@ -1261,7 +1263,7 @@ let df = df! {
 
 **MCP Server:**
 - `crates/p2a-mcp/src/server.rs` - AnalyticsServer struct and router composition
-- `crates/p2a-mcp/src/tools/handlers/` - Tool implementations (270 tools across 17 modules)
+- `crates/p2a-mcp/src/tools/handlers/` - Tool implementations (272 tools across 17 modules)
 - `crates/p2a-mcp/src/tools/requests/` - Request type definitions
 - `crates/p2a-mcp/src/exec.rs` - Tool governor: slots, deadlines, memory admission, quotas, error codes
 - `crates/p2a-mcp/src/tools/limits/` - Request-limit catalogue (`Limits`, `PARAM_RULES`, `ROW_RULES`)

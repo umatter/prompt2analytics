@@ -4,8 +4,8 @@
 //! - Small effective sample size near the cutoff
 //! - Bandwidth sensitivity (comparing estimates at different bandwidths)
 //!
-//! Note: McCrary manipulation test is not currently implemented in p2a-core.
-//! Future versions may add density discontinuity testing.
+//! The density (manipulation) test itself runs on the running variable alone:
+//! [`crate::econometrics::rddensity`], the `rd_density` tool.
 
 use crate::econometrics::RdResult;
 
@@ -42,9 +42,9 @@ const WARN_EFFECTIVE_N: usize = 100;
 ///
 /// # Limitations
 ///
-/// The McCrary manipulation test (testing for density discontinuity at the
-/// cutoff) is not currently implemented. Users should examine running variable
-/// histograms and consider domain knowledge about manipulation possibilities.
+/// The manipulation test (a density discontinuity at the cutoff) needs only the running
+/// variable and is a separate step ([`crate::econometrics::rddensity`]); the report points
+/// to it.
 pub fn rd_diagnostics(result: &RdResult) -> IdentificationReport {
     let mut report = IdentificationReport::new("Regression Discontinuity");
 
@@ -65,21 +65,20 @@ pub fn rd_diagnostics(result: &RdResult) -> IdentificationReport {
         "Potential outcomes are continuous at the cutoff",
     ));
 
-    // Note that manipulation test is not available
+    // The manipulation test is a separate step on the running variable.
     report.add_warning(
         IdentificationWarning::new(
-            "MCCRARY_NOT_AVAILABLE",
+            "MANIPULATION_TEST_SEPARATE",
             WarningSeverity::Info,
-            "Manipulation Test Not Available",
-            "The McCrary density test for running variable manipulation is not \
-             currently implemented. Examine a histogram of the running variable \
-             near the cutoff to visually assess whether bunching or gaps suggest \
-             manipulation. Consider domain knowledge about whether units can \
-             control their running variable value.",
+            "Test for Manipulation Separately",
+            "This estimate does not test whether units sorted around the cutoff. Run the \
+             density manipulation test of Cattaneo, Jansson & Ma (rddensity; the rd_density \
+             tool) on the running variable, and consider whether units can control their \
+             running variable value.",
             "No manipulation",
         )
         .with_remediation(vec![
-            "Plot histogram of running variable near cutoff".to_string(),
+            "Run the density test (rd_density) on the running variable".to_string(),
             "Check for discontinuities in predetermined covariates at cutoff".to_string(),
             "Consider whether manipulation is plausible given the context".to_string(),
         ]),
@@ -347,15 +346,15 @@ mod tests {
     }
 
     #[test]
-    fn test_mccrary_not_available_note() {
+    fn test_manipulation_test_note() {
         let result = create_mock_rd_result(150, 200);
         let report = rd_diagnostics(&result);
 
-        // Should have note about McCrary not available
+        // Points to the separate density test
         let warning = report
             .warnings
             .iter()
-            .find(|w| w.code == "MCCRARY_NOT_AVAILABLE");
+            .find(|w| w.code == "MANIPULATION_TEST_SEPARATE");
         assert!(warning.is_some());
         assert_eq!(warning.unwrap().severity, WarningSeverity::Info);
     }

@@ -1660,6 +1660,99 @@ pub struct ScpiRequest {
     pub weight_threshold: Option<f64>,
 }
 
+/// Request for the RD density (manipulation) test.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RdDensityRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Running variable column name
+    #[schemars(description = "Name of the running (forcing) variable (X) column.")]
+    #[serde(alias = "x", alias = "score")]
+    pub running_var: String,
+
+    /// Cutoff value
+    #[schemars(
+        description = "Cutoff value for the running variable, strictly inside its range. Default is 0."
+    )]
+    pub cutoff: Option<f64>,
+
+    /// Order of the density fit
+    #[schemars(
+        description = "Order of the local polynomial density fit used for the bandwidths (1 to 7, default 2); the test itself uses p + 1, as rddensity."
+    )]
+    pub p: Option<usize>,
+
+    /// Kernel
+    #[schemars(description = "Kernel: 'triangular' (default), 'epanechnikov' or 'uniform'.")]
+    pub kernel: Option<String>,
+
+    /// Variance estimator
+    #[schemars(description = "Variance estimator: 'jackknife' (default) or 'plugin'.")]
+    pub vce: Option<String>,
+
+    /// Bandwidth selector
+    #[schemars(
+        description = "Bandwidth selector when h is not given, as rddensity's bwselect: 'comb' (default; per side the median of 'each', 'diff' and 'sum'), 'each' (each side its own), 'diff' (one bandwidth for the difference) or 'sum' (one for the sum)."
+    )]
+    pub bwselect: Option<String>,
+
+    /// Bandwidths by hand
+    #[schemars(
+        description = "Bandwidth by hand: one value for both sides or two (left, right), in units of the running variable."
+    )]
+    pub h: Option<Vec<f64>>,
+
+    /// Treat repeated values as mass points
+    #[schemars(
+        description = "Treat repeated values of the running variable as mass points (default true, as rddensity)."
+    )]
+    pub mass_points: Option<bool>,
+}
+
+/// Request for an RD plot (binned means and global polynomial fits).
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RdPlotRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Outcome variable column name
+    #[schemars(description = "Name of the outcome variable (Y) column.")]
+    #[serde(alias = "dep_var", alias = "y", alias = "response")]
+    pub outcome: String,
+
+    /// Running variable column name
+    #[schemars(description = "Name of the running (forcing) variable (X) column.")]
+    #[serde(alias = "x", alias = "score")]
+    pub running_var: String,
+
+    /// Cutoff value
+    #[schemars(
+        description = "Cutoff value for the running variable, strictly inside its range. Default is 0."
+    )]
+    pub cutoff: Option<f64>,
+
+    /// Order of the global polynomial
+    #[schemars(
+        description = "Order of the global polynomial fitted on each side (rdplot p). Default is 4; at most 8."
+    )]
+    pub p: Option<usize>,
+
+    /// Bins by hand
+    #[schemars(
+        description = "Number of evenly spaced bins: one value for both sides or two (left, right). By default the number mimics the variance of the outcome, as rdplot's binselect = 'esmv'."
+    )]
+    pub nbins: Option<Vec<usize>>,
+
+    /// Chart title (optional)
+    #[schemars(description = "Optional title for the chart.")]
+    pub title: Option<String>,
+}
+
 /// Request for Sharp Regression Discontinuity estimation.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]

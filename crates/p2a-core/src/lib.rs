@@ -1476,6 +1476,7 @@ pub use visualization::{
     HeatmapResult, HistogramResult, IrfPlotResult, LineChartResult, ResidualDiagnosticsResult,
     ScatterResult, VisualizationError, box_plot, coefficient_plot, correlation_heatmap, dendrogram,
     event_study_plot, histogram, irf_plot, line_chart, residual_diagnostics, scatter_plot,
+    scatter_plot_grouped,
 };
 
 /// Re-export polars for downstream use
