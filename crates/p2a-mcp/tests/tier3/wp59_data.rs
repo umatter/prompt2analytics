@@ -900,6 +900,38 @@ async fn test_mcp_upload_dataset_reads_a_european_csv() {
     );
 }
 
+/// A second upload under a name in use says that it replaced the dataset, and a column that is
+/// text only because of a missing-value code is named with the way to convert it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_mcp_upload_dataset_notes_a_replacement_and_missing_codes() {
+    use base64::Engine as _;
+    let (session, server) = session_with_datasets(vec![]);
+    let upload = |bytes: &'static [u8]| {
+        let content = base64::engine::general_purpose::STANDARD.encode(bytes);
+        json!({"filename": "d.csv", "name": "d", "content": content})
+    };
+    let r = call(
+        &server,
+        &session,
+        "upload_dataset",
+        upload(b"a,b\n1,2\n3,4\n"),
+    )
+    .await;
+    assert!(r.success && !text(&r).contains("replaced"), "{}", text(&r));
+    let r = call(
+        &server,
+        &session,
+        "upload_dataset",
+        upload(b"a,b\n1,.\n3,4.5\n"),
+    )
+    .await;
+    let t = text(&r);
+    assert!(r.success, "{t}");
+    assert!(t.contains("it replaced the dataset 'd'"), "{t}");
+    assert!(t.contains("column 'b'") && t.contains("munge_cast"), "{t}");
+    assert!(t.lines().next().unwrap().ends_with("'d'"), "{t}");
+}
+
 /// upload_dataset reads Stata and SAS files from the request's bytes, a declared type that matches
 /// the extension included; a workbook that is not one is answered with the reader's error.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

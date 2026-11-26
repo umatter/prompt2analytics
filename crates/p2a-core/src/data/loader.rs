@@ -1693,7 +1693,48 @@ impl DataLoader {
         let mut notes = Vec::new();
         notes.extend(encoding.map(|e| format!("decoded from {e}")));
         notes.extend(dialect.note());
+        notes.extend(Self::missing_code_notes(&df));
         Ok((df, notes))
+    }
+
+    /// Notes on text columns that would be numeric but for missing-value codes R does not
+    /// read as missing by default (`.`, `-`, `N/A`, `#N/A`, `n/a`, `NULL`, `null`, `?`): every
+    /// other value parses as a number. One note per column, naming the codes and how to convert
+    /// it (`munge_cast`, which turns them into missing values). At most the first 100,000
+    /// values of a column are looked at.
+    pub fn missing_code_notes(df: &DataFrame) -> Vec<String> {
+        const CODES: [&str; 8] = [".", "-", "N/A", "#N/A", "n/a", "NULL", "null", "?"];
+        const LOOK: usize = 100_000;
+        let mut notes = Vec::new();
+        for col in df.get_columns() {
+            let Ok(ca) = col.str() else { continue };
+            let mut found: Vec<&str> = Vec::new();
+            let mut numbers = 0usize;
+            let mut other = false;
+            for v in ca.into_iter().take(LOOK).flatten() {
+                let t = v.trim();
+                if let Some(code) = CODES.iter().find(|c| **c == t) {
+                    if !found.contains(code) {
+                        found.push(code);
+                    }
+                } else if t.parse::<f64>().is_ok() {
+                    numbers += 1;
+                } else {
+                    other = true;
+                    break;
+                }
+            }
+            if !other && numbers > 0 && !found.is_empty() {
+                let codes: Vec<String> = found.iter().map(|c| format!("'{c}'")).collect();
+                notes.push(format!(
+                    "column '{}' is text only because of the value(s) {}; if they mean missing, \
+                     convert it with munge_cast to float (they become missing values)",
+                    col.name(),
+                    codes.join(", ")
+                ));
+            }
+        }
+        notes
     }
 
     /// Load the first sheet of an Excel or OpenDocument workbook held in memory. A workbook is
@@ -1891,6 +1932,23 @@ fn check_numeric_type(col_data: &[Option<String>]) -> (bool, bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_codes_that_make_a_column_text_are_noted() {
+        let bytes = b"a,b,c\n1,x,.\n2,y,3.5\nN/A,z,4\n";
+        let (df, notes) = DataLoader::load_csv_bytes(bytes).unwrap();
+        assert_eq!(df.height(), 3);
+        let joined = notes.join(" | ");
+        assert!(
+            joined.contains("column 'a'") && joined.contains("'N/A'"),
+            "{joined}"
+        );
+        assert!(
+            joined.contains("column 'c'") && joined.contains("'.'"),
+            "{joined}"
+        );
+        assert!(!joined.contains("column 'b'"), "{joined}");
+    }
 
     #[test]
     fn test_load_csv_string() {

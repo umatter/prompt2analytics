@@ -61,7 +61,7 @@ pub fn Message(props: MessageProps) -> Element {
     let is_user = message.role == "user";
     let viewer = try_use_context::<ExhibitViewer>();
 
-    let timestamp = message.timestamp.format("%H:%M").to_string();
+    let timestamp = crate::utils::local_clock(&message.timestamp);
 
     if is_user {
         // User message: the question, set large

@@ -273,6 +273,26 @@ pub struct DatasetMetaResponse {
     /// Whether the session holds the dataset's data now. After a server restart the row is
     /// listed but its data is gone until it is reloaded or added again.
     pub in_memory: bool,
+    /// The type of each column in `column_names` (`integer`, `number`, `text`, `logical`,
+    /// `date`, `datetime`, `category` or `other`), from the data the session holds; empty when
+    /// it holds none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub column_types: Vec<String>,
+}
+
+/// The label of a column type in the dataset list.
+fn column_type_label(dtype: &p2a_core::polars::prelude::DataType) -> &'static str {
+    use p2a_core::polars::prelude::DataType as D;
+    match dtype {
+        d if d.is_integer() => "integer",
+        d if d.is_float() || d.is_decimal() => "number",
+        D::Boolean => "logical",
+        D::String => "text",
+        D::Date => "date",
+        D::Datetime(..) => "datetime",
+        d if d.is_categorical() || d.is_enum() => "category",
+        _ => "other",
+    }
 }
 
 impl From<DatasetMeta> for DatasetMetaResponse {
@@ -291,6 +311,7 @@ impl From<DatasetMeta> for DatasetMetaResponse {
             na_strings: meta.na_strings,
             value_labels: meta.value_labels,
             in_memory: false,
+            column_types: Vec::new(),
         }
     }
 }
@@ -854,9 +875,23 @@ async fn list_session_datasets(
             let response: Vec<DatasetMetaResponse> = datasets
                 .into_iter()
                 .map(|meta| {
-                    let in_memory = held.contains_key(&meta.name);
+                    let column_types = held
+                        .get(&meta.name)
+                        .map(|ds| {
+                            let df = ds.df();
+                            meta.column_names
+                                .iter()
+                                .map(|c| {
+                                    df.column(c)
+                                        .map_or("other", |col| column_type_label(col.dtype()))
+                                        .to_string()
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
                     DatasetMetaResponse {
-                        in_memory,
+                        in_memory: held.contains_key(&meta.name),
+                        column_types,
                         ..meta.into()
                     }
                 })

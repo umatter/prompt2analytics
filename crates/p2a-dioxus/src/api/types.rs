@@ -360,6 +360,10 @@ pub struct DatasetMeta {
     /// Whether the server holds the data now (older servers do not say: yes).
     #[serde(default = "held")]
     pub in_memory: bool,
+    /// The type of each listed column (`integer`, `number`, `text`, ...), when the server
+    /// holds the data; empty otherwise.
+    #[serde(default)]
+    pub column_types: Vec<String>,
 }
 
 fn held() -> bool {
@@ -495,6 +499,7 @@ mod tests {
             loaded_at: "2026-10-27T00:00:00Z".into(),
             file_size_bytes: None,
             in_memory: true,
+            column_types: Vec::new(),
         }
     }
 

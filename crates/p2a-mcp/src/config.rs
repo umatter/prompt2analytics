@@ -197,9 +197,10 @@ pub struct CliArgs {
     #[arg(long, env = "P2A_JWT_SECRET")]
     pub jwt_secret: Option<String>,
 
-    /// Session timeout in minutes
-    #[arg(long, default_value = "60", env = "P2A_SESSION_TTL")]
-    pub session_ttl_minutes: u64,
+    /// Session timeout in minutes: 60, or 30 days (43,200) for a local server that keeps
+    /// conversations in a store on disk (`--db-path`), as the desktop app does
+    #[arg(long, env = "P2A_SESSION_TTL")]
+    pub session_ttl_minutes: Option<u64>,
 
     /// Maximum number of concurrent sessions
     #[arg(long, default_value = "100", env = "P2A_MAX_SESSIONS")]
@@ -455,6 +456,13 @@ pub(crate) fn available_cpus() -> usize {
         .unwrap_or(1)
 }
 
+/// The session TTL, in minutes, when none is configured.
+pub const DEFAULT_SESSION_TTL_MINUTES: u64 = 60;
+
+/// The session TTL of a local HTTP server with a conversation store on disk when none is
+/// configured: 30 days, the desktop app's.
+pub const LOCAL_STORE_SESSION_TTL_MINUTES: u64 = 30 * 24 * 60;
+
 impl ServerConfig {
     /// Create configuration from CLI arguments, reading the boolean `P2A_*`
     /// flags from the process environment.
@@ -470,7 +478,8 @@ impl ServerConfig {
         env: impl Fn(&str) -> Option<String>,
     ) -> anyhow::Result<Self> {
         let flag = |name: &str| truthy(env(name).as_deref());
-        let config = Self {
+        let ttl_given = args.session_ttl_minutes;
+        let mut config = Self {
             transport: args.transport,
             #[cfg(feature = "http")]
             http: HttpConfig {
@@ -492,7 +501,7 @@ impl ServerConfig {
                 db_path: args.db_path,
             },
             session: SessionConfig {
-                ttl_minutes: args.session_ttl_minutes,
+                ttl_minutes: DEFAULT_SESSION_TTL_MINUTES,
                 max_sessions: args.max_sessions,
                 evict_idle_minutes: None,
             },
@@ -525,7 +534,23 @@ impl ServerConfig {
                 overrides: args.limit_overrides,
             },
         };
+        config.session.ttl_minutes = ttl_given.unwrap_or_else(|| config.default_session_ttl());
         Ok(config)
+    }
+
+    /// The session TTL when none is configured: [`LOCAL_STORE_SESSION_TTL_MINUTES`] (30
+    /// days) for an HTTP server in local mode with a conversation store on disk, whose
+    /// conversations would otherwise be deleted with a session idle for an hour;
+    /// [`DEFAULT_SESSION_TTL_MINUTES`] (60) otherwise.
+    pub fn default_session_ttl(&self) -> u64 {
+        #[cfg(all(feature = "http", feature = "db"))]
+        if self.transport == TransportType::Http
+            && self.deployment_mode() == DeploymentMode::Local
+            && self.http.db_path.is_some()
+        {
+            return LOCAL_STORE_SESSION_TTL_MINUTES;
+        }
+        DEFAULT_SESSION_TTL_MINUTES
     }
 
     /// This configuration with its transport set to HTTP. `ServerConfig`'s
@@ -770,6 +795,29 @@ mod tests {
                 .unwrap_or_else(|| panic!("no argument {id}"));
             assert!(arg.get_env().is_none(), "{id} reads its env through clap");
         }
+    }
+
+    #[cfg(all(feature = "http", feature = "db"))]
+    #[test]
+    fn local_server_with_a_store_keeps_sessions_for_30_days() {
+        let ttl = |argv: &[&str]| {
+            let args = CliArgs::try_parse_from(argv).unwrap();
+            ServerConfig::from_args_with_env(args, |_| None)
+                .unwrap()
+                .session
+                .ttl_minutes
+        };
+        let http = ["p2a-mcp", "--transport", "http"];
+        assert_eq!(ttl(&http), DEFAULT_SESSION_TTL_MINUTES);
+        let stored = [&http[..], &["--db-path", "/tmp/x"]].concat();
+        assert_eq!(ttl(&stored), LOCAL_STORE_SESSION_TTL_MINUTES);
+        // an explicit TTL wins; open public mode keeps the hour
+        assert_eq!(
+            ttl(&[&stored[..], &["--session-ttl-minutes", "90"]].concat()),
+            90
+        );
+        let open = [&stored[..], &["--allow-unauthenticated"]].concat();
+        assert_eq!(ttl(&open), DEFAULT_SESSION_TTL_MINUTES);
     }
 
     #[test]

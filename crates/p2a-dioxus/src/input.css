@@ -172,6 +172,9 @@ body { background: var(--k-paper); color: var(--k-ink); }
     width: 100%; text-align: left; border-bottom: 1px solid var(--k-rule); padding: 12px 0; cursor: pointer;
     background: transparent; color: var(--k-ink);
   }
+  /* conversation row actions: hidden until the row is hovered or focused (keyboard) */
+  .k-row-actions { opacity: 0; }
+  .group:hover .k-row-actions, .group:focus-within .k-row-actions, .k-row-actions:focus-within { opacity: 1; }
   .k-start .n { font-family: var(--font-mono); font-stretch: 87.5%; font-size: 12px; font-weight: 700; }
   .k-start .d { display: block; color: var(--k-muted); font-size: 12.5px; }
   .k-start .go { font-family: var(--font-mono); font-stretch: 87.5%; font-size: 12px; color: var(--k-orange-text); }

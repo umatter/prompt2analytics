@@ -1935,9 +1935,11 @@ impl AnalyticsServer {
             profiler.track_dataset(&id, &dataset);
         }
 
+        let code_notes = p2a_core::data::DataLoader::missing_code_notes(dataset.df());
+
         // Store the dataset
         let mut datasets = self.datasets.write().await;
-        datasets.insert(id.clone(), dataset);
+        let replaced = datasets.insert(id.clone(), dataset).is_some();
 
         let result = format!(
             "Successfully loaded dataset '{}'\n\n\
@@ -1963,6 +1965,13 @@ impl AnalyticsServer {
                 .join("\n")
         );
         let result = result + &stata_label_report(&labels, value_labels) + &stata_notes(&notes);
+        let mut code_notes = code_notes;
+        code_notes.extend(replaced_note(replaced, &id));
+        let result = if code_notes.is_empty() {
+            result
+        } else {
+            format!("{result}\n\nNote: {}", code_notes.join("; "))
+        };
 
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
@@ -2187,7 +2196,7 @@ impl AnalyticsServer {
 
         // Store
         let mut datasets = self.datasets.write().await;
-        datasets.insert(id.clone(), dataset);
+        let replaced = datasets.insert(id.clone(), dataset).is_some();
 
         let result = format!(
             "Successfully uploaded dataset '{}'\n\n\
@@ -2206,6 +2215,7 @@ impl AnalyticsServer {
                 .join("\n")
         );
 
+        notes.extend(replaced_note(replaced, &id));
         let result = if notes.is_empty() {
             result
         } else {
@@ -2244,7 +2254,7 @@ impl AnalyticsServer {
         let info: DatasetInfo = (&dataset).into();
 
         let mut datasets = self.datasets.write().await;
-        datasets.insert(request.name.clone(), dataset);
+        let replaced = datasets.insert(request.name.clone(), dataset).is_some();
 
         let result = format!(
             "Successfully created dataset '{}'\n\n\
@@ -2259,6 +2269,10 @@ impl AnalyticsServer {
                 .collect::<Vec<_>>()
                 .join("\n")
         );
+        let result = match replaced_note(replaced, &request.name) {
+            Some(note) => format!("{result}\n\nNote: {note}"),
+            None => result,
+        };
 
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
@@ -2544,6 +2558,11 @@ fn stata_label_report(
         ));
     }
     out
+}
+
+/// The note for a load that replaced a dataset of the same name.
+fn replaced_note(replaced: bool, name: &str) -> Option<String> {
+    replaced.then(|| format!("it replaced the dataset '{name}' that was loaded before"))
 }
 
 /// The notes of a Stata load ("Notes:" and one line each); empty when there are none.

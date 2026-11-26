@@ -402,6 +402,7 @@ mod accept_tests {
                 loaded_at: String::new(),
                 file_size_bytes: None,
                 in_memory: true,
+                column_types: Vec::new(),
             },
             DatasetMeta {
                 id: "ds-2".into(),
@@ -415,6 +416,7 @@ mod accept_tests {
                 loaded_at: String::new(),
                 file_size_bytes: None,
                 in_memory: true,
+                column_types: Vec::new(),
             },
         ]
     }

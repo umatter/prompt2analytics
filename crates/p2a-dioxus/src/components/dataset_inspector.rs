@@ -36,6 +36,43 @@ pub fn DatasetInspectorModal(props: DatasetInspectorModalProps) -> Element {
     let mut copied = use_signal(|| false);
 
     let file_size = dataset.file_size_bytes.map(size_label);
+    let loaded = crate::utils::local_stamp(&dataset.loaded_at);
+    // The first rows, fetched with head_dataset when asked for (None: not asked yet).
+    let mut preview = use_signal(|| None::<Result<String, String>>);
+    let session = use_context::<Signal<crate::state::SessionState>>();
+    let show_preview = {
+        let name = dataset.name.clone();
+        move |_| {
+            let name = name.clone();
+            let Some(sid) = session.peek().get_session_id().map(str::to_string) else {
+                preview.set(Some(Err("No session yet".into())));
+                return;
+            };
+            preview.set(Some(Ok(String::new())));
+            spawn(async move {
+                let args = serde_json::json!({ "dataset": name, "n": 5 });
+                let result = crate::api::ApiClient::new()
+                    .call_tool(&sid, "head_dataset", args)
+                    .await
+                    .and_then(|r| {
+                        let text: Vec<String> = r
+                            .content
+                            .iter()
+                            .filter_map(|c| match c {
+                                crate::api::types::ContentItem::Text { text } => Some(text.clone()),
+                                _ => None,
+                            })
+                            .collect();
+                        if r.success {
+                            Ok(text.join("\n"))
+                        } else {
+                            Err(r.error.unwrap_or_else(|| text.join("\n")))
+                        }
+                    });
+                preview.set(Some(result));
+            });
+        }
+    };
 
     // Handle copy dataset name
     let handle_copy_name = {
@@ -164,7 +201,7 @@ pub fn DatasetInspectorModal(props: DatasetInspectorModalProps) -> Element {
                         }
                         div { class: "k-row",
                             span { class: "k-muted", "Loaded" }
-                            span { class: "k-mono text-[11.5px]", "{dataset.loaded_at}" }
+                            span { class: "k-mono text-[11.5px]", "{loaded}" }
                         }
                     }
 
@@ -188,11 +225,35 @@ pub fn DatasetInspectorModal(props: DatasetInspectorModalProps) -> Element {
                                     li { key: "{col}", title: "{col}",
                                         span { class: "ty", "{i + 1:>3}" }
                                         "{col}"
+                                        if let Some(t) = dataset.column_types.get(i) {
+                                            span { class: "k-mono k-muted text-[11px] ml-2", "{t}" }
+                                        }
                                     }
                                 }
                             }
                         } else if dataset.width() > 0 {
                             p { class: "k-help", "Column names not stored" }
+                        }
+                    }
+
+                    // First rows, on request
+                    if dataset.in_memory {
+                        div {
+                            h3 { class: "k-section-h", "First rows" }
+                            match preview() {
+                                None => rsx! {
+                                    button { class: "k-btn", onclick: show_preview, "Show the first 5 rows" }
+                                },
+                                Some(Ok(ref t)) if t.is_empty() => rsx! {
+                                    p { class: "k-help", span { class: "k-spin" } " loading" }
+                                },
+                                Some(Ok(ref t)) => rsx! {
+                                    pre { class: "k-mono text-[11.5px] overflow-x-auto whitespace-pre", "{t}" }
+                                },
+                                Some(Err(ref e)) => rsx! {
+                                    p { class: "k-help k-orange-text", role: "alert", "{e}" }
+                                },
+                            }
                         }
                     }
                 }

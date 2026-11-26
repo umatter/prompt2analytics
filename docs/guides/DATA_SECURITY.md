@@ -197,7 +197,8 @@ the controls and their limits when an LLM drives the analysis.
 
 - **Server sessions.** `DELETE /api/sessions/{id}` removes the session's
   datasets, its data directory and its database rows. Idle sessions expire
-  after `P2A_SESSION_TTL` minutes (60) and are removed the same way.
+  after `P2A_SESSION_TTL` minutes (60; 30 days for a local server with a
+  conversation store on disk) and are removed the same way.
 - **Desktop app.** Delete the `p2a` data and configuration directories listed
   above.
 - **Web app.** Clear the site data for the app's origin in your browser.

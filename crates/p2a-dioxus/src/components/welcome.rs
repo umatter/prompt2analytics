@@ -103,6 +103,7 @@ pub fn Welcome(props: WelcomeProps) -> Element {
                         class: "k-start",
                         disabled: props.disabled || loading.read().is_some(),
                         onclick: move |_| start(example),
+                        title: "Loads {example.name} and asks its question: one chat message to your model",
                         span { class: "n", "{example.name}" }
                         span {
                             "{example.title}"
@@ -113,7 +114,7 @@ pub fn Welcome(props: WelcomeProps) -> Element {
                                 span { class: "k-spin" }
                                 " loading"
                             } else {
-                                "load"
+                                "ask"
                             }
                         }
                     }

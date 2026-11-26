@@ -323,7 +323,9 @@ HTTP), and they never depend on the resource profile:
 
 ### Sessions and persistence
 
-- **TTL.** A session expires `P2A_SESSION_TTL` minutes (60) after its last use;
+- **TTL.** A session expires `P2A_SESSION_TTL` minutes after its last use (60;
+  30 days by default for a Local-mode server with a conversation store on disk,
+  `--db-path`, whose conversations would otherwise go with an hour's idle session);
   an expired session answers 410, and a cleanup task removes expired sessions
   every 10 minutes.
 - **One registry.** The in-memory session table is the only record of live
@@ -545,7 +547,7 @@ profile. For the timeout, watchdog, memory, data, allocation and eviction knobs
 | `--expose-enumeration` | `P2A_EXPOSE_ENUMERATION` | off | same | Local mode only; the env accepts `1`/`true`/`yes`/`on` |
 | `--enable-ws` | `P2A_ENABLE_WS` | off | same | OpenPublic only; the env accepts `1`/`true`/`yes`/`on` |
 | `--session-dirs` | `P2A_SESSION_DIRS` | `auto` | `auto` | `auto` = on only in OpenPublic; `on`, `off` |
-| `--session-ttl-minutes` | `P2A_SESSION_TTL` | 60 | 60 | minutes since last use |
+| `--session-ttl-minutes` | `P2A_SESSION_TTL` | 60; 43,200 (30 days) in Local mode with `--db-path` | 60 | minutes since last use; the 30 days keep a local store's conversations, as the desktop app does |
 | `--max-sessions` | `P2A_MAX_SESSIONS` | 100 | 100 | |
 | `--db-path` | `P2A_DB_PATH` | none (in-memory store) | same | feature `db`; must lie outside `P2A_DATA_ROOT` outside Local mode |
 | `--audit-log` | `P2A_AUDIT_LOG` | false | false | the env accepts `1`/`true`/`yes`/`on` |

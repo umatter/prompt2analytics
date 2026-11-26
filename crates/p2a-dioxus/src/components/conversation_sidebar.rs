@@ -347,6 +347,20 @@ pub fn ConversationSidebar() -> Element {
                     let id = conv_id.clone();
                     move |_| handle_select(id.clone())
                 },
+                // keyboard: Tab reaches the row, Enter or Space opens it
+                tabindex: "0",
+                role: "button",
+                "aria-current": if is_current { "true" } else { "false" },
+                onkeydown: {
+                    let id = conv_id.clone();
+                    move |e: Event<KeyboardData>| {
+                        let open = e.key() == Key::Enter || e.key() == Key::Character(" ".into());
+                        if open && !is_editing {
+                            e.prevent_default();
+                            handle_select(id.clone())
+                        }
+                    }
+                },
 
                 if is_current {
                     span { class: "absolute left-4 top-[6px] k-mono font-bold k-orange", "aria-hidden": "true", "›" }
@@ -357,6 +371,14 @@ pub fn ConversationSidebar() -> Element {
                         input {
                             class: "flex-1 px-2 py-1 text-sm rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-teal-500",
                             value: "{edit_title}",
+                            "aria-label": "Conversation title",
+                            // the field takes the focus, with its text selected
+                            onmounted: move |e: Event<MountedData>| async move {
+                                let _ = e.set_focus(true).await;
+                            },
+                            onfocus: move |_| {
+                                let _ = document::eval("document.activeElement?.select?.()");
+                            },
                             oninput: move |e| edit_title.set(e.value().clone()),
                             onkeydown: move |e| {
                                 if e.key() == Key::Enter {
@@ -424,7 +446,10 @@ pub fn ConversationSidebar() -> Element {
                         }
 
                         // Action buttons (shown on hover)
-                        div { class: "opacity-0 group-hover:opacity-100 flex items-center gap-0.5 transition-opacity",
+                        // shown on hover, and while the row or a button has the keyboard focus
+                        div { class: "k-row-actions flex items-center gap-0.5 transition-opacity",
+                            // a key on a button acts on the button, not on the row
+                            onkeydown: |e: Event<KeyboardData>| e.stop_propagation(),
                             // Rename button
                             button {
                                 class: "action-btn-rename p-1.5 rounded transition-all cursor-pointer hover:bg-teal-50 dark:hover:bg-teal-900/30",

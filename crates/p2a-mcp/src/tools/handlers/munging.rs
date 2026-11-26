@@ -3112,12 +3112,20 @@ impl AnalyticsServer {
         let replaced = saved_note(&datasets, &result_name, Some(request.dataset.as_str()));
         datasets.insert(result_name.clone(), result);
 
-        Ok(CallToolResult::success(vec![Content::text(with_note(
+        let saved = if result_name == request.dataset {
+            format!(
+                "Created column '{}' in '{}' (the dataset was changed in place; pass result_name \
+                 to keep the original)",
+                request.new_column, result_name
+            )
+        } else {
             format!(
                 "Created column '{}', saved as '{}'",
                 request.new_column, result_name
-            ),
-            &replaced,
+            )
+        };
+        Ok(CallToolResult::success(vec![Content::text(with_note(
+            saved, &replaced,
         ))]))
     }
 

@@ -34,7 +34,7 @@ pub const EXAMPLES: [Example; 3] = [
         name: "grunfeld",
         title: "Investment by 10 US firms, 1935 to 1954",
         question: "Estimate a fixed effects model of investment on firm value and capital.",
-        prompt: "Estimate a fixed effects panel model of inv on value and capital in grunfeld, with firm as the entity and year as the time variable.",
+        prompt: "Estimate a fixed effects (within) panel model of inv on value and capital in grunfeld, with firm as the entity.",
         csv: include_str!("../assets/examples/grunfeld.csv"),
         rows: 200,
         cols: 5,
