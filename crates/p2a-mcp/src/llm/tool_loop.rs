@@ -122,6 +122,31 @@ pub fn repeated_tool_note(name: &str) -> String {
     )
 }
 
+/// The answer when the loop reaches the iteration cap after the model wrote text (the text comes
+/// first).
+pub const MAX_ITERATIONS_AFTER_TEXT_NOTE: &str = "Analysis stopped at the limit of model calls \
+     for one request, so the answer above may be incomplete. Ask again with a narrower request.";
+
+/// A loop-guard note as it follows text the model wrote: the per-tool note says the answer above
+/// may be incomplete; the repeat note reads the same either way.
+fn stopped_after_text_note(note: &str) -> String {
+    note.replacen(
+        ". Ask again",
+        ", so the answer above may be incomplete. Ask again",
+        1,
+    )
+}
+
+/// The answer of a stopped loop: the note alone when the model wrote no text, else the model's
+/// last text and the note after it, so the reader knows why the answer ends where it does.
+fn stopped_answer(last_text: String, alone: &str, after_text: &str) -> Message {
+    Message::assistant(if last_text.is_empty() {
+        alone.to_string()
+    } else {
+        format!("{last_text}\n\n{after_text}")
+    })
+}
+
 /// Why a round of tool calls is refused before it runs.
 enum Stop {
     Repeat,
@@ -539,11 +564,8 @@ pub async fn run_tool_loop(
                     repeated_tool_note(&name)
                 }
             };
-            return Ok(Message::assistant(if last_text.is_empty() {
-                note
-            } else {
-                last_text
-            }));
+            let after = stopped_after_text_note(&note);
+            return Ok(stopped_answer(last_text, &note, &after));
         }
         let calls: Vec<ToolCall> = turn
             .tool_calls
@@ -611,11 +633,11 @@ pub async fn run_tool_loop(
         max = config.max_iterations,
         "Tool loop reached its iteration cap"
     );
-    Ok(Message::assistant(if last_text.is_empty() {
-        MAX_ITERATIONS_NOTE.to_string()
-    } else {
-        last_text
-    }))
+    Ok(stopped_answer(
+        last_text,
+        MAX_ITERATIONS_NOTE,
+        MAX_ITERATIONS_AFTER_TEXT_NOTE,
+    ))
 }
 
 #[cfg(test)]
@@ -1265,7 +1287,44 @@ mod tests {
         );
         let p = Scripted::new(script("working"));
         let (m, _) = run(&p, &Tools::default(), &config(2, true)).await;
-        assert_eq!(m.content, "working");
+        assert_eq!(
+            m.content,
+            "working\n\nAnalysis stopped at the limit of model calls for one request, so the \
+             answer above may be incomplete. Ask again with a narrower request."
+        );
+    }
+
+    /// A loop the guard stops after the model wrote text keeps the text and says why it ended.
+    #[tokio::test]
+    async fn a_stop_after_text_keeps_the_text_and_adds_the_note() {
+        let p = Scripted::new(
+            (1..=4)
+                .map(|i| {
+                    turn(
+                        if i == 3 {
+                            "Removing the next value."
+                        } else {
+                            ""
+                        },
+                        &[("t", json!({"i": i}))],
+                    )
+                })
+                .collect(),
+        );
+        let (m, _) = run(&p, &Tools::default(), &config(25, true)).await;
+        assert_eq!(
+            m.content,
+            format!(
+                "Removing the next value.\n\n{}",
+                stopped_after_text_note(&repeated_tool_note("t"))
+            )
+        );
+        let p = Scripted::new(vec![
+            turn("Trying t.", &[("t", json!({"a": 1}))]),
+            turn("", &[("t", json!({"a": 1}))]),
+        ]);
+        let (m, _) = run(&p, &Tools::default(), &config(25, true)).await;
+        assert_eq!(m.content, format!("Trying t.\n\n{REPEATED_CALLS_NOTE}"));
     }
 
     #[tokio::test]
