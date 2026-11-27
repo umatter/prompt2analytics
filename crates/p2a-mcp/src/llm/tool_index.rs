@@ -331,6 +331,17 @@ mod tests {
         );
     }
 
+    /// k-means uses the columns as given, so its description says how to put them on one scale.
+    #[test]
+    fn kmeans_description_points_to_standardizing() {
+        let t = registry().iter().find(|t| t.name == "ml_kmeans").unwrap();
+        assert!(
+            t.description.contains("munge_standardize"),
+            "{}",
+            t.description
+        );
+    }
+
     #[test]
     fn help_with_tool_lists_parameters() {
         let h = help(&json!({"tool": "sar_model"}), &callable).unwrap();
