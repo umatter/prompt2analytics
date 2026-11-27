@@ -104,6 +104,61 @@ macro_rules! tool_try {
     };
 }
 
+/// For a logit or probit fit, the average change in the predicted probability when each 0/1
+/// regressor goes from 0 to 1 (`marginaleffects::avg_comparisons`), as text to append to the
+/// marginal-effects table; empty when no regressor is 0/1. The table's AME of a 0/1 regressor
+/// is the average slope dP/dx, which is not the effect of switching it on.
+fn binary_changes(
+    dataset: &p2a_core::data::Dataset,
+    result: &p2a_core::regression::MarginalEffectsResult,
+    y: &str,
+    x: &[&str],
+) -> Result<String, p2a_core::errors::EconError> {
+    use p2a_core::data::columns::{ColumnRequest, NaPolicy};
+    use p2a_core::traits::estimator::z_critical;
+
+    // The rows the model used: complete in the outcome and every regressor.
+    let cols = ColumnRequest::new(dataset.df())
+        .numeric(y)
+        .numerics(x)
+        .na(NaPolicy::Omit)
+        .extract()?;
+    let binary: Vec<&str> = x
+        .iter()
+        .copied()
+        .filter(|c| {
+            let v = cols.numeric(c);
+            v.iter().all(|&a| a == 0.0 || a == 1.0) && v.contains(&0.0) && v.contains(&1.0)
+        })
+        .collect();
+    if binary.is_empty() {
+        return Ok(String::new());
+    }
+    let z = z_critical(0.95)?;
+    let mut out = String::from(
+        "\n\n0/1 regressors: the AME above is the average slope dP/dx, not the effect of \
+         switching the variable on. The average change in P(y = 1) from 0 to 1, the other \
+         regressors as observed (marginaleffects::avg_comparisons):",
+    );
+    for c in binary {
+        // An aliased regressor has no coefficient and no change; the table already says so.
+        let Ok(r) = p2a_core::regression::contrasts(dataset, result, c, &[0.0, 1.0]) else {
+            continue;
+        };
+        let e = &r.contrasts[0];
+        out.push_str(&format!(
+            "\n  {c}: {:.4} (SE {:.4}, z = {:.2}, p = {:.4}, 95% CI [{:.4}, {:.4}])",
+            e.estimate,
+            e.std_error,
+            e.z_value,
+            e.p_value,
+            e.estimate - z * e.std_error,
+            e.estimate + z * e.std_error,
+        ));
+    }
+    Ok(out)
+}
+
 /// The models marginal_effects fits.
 static MARGINAL_MODEL: Choices<MarginalModel> = Choices {
     option: "model",
@@ -2897,7 +2952,7 @@ impl AnalyticsServer {
 
     /// Compute average marginal effects from regression models.
     #[tool(
-        description = "Compute average marginal effects (AME) from regression models. For OLS, marginal effects equal coefficients. For Logit/Probit, effects are averaged across observations accounting for nonlinearity. Returns effects, standard errors, z-values, p-values, and confidence intervals."
+        description = "Compute average marginal effects (AME) from regression models. For OLS, marginal effects equal coefficients. For Logit/Probit, effects are averaged across observations accounting for nonlinearity, and each 0/1 regressor also gets the average change in the probability from 0 to 1 (the AME of a 0/1 regressor is a slope, not that change). Returns effects, standard errors, z-values, p-values, and confidence intervals."
     )]
     pub async fn marginal_effects(
         &self,
@@ -2926,9 +2981,16 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(
-            result.to_string(),
-        )]))
+        let mut text = result.to_string();
+        if matches!(model_type, MarginalModel::Logit | MarginalModel::Probit) {
+            match binary_changes(dataset, &result, &request.y, &x_refs) {
+                Ok(note) => text.push_str(&note),
+                Err(e) => text.push_str(&format!(
+                    "\nThe 0-to-1 changes of the 0/1 regressors could not be computed: {e}"
+                )),
+            }
+        }
+        Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
     /// Run Regression Standardization (G-computation) for causal effect estimation.
@@ -3889,6 +3951,74 @@ mod tests {
             out.contains("Available units (first 10 of 20): 1, 2, 3, 4, 5, 6, 7, 8, 9, 10"),
             "{out}"
         );
+    }
+
+    #[test]
+    fn marginal_effects_reports_the_zero_to_one_change_of_binary_regressors() {
+        // A logit with a 0/1 regressor d and a continuous x: the reply adds d's average
+        // change from 0 to 1, as core's contrasts computes it, and nothing for x.
+        let n = 200;
+        let x: Vec<f64> = (0..n)
+            .map(|i| ((i * 37) % 101) as f64 / 25.0 - 2.0)
+            .collect();
+        let d: Vec<f64> = (0..n).map(|i| ((i * 13) % 7 < 3) as u8 as f64).collect();
+        let y: Vec<f64> = (0..n)
+            .map(|i| {
+                let u = ((i * 61 + 17) % 97) as f64 / 97.0;
+                let p = 1.0 / (1.0 + (-(-0.3 + 0.8 * x[i] + 1.2 * d[i])).exp());
+                (u < p) as u8 as f64
+            })
+            .collect();
+        let df = DataFrame::new(vec![
+            Series::new("y".into(), y).into(),
+            Series::new("x".into(), x).into(),
+            Series::new("d".into(), d).into(),
+        ])
+        .unwrap();
+        let (rt, server) = server_with(vec![("b", df.clone())]);
+        let req: MarginalEffectsRequest = serde_json::from_value(
+            json!({"dataset": "b", "y": "y", "x": ["x", "d"], "model": "logit"}),
+        )
+        .unwrap();
+        let out = text(
+            &rt.block_on(server.marginal_effects(Parameters(req)))
+                .unwrap(),
+        );
+
+        let ds = p2a_core::data::Dataset::new(df);
+        let me =
+            p2a_core::regression::marginal_effects(&ds, "y", &["x", "d"], MarginalModel::Logit)
+                .unwrap();
+        let c = &p2a_core::regression::contrasts(&ds, &me, "d", &[0.0, 1.0])
+            .unwrap()
+            .contrasts[0];
+        assert!(
+            out.contains("0/1 regressors: the AME above is the average slope"),
+            "{out}"
+        );
+        let line = format!("\n  d: {:.4} (SE {:.4},", c.estimate, c.std_error);
+        assert!(out.contains(&line), "{line} not in {out}");
+        assert!(!out.contains("\n  x: "), "{out}");
+        // The slope differs from the change here, which is why both are reported.
+        let ame = me
+            .average_marginal
+            .iter()
+            .find(|m| m.variable == "d")
+            .unwrap();
+        assert!(
+            (ame.estimate - c.estimate).abs() > 1e-3,
+            "{} {}",
+            ame.estimate,
+            c.estimate
+        );
+
+        let req: MarginalEffectsRequest =
+            serde_json::from_value(json!({"dataset": "b", "y": "y", "x": ["x", "d"]})).unwrap();
+        let ols = text(
+            &rt.block_on(server.marginal_effects(Parameters(req)))
+                .unwrap(),
+        );
+        assert!(!ols.contains("0/1 regressors"), "{ols}");
     }
 
     #[test]
