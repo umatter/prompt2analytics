@@ -145,6 +145,8 @@ pub struct MediationResult {
     pub n_obs: usize,
     /// Number of complete rows trimmed for extreme propensity scores
     pub n_trimmed: usize,
+    /// The trimming bound: units with a propensity score outside `(trim, 1 - trim)` are dropped.
+    pub trim: f64,
     /// Rows dropped because of missing values before the propensity models were fitted.
     pub missing: MissingSummary,
     /// Warnings: propensity-model fit problems, failed or warned bootstrap replicates, a
@@ -156,6 +158,18 @@ impl ResultNotes for MediationResult {
     fn notes_warnings(&self) -> Vec<String> {
         self.warnings.clone()
     }
+}
+
+/// The sample line's note on trimming: how many units the rule dropped, and the rule.
+fn trim_note(n_trimmed: usize, trim: f64) -> String {
+    if trim == 0.0 {
+        return "no trimming".to_string();
+    }
+    let units = if n_trimmed == 1 { "unit" } else { "units" };
+    format!(
+        "{n_trimmed} {units} trimmed: propensity scores outside ({trim}, {})",
+        1.0 - trim
+    )
 }
 
 impl fmt::Display for MediationResult {
@@ -265,7 +279,12 @@ impl fmt::Display for MediationResult {
         )?;
         writeln!(f, "  (NIE / Total Effect)")?;
         writeln!(f)?;
-        writeln!(f, "N = {} (trimmed: {})", self.n_obs, self.n_trimmed)?;
+        writeln!(
+            f,
+            "N = {} ({})",
+            self.n_obs,
+            trim_note(self.n_trimmed, self.trim)
+        )?;
         writeln!(f)?;
         writeln!(f, "Signif. codes: *** p<0.01, ** p<0.05, * p<0.10")?;
         f.write_str(&notes_text(self))?;
@@ -482,6 +501,7 @@ pub fn run_mediation_analysis(
         p_indirect_control,
         n_obs,
         n_trimmed,
+        trim: config.trim,
         missing: cols.missing().clone(),
         warnings,
     })
@@ -1511,7 +1531,10 @@ mod tests {
             ["y", "m", "x1"]
         );
         let text = r.to_string();
-        assert!(text.contains("N = 280 (trimmed: 70)"), "{text}");
+        assert!(
+            text.contains("N = 280 (70 units trimmed: propensity scores outside (0.05, 0.95))"),
+            "{text}"
+        );
         assert!(
             text.trim_end().ends_with(
                 "Missing values: 50 of 400 rows dropped because of missing values \
@@ -1666,5 +1689,19 @@ mod tests {
                 "trim",
             );
         }
+    }
+
+    /// The sample line names the trimming rule, so "0 units trimmed" does not read as no rule.
+    #[test]
+    fn trim_note_names_the_rule() {
+        assert_eq!(
+            trim_note(0, 0.05),
+            "0 units trimmed: propensity scores outside (0.05, 0.95)"
+        );
+        assert_eq!(
+            trim_note(1, 0.1),
+            "1 unit trimmed: propensity scores outside (0.1, 0.9)"
+        );
+        assert_eq!(trim_note(0, 0.0), "no trimming");
     }
 }

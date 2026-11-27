@@ -39,7 +39,10 @@ async fn test_validate_mcp_mediation_analysis_causal_na() {
     .await;
     let t = text(&res);
     assert!(res.success, "{t}");
-    assert!(t.contains("N = 280 (trimmed: 70)"), "{t}");
+    assert!(
+        t.contains("N = 280 (70 units trimmed: propensity scores outside (0.05, 0.95))"),
+        "{t}"
+    );
     assert!(t.contains(MISSING_LINE), "{t}");
     let total = labelled(&t, "Total (ATE)").unwrap_or_else(|| panic!("no total in:\n{t}"));
     Check::new(&case)
