@@ -4,7 +4,7 @@
 //! `JsonSchema` derives on request structs, ensuring a single source of truth.
 //! Tools are organized into tiers for priority-based filtering.
 
-/// Tier 1: Core analytical tools always exposed to LLM (~119 tools).
+/// Tier 1: Core analytical tools always exposed to LLM (128 tools).
 /// Stays under OpenAI's 128-tool limit while covering all common workflows.
 pub const TIER1_TOOLS: &[&str] = &[
     // Data management (6)
@@ -25,13 +25,12 @@ pub const TIER1_TOOLS: &[&str] = &[
     "regression_bgtest",
     "regression_loess",
     "regression_step",
-    // Panel (10)
+    // Panel (9; panel_pvcm stays callable by name)
     "panel_fixed_effects",
     "panel_random_effects",
     "panel_hdfe",
     "panel_gmm",
     "panel_gls",
-    "panel_pvcm",
     "panel_pmg",
     "panel_unit_root",
     "hausman_test",
@@ -131,6 +130,12 @@ pub const TIER1_TOOLS: &[&str] = &[
     "viz_event_study",
     "viz_irf",
     "viz_dendrogram",
+    // Survival (5)
+    "kaplan_meier",
+    "log_rank",
+    "cox_ph",
+    "aft",
+    "competing_risks",
     // Statistics & other (4)
     "compute_correlation",
     "marginal_effects",
@@ -473,6 +478,24 @@ mod tests {
             "Tier 1 has {} tools, exceeds OpenAI limit of 128",
             TIER1_TOOLS.len()
         );
+    }
+
+    #[test]
+    fn the_survival_tools_are_offered() {
+        // Without them the chat model answers a Kaplan-Meier or Cox request with "no tool does
+        // survival analysis", although the server has all five.
+        for t in [
+            "kaplan_meier",
+            "log_rank",
+            "cox_ph",
+            "aft",
+            "competing_risks",
+        ] {
+            assert!(
+                TIER1_TOOLS.contains(&t),
+                "{t} is not offered to the chat model"
+            );
+        }
     }
 
     #[test]
