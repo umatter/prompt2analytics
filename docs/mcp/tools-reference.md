@@ -260,7 +260,7 @@ Total tools: 272
 
 | Tool | Description | R counterpart |
 |------|-------------|---------------|
-| `mediation_analysis` | Perform causal mediation analysis to decompose treatment effects into direct and indirect (mediated) effects. Uses IPW-based identification following Huber (2014). Returns θ(0) (the natural direct effect, NDE) and δ(1) (the natural indirect effect, NIE), and the reverse decomposition θ(1), δ(0), with the proportion mediated and bootstrap inference. Bootstrap draws are seeded by the session seed (default 42). | mediation::mediate() |
+| `mediation_analysis` | Perform causal mediation analysis to decompose treatment effects into direct and indirect (mediated) effects. Uses IPW-based identification following Huber (2014). Returns θ(0) (the natural direct effect, NDE) and δ(1) (the natural indirect effect, NIE), and the reverse decomposition θ(1), δ(0), with the proportion mediated and bootstrap inference. Bootstrap draws are seeded by the session seed (default 42). | causalweight::medweight() |
 | `natural_effects_mediation` | Natural direct and indirect effects by natural effect models (Vansteelandt, Bekaert & Lange 2012) with the imputation estimator of R's medflex (neImpute + neModel): an outcome working model (gaussian, poisson or binomial, optionally with A x M), imputed nested counterfactuals, and a natural effect model on the difference, ratio or odds-ratio scale; effects at the confounder means, robust sandwich SEs (n_bootstrap = 0) or seeded bootstrap SEs with bias-corrected normal intervals. The treatment must be 0/1. | medflex::neModel() |
 
 ## Discrete (10 tools)
