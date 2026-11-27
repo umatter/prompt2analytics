@@ -69,7 +69,37 @@ pub fn DatasetSidebar() -> Element {
 
                 let client = api();
                 match client.reload_session_datasets(&sid).await {
-                    Ok(result) => {
+                    Ok(mut result) => {
+                        // Bundled examples have no file on the server: load the
+                        // app's own copy of each one the server skipped.
+                        let metas = datasets.peek().clone();
+                        let mut skipped = Vec::new();
+                        for skip in std::mem::take(&mut result.skipped) {
+                            let example = metas
+                                .iter()
+                                .find(|m| m.name == skip.name && m.source_path.is_none())
+                                .and_then(|m| {
+                                    crate::examples::example_to_restore(
+                                        &m.name,
+                                        m.row_count,
+                                        m.column_count,
+                                    )
+                                });
+                            match example {
+                                Some(ex) => match crate::examples::load_example(session_state, ex)
+                                    .await
+                                {
+                                    Ok(()) => result.succeeded.push(skip.name),
+                                    Err(e) => result.failed.push(crate::api::ReloadFailure {
+                                        name: skip.name,
+                                        source_path: format!("{}.csv (bundled example)", ex.name),
+                                        error: e,
+                                    }),
+                                },
+                                None => skipped.push(skip),
+                            }
+                        }
+                        result.skipped = skipped;
                         reload_result.set(Some(result.clone()));
 
                         // Refresh the dataset list, here and in the status bar
