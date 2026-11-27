@@ -342,6 +342,20 @@ mod tests {
         );
     }
 
+    /// The mean cost assumes unit variance, so the description says what to do with other series.
+    #[test]
+    fn changepoint_description_says_how_to_meet_unit_variance() {
+        let t = registry()
+            .iter()
+            .find(|t| t.name == "ts_changepoint")
+            .unwrap();
+        assert!(
+            t.description.contains("munge_standardize") && t.description.contains("meanvar"),
+            "{}",
+            t.description
+        );
+    }
+
     #[test]
     fn help_with_tool_lists_parameters() {
         let h = help(&json!({"tool": "sar_model"}), &callable).unwrap();

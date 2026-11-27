@@ -938,7 +938,7 @@ impl AnalyticsServer {
 
     /// Detect changepoints (structural breaks) in a time series.
     #[tool(
-        description = "Detect changepoints (structural breaks) in a time series using PELT (changepoint's cpt.mean / cpt.var / cpt.meanvar with the MBIC penalty by default; the mean cost assumes unit variance) or Binary Segmentation (changepoint's BinSeg: the same costs and penalties, at most Q = 5 changepoints by default, set by max_changepoints). Identifies points where the mean or variance changes. Useful for regime detection, anomaly detection, and segmenting time series into homogeneous periods."
+        description = "Detect changepoints (structural breaks) in a time series using PELT (changepoint's cpt.mean / cpt.var / cpt.meanvar with the MBIC penalty by default) or Binary Segmentation (changepoint's BinSeg: the same costs and penalties, at most Q = 5 changepoints by default, set by max_changepoints). Identifies points where the mean or variance changes. The mean cost assumes unit variance, as cpt.mean does: on a series whose standard deviation is far from 1 it finds spurious breaks, so standardize the column first with munge_standardize, or use change_type 'meanvar'. Useful for regime detection, anomaly detection, and segmenting time series into homogeneous periods."
     )]
     pub async fn ts_changepoint(
         &self,
