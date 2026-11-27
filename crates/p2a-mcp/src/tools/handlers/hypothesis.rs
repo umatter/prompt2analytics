@@ -19,6 +19,7 @@ use crate::tools::common::{
 };
 use crate::tools::limits::{Family, echo};
 use crate::tools::requests::hypothesis::*;
+use p2a_core::data::columns::two_groups;
 use p2a_core::stats::{
     Alternative, CmhAlternative, GofExpected, PValueAdjustMethod, PoissonAlternative, mcnemar_test,
     poisson_test, run_bartlett_test, run_chisq_gof_with, run_chisq_independence, run_friedman_test,
@@ -1519,7 +1520,7 @@ impl AnalyticsServer {
 
     /// Run t-test for comparing means.
     #[tool(
-        description = "Run Student's t-test for comparing means. Supports: (1) One-sample t-test: compare sample mean to hypothesized value, (2) Two-sample t-test: pass x and y as two numeric columns to compare (Welch's by default), (3) Paired t-test: compare matched pairs. Returns t-statistic, p-value, confidence interval, and effect estimate. Note: x and y must both be numeric columns. To compare a numeric variable across groups (e.g., salary by gender), first filter into two datasets or use two numeric columns. Missing values are dropped as R's t.test does (each sample on its own; complete pairs when paired) and reported in a 'Missing values' line. Integer columns are accepted."
+        description = "Run Student's t-test for comparing means. Supports: (1) One-sample t-test: compare sample mean to hypothesized value, (2) Two-sample t-test: pass x and y as two numeric columns to compare (Welch's by default), (3) Paired t-test: compare matched pairs. Returns t-statistic, p-value, confidence interval, and effect estimate. Note: x and y must both be numeric columns. To compare a numeric variable between two groups (e.g., salary by gender), pass the variable as x and the two-level column as group, as R's t.test(x ~ group). Missing values are dropped as R's t.test does (each sample on its own; complete pairs when paired) and reported in a 'Missing values' line. Integer columns are accepted."
     )]
     pub async fn hypothesis_t_test(
         &self,
@@ -1539,10 +1540,43 @@ impl AnalyticsServer {
         let var_equal = request.var_equal.unwrap_or(false);
         let conf_level = request.conf_level.unwrap_or(0.95);
 
-        if paired && request.y.is_none() {
+        if paired && request.y.is_none() && request.group.is_none() {
             return Ok(CallToolResult::error(vec![Content::text(
                 "Paired t-test requires both x and y columns.".to_string(),
             )]));
+        }
+
+        if let Some(group) = request.group.as_deref() {
+            if let Err(msg) = check_group_form(request.y.as_deref(), paired) {
+                return Ok(CallToolResult::error(vec![Content::text(msg)]));
+            }
+            let split = match two_groups(dataset.df(), &request.x, group) {
+                Ok(s) => s,
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "t-test failed: {e}"
+                    ))]));
+                }
+            };
+            return match p2a_core::stats::ttest::two_sample_t_test(
+                &split.first,
+                &split.second,
+                mu,
+                alternative,
+                var_equal,
+                conf_level,
+            ) {
+                Ok(mut r) => {
+                    r.missing = split.missing.clone();
+                    Ok(CallToolResult::success(vec![Content::text(format!(
+                        "{}\n{r}",
+                        group_line(&request.x, group, &split)
+                    ))]))
+                }
+                Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                    "t-test failed: {e}"
+                ))])),
+            };
         }
 
         match t_test(
@@ -1565,7 +1599,7 @@ impl AnalyticsServer {
 
     /// Run Wilcoxon rank sum or signed rank test.
     #[tool(
-        description = "Run Wilcoxon non-parametric test for location. Supports: (1) One-sample signed rank test: test if median differs from hypothesized value, (2) Two-sample rank sum test (Mann-Whitney U): compare distributions between two groups, (3) Paired signed rank test: compare matched pairs. Does not assume normality. Returns W/V statistic, p-value, and optionally confidence interval and location estimate."
+        description = "Run Wilcoxon non-parametric test for location. Supports: (1) One-sample signed rank test: test if median differs from hypothesized value, (2) Two-sample rank sum test (Mann-Whitney U): compare two numeric columns x and y, or x between the two levels of a group column (R's wilcox.test(x ~ group)), (3) Paired signed rank test: compare matched pairs. Does not assume normality. Returns W/V statistic, p-value, and optionally confidence interval and location estimate."
     )]
     pub async fn hypothesis_wilcoxon(
         &self,
@@ -1591,15 +1625,36 @@ impl AnalyticsServer {
         config.conf_int = request.conf_int.unwrap_or(false);
         config.conf_level = request.conf_level.unwrap_or(0.95);
 
-        match wilcoxon_test(
-            dataset,
-            &request.x,
-            request.y.as_deref(),
-            mu,
-            alternative,
-            paired,
-            &config,
-        ) {
+        let mut groups_note = None;
+        let outcome = match request.group.as_deref() {
+            Some(group) => {
+                if let Err(msg) = check_group_form(request.y.as_deref(), paired) {
+                    return Ok(CallToolResult::error(vec![Content::text(msg)]));
+                }
+                two_groups(dataset.df(), &request.x, group).and_then(|split| {
+                    groups_note = Some(group_line(&request.x, group, &split));
+                    let mut r = p2a_core::stats::wilcoxon::wilcoxon_rank_sum(
+                        &split.first,
+                        &split.second,
+                        mu,
+                        alternative,
+                        &config,
+                    )?;
+                    r.missing = split.missing;
+                    Ok(r)
+                })
+            }
+            None => wilcoxon_test(
+                dataset,
+                &request.x,
+                request.y.as_deref(),
+                mu,
+                alternative,
+                paired,
+                &config,
+            ),
+        };
+        match outcome {
             Ok(result) => {
                 let mut json_output = serde_json::json!({
                     "test": result.test_name,
@@ -1644,11 +1699,17 @@ impl AnalyticsServer {
                     json_output["warning"] = serde_json::json!(warn);
                 }
 
-                Ok(CallToolResult::success(vec![Content::text(format!(
+                let text = format!(
                     "{}\n\n{}",
                     result,
                     serde_json::to_string_pretty(&json_output).unwrap_or_default()
-                ))]))
+                );
+                Ok(CallToolResult::success(vec![Content::text(
+                    match groups_note {
+                        Some(note) => format!("{note}\n{text}"),
+                        None => text,
+                    },
+                )]))
             }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
                 "Wilcoxon test failed: {}",
@@ -1769,6 +1830,35 @@ fn lower_triangular_p_matrix(
         }
     }
     Ok(p_matrix)
+}
+
+/// The formula form takes the place of y and has no paired version (R: "cannot use
+/// 'paired' in formula method").
+fn check_group_form(y: Option<&str>, paired: bool) -> Result<(), String> {
+    if y.is_some() {
+        return Err(
+            "give either y (a second column) or group (a two-level column), not both".to_string(),
+        );
+    }
+    if paired {
+        return Err(
+            "group cannot be used with paired = true (as in R's formula method); give \
+                    the paired measurements as x and y"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// Which group is which in a formula-form test.
+fn group_line(x: &str, group: &str, split: &p2a_core::data::columns::TwoGroups) -> String {
+    let [a, b] = &split.levels;
+    format!(
+        "{x} by {group} (as R's {x} ~ {group}): sample 1 = {group} {a} (n = {}), sample 2 = \
+         {group} {b} (n = {}); differences are sample 1 minus sample 2.",
+        split.first.len(),
+        split.second.len()
+    )
 }
 
 #[cfg(test)]
@@ -3070,6 +3160,93 @@ mod tests {
                 "Column 'successes_frac' must hold non-negative whole numbers (counts); row 2 is 5.5"
             ),
             "{e}"
+        );
+    }
+
+    /// The formula form, t.test(y ~ g) and wilcox.test(y ~ g): levels in factor order, rows
+    /// missing y or g dropped jointly. R 4.x values quoted (t.test: t, df, p, CI; wilcox.test:
+    /// W, exact p).
+    #[test]
+    fn t_test_and_wilcoxon_split_by_a_two_level_group_as_r_formula() {
+        let y = [
+            Some(5.1),
+            Some(4.8),
+            Some(6.2),
+            Some(5.9),
+            None,
+            Some(7.1),
+            Some(6.6),
+            Some(7.4),
+            Some(6.0),
+            Some(5.5),
+            Some(8.1),
+            Some(7.7),
+        ];
+        let g = [
+            Some("b"),
+            Some("a"),
+            Some("b"),
+            Some("a"),
+            Some("a"),
+            Some("b"),
+            None,
+            Some("a"),
+            Some("b"),
+            Some("a"),
+            Some("b"),
+            Some("a"),
+        ];
+        let df = df!("y" => y, "g" => g, "h" => [1i64, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3]).unwrap();
+        let (rt, server) = server_with(vec![("d", df)]);
+        let call_t = |v: serde_json::Value| {
+            let req: TTestRequest = serde_json::from_value(v).unwrap();
+            rt.block_on(server.hypothesis_t_test(Parameters(req)))
+                .unwrap()
+        };
+        let r = call_t(serde_json::json!({"dataset": "d", "x": "y", "group": "g"}));
+        let t = text(&r);
+        assert_ne!(r.is_error, Some(true), "{t}");
+        assert!(
+            t.starts_with("y by g (as R's y ~ g): sample 1 = g a (n = 5), sample 2 = g b (n = 5)"),
+            "{t}"
+        );
+        for want in [
+            "t = -0.317443",
+            "df = 7.94",
+            "p-value = 0.759095",
+            "(-1.985724, 1.505724)",
+        ] {
+            assert!(t.contains(want), "{want}: {t}");
+        }
+        let req: WilcoxonTestRequest =
+            serde_json::from_value(serde_json::json!({"dataset": "d", "x": "y", "group": "g"}))
+                .unwrap();
+        let r = rt
+            .block_on(server.hypothesis_wilcoxon(Parameters(req)))
+            .unwrap();
+        let t = text(&r);
+        assert_ne!(r.is_error, Some(true), "{t}");
+        let json: serde_json::Value = serde_json::from_str(&t[t.find("\n{").unwrap()..]).unwrap();
+        assert_eq!(json["statistic"].as_f64(), Some(10.0), "{t}");
+        assert!(
+            (json["p_value"].as_f64().unwrap() - 0.690476190476).abs() < 1e-9,
+            "{t}"
+        );
+        assert!(t.starts_with("y by g (as R's y ~ g)"), "{t}");
+        // Refusals: three levels, y and group together, group with paired.
+        let r = call_t(serde_json::json!({"dataset": "d", "x": "y", "group": "h"}));
+        assert!(
+            text(&r).contains("exactly 2 levels, it has 3 (1, 2, 3)"),
+            "{}",
+            text(&r)
+        );
+        let r = call_t(serde_json::json!({"dataset": "d", "x": "y", "y": "h", "group": "g"}));
+        assert!(text(&r).contains("not both"), "{}", text(&r));
+        let r = call_t(serde_json::json!({"dataset": "d", "x": "y", "group": "g", "paired": true}));
+        assert!(
+            text(&r).contains("cannot be used with paired"),
+            "{}",
+            text(&r)
         );
     }
 }

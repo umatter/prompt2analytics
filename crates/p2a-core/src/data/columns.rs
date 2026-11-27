@@ -1326,6 +1326,58 @@ fn time_values(col: &Column, name: &str) -> EconResult<Vec<Option<i64>>> {
     Ok(out)
 }
 
+/// A numeric column split by a two-level grouping column, as R's formula methods
+/// (`t.test(y ~ g)`, `wilcox.test(y ~ g)`) split it.
+#[derive(Debug, Clone)]
+pub struct TwoGroups {
+    /// The two level labels, in R `factor()` order.
+    pub levels: [String; 2],
+    /// Values of the first level.
+    pub first: Vec<f64>,
+    /// Values of the second level.
+    pub second: Vec<f64>,
+    /// Rows dropped for a missing value or group (jointly, as `model.frame`).
+    pub missing: MissingSummary,
+}
+
+/// Splits `value` by `group`, which must have exactly two levels among the complete rows
+/// (R: "grouping factor must have exactly 2 levels"). Rows missing either are dropped.
+pub fn two_groups(df: &DataFrame, value: &str, group: &str) -> EconResult<TwoGroups> {
+    let cols = ColumnRequest::new(df)
+        .numeric(value)
+        .factor(group)
+        .na(NaPolicy::Omit)
+        .extract()?;
+    let factor = cols.factor(group);
+    if factor.n_levels() != 2 {
+        let shown: Vec<&str> = factor.levels.iter().take(5).map(String::as_str).collect();
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "grouping column '{group}' must have exactly 2 levels, it has {} ({}{}); filter \
+                 it to two groups first",
+                factor.n_levels(),
+                shown.join(", "),
+                if factor.n_levels() > 5 { ", ..." } else { "" }
+            ),
+        });
+    }
+    let values = cols.numeric(value);
+    let (mut first, mut second) = (Vec::new(), Vec::new());
+    for (&v, &code) in values.iter().zip(&factor.codes) {
+        if code == 0 {
+            first.push(v);
+        } else {
+            second.push(v);
+        }
+    }
+    Ok(TwoGroups {
+        levels: [factor.levels[0].clone(), factor.levels[1].clone()],
+        first,
+        second,
+        missing: cols.missing().clone(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
