@@ -241,6 +241,17 @@ const OTHER_MARKERS: &[&str] = &[
     "gibt",
     "es",
     "mir",
+    "ich",
+    "oder",
+    "auch",
+    "noch",
+    "einmal",
+    "nochmal",
+    "zeichne",
+    "zeichnen",
+    "erstelle",
+    "zwischen",
+    "gegen",
     // Spanish, Portuguese
     "el",
     "los",
@@ -263,6 +274,9 @@ const OTHER_MARKERS: &[&str] = &[
     "com",
     "da",
     "do",
+    "otra",
+    "vez",
+    "dibuja",
     // French, Italian
     "le",
     "les",
@@ -284,6 +298,8 @@ const OTHER_MARKERS: &[&str] = &[
     "della",
     "che",
     "sono",
+    "encore",
+    "dessine",
     // Dutch
     "het",
     "een",
@@ -631,6 +647,9 @@ mod tests {
             "Quel est l'effet de treat sur re78 dans lalonde ?",
             "Wat is het effect van treat op re78?",
             "Zeige mir die Größe",
+            "Bitte die Heatmap noch einmal zeichnen.",
+            "Dibuja otra vez el histograma",
+            "Dessine encore le graphique",
         ];
         for q in other {
             assert!(is_plainly_other_language(q), "{q}");
