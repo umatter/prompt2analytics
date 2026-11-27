@@ -859,15 +859,46 @@ fn llm_callable_tools(server: &crate::server::AnalyticsServer) -> &'static HashS
 /// What is wrong with a `p2a_run` call that reached an executor (the loop unwraps the
 /// well-formed ones into calls of the named tool).
 fn p2a_run_shape_error(arguments: &serde_json::Value) -> String {
+    let flat = arguments
+        .as_object()
+        .is_some_and(|o| o.keys().any(|k| k != "tool" && k != "args"));
     let problem = match arguments
         .get("tool")
         .and_then(|t| t.as_str())
         .map(str::trim)
     {
         None | Some("") => "`tool` must name a tool from the index",
+        Some(_) if flat => "the tool's parameters go inside `args`, not beside `tool`",
         Some(_) => "`args` must be an object of the tool's parameters",
     };
     format!("p2a_run needs {{\"tool\": \"<name>\", \"args\": {{...}}}}: {problem}.")
+}
+
+/// The audit outcome of a chat-only tool's answer. A refused lookup of a named tool is audited as
+/// a direct call of it would be (`not_available` for an internal tool, `unknown_tool` for an
+/// unregistered one), so an audit query for probes of internal tools finds lookups too; any other
+/// failure is `tool_error`.
+fn chat_only_outcome(
+    answer: &Result<String, String>,
+    arguments: &serde_json::Value,
+) -> &'static str {
+    if answer.is_ok() {
+        return "ok";
+    }
+    let registered = |t: &str| {
+        crate::tools::registry::registry()
+            .iter()
+            .any(|r| r.name == t)
+    };
+    match arguments
+        .get("tool")
+        .and_then(|t| t.as_str())
+        .map(str::trim)
+    {
+        Some(t) if INTERNAL_TOOLS.contains(&t) => NOT_AVAILABLE,
+        Some(t) if !t.is_empty() && !registered(t) => UNKNOWN_TOOL,
+        _ => "tool_error",
+    }
 }
 
 /// The answer of a chat-only tool (`p2a_help`, or a malformed `p2a_run`), in the governor's result
@@ -901,7 +932,7 @@ async fn answer_chat_only(
             CallOrigin::LlmTool.as_str(),
             name,
             sanitize_arguments(arguments, &server.declared_parameters(name)),
-            if answer.is_ok() { "ok" } else { "tool_error" },
+            chat_only_outcome(&answer, arguments),
             0,
             summary,
         );
@@ -921,7 +952,10 @@ fn refuse_unless_callable(
     server: &crate::server::AnalyticsServer,
     name: &str,
 ) -> Result<(), (&'static str, String)> {
-    if crate::llm::is_chat_only(name) {
+    // The chat-only tools exist only where they are offered (index mode); in tier1 they are
+    // unknown names, refused and audited as before the index existed.
+    if crate::llm::is_chat_only(name) && server.llm_tool_mode() == crate::config::LlmToolMode::Index
+    {
         return Ok(());
     }
     check_llm_tool_call(name, |n| llm_callable_tools(server).contains(n)).map_err(|refusal| {
@@ -2636,6 +2670,65 @@ mod tests {
                 .unwrap_err();
             assert!(err.contains("p2a_run needs"), "{err}");
         }
+    }
+
+    #[tokio::test]
+    async fn flat_p2a_run_says_parameters_go_inside_args() {
+        let (governor, server, chat) = governed_parts().await;
+        let executor = SessionToolExecutor::new(governor, server, chat, no_audit());
+        let err = executor
+            .execute(
+                crate::llm::P2A_RUN,
+                serde_json::json!({"tool": "sar_model", "dataset": "d"}),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.contains("inside `args`"), "{err}");
+    }
+
+    /// In tier1 the chat-only names are not offered, so they are refused as unknown tools, as
+    /// before the index existed.
+    #[tokio::test]
+    async fn tier1_refuses_the_chat_only_names_as_unknown() {
+        let (governor, _, chat) = governed_parts().await;
+        let server = Arc::new(
+            crate::server::AnalyticsServer::new()
+                .with_llm_tool_mode(crate::config::LlmToolMode::Tier1),
+        );
+        assert_eq!(
+            refuse_unless_callable(&server, crate::llm::P2A_HELP)
+                .unwrap_err()
+                .0,
+            UNKNOWN_TOOL
+        );
+        let executor = SessionToolExecutor::new(governor, server, chat, no_audit());
+        for name in [crate::llm::P2A_HELP, crate::llm::P2A_RUN] {
+            let err = executor
+                .execute(name, serde_json::json!({"tool": "cox_ph", "args": {}}))
+                .await
+                .unwrap_err();
+            assert!(err.contains("Unknown tool"), "{name}: {err}");
+        }
+    }
+
+    #[test]
+    fn p2a_help_refusals_are_audited_as_refusals() {
+        let ok: Result<String, String> = Ok(String::new());
+        let refused: Result<String, String> = Err(String::new());
+        let tool = |t: &str| serde_json::json!({"tool": t});
+        assert_eq!(chat_only_outcome(&ok, &tool("cox_ph")), "ok");
+        assert_eq!(
+            chat_only_outcome(&refused, &tool("cleaning_session_start")),
+            NOT_AVAILABLE
+        );
+        assert_eq!(
+            chat_only_outcome(&refused, &tool("no_such_tool")),
+            UNKNOWN_TOOL
+        );
+        assert_eq!(
+            chat_only_outcome(&refused, &serde_json::json!({})),
+            "tool_error"
+        );
     }
 
     #[tokio::test]

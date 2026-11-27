@@ -179,8 +179,9 @@ fn round_key(tc: &ToolCall) -> String {
     format!("{P2A_HELP}:{target}")
 }
 
-/// A `p2a_run` call as a call of the tool it names (`args` missing or null: no arguments). A
-/// malformed one (no tool name, `args` not an object) is returned unchanged; the executor answers
+/// A `p2a_run` call as a call of the tool it names (`args` missing or null: no arguments; `args`
+/// as JSON text: parsed). A malformed one (no tool name, `args` not an object, parameters beside
+/// `tool` instead of inside `args`) is returned unchanged; the executor answers
 /// it with the expected shape.
 fn unwrap_run(call: ToolCall) -> ToolCall {
     if call.name != P2A_RUN {
@@ -192,9 +193,19 @@ fn unwrap_run(call: ToolCall) -> ToolCall {
         .and_then(|v| v.as_str())
         .map(str::trim)
         .filter(|t| !t.is_empty());
+    // Parameters beside `tool` instead of inside `args` are not dropped: the call stays
+    // malformed and the executor says where they go. `args` sent as JSON text is parsed.
+    let flat = call
+        .arguments
+        .as_object()
+        .is_some_and(|o| o.keys().any(|k| k != "tool" && k != "args"));
     let args = match call.arguments.get("args") {
+        _ if flat => None,
         None | Some(serde_json::Value::Null) => Some(serde_json::json!({})),
         Some(v @ serde_json::Value::Object(_)) => Some(v.clone()),
+        Some(serde_json::Value::String(text)) => serde_json::from_str::<serde_json::Value>(text)
+            .ok()
+            .filter(serde_json::Value::is_object),
         Some(_) => None,
     };
     match (tool, args) {
@@ -764,6 +775,29 @@ mod tests {
             let (_, calls) = run_offered(&p, &offered()).await;
             assert_eq!(calls, [(P2A_RUN.to_string(), args)]);
         }
+    }
+
+    /// Parameters given beside `tool` instead of inside `args` are not dropped: the call stays a
+    /// malformed `p2a_run`, which the executor answers with the expected shape.
+    #[tokio::test]
+    async fn flat_p2a_run_is_not_unwrapped() {
+        let args = json!({"tool": "sar_model", "dataset": "d"});
+        let p = Scripted::new(vec![turn("", &[(P2A_RUN, args.clone())])]);
+        let (_, calls) = run_offered(&p, &offered()).await;
+        assert_eq!(calls, [(P2A_RUN.to_string(), args)]);
+    }
+
+    #[tokio::test]
+    async fn p2a_run_args_as_json_text_are_parsed() {
+        let p = Scripted::new(vec![turn(
+            "",
+            &[(
+                P2A_RUN,
+                json!({"tool": "sar_model", "args": "{\"dataset\": \"d\"}"}),
+            )],
+        )]);
+        let (_, calls) = run_offered(&p, &offered()).await;
+        assert_eq!(calls, [("sar_model".to_string(), json!({"dataset": "d"}))]);
     }
 
     #[tokio::test]
