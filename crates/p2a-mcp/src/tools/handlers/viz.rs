@@ -331,6 +331,9 @@ fn pairwise_note(corr: &p2a_core::stats::CorrelationMatrix) -> Option<String> {
 /// The viz_heatmap reply (text, PNG): the selection is checked first (every name exists and is
 /// numeric, and no more variables than the image holds), then only the selected columns are
 /// correlated (all numeric columns without a selection).
+/// The heatmap reply lists the correlations of at most this many variables.
+const HEATMAP_VALUES_LISTED: usize = 12;
+
 fn heatmap_reply(
     dataset: &p2a_core::Dataset,
     selection: Option<&[String]>,
@@ -425,6 +428,28 @@ fn heatmap_reply(
         "Correlation heatmap generated successfully.\nVariables: {}",
         corr.columns.join(", ")
     );
+    // The values drawn in the cells, so the reply can quote them (the model does not read the
+    // image); a larger matrix is left to compute_correlation.
+    if corr.columns.len() <= HEATMAP_VALUES_LISTED {
+        description.push_str("\nCorrelations (as drawn):");
+        for (name, row) in corr.columns.iter().zip(&corr.matrix) {
+            let values: Vec<String> = row
+                .iter()
+                .map(|v| {
+                    if v.is_finite() {
+                        format!("{v:.3}")
+                    } else {
+                        "NA".to_string()
+                    }
+                })
+                .collect();
+            description.push_str(&format!(
+                "\n  {}: {}",
+                p2a_text::ellipsize(name, 40),
+                values.join(", ")
+            ));
+        }
+    }
     if let Some(note) = pairwise_note(&corr) {
         description.push('\n');
         description.push_str(&note);
@@ -935,7 +960,7 @@ impl AnalyticsServer {
 
     /// Generate a correlation heatmap.
     #[tool(
-        description = "Correlation heatmap of numeric columns: Pearson correlations, each pair over the rows where both are present (R's cor(use = \"pairwise.complete.obs\")), on a diverging colour scale. At most 127 variables fit the image (labels are hidden above about 40); unknown or non-numeric names in columns are refused. Returns a base64-encoded PNG image."
+        description = "Correlation heatmap of numeric columns: Pearson correlations, each pair over the rows where both are present (R's cor(use = \"pairwise.complete.obs\")), on a diverging colour scale. At most 127 variables fit the image (labels are hidden above about 40); unknown or non-numeric names in columns are refused. Returns a base64-encoded PNG image and, for up to 12 variables, the correlations it shows."
     )]
     pub async fn viz_heatmap(
         &self,
@@ -2116,6 +2141,18 @@ mod tests {
         );
         let all = text(&heatmap(&server, None));
         assert!(all.contains("Variables: a, b, c\n"), "{all}");
+        // The drawn values are listed, row by row, so the reply can quote them.
+        let ab = p2a_core::stats::correlation_matrix(
+            &Dataset::new(heatmap_frame())
+                .select_columns(&["a", "b"])
+                .unwrap(),
+        )
+        .unwrap();
+        let want = format!("\n  a: 1.000, {:.3}\n", ab.matrix[0][1]);
+        assert!(
+            t.contains("Correlations (as drawn):") && t.contains(&want),
+            "{t}"
+        );
         // The handler's sentence equals the last line of CorrelationMatrix's table.
         let corr = p2a_core::stats::correlation_matrix(&Dataset::new(heatmap_frame())).unwrap();
         assert_eq!(

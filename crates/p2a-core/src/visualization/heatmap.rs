@@ -69,6 +69,17 @@ struct Layout {
     labels: bool,
 }
 
+/// Label text size on `cell`-px cells: the cell size up to 14 px, which the label band's
+/// 8 px a character still holds.
+fn label_font(cell: u32) -> u32 {
+    cell.min(14)
+}
+
+/// Value text size on cells of at least 35 px: 12 px, growing with the cell to 18 px.
+fn value_font(cell: u32) -> u32 {
+    (cell / 6).clamp(12, 18)
+}
+
 /// The cell size that fits `n_rows` x `n_cols` cells with label bands of `label_margin`.
 fn cell_size(n_rows: usize, n_cols: usize, label_margin: u32, width: u32, height: u32) -> u32 {
     let avail_w = width.saturating_sub(LEFT_MARGIN + label_margin + COLORBAR_BAND);
@@ -261,7 +272,7 @@ pub fn correlation_heatmap(
                     root.draw(&Text::new(
                         val_text,
                         ((x + cell / 2) as i32, (y + cell / 2) as i32),
-                        ("sans-serif", 12)
+                        ("sans-serif", value_font(cell))
                             .into_font()
                             .color(&text_color)
                             .pos(Pos::new(HPos::Center, VPos::Center)),
@@ -275,7 +286,7 @@ pub fn correlation_heatmap(
             // Labels shortened by characters (a byte cut panics inside a multi-byte
             // character) to what the label band holds at about 8 px a character.
             let max_chars = (lay.label_margin / 8).max(1) as usize;
-            let font_size = f64::from(cell.min(11));
+            let font_size = f64::from(label_font(cell));
             // Row labels, right-aligned against the matrix.
             for (i, label) in row_labels.iter().enumerate() {
                 let y = y_offset + i as u32 * cell + cell / 2;
@@ -289,9 +300,26 @@ pub fn correlation_heatmap(
                 ))
                 .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
             }
-            // Column labels, rotated, in the band above the matrix, reading upwards.
+            // Column labels in the band above the matrix: horizontal when every label fits its
+            // cell, otherwise rotated, reading upwards.
+            let horizontal = col_labels.iter().all(|l| {
+                let shown = p2a_text::ellipsize(l, max_chars).chars().count() as u32;
+                shown * 8 + 4 <= cell
+            });
             for (j, label) in col_labels.iter().enumerate() {
                 let x = x_offset + j as u32 * cell + cell / 2;
+                if horizontal {
+                    root.draw(&Text::new(
+                        p2a_text::ellipsize(label, max_chars).into_owned(),
+                        (x as i32, (y_offset - 4) as i32),
+                        ("sans-serif", font_size)
+                            .into_font()
+                            .color(&BLACK)
+                            .pos(Pos::new(HPos::Center, VPos::Bottom)),
+                    ))
+                    .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+                    continue;
+                }
                 root.draw(&Text::new(
                     p2a_text::ellipsize(label, max_chars).into_owned(),
                     (x as i32, (y_offset - 4) as i32),
@@ -332,7 +360,7 @@ pub fn correlation_heatmap(
                 (colorbar_x + colorbar_width + 5) as i32,
                 (colorbar_y + 5) as i32,
             ),
-            ("sans-serif", 11).into_font().color(&BLACK),
+            ("sans-serif", 13).into_font().color(&BLACK),
         ))
         .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
@@ -342,7 +370,7 @@ pub fn correlation_heatmap(
                 (colorbar_x + colorbar_width + 5) as i32,
                 (colorbar_y + colorbar_height) as i32,
             ),
-            ("sans-serif", 11).into_font().color(&BLACK),
+            ("sans-serif", 13).into_font().color(&BLACK),
         ))
         .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
