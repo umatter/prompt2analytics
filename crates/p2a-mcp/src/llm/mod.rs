@@ -14,6 +14,7 @@ mod provider;
 mod retry;
 mod stream;
 mod tokens;
+pub mod tool_index;
 pub mod tool_loop;
 mod tools;
 
@@ -170,6 +171,10 @@ pub use retry::{RetryConfig, send_with_retry};
 pub use tokens::{
     ContextBudget, estimate_message_tokens, estimate_tokens, estimate_tool_definition_tokens,
     get_model_context_size, known_model_context_size,
+};
+pub use tool_index::{
+    CORE_TOOLS, LlmToolMode, P2A_HELP, P2A_RUN, help as tool_help, index_text, is_chat_only,
+    meta_tool_definitions,
 };
 pub use tool_loop::{
     AssistantTurn, MAX_ITERATIONS_NOTE, MAX_ROUNDS_PER_TOOL, REPEATED_CALLS_NOTE, StreamSink,
