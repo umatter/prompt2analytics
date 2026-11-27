@@ -104,13 +104,44 @@ pub fn meta_tool_definitions() -> Vec<ToolDefinition> {
     ]
 }
 
-/// A tool's index phrase: its description's first sentence, cut to [`PHRASE_CHARS`].
+/// Words whose period does not end a sentence.
+const ABBREVIATIONS: &[&str] = &["e.g", "i.e", "etc", "vs", "cf", "approx", "incl", "resp"];
+
+/// A tool's index phrase: its description's first sentence on one line (whitespace runs, line
+/// breaks included, become one space; a period after an abbreviation such as "e.g." does not end
+/// the sentence), cut to [`PHRASE_CHARS`].
 fn phrase(description: &str) -> String {
-    let first = match description.find(". ") {
-        Some(i) => &description[..i],
-        None => description.trim_end_matches('.'),
+    let flat = description.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut end = None;
+    let mut from = 0;
+    while let Some(i) = flat[from..].find(". ") {
+        let at = from + i;
+        let word = flat[..at]
+            .rsplit(' ')
+            .next()
+            .unwrap_or("")
+            .trim_start_matches(|c: char| !c.is_alphanumeric())
+            .to_ascii_lowercase();
+        if !ABBREVIATIONS.contains(&word.as_str()) {
+            end = Some(at);
+            break;
+        }
+        from = at + 2;
+    }
+    let first = match end {
+        Some(at) => &flat[..at],
+        None => flat.trim_end_matches('.'),
     };
     p2a_text::ellipsize(first.trim(), PHRASE_CHARS).into_owned()
+}
+
+/// A text field of a `p2a_help` call, trimmed; an empty one is absent.
+pub fn help_field<'a>(arguments: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+    arguments
+        .get(key)
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
 }
 
 /// The index line of one tool.
@@ -170,13 +201,7 @@ pub fn help(
     arguments: &serde_json::Value,
     callable: &dyn Fn(&str) -> bool,
 ) -> Result<String, String> {
-    let field = |k: &str| {
-        arguments
-            .get(k)
-            .and_then(|v| v.as_str())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-    };
+    let field = |k: &str| help_field(arguments, k);
     if let Some(name) = field("tool") {
         check_llm_tool_call(name, callable)?;
         let info = registry()
@@ -292,6 +317,18 @@ mod tests {
             assert!(is_chat_only(n) && !registry().iter().any(|t| t.name == n));
         }
         assert_eq!(defs[1].parameters["required"], json!(["tool"]));
+    }
+
+    #[test]
+    fn phrase_keeps_abbreviations_and_one_line() {
+        assert_eq!(
+            phrase("Fit a model, e.g. a probit. More text."),
+            "Fit a model, e.g. a probit"
+        );
+        assert_eq!(
+            phrase("Line one\ncontinues here. Next."),
+            "Line one continues here"
+        );
     }
 
     #[test]

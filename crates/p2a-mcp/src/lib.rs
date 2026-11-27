@@ -114,6 +114,8 @@ fn embedded_server_config(
             expose_enumeration: false,
             enable_ws: false,
             session_dirs: config::SessionDirsSetting::Auto,
+            // The desktop app always offers the tool index (P2A_LLM_TOOLS is read by the
+            // server binary only; the paper's evaluation runs that binary).
             llm_tools: config::LlmToolMode::default(),
             #[cfg(feature = "db")]
             db_path: config.db_path.clone(),

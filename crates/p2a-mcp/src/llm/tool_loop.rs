@@ -13,7 +13,7 @@ use async_trait::async_trait;
 
 use super::context::{json_str, push_tool_results_for_model, truncate_str};
 use super::provider::effective_max_tool_iterations;
-use super::tool_index::{P2A_HELP, P2A_RUN};
+use super::tool_index::{P2A_HELP, P2A_RUN, help_field};
 use super::{
     LlmError, Message, MessageRole, ProviderConfig, StreamChunk, ToolCall, ToolDefinition,
     ToolExecutor, ToolResult,
@@ -172,9 +172,9 @@ fn round_key(tc: &ToolCall) -> String {
     if tc.name != P2A_HELP {
         return tc.name.clone();
     }
-    let target = ["tool", "query"]
-        .iter()
-        .find_map(|k| tc.arguments.get(*k).and_then(|v| v.as_str()))
+    // What `p2a_help` looks up: its `tool`, else its `query`, trimmed, an empty one absent.
+    let target = help_field(&tc.arguments, "tool")
+        .or_else(|| help_field(&tc.arguments, "query"))
         .unwrap_or("");
     format!("{P2A_HELP}:{target}")
 }
@@ -182,8 +182,21 @@ fn round_key(tc: &ToolCall) -> String {
 /// A `p2a_run` call as a call of the tool it names (`args` missing or null: no arguments; `args`
 /// as JSON text: parsed). A malformed one (no tool name, `args` not an object, parameters beside
 /// `tool` instead of inside `args`) is returned unchanged; the executor answers
-/// it with the expected shape.
-fn unwrap_run(call: ToolCall) -> ToolCall {
+/// it with the expected shape. A `p2a_run` naming `p2a_run` is unwrapped until it names
+/// another tool or is malformed.
+fn unwrap_run(mut call: ToolCall) -> ToolCall {
+    while call.name == P2A_RUN {
+        let next = unwrap_once(call.clone());
+        if next.name == P2A_RUN && next.arguments == call.arguments {
+            return next;
+        }
+        call = next;
+    }
+    call
+}
+
+/// One level of [`unwrap_run`].
+fn unwrap_once(call: ToolCall) -> ToolCall {
     if call.name != P2A_RUN {
         return call;
     }
@@ -401,7 +414,7 @@ fn attach_note(conversation: &mut [Message], note: Option<&str>) {
     }
 }
 
-/// The messages as a provider must see them (stub).
+/// The messages as a provider must see them.
 ///
 /// Every message carries real tool names (the loop unwraps `p2a_run`, and history from the
 /// database or the client is stored that way). For a request whose tool list does not offer a
@@ -414,6 +427,9 @@ pub fn for_provider(messages: &[Message], tools: &[ToolDefinition]) -> Vec<Messa
     let help_as_text = !offers(P2A_HELP);
     let mut out = Vec::with_capacity(messages.len());
     let mut texted: HashSet<String> = HashSet::new();
+    // Texted results already sent: a result can be repeated (the attached results of an
+    // `interpret: false` turn and a tool message after it), and goes out once.
+    let mut answered: HashSet<String> = HashSet::new();
     for m in messages {
         let mut m = m.clone();
         if let Some(calls) = m.tool_calls.take() {
@@ -447,12 +463,24 @@ pub fn for_provider(messages: &[Message], tools: &[ToolDefinition]) -> Vec<Messa
             let (moved, kept): (Vec<ToolResult>, Vec<ToolResult>) = results
                 .into_iter()
                 .partition(|r| texted.contains(&r.tool_call_id));
-            let text: Vec<String> = moved
+            let mut text: Vec<String> = moved
                 .iter()
+                .filter(|r| answered.insert(r.tool_call_id.clone()))
                 .map(|r| format!("p2a_help answered:\n{}", r.content))
                 .collect();
             if kept.is_empty() {
-                out.push(Message::user(text.join("\n\n")));
+                if m.role == MessageRole::Assistant {
+                    // An attached turn: its text and other calls stay before the answers.
+                    if m.tool_calls.is_some() || !m.content.is_empty() {
+                        out.push(m);
+                    }
+                } else if !m.content.is_empty() {
+                    // A results message's content is the round's language note.
+                    text.push(m.content);
+                }
+                if !text.is_empty() {
+                    out.push(Message::user(text.join("\n\n")));
+                }
                 continue;
             }
             m.tool_results = Some(kept);
@@ -928,6 +956,104 @@ mod tests {
         let all_text: String = out.iter().map(|m| m.content.as_str()).collect();
         assert!(all_text.contains("result of p2a_help"), "{all_text}");
         assert!(all_text.contains("cox_ph"), "{all_text}");
+    }
+
+    fn help_call(id: &str) -> ToolCall {
+        ToolCall {
+            id: id.into(),
+            name: P2A_HELP.into(),
+            arguments: json!({"tool": "cox_ph"}),
+        }
+    }
+    fn help_result(id: &str) -> ToolResult {
+        ToolResult {
+            tool_call_id: id.into(),
+            content: "cox_ph: Cox model".into(),
+            is_error: false,
+        }
+    }
+
+    /// An `interpret: false` turn carries its calls and results on one assistant message; when
+    /// all its calls were `p2a_help` and help is not offered, the turn stays, as text.
+    #[test]
+    fn for_provider_keeps_an_attached_turn_whose_calls_were_all_help() {
+        let mut turn = Message::assistant_with_tools("Looking.", vec![help_call("h1")]);
+        turn.tool_results = Some(vec![help_result("h1")]);
+        let out = for_provider(&[Message::user("go"), turn], &[def("regression_ols")]);
+        assert_eq!(out.len(), 3, "{out:?}");
+        assert_eq!(out[1].role, MessageRole::Assistant);
+        assert!(out[1].content.starts_with("Looking.") && out[1].content.contains("Looked up"));
+        assert!(out[1].tool_calls.is_none() && out[1].tool_results.is_none());
+        assert_eq!(out[2].role, MessageRole::User);
+        assert!(out[2].content.contains("p2a_help answered:"));
+    }
+
+    #[test]
+    fn for_provider_texts_a_help_answer_once() {
+        let mut turn = Message::assistant_with_tools("", vec![help_call("h1")]);
+        turn.tool_results = Some(vec![help_result("h1")]);
+        let mut repeat = Message::assistant("");
+        repeat.role = MessageRole::Tool;
+        repeat.tool_results = Some(vec![help_result("h1")]);
+        let out = for_provider(
+            &[Message::user("go"), turn, repeat],
+            &[def("regression_ols")],
+        );
+        let answers = out
+            .iter()
+            .filter(|m| m.content.contains("p2a_help answered:"))
+            .count();
+        assert_eq!(answers, 1, "{out:?}");
+    }
+
+    #[test]
+    fn for_provider_keeps_the_language_note_of_texted_results() {
+        let mut results = Message::assistant("Answer in English.");
+        results.role = MessageRole::Tool;
+        results.tool_results = Some(vec![help_result("h1")]);
+        let msgs = [
+            Message::user("go"),
+            Message::assistant_with_tools("", vec![help_call("h1")]),
+            results,
+        ];
+        let out = for_provider(&msgs, &[def("regression_ols")]);
+        let last = out.last().unwrap();
+        assert_eq!(last.role, MessageRole::User);
+        assert!(
+            last.content.contains("p2a_help answered:")
+                && last.content.contains("Answer in English."),
+            "{}",
+            last.content
+        );
+    }
+
+    /// The loop guard keys a lookup by what `p2a_help` looks up: trimmed, an empty `tool` absent.
+    #[test]
+    fn help_round_key_matches_what_help_looks_up() {
+        let key = |a: Value| {
+            round_key(&ToolCall {
+                id: "x".into(),
+                name: P2A_HELP.into(),
+                arguments: a,
+            })
+        };
+        assert_eq!(
+            key(json!({"tool": "", "query": "kaplan"})),
+            "p2a_help:kaplan"
+        );
+        assert_eq!(
+            key(json!({"tool": "cox_ph "})),
+            key(json!({"tool": "cox_ph"}))
+        );
+    }
+
+    #[tokio::test]
+    async fn nested_p2a_run_is_unwrapped_to_the_innermost_tool() {
+        let nested =
+            json!({"tool": P2A_RUN, "args": {"tool": "sar_model", "args": {"dataset": "d"}}});
+        let p = Scripted::new(vec![turn("", &[(P2A_RUN, nested)])]);
+        let (_, calls) = run_offered(&p, &offered()).await;
+        assert_eq!(calls, [("sar_model".to_string(), json!({"dataset": "d"}))]);
     }
 
     #[test]

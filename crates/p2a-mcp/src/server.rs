@@ -639,8 +639,6 @@ impl AnalyticsServer {
         v
     }
 
-    /// Audit this server's MCP tool calls (the stdio transport) to `logger`:
-    /// one entry per call with origin and session id `stdio`.
     /// The server offering tools to the chat model in `mode`.
     pub fn with_llm_tool_mode(mut self, mode: crate::config::LlmToolMode) -> Self {
         self.llm_tool_mode = mode;
@@ -652,6 +650,8 @@ impl AnalyticsServer {
         self.llm_tool_mode
     }
 
+    /// Audit this server's MCP tool calls (the stdio transport) to `logger`:
+    /// one entry per call with origin and session id `stdio`.
     pub fn with_audit_logger(mut self, logger: Arc<crate::audit::AuditLogger>) -> Self {
         self.audit = Some(logger);
         self
@@ -678,6 +678,13 @@ impl AnalyticsServer {
             names,
             structs: crate::tools::limits::struct_paths(tool),
         }
+    }
+
+    /// The server one HTTP call runs on: scoped to `session`, offering tools to the chat model
+    /// as this server does.
+    #[cfg(feature = "http")]
+    pub(crate) fn session_server(&self, session: &crate::session::Session) -> Self {
+        Self::with_session(session).with_llm_tool_mode(self.llm_tool_mode)
     }
 
     /// Create a server scoped to `session`: it shares the session's
@@ -873,7 +880,7 @@ impl AnalyticsServer {
             .map_err(log_and_convert)?;
 
         // A session-scoped server instance that shares the session's state.
-        let session_server = Self::with_session(session);
+        let session_server = self.session_server(session);
         let mut result = session_server
             .dispatch_tool(tool_name, arguments)
             .await
@@ -2671,17 +2678,31 @@ mod tests {
     // =========================================================================
 }
 
-/// Spatial weights and cleaning sessions live in the `Session` (MCP-4): a
-/// session-scoped server is built per HTTP call, so state kept anywhere else
-/// was gone by the next call. The Moran figures were computed in R 4.3.3
-/// from spdep's formulas written out (see `session::test_fixtures`); they
-/// are not an R-pinned case. They show that the stored k = 4 and k = 5
-/// weights are the ones a later call uses.
+/// How tools are offered to the chat model in each `LlmToolMode`.
 #[cfg(all(test, feature = "http", feature = "llm"))]
 mod llm_tool_list_tests {
     use super::*;
     use crate::config::LlmToolMode;
     use crate::llm::{CORE_TOOLS, INTERNAL_TOOLS, P2A_HELP, P2A_RUN, TIER1_TOOLS, index_text};
+
+    /// The per-call session server offers tools as the shared server does.
+    #[tokio::test]
+    async fn session_server_keeps_the_llm_tool_mode() {
+        use crate::config::SessionConfig;
+        use crate::session::SessionManager;
+        let sessions = SessionManager::new(SessionConfig {
+            ttl_minutes: 60,
+            max_sessions: 10,
+            evict_idle_minutes: None,
+        });
+        let id = sessions.create_session(None).await.unwrap();
+        let session = sessions.get_session(&id).await.unwrap();
+        let server = AnalyticsServer::new().with_llm_tool_mode(LlmToolMode::Tier1);
+        assert_eq!(
+            server.session_server(&session).llm_tool_mode(),
+            LlmToolMode::Tier1
+        );
+    }
 
     fn names(mode: LlmToolMode) -> Vec<String> {
         AnalyticsServer::new()
@@ -2748,6 +2769,12 @@ mod llm_tool_list_tests {
     }
 }
 
+/// Spatial weights and cleaning sessions live in the `Session` (MCP-4): a
+/// session-scoped server is built per HTTP call, so state kept anywhere else
+/// was gone by the next call. The Moran figures were computed in R 4.3.3
+/// from spdep's formulas written out (see `session::test_fixtures`); they
+/// are not an R-pinned case. They show that the stored k = 4 and k = 5
+/// weights are the ones a later call uses.
 #[cfg(all(test, feature = "http"))]
 mod session_state_tests {
     use super::*;

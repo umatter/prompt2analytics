@@ -547,7 +547,7 @@ profile. For the timeout, watchdog, memory, data, allocation and eviction knobs
 | `--expose-enumeration` | `P2A_EXPOSE_ENUMERATION` | off | same | Local mode only; the env accepts `1`/`true`/`yes`/`on` |
 | `--enable-ws` | `P2A_ENABLE_WS` | off | same | OpenPublic only; the env accepts `1`/`true`/`yes`/`on` |
 | `--session-dirs` | `P2A_SESSION_DIRS` | `auto` | `auto` | `auto` = on only in OpenPublic; `on`, `off` |
-| `--llm-tools` | `P2A_LLM_TOOLS` | `index` | same | how tools are offered to the chat model: `index` (core tools, `p2a_help`, `p2a_run` and a tool index in the prompt; every non-internal tool reachable) or `tier1` (the earlier 128-tool list, the paper's evaluation setup) |
+| `--llm-tools` | `P2A_LLM_TOOLS` | `index` | same | how tools are offered to the chat model: `index` (core tools, `p2a_help`, `p2a_run` and a tool index in the prompt; every non-internal tool reachable) or `tier1` (the earlier 128-tool list, the paper's evaluation setup); the desktop app's embedded server always uses `index` |
 | `--session-ttl-minutes` | `P2A_SESSION_TTL` | 60; 43,200 (30 days) in Local mode with `--db-path` | 60 | minutes since last use; the 30 days keep a local store's conversations, as the desktop app does |
 | `--max-sessions` | `P2A_MAX_SESSIONS` | 100 | 100 | |
 | `--db-path` | `P2A_DB_PATH` | none (in-memory store) | same | feature `db`; must lie outside `P2A_DATA_ROOT` outside Local mode |
