@@ -105,9 +105,16 @@ impl std::fmt::Display for PPTestResult {
         )?;
         writeln!(f)?;
         writeln!(f, "H₀: The series has a unit root (non-stationary)")?;
-        writeln!(f, "H₁: The series is stationary")?;
+        writeln!(
+            f,
+            "H₁: The series is stationary around a linear trend (the test regression has an \
+             intercept and a trend, as in PP.test)"
+        )?;
         if self.p_value < 0.05 {
-            writeln!(f, "\nConclusion: Reject H₀ - evidence of stationarity.")?;
+            writeln!(
+                f,
+                "\nConclusion: Reject H₀ - evidence of trend stationarity."
+            )?;
         } else {
             writeln!(
                 f,

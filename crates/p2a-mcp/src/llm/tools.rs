@@ -100,7 +100,7 @@ pub const TIER1_TOOLS: &[&str] = &[
     "ml_hierarchical",
     "ml_tsne",
     "ml_svm",
-    // Data munging (17)
+    // Data munging (19)
     "munge_filter",
     "munge_rename",
     "munge_mutate",
@@ -117,6 +117,8 @@ pub const TIER1_TOOLS: &[&str] = &[
     "munge_fill_na",
     "munge_deduplicate",
     "munge_concat",
+    "munge_diff",
+    "munge_lag_lead",
     "str_replace_value",
     // Visualization (10)
     "viz_histogram",

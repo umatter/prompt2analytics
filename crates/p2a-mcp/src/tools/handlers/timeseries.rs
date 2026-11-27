@@ -473,7 +473,7 @@ impl AnalyticsServer {
 
     /// - Banerjee, A., Dolado, J. J., Galbraith, J. W., & Hendry, D. (1993). Co-integration, Error Correction, and the Econometric Analysis of Non-Stationary Data. Oxford University Press.
     #[tool(
-        description = "Test for unit root in a time series using the Phillips-Perron test. Tests H₀: series has unit root (non-stationary) vs H₁: series is stationary. Uses Newey-West long-run variance estimator with Bartlett weights for serial correlation correction. Similar to ADF test but makes non-parametric correction. Returns: Z(τ) statistic, truncation lag, p-value, and diagnostics."
+        description = "Test for unit root in a time series using the Phillips-Perron test. Tests H₀: series has unit root (non-stationary) vs H₁: series is stationary around a linear trend: the test regression always has an intercept and a linear time trend, as R's PP.test, so a rejection does not mean the series is level-stationary. To test a differenced series, make it with munge_diff first. Uses Newey-West long-run variance estimator with Bartlett weights for serial correlation correction. Similar to ADF test but makes non-parametric correction. Returns: Z(τ) statistic, truncation lag, p-value, and diagnostics."
     )]
     pub async fn timeseries_pp_test(
         &self,
@@ -510,7 +510,7 @@ impl AnalyticsServer {
             "lambda_squared": result.lambda_squared,
             "interpretation": if result.p_value < 0.05 {
                 format!(
-                    "Reject H₀ (p={:.4}): Evidence of stationarity at the 5% level. The series likely does not have a unit root.",
+                    "Reject H₀ (p={:.4}): Evidence of stationarity around a linear trend at the 5% level. The series likely does not have a unit root.",
                     result.p_value
                 )
             } else {
@@ -520,7 +520,7 @@ impl AnalyticsServer {
                 )
             },
             "recommendation": if result.p_value < 0.05 {
-                "Series appears stationary. Can proceed with standard time series methods."
+                "Series appears stationary around a linear trend (the test regression has an intercept and a trend)."
             } else {
                 "Series may have unit root. Consider differencing (Δy = y_t - y_{t-1}) before analysis."
             }
