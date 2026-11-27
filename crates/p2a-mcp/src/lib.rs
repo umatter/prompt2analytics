@@ -114,6 +114,7 @@ fn embedded_server_config(
             expose_enumeration: false,
             enable_ws: false,
             session_dirs: config::SessionDirsSetting::Auto,
+            llm_tools: config::LlmToolMode::default(),
             #[cfg(feature = "db")]
             db_path: config.db_path.clone(),
         },

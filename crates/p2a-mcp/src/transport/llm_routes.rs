@@ -1062,6 +1062,7 @@ async fn build_chat_messages(
     tools: &[ToolDefinition],
     cfg: &ProviderConfig,
     settings: &LlmSettings,
+    tool_mode: crate::config::LlmToolMode,
 ) -> Result<Vec<Message>, ToolCallError> {
     // A history that already ends with the prompt (a client that sends it in both fields, or a
     // stored conversation the client posted the prompt to) would give the model the question
@@ -1070,7 +1071,7 @@ async fn build_chat_messages(
     drop_repeated_prompt(&mut history, &user_message);
     let dataset_context =
         governed_dataset_context(governor, session, settings.context_bytes).await?;
-    let system_prompt = get_system_prompt_with_context(dataset_context.as_deref());
+    let system_prompt = crate::llm::get_system_prompt_for(tool_mode, dataset_context.as_deref());
     let reserved_for_response = cfg.max_tokens.unwrap_or(4096) as usize;
     let processed = ContextManager::for_request(
         &cfg.model,
@@ -1183,6 +1184,7 @@ pub async fn llm_chat(
         &tools,
         &provider_config,
         &settings,
+        state.server.llm_tool_mode(),
     )
     .await
     {
@@ -2233,6 +2235,7 @@ async fn run_chat_stream(
         &tools,
         &provider_config,
         &settings,
+        state.server.llm_tool_mode(),
     )
     .await
     {
@@ -3001,6 +3004,7 @@ mod chat_tests {
             &[],
             &cfg,
             &settings,
+            crate::config::LlmToolMode::Tier1,
         )
         .await
         .unwrap();
@@ -3049,6 +3053,7 @@ mod chat_tests {
                 &[],
                 &ProviderConfig::default(),
                 &settings,
+                crate::config::LlmToolMode::Tier1,
             )
             .await
             .unwrap();
@@ -3107,6 +3112,7 @@ mod chat_tests {
             &[],
             &ProviderConfig::default(),
             &settings,
+            crate::config::LlmToolMode::Tier1,
         )
         .await
         .unwrap();

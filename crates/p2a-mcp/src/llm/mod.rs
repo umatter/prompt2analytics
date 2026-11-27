@@ -181,7 +181,10 @@ pub use tool_loop::{
     ToolLoopConfig, ToolLoopProvider, new_request_id, repeated_tool_note, run_tool_loop,
     tool_call_id,
 };
-pub use tools::{INTERNAL_TOOLS, TIER1_TOOLS, check_llm_tool_call, get_system_prompt_with_context};
+pub use tools::{
+    INTERNAL_TOOLS, TIER1_TOOLS, check_llm_tool_call, get_system_prompt_for,
+    get_system_prompt_with_context,
+};
 
 #[cfg(test)]
 mod tests {

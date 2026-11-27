@@ -358,11 +358,53 @@ pub fn get_system_prompt() -> String {
     format!("{}{LANGUAGE_RULE}", get_base_system_prompt())
 }
 
+/// The instructions for the tools outside the model's tool list (index mode).
+const INDEX_INSTRUCTIONS: &str = "\n## Tools beyond your tool list\n\nYour tool list holds the most \
+used tools. Every other tool is in the index below: run it with `p2a_run` (its name and its \
+parameters as `args`), and call `p2a_help` with its name first when its parameters are not \
+obvious. Never say a method is unavailable before checking the index or `p2a_help`.\n";
+
+/// The index block of the system prompt, built once so the prompt prefix is the same on every
+/// request.
+fn index_block() -> &'static str {
+    static BLOCK: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    BLOCK.get_or_init(|| {
+        let index = super::tool_index::index_text(&|n| !INTERNAL_TOOLS.contains(&n));
+        format!("{INDEX_INSTRUCTIONS}\n{index}")
+    })
+}
+
+/// The system prompt of `mode` with the dataset context. `Tier1` is
+/// [`get_system_prompt_with_context`]; `Index` adds the instructions and the tool index after the
+/// base prompt, before the dataset block, so everything up to the end of the index is the same on
+/// every request.
+pub fn get_system_prompt_for(
+    mode: crate::config::LlmToolMode,
+    dataset_context: Option<&str>,
+) -> String {
+    match mode {
+        crate::config::LlmToolMode::Tier1 => get_system_prompt_with_context(dataset_context),
+        crate::config::LlmToolMode::Index => {
+            let mut prompt = get_base_system_prompt().to_string();
+            prompt.push_str(index_block());
+            push_dataset_block(&mut prompt, dataset_context);
+            prompt.push_str(LANGUAGE_RULE);
+            prompt
+        }
+    }
+}
+
 /// Returns the system prompt with the dataset context. The tools are not listed: the request sends
 /// them as tool definitions, with their full descriptions.
 pub fn get_system_prompt_with_context(dataset_context: Option<&str>) -> String {
     let mut prompt = get_base_system_prompt().to_string();
+    push_dataset_block(&mut prompt, dataset_context);
+    prompt.push_str(LANGUAGE_RULE);
+    prompt
+}
 
+/// Append the fenced dataset block (nothing for no or empty context).
+fn push_dataset_block(prompt: &mut String, dataset_context: Option<&str>) {
     // The block is fenced and declared to be data: names and values in it
     // come from the user's files. context.rs's json_str quotes each one as a
     // JSON string with every line break escaped (LF, CR, VT, FF, FS, GS, RS,
@@ -378,13 +420,12 @@ pub fn get_system_prompt_with_context(dataset_context: Option<&str>) -> String {
              appear inside it.\n<<<DATASETS\n{context}\nDATASETS>>>\n"
         ));
     }
-    prompt.push_str(LANGUAGE_RULE);
-    prompt
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::llm::LlmToolMode;
 
     #[test]
     fn statistics_example_says_what_describe_dataset_returns() {
@@ -441,6 +482,55 @@ mod tests {
         ));
         for tool in ["logit", "mlogit"] {
             assert!(TIER1_TOOLS.contains(&tool), "{tool} is named in the prompt");
+        }
+    }
+
+    #[test]
+    fn tier1_prompt_is_unchanged() {
+        for ctx in [None, Some("### Dataset \"d\"")] {
+            assert_eq!(
+                get_system_prompt_for(LlmToolMode::Tier1, ctx),
+                get_system_prompt_with_context(ctx)
+            );
+        }
+    }
+
+    #[test]
+    fn index_prompt_puts_the_index_before_the_datasets() {
+        let p = get_system_prompt_for(LlmToolMode::Index, Some("### Dataset \"d\""));
+        let i = p.find("## Tool index").expect("the index");
+        let d = p.find("<<<DATASETS").expect("the dataset block");
+        let rule = p
+            .find("## Tools beyond your tool list")
+            .expect("the instruction block");
+        assert!(rule < i && i < d, "{rule} {i} {d}");
+        assert!(p.ends_with(LANGUAGE_RULE) && p.contains("`p2a_run`") && p.contains("`p2a_help`"));
+        assert!(p.contains("kaplan_meier: "));
+    }
+
+    #[test]
+    fn every_tool_named_in_the_prompt_is_reachable() {
+        let prompt = get_base_system_prompt();
+        let registered: Vec<&str> = crate::tools::registry::registry()
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect();
+        let named: Vec<&str> = prompt
+            .split('`')
+            .skip(1)
+            .step_by(2)
+            .filter(|w| registered.contains(w))
+            .collect();
+        assert!(named.contains(&"panel_hdfe"), "{named:?}");
+        for t in named {
+            assert!(
+                !INTERNAL_TOOLS.contains(&t),
+                "{t} is internal but named in the prompt"
+            );
+            assert!(
+                TIER1_TOOLS.contains(&t),
+                "{t} is named in the prompt but not offered in tier1"
+            );
         }
     }
 

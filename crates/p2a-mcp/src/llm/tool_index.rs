@@ -12,15 +12,7 @@ use super::ToolDefinition;
 use super::tools::{INTERNAL_TOOLS, check_llm_tool_call};
 use crate::tools::registry::{ToolCategory, category_name, registry, search_tools_scored};
 
-/// How tools are offered to the chat model (`P2A_LLM_TOOLS`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
-pub enum LlmToolMode {
-    /// Core tools with schemas, `p2a_help`, `p2a_run` and the tool index in the prompt.
-    #[default]
-    Index,
-    /// The `TIER1_TOOLS` list with full schemas and no index (the paper's evaluation setup).
-    Tier1,
-}
+pub use crate::config::LlmToolMode;
 
 /// The chat-only tool that looks a tool up.
 pub const P2A_HELP: &str = "p2a_help";

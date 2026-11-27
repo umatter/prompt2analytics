@@ -583,6 +583,8 @@ pub struct AnalyticsServer {
     /// Audit log for the stdio transport's tool calls (`None`: not audited
     /// here; governed HTTP-side calls are audited by the governor).
     audit: Option<Arc<crate::audit::AuditLogger>>,
+    /// How tools are offered to the chat model (`P2A_LLM_TOOLS`).
+    llm_tool_mode: crate::config::LlmToolMode,
 }
 
 // ============================================================================
@@ -624,6 +626,7 @@ impl AnalyticsServer {
             memory_profiler: Arc::new(RwLock::new(p2a_core::MemoryProfiler::new())),
             tool_router,
             audit: None,
+            llm_tool_mode: crate::config::LlmToolMode::default(),
         }
     }
 
@@ -638,6 +641,17 @@ impl AnalyticsServer {
 
     /// Audit this server's MCP tool calls (the stdio transport) to `logger`:
     /// one entry per call with origin and session id `stdio`.
+    /// The server offering tools to the chat model in `mode`.
+    pub fn with_llm_tool_mode(mut self, mode: crate::config::LlmToolMode) -> Self {
+        self.llm_tool_mode = mode;
+        self
+    }
+
+    /// How tools are offered to the chat model.
+    pub fn llm_tool_mode(&self) -> crate::config::LlmToolMode {
+        self.llm_tool_mode
+    }
+
     pub fn with_audit_logger(mut self, logger: Arc<crate::audit::AuditLogger>) -> Self {
         self.audit = Some(logger);
         self
@@ -703,6 +717,7 @@ impl AnalyticsServer {
             memory_profiler: session.memory_profiler.clone(),
             tool_router,
             audit: None,
+            llm_tool_mode: crate::config::LlmToolMode::default(),
         }
     }
 
@@ -752,13 +767,19 @@ impl AnalyticsServer {
             }
         }
 
-        use crate::llm::{INTERNAL_TOOLS, TIER1_TOOLS, ToolDefinition};
+        use crate::config::LlmToolMode;
+        use crate::llm::{CORE_TOOLS, INTERNAL_TOOLS, TIER1_TOOLS, ToolDefinition};
 
-        self.router_tools()
+        let offered: &[&str] = match self.llm_tool_mode {
+            LlmToolMode::Index => CORE_TOOLS,
+            LlmToolMode::Tier1 => TIER1_TOOLS,
+        };
+        let mut tools: Vec<ToolDefinition> = self
+            .router_tools()
             .into_iter()
             .filter(|t| {
                 let name = t.name.as_ref();
-                !INTERNAL_TOOLS.contains(&name) && TIER1_TOOLS.contains(&name)
+                !INTERNAL_TOOLS.contains(&name) && offered.contains(&name)
             })
             .map(|t| {
                 let mut params = serde_json::to_value(&t.input_schema).unwrap_or_default();
@@ -771,7 +792,11 @@ impl AnalyticsServer {
                     parameters: params,
                 }
             })
-            .collect()
+            .collect();
+        if self.llm_tool_mode == LlmToolMode::Index {
+            tools.extend(crate::llm::meta_tool_definitions());
+        }
+        tools
     }
 
     /// Call a tool by name with session context (for HTTP transport).
@@ -2652,6 +2677,77 @@ mod tests {
 /// from spdep's formulas written out (see `session::test_fixtures`); they
 /// are not an R-pinned case. They show that the stored k = 4 and k = 5
 /// weights are the ones a later call uses.
+#[cfg(all(test, feature = "http", feature = "llm"))]
+mod llm_tool_list_tests {
+    use super::*;
+    use crate::config::LlmToolMode;
+    use crate::llm::{CORE_TOOLS, INTERNAL_TOOLS, P2A_HELP, P2A_RUN, TIER1_TOOLS, index_text};
+
+    fn names(mode: LlmToolMode) -> Vec<String> {
+        AnalyticsServer::new()
+            .with_llm_tool_mode(mode)
+            .list_tools_for_llm()
+            .into_iter()
+            .map(|t| t.name)
+            .collect()
+    }
+
+    #[test]
+    fn index_mode_is_the_default() {
+        assert_eq!(AnalyticsServer::new().llm_tool_mode(), LlmToolMode::Index);
+    }
+
+    #[test]
+    fn index_mode_offers_core_and_meta_tools() {
+        let mut want: Vec<String> = CORE_TOOLS.iter().map(|s| s.to_string()).collect();
+        want.extend([P2A_HELP.to_string(), P2A_RUN.to_string()]);
+        let mut got = names(LlmToolMode::Index);
+        want.sort();
+        got.sort();
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn tier1_mode_offers_todays_list() {
+        let registered: Vec<String> = AnalyticsServer::new()
+            .router_tools()
+            .into_iter()
+            .map(|t| t.name.to_string())
+            .collect();
+        let mut want: Vec<String> = TIER1_TOOLS
+            .iter()
+            .filter(|t| registered.iter().any(|r| r == *t) && !INTERNAL_TOOLS.contains(t))
+            .map(|s| s.to_string())
+            .collect();
+        let mut got = names(LlmToolMode::Tier1);
+        want.sort();
+        got.sort();
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn index_mode_sends_far_fewer_tool_bytes() {
+        let bytes = |mode| {
+            serde_json::to_string(
+                &AnalyticsServer::new()
+                    .with_llm_tool_mode(mode)
+                    .list_tools_for_llm()
+                    .iter()
+                    .map(|t| (&t.name, &t.description, &t.parameters))
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap()
+            .len()
+        };
+        let index = bytes(LlmToolMode::Index) + index_text(&|n| !INTERNAL_TOOLS.contains(&n)).len();
+        let tier1 = bytes(LlmToolMode::Tier1);
+        assert!(
+            index * 10 < tier1 * 4,
+            "index {index} bytes, tier1 {tier1} bytes"
+        );
+    }
+}
+
 #[cfg(all(test, feature = "http"))]
 mod session_state_tests {
     use super::*;
