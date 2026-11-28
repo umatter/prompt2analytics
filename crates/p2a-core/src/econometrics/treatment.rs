@@ -639,8 +639,10 @@ pub fn run_ipw_treatment(
         compute_ps_summary(&ps)
     };
 
-    // Check for extreme propensity scores, before trimming
-    if ps_untrimmed.min < 0.01 || ps_untrimmed.max > 0.99 {
+    // Check for extreme propensity scores, before trimming. For the ATT only scores near 1 make
+    // a weight large (controls get p/(1-p), treated units 1).
+    let extreme_low = config.estimand == Estimand::ATE && ps_untrimmed.min < 0.01;
+    if extreme_low || ps_untrimmed.max > 0.99 {
         let trimmed = if config.trim > 0.0 {
             format!(
                 "trimmed at {}: {} of {} units dropped",

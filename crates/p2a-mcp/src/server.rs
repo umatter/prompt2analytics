@@ -583,6 +583,8 @@ pub struct AnalyticsServer {
     /// Audit log for the stdio transport's tool calls (`None`: not audited
     /// here; governed HTTP-side calls are audited by the governor).
     audit: Option<Arc<crate::audit::AuditLogger>>,
+    /// How tools are offered to the chat model (`P2A_LLM_TOOLS`).
+    llm_tool_mode: crate::config::LlmToolMode,
 }
 
 // ============================================================================
@@ -624,6 +626,7 @@ impl AnalyticsServer {
             memory_profiler: Arc::new(RwLock::new(p2a_core::MemoryProfiler::new())),
             tool_router,
             audit: None,
+            llm_tool_mode: crate::config::LlmToolMode::default(),
         }
     }
 
@@ -634,6 +637,17 @@ impl AnalyticsServer {
         let mut v = self.tool_router.list_all();
         v.sort_by(|a, b| a.name.cmp(&b.name));
         v
+    }
+
+    /// The server offering tools to the chat model in `mode`.
+    pub fn with_llm_tool_mode(mut self, mode: crate::config::LlmToolMode) -> Self {
+        self.llm_tool_mode = mode;
+        self
+    }
+
+    /// How tools are offered to the chat model.
+    pub fn llm_tool_mode(&self) -> crate::config::LlmToolMode {
+        self.llm_tool_mode
     }
 
     /// Audit this server's MCP tool calls (the stdio transport) to `logger`:
@@ -664,6 +678,13 @@ impl AnalyticsServer {
             names,
             structs: crate::tools::limits::struct_paths(tool),
         }
+    }
+
+    /// The server one HTTP call runs on: scoped to `session`, offering tools to the chat model
+    /// as this server does.
+    #[cfg(feature = "http")]
+    pub(crate) fn session_server(&self, session: &crate::session::Session) -> Self {
+        Self::with_session(session).with_llm_tool_mode(self.llm_tool_mode)
     }
 
     /// Create a server scoped to `session`: it shares the session's
@@ -703,6 +724,7 @@ impl AnalyticsServer {
             memory_profiler: session.memory_profiler.clone(),
             tool_router,
             audit: None,
+            llm_tool_mode: crate::config::LlmToolMode::default(),
         }
     }
 
@@ -752,13 +774,19 @@ impl AnalyticsServer {
             }
         }
 
-        use crate::llm::{INTERNAL_TOOLS, TIER1_TOOLS, ToolDefinition};
+        use crate::config::LlmToolMode;
+        use crate::llm::{CORE_TOOLS, INTERNAL_TOOLS, TIER1_TOOLS, ToolDefinition};
 
-        self.router_tools()
+        let offered: &[&str] = match self.llm_tool_mode {
+            LlmToolMode::Index => CORE_TOOLS,
+            LlmToolMode::Tier1 => TIER1_TOOLS,
+        };
+        let mut tools: Vec<ToolDefinition> = self
+            .router_tools()
             .into_iter()
             .filter(|t| {
                 let name = t.name.as_ref();
-                !INTERNAL_TOOLS.contains(&name) && TIER1_TOOLS.contains(&name)
+                !INTERNAL_TOOLS.contains(&name) && offered.contains(&name)
             })
             .map(|t| {
                 let mut params = serde_json::to_value(&t.input_schema).unwrap_or_default();
@@ -771,7 +799,11 @@ impl AnalyticsServer {
                     parameters: params,
                 }
             })
-            .collect()
+            .collect();
+        if self.llm_tool_mode == LlmToolMode::Index {
+            tools.extend(crate::llm::meta_tool_definitions());
+        }
+        tools
     }
 
     /// Call a tool by name with session context (for HTTP transport).
@@ -848,7 +880,7 @@ impl AnalyticsServer {
             .map_err(log_and_convert)?;
 
         // A session-scoped server instance that shares the session's state.
-        let session_server = Self::with_session(session);
+        let session_server = self.session_server(session);
         let mut result = session_server
             .dispatch_tool(tool_name, arguments)
             .await
@@ -2644,6 +2676,97 @@ mod tests {
     // =========================================================================
     // Phase 6: LLM-Assisted Data Cleaning Tests
     // =========================================================================
+}
+
+/// How tools are offered to the chat model in each `LlmToolMode`.
+#[cfg(all(test, feature = "http", feature = "llm"))]
+mod llm_tool_list_tests {
+    use super::*;
+    use crate::config::LlmToolMode;
+    use crate::llm::{CORE_TOOLS, INTERNAL_TOOLS, P2A_HELP, P2A_RUN, TIER1_TOOLS, index_text};
+
+    /// The per-call session server offers tools as the shared server does.
+    #[tokio::test]
+    async fn session_server_keeps_the_llm_tool_mode() {
+        use crate::config::SessionConfig;
+        use crate::session::SessionManager;
+        let sessions = SessionManager::new(SessionConfig {
+            ttl_minutes: 60,
+            max_sessions: 10,
+            evict_idle_minutes: None,
+        });
+        let id = sessions.create_session(None).await.unwrap();
+        let session = sessions.get_session(&id).await.unwrap();
+        let server = AnalyticsServer::new().with_llm_tool_mode(LlmToolMode::Tier1);
+        assert_eq!(
+            server.session_server(&session).llm_tool_mode(),
+            LlmToolMode::Tier1
+        );
+    }
+
+    fn names(mode: LlmToolMode) -> Vec<String> {
+        AnalyticsServer::new()
+            .with_llm_tool_mode(mode)
+            .list_tools_for_llm()
+            .into_iter()
+            .map(|t| t.name)
+            .collect()
+    }
+
+    #[test]
+    fn index_mode_is_the_default() {
+        assert_eq!(AnalyticsServer::new().llm_tool_mode(), LlmToolMode::Index);
+    }
+
+    #[test]
+    fn index_mode_offers_core_and_meta_tools() {
+        let mut want: Vec<String> = CORE_TOOLS.iter().map(|s| s.to_string()).collect();
+        want.extend([P2A_HELP.to_string(), P2A_RUN.to_string()]);
+        let mut got = names(LlmToolMode::Index);
+        want.sort();
+        got.sort();
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn tier1_mode_offers_todays_list() {
+        let registered: Vec<String> = AnalyticsServer::new()
+            .router_tools()
+            .into_iter()
+            .map(|t| t.name.to_string())
+            .collect();
+        let mut want: Vec<String> = TIER1_TOOLS
+            .iter()
+            .filter(|t| registered.iter().any(|r| r == *t) && !INTERNAL_TOOLS.contains(t))
+            .map(|s| s.to_string())
+            .collect();
+        let mut got = names(LlmToolMode::Tier1);
+        want.sort();
+        got.sort();
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn index_mode_sends_far_fewer_tool_bytes() {
+        let bytes = |mode| {
+            serde_json::to_string(
+                &AnalyticsServer::new()
+                    .with_llm_tool_mode(mode)
+                    .list_tools_for_llm()
+                    .iter()
+                    .map(|t| (&t.name, &t.description, &t.parameters))
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap()
+            .len()
+        };
+        let index = bytes(LlmToolMode::Index) + index_text(&|n| !INTERNAL_TOOLS.contains(&n)).len();
+        let tier1 = bytes(LlmToolMode::Tier1);
+        assert!(
+            index * 10 < tier1 * 4,
+            "index {index} bytes, tier1 {tier1} bytes"
+        );
+    }
 }
 
 /// Spatial weights and cleaning sessions live in the `Session` (MCP-4): a

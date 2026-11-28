@@ -5,7 +5,7 @@
 //! - Extreme IPW weights
 //! - Residual covariate imbalance after matching
 
-use crate::econometrics::{IpwResult, MatchResult, PropensityScoreSummary};
+use crate::econometrics::{Estimand, IpwResult, MatchResult, PropensityScoreSummary};
 
 use super::{
     Assumption, AssumptionStatus, IdentificationReport, IdentificationWarning, WarningDiagnostics,
@@ -290,7 +290,9 @@ fn tail_level(distance: f64) -> u8 {
 ///
 /// Positivity from the fitted propensity scores before trimming (`ps_summary_untrimmed`; the
 /// kept units' summary for a result that does not carry it): the status is the worse of the
-/// two tails.
+/// two tails. For the ATT only the upper tail counts: the ATT needs comparable controls for
+/// every treated unit (p(X) < 1), a control with a score near 0 gets weight p/(1-p) near 0 and
+/// a treated unit weight 1, so scores near 0 make no weight large.
 fn check_positivity(result: &IpwResult, report: &mut IdentificationReport) {
     let ps_summary = result
         .ps_summary_untrimmed
@@ -299,7 +301,9 @@ fn check_positivity(result: &IpwResult, report: &mut IdentificationReport) {
     let ps_min = ps_summary.min;
     let ps_max = ps_summary.max;
 
-    let (low, high) = (tail_level(ps_min), tail_level(1.0 - ps_max));
+    let att = result.estimand == Estimand::ATT;
+    let low = if att { 0 } else { tail_level(ps_min) };
+    let high = tail_level(1.0 - ps_max);
     let has_extreme_low = low > 0;
     let has_extreme_high = high > 0;
 
@@ -330,9 +334,16 @@ fn check_positivity(result: &IpwResult, report: &mut IdentificationReport) {
             issue_parts.push(format!("max = {:.4}", ps_max));
         }
 
-        // Largest ATE-scale weight, max(1/min, 1/(1 - max)), the scores imply: before trimming
-        // from the untrimmed summary, and, when units were dropped, over the kept scores. The
-        // message says "ATE-scale": for ATT the weights are 1 and p/(1-p), not this figure.
+        // Largest weight the scores imply: before trimming from the untrimmed summary, and, when
+        // units were dropped, over the kept scores. ATE: max(1/min, 1/(1 - max)). ATT: the
+        // controls' p/(1-p) at the largest score, a bound (that unit may be treated, weight 1).
+        let att_weight = |max: f64| {
+            if max < 1.0 {
+                max / (1.0 - max)
+            } else {
+                f64::INFINITY
+            }
+        };
         let implied_max_weight = |min: f64, max: f64| {
             if min > 0.0 && max < 1.0 {
                 f64::max(1.0 / min, 1.0 / (1.0 - max))
@@ -341,7 +352,20 @@ fn check_positivity(result: &IpwResult, report: &mut IdentificationReport) {
             }
         };
         let max_weight = implied_max_weight(ps_min, ps_max);
-        let weights = if result.ps_summary_untrimmed.is_some() && result.n_trimmed > 0 {
+        let trimmed_some = result.ps_summary_untrimmed.is_some() && result.n_trimmed > 0;
+        let weights = if att && trimmed_some {
+            format!(
+                "ATT control weights p/(1-p) of at most ≈ {:.1} before trimming; the kept \
+                 controls' weights are at most ≈ {:.1}",
+                att_weight(ps_max),
+                att_weight(result.ps_summary.max)
+            )
+        } else if att {
+            format!(
+                "ATT control weights p/(1-p) of at most ≈ {:.1}",
+                att_weight(ps_max)
+            )
+        } else if trimmed_some {
             format!(
                 "ATE-scale IPW weights up to ≈ {:.1} before trimming; the kept units' largest \
                  ATE-scale weight is ≈ {:.1}",
@@ -728,5 +752,84 @@ mod tests {
             .iter()
             .find(|w| w.code == "SENSITIVITY_RECOMMENDED");
         assert!(sens_warning.is_some());
+    }
+
+    /// Scores from logit(p) = a + b x on a standard normal covariate, seeded.
+    fn scores_dataset(a: f64, b: f64) -> crate::data::Dataset {
+        use polars::prelude::*;
+        use rand::{Rng, SeedableRng, rngs::StdRng};
+        let mut rng = StdRng::seed_from_u64(20261127);
+        let (mut y, mut d, mut x) = (Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..600 {
+            let xi: f64 = rand_distr::Distribution::sample(&rand_distr::StandardNormal, &mut rng);
+            let p = 1.0 / (1.0 + (-(a + b * xi)).exp());
+            let di = if rng.r#gen::<f64>() < p { 1.0 } else { 0.0 };
+            let noise: f64 =
+                rand_distr::Distribution::sample(&rand_distr::StandardNormal, &mut rng);
+            x.push(xi);
+            d.push(di);
+            y.push(1.0 + 0.5 * di + xi + noise);
+        }
+        crate::data::Dataset::new(df! { "y" => y, "d" => d, "x" => x }.unwrap())
+    }
+
+    #[test]
+    fn att_positivity_counts_only_the_upper_tail() {
+        // Fails before: under the ATT, scores near 0 (controls weighted p/(1-p) ~ 0, treated 1)
+        // raised a positivity warning quoting ATE weights no ATT unit carries.
+        use crate::econometrics::{IpwConfig, run_ipw_treatment};
+        let mut att = create_mock_ipw_result(0.005, 0.8);
+        att.estimand = Estimand::ATT;
+        let report = ipw_diagnostics(&att);
+        assert_eq!(positivity_status(&report), AssumptionStatus::NoViolation);
+        assert!(
+            !report
+                .warnings
+                .iter()
+                .any(|w| w.code == "POSITIVITY_VIOLATION"),
+            "{:?}",
+            report.warnings
+        );
+        let mut att = create_mock_ipw_result(0.3, 0.995);
+        att.estimand = Estimand::ATT;
+        let report = ipw_diagnostics(&att);
+        assert_eq!(
+            positivity_status(&report),
+            AssumptionStatus::LikelyViolation
+        );
+        let w = report
+            .warnings
+            .iter()
+            .find(|w| w.code == "POSITIVITY_VIOLATION")
+            .expect("positivity warning");
+        let want = format!("p/(1-p) of at most ≈ {:.1}", 0.995 / 0.005);
+        assert!(w.message.contains(&want), "{}", w.message);
+        assert!(!w.message.contains("ATE-scale"), "{}", w.message);
+        assert!(!w.message.contains("min ="), "{}", w.message);
+
+        // The estimator: only low scores (logit -4 + 2x), the ATE warns, the ATT does not.
+        let ds = scores_dataset(-4.0, 2.0);
+        let mut c = IpwConfig::default();
+        let ate = run_ipw_treatment(&ds, "y", "d", &["x"], c.clone()).unwrap();
+        let untrimmed = ate.ps_summary_untrimmed.as_ref().unwrap();
+        assert!(untrimmed.min < 0.01 && untrimmed.max < 0.98, "precondition");
+        assert!(
+            ate.warnings
+                .iter()
+                .any(|w| w.contains("Extreme propensity"))
+        );
+        c.estimand = Estimand::ATT;
+        let att = run_ipw_treatment(&ds, "y", "d", &["x"], c).unwrap();
+        assert!(
+            !att.warnings
+                .iter()
+                .any(|w| w.contains("Extreme propensity")),
+            "{:?}",
+            att.warnings
+        );
+        assert_eq!(
+            positivity_status(&ipw_diagnostics(&att)),
+            AssumptionStatus::NoViolation
+        );
     }
 }

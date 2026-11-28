@@ -1088,7 +1088,7 @@ Generate forecasts from a fitted ARIMA model.
 - `horizon`: Forecast horizon (number of periods ahead)
 - `seasonal_p`, `seasonal_d`, `seasonal_q`, `period`, `include_mean`, `include_drift` (optional): as for `ts_arima_fit`
 
-**Output includes:** the fitted model, point forecasts, standard errors and 80% / 95% prediction intervals, as R `forecast(Arima(x, order, method = 'CSS'))`. The history and forecasts are saved as the dataset `<dataset>_forecast_<column>` (`time`, `actual`, `forecast`, `lower_95`, `upper_95`, `lower_80`, `upper_80`); `time` continues the dataset's regular date or year column, else counts 1, 2, ... `ts_holt_winters` with a horizon saves its forecasts the same way.
+**Output includes:** the fitted model, point forecasts, standard errors and 80% / 95% prediction intervals, as R `forecast(Arima(x, order, method = 'CSS'))`. The history and forecasts are saved as the dataset `<dataset>_arima_forecast_<column>` (`time`, `actual`, `forecast`, `lower_95`, `upper_95`, `lower_80`, `upper_80`); `time` continues the dataset's regular date or year column, else counts 1, 2, ... `ts_holt_winters` with a horizon saves its forecasts the same way, as `<dataset>_hw_forecast_<column>`, so the two forecasts of one series are kept side by side.
 
 ### ts_mstl
 MSTL seasonal-trend decomposition.

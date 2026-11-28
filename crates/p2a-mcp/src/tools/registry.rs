@@ -239,7 +239,7 @@ pub static CATEGORY_TABLE: &[(&str, ToolCategory, &[&str], Option<&str>)] = &[
     ("logit", C::Discrete, &["probit", "multinom"], Some("glm(family=binomial)")),
     ("ltmle", C::Treatment, &["treatment_tmle"], Some("ltmle::ltmle()")),
     ("marginal_effects", C::Regression, &["logit", "probit"], Some("marginaleffects::avg_slopes()")),
-    ("mediation_analysis", C::Mediation, &["natural_effects_mediation"], Some("mediation::mediate()")),
+    ("mediation_analysis", C::Mediation, &["natural_effects_mediation"], Some("causalweight::medweight()")),
     ("mixed_logit", C::Discrete, &["mlogit", "multinom"], Some("gmnl::gmnl()")),
     ("ml_bart_causal", C::MachineLearning, &["ml_causal_forest", "heterogeneity_test"], Some("bartCause::bartc()")),
     ("ml_c50", C::MachineLearning, &["ml_ctree", "ml_cubist"], Some("C50::C5.0()")),

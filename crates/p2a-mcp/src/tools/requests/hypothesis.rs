@@ -157,6 +157,12 @@ pub struct WilcoxonTestRequest {
     )]
     pub y: Option<String>,
 
+    /// Two-level grouping column (formula form)
+    #[schemars(
+        description = "Grouping column with exactly two levels, as R's wilcox.test(x ~ group): x is split by it and the first level (R factor order: numbers numerically, text alphabetically) is compared with the second. Rows missing x or the group are dropped. Use instead of y; not with paired."
+    )]
+    pub group: Option<String>,
+
     /// Hypothesized location shift
     #[schemars(
         description = "Null hypothesis value (default: 0). For one-sample: hypothesized median. For two-sample: hypothesized location shift."
@@ -217,6 +223,12 @@ pub struct TTestRequest {
         description = "Name of the second variable column for two-sample or paired tests. Omit for one-sample test."
     )]
     pub y: Option<String>,
+
+    /// Two-level grouping column (formula form)
+    #[schemars(
+        description = "Grouping column with exactly two levels, as R's t.test(x ~ group): x is split by it and the difference is the first level minus the second (R factor order: numbers numerically, text alphabetically). Rows missing x or the group are dropped. Use instead of y; not with paired."
+    )]
+    pub group: Option<String>,
 
     /// Hypothesized mean or difference
     #[schemars(

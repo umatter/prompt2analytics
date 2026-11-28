@@ -346,7 +346,7 @@ impl AnalyticsServer {
 
     /// Run K-means clustering.
     #[tool(
-        description = "K-means clustering (k-means++ starts, n_init restarts, Lloyd iterations until no assignment changes, as R's kmeans(algorithm = 'Lloyd')). Returns cluster sizes, centroids, inertia (R's tot.withinss), iterations and convergence, and a JSON block with each row's cluster (1..k, R's numbering; first 100 rows). With output_column, writes every row's cluster into the dataset. Seed: seed, else set_seed, else 42."
+        description = "K-means clustering (k-means++ starts, n_init restarts, Lloyd iterations until no assignment changes, as R's kmeans(algorithm = 'Lloyd')). Returns cluster sizes, centroids, inertia (R's tot.withinss), iterations and convergence, and a JSON block with each row's cluster (1..k, R's numbering; first 100 rows). With output_column, writes every row's cluster into the dataset. The columns are used as given, not standardized: when they are on different scales, standardize them first with munge_standardize. Seed: seed, else set_seed, else 42."
     )]
     pub async fn ml_kmeans(
         &self,

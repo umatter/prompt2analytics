@@ -139,7 +139,7 @@ pub async fn build_app_with(
     // Start background cleanup task (every 10 minutes)
     session_manager.clone().start_cleanup_task(10);
 
-    let server = Arc::new(AnalyticsServer::new());
+    let server = Arc::new(AnalyticsServer::new().with_llm_tool_mode(config.http.llm_tools));
 
     // Create audit logger
     let audit_logger = Arc::new(match AuditLogger::new(&config.audit) {

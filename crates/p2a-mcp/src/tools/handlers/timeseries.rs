@@ -473,7 +473,7 @@ impl AnalyticsServer {
 
     /// - Banerjee, A., Dolado, J. J., Galbraith, J. W., & Hendry, D. (1993). Co-integration, Error Correction, and the Econometric Analysis of Non-Stationary Data. Oxford University Press.
     #[tool(
-        description = "Test for unit root in a time series using the Phillips-Perron test. Tests H₀: series has unit root (non-stationary) vs H₁: series is stationary. Uses Newey-West long-run variance estimator with Bartlett weights for serial correlation correction. Similar to ADF test but makes non-parametric correction. Returns: Z(τ) statistic, truncation lag, p-value, and diagnostics."
+        description = "Test for unit root in a time series using the Phillips-Perron test. Tests H₀: series has unit root (non-stationary) vs H₁: series is stationary around a linear trend: the test regression always has an intercept and a linear time trend, as R's PP.test, so a rejection does not mean the series is level-stationary. To test a differenced series, make it with munge_diff first. Uses Newey-West long-run variance estimator with Bartlett weights for serial correlation correction. Similar to ADF test but makes non-parametric correction. Returns: Z(τ) statistic, truncation lag, p-value, and diagnostics."
     )]
     pub async fn timeseries_pp_test(
         &self,
@@ -510,7 +510,7 @@ impl AnalyticsServer {
             "lambda_squared": result.lambda_squared,
             "interpretation": if result.p_value < 0.05 {
                 format!(
-                    "Reject H₀ (p={:.4}): Evidence of stationarity at the 5% level. The series likely does not have a unit root.",
+                    "Reject H₀ (p={:.4}): Evidence of stationarity around a linear trend at the 5% level. The series likely does not have a unit root.",
                     result.p_value
                 )
             } else {
@@ -520,7 +520,7 @@ impl AnalyticsServer {
                 )
             },
             "recommendation": if result.p_value < 0.05 {
-                "Series appears stationary. Can proceed with standard time series methods."
+                "Series appears stationary around a linear trend (the test regression has an intercept and a trend)."
             } else {
                 "Series may have unit root. Consider differencing (Δy = y_t - y_{t-1}) before analysis."
             }
@@ -774,7 +774,7 @@ impl AnalyticsServer {
                 );
                 drop(datasets);
                 let saved = self
-                    .save_forecast_table(&request.dataset, &request.column, table)
+                    .save_forecast_table(&request.dataset, "arima", &request.column, table)
                     .await;
                 Ok(CallToolResult::success(vec![Content::text(
                     with_saved_forecast_line(
@@ -938,7 +938,7 @@ impl AnalyticsServer {
 
     /// Detect changepoints (structural breaks) in a time series.
     #[tool(
-        description = "Detect changepoints (structural breaks) in a time series using PELT (changepoint's cpt.mean / cpt.var / cpt.meanvar with the MBIC penalty by default; the mean cost assumes unit variance) or Binary Segmentation (changepoint's BinSeg: the same costs and penalties, at most Q = 5 changepoints by default, set by max_changepoints). Identifies points where the mean or variance changes. Useful for regime detection, anomaly detection, and segmenting time series into homogeneous periods."
+        description = "Detect changepoints (structural breaks) in a time series using PELT (changepoint's cpt.mean / cpt.var / cpt.meanvar with the MBIC penalty by default) or Binary Segmentation (changepoint's BinSeg: the same costs and penalties, at most Q = 5 changepoints by default, set by max_changepoints). Identifies points where the mean or variance changes. The mean cost assumes unit variance, as cpt.mean does: on a series whose standard deviation is far from 1 it finds spurious breaks, so standardize the column first with munge_standardize, or use change_type 'meanvar'. Useful for regime detection, anomaly detection, and segmenting time series into homogeneous periods."
     )]
     pub async fn ts_changepoint(
         &self,
@@ -1208,7 +1208,7 @@ impl AnalyticsServer {
         drop(datasets);
         if let Some(table) = table {
             let saved = self
-                .save_forecast_table(&request.dataset, &request.column, table)
+                .save_forecast_table(&request.dataset, "hw", &request.column, table)
                 .await;
             output = with_saved_forecast_line(saved, output);
         }
@@ -2317,11 +2317,13 @@ fn with_saved_forecast_line(saved: Result<(String, Vec<String>), String>, text: 
 }
 
 impl AnalyticsServer {
-    /// Saves a forecast as `<dataset>_forecast_<column>`, replacing an earlier forecast of that
-    /// name but never another dataset. Returns its name and columns.
+    /// Saves a forecast as `<dataset>_<method>_forecast_<column>` (`arima`, `hw`), replacing an
+    /// earlier forecast of that name but never another dataset, so an ARIMA and a Holt-Winters
+    /// forecast of one series are kept side by side. Returns its name and columns.
     async fn save_forecast_table(
         &self,
         dataset: &str,
+        method: &str,
         column: &str,
         table: Result<p2a_core::Dataset, String>,
     ) -> Result<(String, Vec<String>), String> {
@@ -2335,7 +2337,7 @@ impl AnalyticsServer {
         let mut datasets = self.datasets.write().await;
         let name = crate::tools::handlers::regression::save_table(
             &mut datasets,
-            &format!("{dataset}_forecast_{column}"),
+            &format!("{dataset}_{method}_forecast_{column}"),
             table,
             is_forecast_table,
         );
@@ -2517,8 +2519,9 @@ mod tests {
             .join("\n")
     }
 
-    /// Forecasts are saved with their history, continue the months, plot with viz_line, and
-    /// never replace a dataset that is not a forecast.
+    /// Forecasts are saved with their history, continue the months, plot with viz_line, never
+    /// replace a dataset that is not a forecast, and an ARIMA and a Holt-Winters forecast of one
+    /// series are kept apart.
     #[tokio::test]
     async fn forecasts_are_saved_as_datasets_viz_line_plots() {
         use p2a_core::polars::prelude::*;
@@ -2531,7 +2534,7 @@ mod tests {
         {
             let mut datasets = server.datasets.write().await;
             datasets.insert("air".into(), p2a_core::Dataset::new(df.clone()));
-            datasets.insert("air_forecast_y".into(), p2a_core::Dataset::new(df));
+            datasets.insert("air_arima_forecast_y".into(), p2a_core::Dataset::new(df));
         }
         let arima = serde_json::json!({
             "dataset": "air", "column": "y", "p": 1, "d": 1, "q": 1, "horizon": 3
@@ -2541,15 +2544,16 @@ mod tests {
             let r = server.ts_arima_forecast(Parameters(req)).await.unwrap();
             let t = text_of(&r);
             assert!(
-                t.starts_with("Forecast saved with the history as dataset 'air_forecast_y_2'")
-                    && t.ends_with(NON_SEASONAL.trim_start()),
+                t.starts_with(
+                    "Forecast saved with the history as dataset 'air_arima_forecast_y_2'"
+                ) && t.ends_with(NON_SEASONAL.trim_start()),
                 "{t}"
             );
         }
         {
             let datasets = server.datasets.read().await;
             assert_eq!(datasets.len(), 3);
-            let df = datasets["air_forecast_y_2"].df();
+            let df = datasets["air_arima_forecast_y_2"].df();
             assert_eq!(df.shape(), (51, 7));
             let time = df.column("time").unwrap().cast(&DataType::String).unwrap();
             assert_eq!(time.str().unwrap().get(50), Some("1953-03-01"));
@@ -2584,10 +2588,10 @@ mod tests {
             }))
             .unwrap();
             let t = text_of(&server.ts_holt_winters(Parameters(req)).await.unwrap());
-            assert!(t.contains("as dataset 'air_forecast_y_2'"), "{t}");
+            assert!(t.contains("as dataset 'air_hw_forecast_y'"), "{t}");
             assert_eq!(t.contains("lower_95"), seasonal == "additive", "{t}");
             let mut plot = serde_json::json!({
-                "dataset": "air_forecast_y_2", "x_column": "time",
+                "dataset": "air_hw_forecast_y", "x_column": "time",
                 "y_columns": ["actual", "forecast"]
             });
             if seasonal == "additive" {
@@ -2597,6 +2601,12 @@ mod tests {
             let req = serde_json::from_value(plot).unwrap();
             let r = server.viz_line(Parameters(req)).await.unwrap();
             assert_ne!(r.is_error, Some(true), "{}", text_of(&r));
+        }
+        {
+            // The Holt-Winters forecasts left the ARIMA forecast in place.
+            let datasets = server.datasets.read().await;
+            assert_eq!(datasets.len(), 4);
+            assert!(datasets.contains_key("air_arima_forecast_y_2"));
         }
         let req = serde_json::from_value(serde_json::json!({
             "dataset": "air", "x_column": "month", "y_columns": ["y"], "lower_column": "y"

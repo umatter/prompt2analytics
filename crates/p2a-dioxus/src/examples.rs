@@ -59,6 +59,18 @@ pub const EXAMPLES: [Example; 3] = [
     },
 ];
 
+/// The bundled example a dataset the server could not reload was loaded from: the
+/// same name, rows and columns. The server keeps no file for an upload, so after a
+/// restart the app loads its own copy again; a user's upload that only shares the
+/// name differs in size and is left alone.
+pub fn example_to_restore(name: &str, rows: i32, cols: i32) -> Option<Example> {
+    EXAMPLES.into_iter().find(|ex| {
+        ex.name == name
+            && usize::try_from(rows).ok() == Some(ex.rows)
+            && usize::try_from(cols).ok() == Some(ex.cols)
+    })
+}
+
 /// Loads an example into the tab's session and adds it to the dataset list.
 pub async fn load_example(
     mut session: Signal<SessionState>,
@@ -97,6 +109,16 @@ mod tests {
             assert_eq!(header.split(',').count(), ex.cols, "{} columns", ex.name);
             assert_eq!(lines.count(), ex.rows, "{} rows", ex.name);
         }
+    }
+
+    #[test]
+    fn only_a_dataset_of_an_examples_name_and_size_is_restored() {
+        let ex = EXAMPLES[2];
+        let (rows, cols) = (ex.rows as i32, ex.cols as i32);
+        assert_eq!(example_to_restore(ex.name, rows, cols), Some(ex));
+        assert_eq!(example_to_restore(ex.name, rows + 1, cols), None);
+        assert_eq!(example_to_restore(ex.name, rows, cols + 1), None);
+        assert_eq!(example_to_restore("my_data", rows, cols), None);
     }
 
     #[test]

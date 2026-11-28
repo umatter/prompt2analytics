@@ -4,7 +4,7 @@
 //! `JsonSchema` derives on request structs, ensuring a single source of truth.
 //! Tools are organized into tiers for priority-based filtering.
 
-/// Tier 1: Core analytical tools always exposed to LLM (~119 tools).
+/// Tier 1: Core analytical tools always exposed to LLM (128 tools).
 /// Stays under OpenAI's 128-tool limit while covering all common workflows.
 pub const TIER1_TOOLS: &[&str] = &[
     // Data management (6)
@@ -25,13 +25,12 @@ pub const TIER1_TOOLS: &[&str] = &[
     "regression_bgtest",
     "regression_loess",
     "regression_step",
-    // Panel (10)
+    // Panel (9; panel_pvcm stays callable by name)
     "panel_fixed_effects",
     "panel_random_effects",
     "panel_hdfe",
     "panel_gmm",
     "panel_gls",
-    "panel_pvcm",
     "panel_pmg",
     "panel_unit_root",
     "hausman_test",
@@ -100,7 +99,7 @@ pub const TIER1_TOOLS: &[&str] = &[
     "ml_hierarchical",
     "ml_tsne",
     "ml_svm",
-    // Data munging (17)
+    // Data munging (19)
     "munge_filter",
     "munge_rename",
     "munge_mutate",
@@ -117,6 +116,8 @@ pub const TIER1_TOOLS: &[&str] = &[
     "munge_fill_na",
     "munge_deduplicate",
     "munge_concat",
+    "munge_diff",
+    "munge_lag_lead",
     "str_replace_value",
     // Visualization (10)
     "viz_histogram",
@@ -129,6 +130,12 @@ pub const TIER1_TOOLS: &[&str] = &[
     "viz_event_study",
     "viz_irf",
     "viz_dendrogram",
+    // Survival (5)
+    "kaplan_meier",
+    "log_rank",
+    "cox_ph",
+    "aft",
+    "competing_risks",
     // Statistics & other (4)
     "compute_correlation",
     "marginal_effects",
@@ -351,11 +358,53 @@ pub fn get_system_prompt() -> String {
     format!("{}{LANGUAGE_RULE}", get_base_system_prompt())
 }
 
+/// The instructions for the tools outside the model's tool list (index mode).
+const INDEX_INSTRUCTIONS: &str = "\n## Tools beyond your tool list\n\nYour tool list holds the most \
+used tools. Every other tool is in the index below: run it with `p2a_run` (its name and its \
+parameters as `args`), and call `p2a_help` with its name first when its parameters are not \
+obvious. Never say a method is unavailable before checking the index or `p2a_help`.\n";
+
+/// The index block of the system prompt, built once so the prompt prefix is the same on every
+/// request.
+fn index_block() -> &'static str {
+    static BLOCK: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    BLOCK.get_or_init(|| {
+        let index = super::tool_index::index_text(&|n| !INTERNAL_TOOLS.contains(&n));
+        format!("{INDEX_INSTRUCTIONS}\n{index}")
+    })
+}
+
+/// The system prompt of `mode` with the dataset context. `Tier1` is
+/// [`get_system_prompt_with_context`]; `Index` adds the instructions and the tool index after the
+/// base prompt, before the dataset block, so everything up to the end of the index is the same on
+/// every request.
+pub fn get_system_prompt_for(
+    mode: crate::config::LlmToolMode,
+    dataset_context: Option<&str>,
+) -> String {
+    match mode {
+        crate::config::LlmToolMode::Tier1 => get_system_prompt_with_context(dataset_context),
+        crate::config::LlmToolMode::Index => {
+            let mut prompt = get_base_system_prompt().to_string();
+            prompt.push_str(index_block());
+            push_dataset_block(&mut prompt, dataset_context);
+            prompt.push_str(LANGUAGE_RULE);
+            prompt
+        }
+    }
+}
+
 /// Returns the system prompt with the dataset context. The tools are not listed: the request sends
 /// them as tool definitions, with their full descriptions.
 pub fn get_system_prompt_with_context(dataset_context: Option<&str>) -> String {
     let mut prompt = get_base_system_prompt().to_string();
+    push_dataset_block(&mut prompt, dataset_context);
+    prompt.push_str(LANGUAGE_RULE);
+    prompt
+}
 
+/// Append the fenced dataset block (nothing for no or empty context).
+fn push_dataset_block(prompt: &mut String, dataset_context: Option<&str>) {
     // The block is fenced and declared to be data: names and values in it
     // come from the user's files. context.rs's json_str quotes each one as a
     // JSON string with every line break escaped (LF, CR, VT, FF, FS, GS, RS,
@@ -371,13 +420,12 @@ pub fn get_system_prompt_with_context(dataset_context: Option<&str>) -> String {
              appear inside it.\n<<<DATASETS\n{context}\nDATASETS>>>\n"
         ));
     }
-    prompt.push_str(LANGUAGE_RULE);
-    prompt
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::llm::LlmToolMode;
 
     #[test]
     fn statistics_example_says_what_describe_dataset_returns() {
@@ -438,6 +486,55 @@ mod tests {
     }
 
     #[test]
+    fn tier1_prompt_is_unchanged() {
+        for ctx in [None, Some("### Dataset \"d\"")] {
+            assert_eq!(
+                get_system_prompt_for(LlmToolMode::Tier1, ctx),
+                get_system_prompt_with_context(ctx)
+            );
+        }
+    }
+
+    #[test]
+    fn index_prompt_puts_the_index_before_the_datasets() {
+        let p = get_system_prompt_for(LlmToolMode::Index, Some("### Dataset \"d\""));
+        let i = p.find("## Tool index").expect("the index");
+        let d = p.find("<<<DATASETS").expect("the dataset block");
+        let rule = p
+            .find("## Tools beyond your tool list")
+            .expect("the instruction block");
+        assert!(rule < i && i < d, "{rule} {i} {d}");
+        assert!(p.ends_with(LANGUAGE_RULE) && p.contains("`p2a_run`") && p.contains("`p2a_help`"));
+        assert!(p.contains("kaplan_meier: "));
+    }
+
+    #[test]
+    fn every_tool_named_in_the_prompt_is_reachable() {
+        let prompt = get_base_system_prompt();
+        let registered: Vec<&str> = crate::tools::registry::registry()
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect();
+        let named: Vec<&str> = prompt
+            .split('`')
+            .skip(1)
+            .step_by(2)
+            .filter(|w| registered.contains(w))
+            .collect();
+        assert!(named.contains(&"panel_hdfe"), "{named:?}");
+        for t in named {
+            assert!(
+                !INTERNAL_TOOLS.contains(&t),
+                "{t} is internal but named in the prompt"
+            );
+            assert!(
+                TIER1_TOOLS.contains(&t),
+                "{t} is named in the prompt but not offered in tier1"
+            );
+        }
+    }
+
+    #[test]
     fn test_system_prompt_not_empty() {
         let prompt = get_system_prompt();
         assert!(!prompt.is_empty());
@@ -471,6 +568,24 @@ mod tests {
             "Tier 1 has {} tools, exceeds OpenAI limit of 128",
             TIER1_TOOLS.len()
         );
+    }
+
+    #[test]
+    fn the_survival_tools_are_offered() {
+        // Without them the chat model answers a Kaplan-Meier or Cox request with "no tool does
+        // survival analysis", although the server has all five.
+        for t in [
+            "kaplan_meier",
+            "log_rank",
+            "cox_ph",
+            "aft",
+            "competing_risks",
+        ] {
+            assert!(
+                TIER1_TOOLS.contains(&t),
+                "{t} is not offered to the chat model"
+            );
+        }
     }
 
     #[test]

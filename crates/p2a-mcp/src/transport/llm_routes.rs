@@ -793,17 +793,20 @@ impl ToolExecutor for SessionToolExecutor {
         let dataset_snapshot = self.store.dataset_snapshot(&session, name).await;
         tracing::info!(tool = %name, "Executing tool");
         let start = std::time::Instant::now();
-        let result = self
-            .governor
-            .call(
-                self.server.clone(),
-                session,
-                name,
-                arguments,
-                CallOrigin::LlmTool,
-            )
-            .await
-            .map_err(|e| e.to_string());
+        let result = if crate::llm::is_chat_only(name) {
+            answer_chat_only(&self.server, &self.audit, &session, name, &arguments).await
+        } else {
+            self.governor
+                .call(
+                    self.server.clone(),
+                    session,
+                    name,
+                    arguments,
+                    CallOrigin::LlmTool,
+                )
+                .await
+                .map_err(|e| e.to_string())
+        };
         let elapsed = start.elapsed();
         tracing::info!(tool = %name, elapsed_ms = %elapsed.as_millis(), "Tool execution completed");
         #[cfg(feature = "db")]
@@ -853,6 +856,95 @@ fn llm_callable_tools(server: &crate::server::AnalyticsServer) -> &'static HashS
     TOOLS.get_or_init(|| server.list_tools().into_iter().map(|t| t.name).collect())
 }
 
+/// What is wrong with a `p2a_run` call that reached an executor (the loop unwraps the
+/// well-formed ones into calls of the named tool).
+fn p2a_run_shape_error(arguments: &serde_json::Value) -> String {
+    let flat = arguments
+        .as_object()
+        .is_some_and(|o| o.keys().any(|k| k != "tool" && k != "args"));
+    let problem = match arguments
+        .get("tool")
+        .and_then(|t| t.as_str())
+        .map(str::trim)
+    {
+        None | Some("") => "`tool` must name a tool from the index",
+        Some(_) if flat => "the tool's parameters go inside `args`, not beside `tool`",
+        Some(_) => "`args` must be an object of the tool's parameters",
+    };
+    format!("p2a_run needs {{\"tool\": \"<name>\", \"args\": {{...}}}}: {problem}.")
+}
+
+/// The audit outcome of a chat-only tool's answer. A refused lookup of a named tool is audited as
+/// a direct call of it would be (`not_available` for an internal tool, `unknown_tool` for an
+/// unregistered one), so an audit query for probes of internal tools finds lookups too; any other
+/// failure is `tool_error`.
+fn chat_only_outcome(
+    answer: &Result<String, String>,
+    arguments: &serde_json::Value,
+) -> &'static str {
+    if answer.is_ok() {
+        return "ok";
+    }
+    let registered = |t: &str| {
+        crate::tools::registry::registry()
+            .iter()
+            .any(|r| r.name == t)
+    };
+    match arguments
+        .get("tool")
+        .and_then(|t| t.as_str())
+        .map(str::trim)
+    {
+        Some(t) if INTERNAL_TOOLS.contains(&t) => NOT_AVAILABLE,
+        Some(t) if !t.is_empty() && !registered(t) => UNKNOWN_TOOL,
+        _ => "tool_error",
+    }
+}
+
+/// The answer of a chat-only tool (`p2a_help`, or a malformed `p2a_run`), in the governor's result
+/// shape, so the executors record and announce it like any call. `p2a_help` reads only the tool
+/// registry, so it does not go through the governor; it gets its own audit entry.
+async fn answer_chat_only(
+    server: &crate::server::AnalyticsServer,
+    audit: &AuditLogger,
+    session: &Session,
+    name: &str,
+    arguments: &serde_json::Value,
+) -> Result<super::http::ToolResult, String> {
+    let answer = if name == crate::llm::P2A_HELP {
+        let callable = llm_callable_tools(server);
+        crate::llm::tool_help(arguments, &|n| {
+            callable.contains(n) && !INTERNAL_TOOLS.contains(&n)
+        })
+    } else {
+        Err(p2a_run_shape_error(arguments))
+    };
+    if audit.is_enabled() {
+        let summary = match &answer {
+            Ok(text) | Err(text) => ResultSummary {
+                content_items: 1,
+                text_bytes: text.len(),
+                ..ResultSummary::default()
+            },
+        };
+        let entry = AuditEntry::new(
+            &session.id,
+            CallOrigin::LlmTool.as_str(),
+            name,
+            sanitize_arguments(arguments, &server.declared_parameters(name)),
+            chat_only_outcome(&answer, arguments),
+            0,
+            summary,
+        );
+        audit.log(entry).await;
+    }
+    answer.map(|text| super::http::ToolResult {
+        success: true,
+        content: vec![ContentItem::Text { text }],
+        error: None,
+    })
+}
+
 /// Refuse a model-emitted tool name the assistant may not call: an internal
 /// tool (audit outcome `not_available`), or one no handler registers
 /// (`unknown_tool`). The refusal text is the tool's error text.
@@ -860,6 +952,12 @@ fn refuse_unless_callable(
     server: &crate::server::AnalyticsServer,
     name: &str,
 ) -> Result<(), (&'static str, String)> {
+    // The chat-only tools exist only where they are offered (index mode); in tier1 they are
+    // unknown names, refused and audited as before the index existed.
+    if crate::llm::is_chat_only(name) && server.llm_tool_mode() == crate::config::LlmToolMode::Index
+    {
+        return Ok(());
+    }
     check_llm_tool_call(name, |n| llm_callable_tools(server).contains(n)).map_err(|refusal| {
         // Classified in `check_llm_tool_call`'s order (internal names first,
         // then unregistered ones); a new refusal reason there needs its own
@@ -1062,6 +1160,7 @@ async fn build_chat_messages(
     tools: &[ToolDefinition],
     cfg: &ProviderConfig,
     settings: &LlmSettings,
+    tool_mode: crate::config::LlmToolMode,
 ) -> Result<Vec<Message>, ToolCallError> {
     // A history that already ends with the prompt (a client that sends it in both fields, or a
     // stored conversation the client posted the prompt to) would give the model the question
@@ -1070,7 +1169,7 @@ async fn build_chat_messages(
     drop_repeated_prompt(&mut history, &user_message);
     let dataset_context =
         governed_dataset_context(governor, session, settings.context_bytes).await?;
-    let system_prompt = get_system_prompt_with_context(dataset_context.as_deref());
+    let system_prompt = crate::llm::get_system_prompt_for(tool_mode, dataset_context.as_deref());
     let reserved_for_response = cfg.max_tokens.unwrap_or(4096) as usize;
     let processed = ContextManager::for_request(
         &cfg.model,
@@ -1183,6 +1282,7 @@ pub async fn llm_chat(
         &tools,
         &provider_config,
         &settings,
+        state.server.llm_tool_mode(),
     )
     .await
     {
@@ -1703,17 +1803,20 @@ impl ToolExecutor for StreamingToolExecutor {
 
         tracing::info!(tool = %name, "Executing tool");
         let start = std::time::Instant::now();
-        let result = self
-            .governor
-            .call(
-                self.server.clone(),
-                session,
-                name,
-                arguments,
-                CallOrigin::LlmTool,
-            )
-            .await
-            .map_err(|e| e.to_string());
+        let result = if crate::llm::is_chat_only(name) {
+            answer_chat_only(&self.server, &self.audit, &session, name, &arguments).await
+        } else {
+            self.governor
+                .call(
+                    self.server.clone(),
+                    session,
+                    name,
+                    arguments,
+                    CallOrigin::LlmTool,
+                )
+                .await
+                .map_err(|e| e.to_string())
+        };
         let elapsed = start.elapsed();
 
         let status = match &result {
@@ -2233,6 +2336,7 @@ async fn run_chat_stream(
         &tools,
         &provider_config,
         &settings,
+        state.server.llm_tool_mode(),
     )
     .await
     {
@@ -2509,6 +2613,146 @@ mod tests {
         }
         let text = tool_end.expect("a ToolEnd event with a result");
         assert!(text.starts_with("Error:"), "{text}");
+    }
+
+    /// The governor of `governed_parts` refuses every call as low on memory, so an answer
+    /// proves the lookup did not go through it.
+    #[tokio::test]
+    async fn p2a_help_answers_without_the_governor() {
+        let (governor, server, chat) = governed_parts().await;
+        let executor = SessionToolExecutor::new(governor, server, chat, no_audit());
+        let text = executor
+            .execute(crate::llm::P2A_HELP, serde_json::json!({"tool": "cox_ph"}))
+            .await
+            .unwrap();
+        assert!(
+            text.contains("cox_ph") && text.contains("Parameters:"),
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn streaming_p2a_help_emits_tool_events() {
+        let (governor, server, chat) = governed_parts().await;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let executor =
+            StreamingToolExecutor::new(governor, server, chat, no_audit(), ChatEvents::new(tx));
+        let text = executor
+            .execute(
+                crate::llm::P2A_HELP,
+                serde_json::json!({"query": "kaplan meier"}),
+            )
+            .await
+            .unwrap();
+        let (mut started, mut ended) = (None, None);
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                ProgressEvent::ToolStart { tool, .. } => started = Some(tool),
+                ProgressEvent::ToolEnd { result, .. } => ended = result,
+                _ => {}
+            }
+        }
+        assert_eq!(started.as_deref(), Some(crate::llm::P2A_HELP));
+        assert_eq!(ended.as_deref(), Some(text.as_str()));
+    }
+
+    #[tokio::test]
+    async fn malformed_p2a_run_is_a_shape_error() {
+        let (governor, server, chat) = governed_parts().await;
+        let executor = SessionToolExecutor::new(governor, server, chat, no_audit());
+        for args in [
+            serde_json::json!({"args": 3}),
+            serde_json::json!({"tool": "x", "args": 3}),
+        ] {
+            let err = executor
+                .execute(crate::llm::P2A_RUN, args)
+                .await
+                .unwrap_err();
+            assert!(err.contains("p2a_run needs"), "{err}");
+        }
+    }
+
+    #[tokio::test]
+    async fn flat_p2a_run_says_parameters_go_inside_args() {
+        let (governor, server, chat) = governed_parts().await;
+        let executor = SessionToolExecutor::new(governor, server, chat, no_audit());
+        let err = executor
+            .execute(
+                crate::llm::P2A_RUN,
+                serde_json::json!({"tool": "sar_model", "dataset": "d"}),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.contains("inside `args`"), "{err}");
+    }
+
+    /// In tier1 the chat-only names are not offered, so they are refused as unknown tools, as
+    /// before the index existed.
+    #[tokio::test]
+    async fn tier1_refuses_the_chat_only_names_as_unknown() {
+        let (governor, _, chat) = governed_parts().await;
+        let server = Arc::new(
+            crate::server::AnalyticsServer::new()
+                .with_llm_tool_mode(crate::config::LlmToolMode::Tier1),
+        );
+        assert_eq!(
+            refuse_unless_callable(&server, crate::llm::P2A_HELP)
+                .unwrap_err()
+                .0,
+            UNKNOWN_TOOL
+        );
+        let executor = SessionToolExecutor::new(governor, server, chat, no_audit());
+        for name in [crate::llm::P2A_HELP, crate::llm::P2A_RUN] {
+            let err = executor
+                .execute(name, serde_json::json!({"tool": "cox_ph", "args": {}}))
+                .await
+                .unwrap_err();
+            assert!(err.contains("Unknown tool"), "{name}: {err}");
+        }
+    }
+
+    #[test]
+    fn p2a_help_refusals_are_audited_as_refusals() {
+        let ok: Result<String, String> = Ok(String::new());
+        let refused: Result<String, String> = Err(String::new());
+        let tool = |t: &str| serde_json::json!({"tool": t});
+        assert_eq!(chat_only_outcome(&ok, &tool("cox_ph")), "ok");
+        assert_eq!(
+            chat_only_outcome(&refused, &tool("cleaning_session_start")),
+            NOT_AVAILABLE
+        );
+        assert_eq!(
+            chat_only_outcome(&refused, &tool("no_such_tool")),
+            UNKNOWN_TOOL
+        );
+        assert_eq!(
+            chat_only_outcome(&refused, &serde_json::json!({})),
+            "tool_error"
+        );
+    }
+
+    #[tokio::test]
+    async fn internal_tool_through_p2a_run_is_refused_like_a_direct_call() {
+        // The loop unwraps p2a_run, so the executor sees the named tool.
+        let (governor, server, chat) = governed_parts().await;
+        let executor = SessionToolExecutor::new(governor, server, chat, no_audit());
+        let err = executor
+            .execute("cleaning_session_start", serde_json::json!({}))
+            .await
+            .unwrap_err();
+        let direct = check_llm_tool_call("cleaning_session_start", |_| true).unwrap_err();
+        assert_eq!(err, direct);
+    }
+
+    #[tokio::test]
+    async fn long_tail_tool_called_directly_still_runs() {
+        let (governor, server, chat) = governed_parts().await;
+        let executor = SessionToolExecutor::new(governor, server, chat, no_audit());
+        let err = executor
+            .execute("sar_model", serde_json::json!({"dataset": "d"}))
+            .await
+            .unwrap_err();
+        assert!(err.contains("low on memory"), "{err}");
     }
 }
 
@@ -3001,6 +3245,7 @@ mod chat_tests {
             &[],
             &cfg,
             &settings,
+            crate::config::LlmToolMode::Tier1,
         )
         .await
         .unwrap();
@@ -3049,6 +3294,7 @@ mod chat_tests {
                 &[],
                 &ProviderConfig::default(),
                 &settings,
+                crate::config::LlmToolMode::Tier1,
             )
             .await
             .unwrap();
@@ -3107,6 +3353,7 @@ mod chat_tests {
             &[],
             &ProviderConfig::default(),
             &settings,
+            crate::config::LlmToolMode::Tier1,
         )
         .await
         .unwrap();

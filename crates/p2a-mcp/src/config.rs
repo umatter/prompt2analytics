@@ -184,6 +184,13 @@ pub struct CliArgs {
     #[arg(long, value_enum, default_value = "auto", env = "P2A_SESSION_DIRS")]
     pub session_dirs: SessionDirsSetting,
 
+    /// How tools are offered to the chat model: `index` (core tools, `p2a_help`, `p2a_run` and
+    /// a tool index; every callable tool reachable) or `tier1` (the earlier 128-tool list, the
+    /// paper's evaluation setup).
+    #[cfg(feature = "http")]
+    #[arg(long, value_enum, default_value = "index", env = "P2A_LLM_TOOLS")]
+    pub llm_tools: LlmToolMode,
+
     /// Deprecated: superseded by `--access-token` / `P2A_ACCESS_TOKEN`. This
     /// flag no longer enables any access control on its own and is kept only
     /// for backward compatibility. (env P2A_AUTH_ENABLED, 1/true/yes/on)
@@ -319,6 +326,16 @@ pub struct LimitsSettings {
     pub overrides: Vec<String>,
 }
 
+/// How tools are offered to the chat model (`P2A_LLM_TOOLS`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
+pub enum LlmToolMode {
+    /// Core tools with schemas, `p2a_help`, `p2a_run` and the tool index in the prompt.
+    #[default]
+    Index,
+    /// The `TIER1_TOOLS` list with full schemas and no index (the paper's evaluation setup).
+    Tier1,
+}
+
 /// Server configuration derived from CLI args and environment.
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
@@ -352,6 +369,8 @@ pub struct HttpConfig {
     pub enable_ws: bool,
     /// Per-session data directories (`--session-dirs`).
     pub session_dirs: SessionDirsSetting,
+    /// How tools are offered to the chat model (`--llm-tools`).
+    pub llm_tools: LlmToolMode,
     /// Database path for persistence (None = in-memory)
     #[cfg(feature = "db")]
     pub db_path: Option<String>,
@@ -497,6 +516,7 @@ impl ServerConfig {
                 expose_enumeration: args.expose_enumeration || flag("P2A_EXPOSE_ENUMERATION"),
                 enable_ws: args.enable_ws || flag("P2A_ENABLE_WS"),
                 session_dirs: args.session_dirs,
+                llm_tools: args.llm_tools,
                 #[cfg(feature = "db")]
                 db_path: args.db_path,
             },
@@ -739,6 +759,7 @@ impl Default for ServerConfig {
                 expose_enumeration: false,
                 enable_ws: false,
                 session_dirs: SessionDirsSetting::Auto,
+                llm_tools: LlmToolMode::default(),
                 #[cfg(feature = "db")]
                 db_path: None,
             },
